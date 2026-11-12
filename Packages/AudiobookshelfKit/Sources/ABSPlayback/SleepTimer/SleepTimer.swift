@@ -14,7 +14,8 @@ import Observation
 /// - ``reset()`` restarts a running timer while audio plays. The `shakeDetector` calls it for shake to reset, only
 ///   while a reset can do something. Once paused in the background iOS likely suspends the app, so a shake during
 ///   the grace period probably only works in the foreground (to be checked on a device).
-/// - An automatic timer starts when playback starts inside the ``AutoSleepPolicy`` window.
+/// - An automatic timer starts when playback starts inside the ``AutoSleepPolicy`` window; an end-of-chapter one
+///   waits for a fresh load to land.
 ///
 /// The playback coordinator (#52) conforms to ``SleepTimerPlaybackControl`` and calls:
 /// - ``itemDidChange(_:)`` when another item loads;
@@ -130,6 +131,9 @@ public final class SleepTimer {
     /// Where playback was when a run began at a rewound position; ticks ignore it until the rewind's seek lands.
     @ObservationIgnored private var stalePosition: Double?
     @ObservationIgnored private var autoSleepSuppressedUntil: Date?
+    /// An automatic end-of-chapter timer is due but playback had no timeline yet (a fresh load calls
+    /// ``playbackWillStart(at:)`` before it loads): it starts at the load's ``didSeek(to:)``.
+    @ObservationIgnored private var awaitsTimelineForAutoStart = false
     @ObservationIgnored private var appliedVolume: Float = 1
     @ObservationIgnored private var tickTask: Task<Void, Never>?
     @ObservationIgnored private var graceTask: Task<Void, Never>?
@@ -184,6 +188,7 @@ public final class SleepTimer {
         if (run ?? expiredRun)?.isAutomatic == true {
             autoSleepSuppressedUntil = options.autoSleep.window(containing: date, calendar: calendar)?.end
         }
+        awaitsTimelineForAutoStart = false
         endGrace()
         stopRun()
     }
@@ -270,6 +275,7 @@ public final class SleepTimer {
     /// aborts (the audio session fails to start, say), the seek the expiry's task would have made is gone.
     public func playbackWillStart(at date: Date = .now) -> TimeInterval {
         runID += 1
+        awaitsTimelineForAutoStart = false
         let rewind = takeRewind()
         let time = time(rewoundBy: rewind)
         let fade = takeQueuedFadeRewind()
@@ -278,8 +284,8 @@ public final class SleepTimer {
             if begin(expiredRun.mode, isAutomatic: expiredRun.isAutomatic, at: time), options.playsResetFeedback {
                 feedback?.playResetFeedback()
             }
-        } else if shouldStartAutomatically(at: date) {
-            begin(options.autoSleep.mode, isAutomatic: true, at: time)
+        } else if shouldStartAutomatically(at: date), !begin(options.autoSleep.mode, isAutomatic: true, at: time) {
+            awaitsTimelineForAutoStart = options.autoSleep.mode == .endOfChapter && control.timeline == nil
         }
         return rewind + fade
     }
@@ -288,6 +294,7 @@ public final class SleepTimer {
     /// undone: the grace period ends, and a reset whose rewind is still in flight doesn't resume.
     public func playbackDidPause() {
         runID += 1
+        awaitsTimelineForAutoStart = false
         endGrace()
         publish(remaining: remaining)
         updateShakeDetection()
@@ -300,6 +307,7 @@ public final class SleepTimer {
     public func itemDidChange(_ itemID: String?) {
         guard itemID != self.itemID else { return }
         self.itemID = itemID
+        awaitsTimelineForAutoStart = false
         pendingRewind = nil
         queuedFadeRewind = nil
         endGrace()
@@ -313,6 +321,13 @@ public final class SleepTimer {
     /// goal, unless it passed what a subtraction left, or it's another item's. Short-lived retargets are expected
     /// while a timer restarted at a rewound position waits for the seek, or during a load.
     public func didSeek(to time: Double) {
+        if awaitsTimelineForAutoStart, control.timeline != nil {
+            awaitsTimelineForAutoStart = false
+            if run == nil {
+                begin(.endOfChapter, isAutomatic: true, at: time)
+                return
+            }
+        }
         guard var run else { return }
         lastPosition = time
         stalePosition = nil

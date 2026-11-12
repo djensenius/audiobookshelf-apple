@@ -193,6 +193,21 @@ struct PlaybackCoordinatorSleepTimerTests {
         t.timer.cancel()
     }
 
+    @Test func automaticEndOfChapterTimerStartsOnAFreshLoad() async throws {
+        let t = try CoordinatorTimerHarness(automatic: true)
+        t.settings.value.sleepTimerLength = 0
+        await until { t.timer.options.autoSleep.mode == .endOfChapter }
+
+        await t.coordinator.play(itemID: "A", startTime: 1000)
+
+        #expect(t.willResumeCount == 1)
+        #expect(t.coordinator.isPlaying)
+        #expect(t.timer.mode == .endOfChapter)
+        #expect(t.timer.isAutomatic)
+        #expect(t.timer.remaining == 2600, "To the end of the 3600-second track")
+        t.timer.cancel()
+    }
+
     @Test func cancelDuringFadeRestoresVolumeWithoutPausing() async throws {
         let t = try CoordinatorTimerHarness()
         await t.coordinator.play(itemID: "A", startTime: 1000)
