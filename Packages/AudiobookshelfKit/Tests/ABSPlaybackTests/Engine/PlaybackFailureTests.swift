@@ -153,4 +153,23 @@ struct PlaybackFailureTests {
         #expect(failure.description == "Unknown error")
         #expect(PlaybackFailure(error: NSError(domain: "Other", code: 1)).kind == .unknown)
     }
+
+    /// The custom-header resource loader's statuses never reach the error log; AVFoundation wraps
+    /// the loader's error instead.
+    @Test func readsHTTPStatusFromTheHeaderLoaderError() {
+        let wrapped = NSError(
+            domain: NSOSStatusErrorDomain, code: -12_660,
+            userInfo: [NSUnderlyingErrorKey: HeaderStreamingError.httpStatus(401) as NSError])
+        let failure = PlaybackFailure(
+            error: avError(.unknown, underlying: wrapped),
+            errorLog: [.init(domain: "CoreMediaErrorDomain", statusCode: 503, comment: nil)])
+
+        #expect(failure.kind == .http(status: 401))
+        #expect(failure.httpStatus == 401)
+
+        let invalid = PlaybackFailure(
+            error: avError(.unknown, underlying: HeaderStreamingError.invalidRange as NSError))
+        #expect(invalid.kind == .unknown)
+        #expect(invalid.httpStatus == nil)
+    }
 }
