@@ -11,3 +11,4 @@ public typealias DownloadRecord = CurrentSchema.DownloadRecord
 public typealias DownloadPart = CurrentSchema.DownloadPart
 public typealias PendingLocalSession = CurrentSchema.PendingLocalSession
 public typealias PlaybackHistoryEvent = CurrentSchema.PlaybackHistoryEvent
+public typealias PendingSessionClose = CurrentSchema.PendingSessionClose
