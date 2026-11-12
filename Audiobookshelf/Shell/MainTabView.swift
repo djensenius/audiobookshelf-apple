@@ -56,6 +56,8 @@ struct MainTabView<Root: View>: View {
         .onChange(of: horizontalSizeClass) { _, sizeClass in
             router.normalize(isCompact: sizeClass == .compact)
         }
+        // Add to playlist on the item cards and episode rows of every tab and pushed screen.
+        .modifier(ItemCardPlaylists(router: router))
         // Keep this the outermost modifier, so every tab stack, pushed `RouteDestination`, the
         // sidebar header and `PlayerSlot`'s presentations inherit the scene's router.
         .environment(router)

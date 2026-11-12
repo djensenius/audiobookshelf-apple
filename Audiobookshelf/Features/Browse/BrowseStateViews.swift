@@ -181,6 +181,7 @@ struct ItemCardActionsHost<Content: View>: View {
     @Environment(\.playItem) private var playItem
     @Environment(\.openWindow) private var openWindow
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
+    @Environment(\.addToPlaylist) private var addToPlaylist
     /// The key of the message for the last failed action, kept while the alert is dismissed.
     @State private var failureKey: String?
     @State private var showsFailure = false
@@ -196,7 +197,9 @@ struct ItemCardActionsHost<Content: View>: View {
     }
 
     private var context: ItemActionContext {
-        ItemCardActions.actionContext(canPlay: playItem != nil, canOpenInNewWindow: supportsMultipleWindows)
+        ItemCardActions.actionContext(
+            canPlay: playItem != nil, canOpenInNewWindow: supportsMultipleWindows,
+            canEditPlaylists: addToPlaylist != nil)
     }
 
     private func perform(_ kind: ItemActionKind, on item: ItemSummary) {
@@ -206,6 +209,10 @@ struct ItemCardActionsHost<Content: View>: View {
         }
         guard kind != .openInNewWindow else {
             OpenInNewWindow.open(ItemCardActions.route(for: item), from: router, with: openWindow)
+            return
+        }
+        guard kind != .addToPlaylist else {
+            addToPlaylist?(item)
             return
         }
         let actions = itemActions
