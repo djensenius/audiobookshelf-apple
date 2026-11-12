@@ -370,6 +370,79 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
         }
     }
 
+    @Test func removeAccountDataClearsOnlyThatAccountsEntries() async throws {
+        try await withIsolatedDefaults { defaults, _ in
+            let settings = AppSettings(defaults: defaults)
+            // The removed account, the same server with another user, the same user on another
+            // server, and a user whose ID only starts with the removed one's.
+            let accounts = [("s", "u"), ("s", "other"), ("t", "u"), ("s", "uu")]
+            for (server, user) in accounts {
+                settings.setLastLibraryID("lib-\(server)-\(user)", serverID: server, userID: user)
+                settings.setLibraryViewPreferencesJSON("{}", serverID: server, userID: user, libraryID: "lib-1")
+                settings.setRecentSearchesJSON("[\"Dune\"]", serverID: server, userID: user, libraryID: "lib-1")
+                settings.setRecentSearchesJSON("[\"Emma\"]", serverID: server, userID: user, libraryID: "lib-2")
+            }
+
+            settings.removeAccountData(serverID: "s", userID: "u")
+            for reader in [settings, AppSettings(defaults: defaults)] {
+                #expect(reader.lastLibraryID(serverID: "s", userID: "u") == nil)
+                #expect(reader.libraryViewPreferencesJSON(serverID: "s", userID: "u", libraryID: "lib-1") == nil)
+                #expect(reader.recentSearchesJSON(serverID: "s", userID: "u", libraryID: "lib-1") == nil)
+                #expect(reader.recentSearchesJSON(serverID: "s", userID: "u", libraryID: "lib-2") == nil)
+                for (server, user) in accounts.dropFirst() {
+                    #expect(reader.lastLibraryID(serverID: server, userID: user) == "lib-\(server)-\(user)")
+                    #expect(
+                        reader.libraryViewPreferencesJSON(serverID: server, userID: user, libraryID: "lib-1") == "{}")
+                    #expect(
+                        reader.recentSearchesJSON(serverID: server, userID: user, libraryID: "lib-2") == "[\"Emma\"]")
+                }
+            }
+            #expect(settings.lastLibraryIDs.count == 3 && settings.recentSearches.count == 6)
+        }
+    }
+
+    @Test func removeAccountDataKeepsPrefixedAccounts() async throws {
+        try await withIsolatedDefaults { defaults, _ in
+            let settings = AppSettings(defaults: defaults)
+            settings.setLastLibraryID("lib-b", serverID: "a", userID: "b")
+            settings.setLastLibraryID("lib-bc", serverID: "a", userID: "bc")
+            settings.setRecentSearchesJSON("[\"Dune\"]", serverID: "a", userID: "bc", libraryID: "lib")
+
+            // `a|b` mustn't match `a|bc`.
+            settings.removeAccountData(serverID: "a", userID: "b")
+            #expect(settings.lastLibraryIDs == [AppSettings.accountKey(serverID: "a", userID: "bc"): "lib-bc"])
+            #expect(settings.recentSearchesJSON(serverID: "a", userID: "bc", libraryID: "lib") == "[\"Dune\"]")
+        }
+    }
+
+    @Test func removeAccountDataKeepingOnlyListedAccountsKeepsTheirEntries() async throws {
+        try await withIsolatedDefaults { defaults, _ in
+            let settings = AppSettings(defaults: defaults)
+            for (server, user) in [("s", "u"), ("s", "uu"), ("s", "other"), ("t", "u")] {
+                settings.setLastLibraryID("lib", serverID: server, userID: user)
+                settings.setRecentSearchesJSON("[\"Dune\"]", serverID: server, userID: user, libraryID: "lib")
+            }
+
+            // `s|u` keeps its own entries, not `s|uu`'s.
+            settings.removeAccountData(keepingOnly: [(serverID: "s", userID: "u"), (serverID: "t", userID: "u")])
+            for reader in [settings, AppSettings(defaults: defaults)] {
+                #expect(Set(reader.lastLibraryIDs.keys) == ["s|u", "t|u"])
+                #expect(Set(reader.recentSearches.keys) == ["s|u|lib", "t|u|lib"])
+            }
+
+            settings.removeAccountData(keepingOnly: [])
+            #expect(settings.lastLibraryIDs.isEmpty && settings.recentSearches.isEmpty)
+        }
+    }
+
+    @Test func removeAccountDataWritesNothingWhenTheresNothingToRemove() async throws {
+        try await withIsolatedDefaults { defaults, suiteName in
+            AppSettings(defaults: defaults).removeAccountData(serverID: "s", userID: "u")
+            AppSettings(defaults: defaults).removeAccountData(keepingOnly: [])
+            #expect(defaults.persistentDomain(forName: suiteName)?.isEmpty ?? true)
+        }
+    }
+
     @Test func fallsBackToStandardDefaultsWithoutAppGroup() {
         let defaults = AppSettings.sharedDefaults(appGroupIdentifier: "group.test.unavailable") { _ in false }
         #expect(defaults === UserDefaults.standard)

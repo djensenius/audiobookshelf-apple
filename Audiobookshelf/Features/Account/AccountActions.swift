@@ -61,6 +61,41 @@ struct AccountActions {
         }
         return .switched(epoch: lifecycle.linkEpoch)
     }
+
+    /// Whether the server list offers to remove `connectionID`: a saved server other than the
+    /// running one (Log Out covers that), only while the session is ready, so not during another
+    /// window's switch.
+    func canRemove(_ connectionID: UUID) -> Bool {
+        guard let accounts, let running = lifecycle.readySession else { return false }
+        return connectionID != running.identity.connectionID && connectionID != accounts.activeConnection?.id
+    }
+
+    /// Whether the server list has any row removal could ever apply to: a saved server other than
+    /// the active one. Structural, so it doesn't flicker with a switch or removal in flight; the
+    /// list's Edit control shows while it holds, and edit mode ends once it doesn't.
+    static func offersRemoval(among connectionIDs: [UUID], activeID: UUID?) -> Bool {
+        connectionIDs.contains { $0 != activeID }
+    }
+
+    /// Forgets a saved server other than the running one, and its saved session, through
+    /// ``SessionLifecycle/removeInactiveAccount(_:from:)``; the session keeps running. Chosen from
+    /// the ready session, the removal fails, rather than signing out, if a change queued before it
+    /// (say, another window's switch to this server) made the server active or ended that session.
+    /// - Returns: The removal's task, which says whether it succeeded, or `nil` when
+    ///   ``canRemove(_:)`` refuses it.
+    @discardableResult
+    func removeServer(_ connectionID: UUID) -> Task<Bool, Never>? {
+        guard canRemove(connectionID), let origin = lifecycle.readySession else { return nil }
+        return Task {
+            do {
+                try await lifecycle.removeInactiveAccount(connectionID, from: origin)
+                return true
+            } catch {
+                Log.ui.error("Couldn't remove a server: \(String(describing: type(of: error)), privacy: .public)")
+                return false
+            }
+        }
+    }
 }
 
 /// How ``AccountActions/switchAccount(to:)`` ended.

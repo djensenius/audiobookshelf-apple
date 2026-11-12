@@ -217,12 +217,17 @@ private struct ItemDetailCover: View {
     let bucket: ImageWidthBucket
     let showsProgress: Bool
     @Environment(\.serverID) private var serverID
+    private var libraries = LibraryCoverSettings()
 
     var body: some View {
         let progress = model.progressFraction
         CoverView(
             key: serverID.flatMap { model.summary?.coverKey(serverID: $0, bucket: bucket) }, title: details.title,
-            author: details.authors.first?.name, progress: showsProgress && progress > 0 ? progress : nil,
+            author: details.authors.first?.name,
+            shape: CoverShape(
+                isPodcast: model.mediaType == .podcast,
+                librarySettings: libraries.settings(forLibrary: model.item?.libraryId)),
+            progress: showsProgress && progress > 0 ? progress : nil,
             isFinished: showsProgress && model.isFinished, accessibility: .hidden)
     }
 }

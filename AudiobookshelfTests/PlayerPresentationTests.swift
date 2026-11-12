@@ -1,4 +1,5 @@
 import ABSAppModel
+import ABSCore
 import ABSUI
 import Testing
 
@@ -20,9 +21,24 @@ import Testing
         #expect(!Layout.inline.showsCloseAndProgress)
     }
 
-    @Test func podcastEpisodesHaveSquareCoversInBothPlayers() {
-        #expect(PlayerViewModel.coverShape(isPodcastEpisode: true) == .square)
-        #expect(PlayerViewModel.coverShape(isPodcastEpisode: false) == .book)
+    /// The players' covers (#336) take the playing item's library's setting, else the current library's.
+    @Test func coverSettingsComeFromTheItemsLibraryElseTheCurrentOne() {
+        let libraries = [
+            Library(
+                id: "lib_standard", name: "Standard", mediaType: .book,
+                settings: LibrarySettings(coverAspectRatio: 0)),
+            Library(
+                id: "lib_square", name: "Square", mediaType: .book, settings: LibrarySettings(coverAspectRatio: 1)),
+        ]
+        func settings(_ libraryID: String?, current: String?) -> LibrarySettings? {
+            LibraryCoverSettings.settings(forLibrary: libraryID, current: current) { id in
+                libraries.first { $0.id == id }
+            }
+        }
+        #expect(settings("lib_square", current: "lib_standard")?.coverAspectRatio == 1)
+        #expect(settings("lib_gone", current: "lib_standard")?.coverAspectRatio == 0)
+        #expect(settings(nil, current: "lib_square")?.coverAspectRatio == 1)
+        #expect(settings(nil, current: nil) == nil)
     }
 
     @Test func theFullPlayerClosesOnlyWhenPresentedWithoutASession() {

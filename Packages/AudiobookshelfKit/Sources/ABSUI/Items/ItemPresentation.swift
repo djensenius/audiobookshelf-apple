@@ -100,11 +100,6 @@ enum ItemPresentation {
         case .openDetails: "info.circle"
         }
     }
-
-    /// Podcasts and episodes have square covers.
-    static func defaultShape(_ item: ItemSummary) -> CoverShape {
-        item.kind == .podcast || item.kind == .episode ? .square : .book
-    }
 }
 
 /// The pointer feedback for cards and rows: the system hover effect on iPad, a highlight on Mac.

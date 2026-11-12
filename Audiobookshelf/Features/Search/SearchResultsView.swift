@@ -45,6 +45,7 @@ struct SearchResultRowView: View {
     @ScaledMetric(relativeTo: .body) private var imageWidth: CGFloat = 44
     @Environment(\.serverID) private var serverID
     @Environment(\.locale) private var locale
+    private var libraries = LibraryCoverSettings()
 
     var body: some View {
         Button(action: open) {
@@ -79,7 +80,7 @@ struct SearchResultRowView: View {
         case .item(let item):
             CoverView(
                 key: serverID.flatMap { item.coverKey(serverID: $0, bucket: .small) }, title: item.title,
-                shape: item.kind == .book ? .book : .square, accessibility: .hidden)
+                shape: CoverShape(kind: item.kind, librarySettings: libraries.current), accessibility: .hidden)
         case .series(let series):
             GroupCoverView(
                 name: series.name,

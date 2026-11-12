@@ -59,7 +59,7 @@ final class AppEnvironment {
                 store: ServerConnectionStore(modelContainer: stack.container), keychain: keychain,
                 validator: ServerValidator(sessionConfiguration: sessionConfiguration),
                 openID: OIDCLoginService(sessionConfiguration: sessionConfiguration),
-                sessionConfiguration: sessionConfiguration)
+                sessionConfiguration: sessionConfiguration, settings: settings)
             downloads = downloadsRoot.map {
                 AppDownloads.make(
                     dataStack: stack, accounts: manager, settings: settings, root: $0, makeSession: makeDownloadSession)

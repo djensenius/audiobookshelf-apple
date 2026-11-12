@@ -31,6 +31,27 @@ import Testing
         #expect(CoverShape.square.aspectRatio == 1)
     }
 
+    /// Legacy `libraries/getBookCoverAspectRatio`: only `BookCoverAspectRatio.STANDARD` (`0`) is 1.6.
+    @Test(
+        arguments: [
+            (LibrarySettings(coverAspectRatio: 0), CoverShape.book),
+            (LibrarySettings(coverAspectRatio: 1), .square),
+            (LibrarySettings(), .square),
+            (nil, .square),
+        ] as [(LibrarySettings?, CoverShape)])
+    func bookCoversFollowTheLibrarySetting(settings: LibrarySettings?, shape: CoverShape) {
+        #expect(CoverShape(isPodcast: false, librarySettings: settings) == shape)
+        #expect(CoverShape(kind: .book, librarySettings: settings) == shape)
+        #expect(CoverShape(kind: .series, librarySettings: settings) == shape)
+    }
+
+    @Test(arguments: [LibrarySettings(coverAspectRatio: 0), LibrarySettings(coverAspectRatio: 1), nil])
+    func podcastCoversAreAlwaysSquare(settings: LibrarySettings?) {
+        #expect(CoverShape(isPodcast: true, librarySettings: settings) == .square)
+        #expect(CoverShape(kind: .podcast, librarySettings: settings) == .square)
+        #expect(CoverShape(kind: .episode, librarySettings: settings) == .square)
+    }
+
     @Test func groupCoverLayoutFansCoversAcrossTheFrame() {
         let size = CGSize(width: 240, height: 160)
         let single = GroupCoverView.layout(count: 1, size: size, aspectRatio: 1.6)

@@ -7,19 +7,23 @@ public struct ItemRow: View {
     private let item: ItemSummary
     private let serverID: UUID?
     private let progress: ItemProgress?
+    private let shape: CoverShape
     private let context: ItemActionContext
     private let perform: (ItemActionKind) -> Void
     @ScaledMetric(relativeTo: .body) private var coverWidth: CGFloat = 56
     @Environment(\.itemProgressReader) private var progressReader
     @Environment(\.locale) private var locale
 
+    /// - Parameter librarySettings: The item's library's settings, for the cover shape
+    ///   (``CoverShape/init(kind:librarySettings:)``); `nil` gives square covers, as in the legacy app.
     public init(
-        item: ItemSummary, serverID: UUID?, progress: ItemProgress? = nil,
+        item: ItemSummary, serverID: UUID?, progress: ItemProgress? = nil, librarySettings: LibrarySettings? = nil,
         context: ItemActionContext = ItemActionContext(), perform: @escaping (ItemActionKind) -> Void
     ) {
         self.item = item
         self.serverID = serverID
         self.progress = progress
+        self.shape = CoverShape(kind: item.kind, librarySettings: librarySettings)
         self.context = context
         self.perform = perform
     }
@@ -32,7 +36,7 @@ public struct ItemRow: View {
             HStack(spacing: ABSSpacing.medium) {
                 CoverView(
                     key: serverID.flatMap { item.coverKey(serverID: $0, bucket: .small) }, title: item.title,
-                    shape: ItemPresentation.defaultShape(item), accessibility: .hidden
+                    shape: shape, accessibility: .hidden
                 )
                 .frame(width: min(coverWidth, 120))
                 VStack(alignment: .leading, spacing: ABSSpacing.xxSmall) {
