@@ -26,7 +26,9 @@ private let logger = Log.playback
 /// - **Closing.** A session is owned by exactly one place: the start continuation until it becomes
 ///   current, then the coordinator. Whoever drops it closes it once, in the background. The next
 ///   `/play` waits up to ``closeWaitTimeout`` for closes in flight, so the server normally sees the
-///   old session closed first; a slow or failed close never blocks it. Closes are best effort;
+///   old session closed first; a slow or failed close never blocks it. A close held back by its
+///   session's report in flight (at most ``closeWaitTimeout``, #337) is sent before that wait
+///   starts, so `/play` never overtakes it. Closes are best effort;
 ///   P2-06b's final report is plugged in through ``finalCloseReport``.
 /// - **Interrupted seeks.** The engine keeps the target of a seek it couldn't finish pending and
 ///   leaves its own time behind (at 0 after a load). The coordinator treats that target as the
@@ -1033,22 +1035,28 @@ public final class PlaybackCoordinator {
         closeOperations.append(operation)
         guard permitsCloseTransport else {
             operation.transport.resolve(.success(false))
+            operation.dispatched.resolve(.success(()))
             return
         }
         let id = UUID()
         let sessions = self.sessions
+        let sleep = self.sleep
         let task = Task { [weak self] in
             defer {
                 self?.closeTasks[id] = nil
                 self?.closingSessionIDs.remove(sessionID)
                 operation.task = nil
+                operation.dispatched.resolve(.success(()))
             }
             // Account end cancels this owned task synchronously. Do not require the coordinator
             // to stay alive: ordinary stop has always allowed its captured close to outlive it.
+            // The syncer's report in flight for this session returns first, within a limit (#337).
+            try? await handoff?.waitForSessionSync(timeout: Self.closeWaitTimeout, sleep: sleep)
             guard !Task.isCancelled else {
                 operation.transport.resolve(.success(false))
                 return
             }
+            operation.dispatched.resolve(.success(()))
             do {
                 try await sessions.closeSession(id: sessionID, report: handoff?.report ?? report)
                 operation.transport.resolve(.success(true))
@@ -1117,8 +1125,12 @@ public final class PlaybackCoordinator {
     }
 
     /// Waits up to ``closeWaitTimeout`` for the closes in flight, so the server normally sees
-    /// the old session closed before the next `/play`.
+    /// the old session closed before the next `/play`. The wait starts once each has been sent
+    /// or suppressed, which its own wait for a report in flight bounds.
     private func waitForCloses() async {
+        for operation in closeOperations where operation.task != nil {
+            try? await operation.dispatched.wait()
+        }
         let closes = Array(closeTasks.values)
         guard !closes.isEmpty else { return }
         let first = FirstFinish()

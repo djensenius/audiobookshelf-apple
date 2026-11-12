@@ -410,10 +410,12 @@ final class InMemoryLastPlayedStore: LastPlayedStoring {
 }
 
 /// A sleep for the close-wait timeout: never elapses in tests (it is cancelled when the closes
-/// finish) unless `elapsesImmediately` is set.
+/// finish) unless `elapsesImmediately` is set, or `isManual` is and a test fires it.
 final class TestSleep: Sendable {
     private let immediate = Mutex(false)
+    private let manual = Mutex(false)
     private let calls = Mutex<[Duration]>([])
+    private let waiting = Mutex<[(id: UUID, continuation: CheckedContinuation<Void, Never>)]>([])
 
     var durations: [Duration] { calls.withLock { $0 } }
 
@@ -422,9 +424,42 @@ final class TestSleep: Sendable {
         set { immediate.withLock { $0 = newValue } }
     }
 
+    /// Each sleep then waits until ``fireOldest()`` or cancellation ends it.
+    var isManual: Bool {
+        get { manual.withLock { $0 } }
+        set { manual.withLock { $0 = newValue } }
+    }
+
+    /// The manual sleeps waiting now.
+    var waitingCount: Int { waiting.withLock { $0.count } }
+
     func sleep(_ duration: Duration) async {
         calls.withLock { $0.append(duration) }
         if elapsesImmediately { return }
-        try? await Task.sleep(for: .seconds(3600))
+        guard isManual else {
+            try? await Task.sleep(for: .seconds(3600))
+            return
+        }
+        let id = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                // Checked under the lock, so a cancel can't fall between the check and registering.
+                let cancelled = waiting.withLock { waiting in
+                    if Task.isCancelled { return true }
+                    waiting.append((id, continuation))
+                    return false
+                }
+                if cancelled { continuation.resume() }
+            }
+        } onCancel: {
+            waiting.withLock { waiting in
+                waiting.firstIndex { $0.id == id }.map { waiting.remove(at: $0).continuation }
+            }?.resume()
+        }
+    }
+
+    /// Ends the sleep that started first among those waiting.
+    func fireOldest() {
+        waiting.withLock { $0.isEmpty ? nil : $0.removeFirst().continuation }?.resume()
     }
 }

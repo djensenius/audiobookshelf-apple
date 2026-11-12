@@ -19,11 +19,13 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 /// - **One request at a time.** Every send runs on one serial queue, and a send
 ///   counts as finished only when the service call returns, after its task has completed. So no
 ///   report or PATCH goes out while an earlier one could still reach the server. The
-///   coordinator's `/close` doesn't go through this queue yet, so it can overlap a report in
-///   flight (#158).
+///   coordinator's final `/close` doesn't go through this queue, but waits, up to
+///   `PlaybackCoordinator.closeWaitTimeout`, for the closing session's report in flight, if any.
+///   A report still queued for it is skipped, so it doesn't hold the close back.
 /// - **Positions first.** Each report trigger saves `LocalMediaProgress` with `needsServerSync`
 ///   before sending. Local writes have their own serial queue, so a held request doesn't block
-///   saving a newer seek or pause. Failed writes stay in memory for the next trigger or drain;
+///   saving a newer seek or pause. Failed writes stay in memory for the next trigger or drain,
+///   and schedule a drain after a backoff, so a paused session's position isn't left unsaved;
 ///   no report is sent while a position still needs saving.
 ///   Final positions enter that queue synchronously in the close callback, even for clean or
 ///   missing rows. Their throwing receipts acknowledge only committed audio, not listening time.
@@ -34,11 +36,12 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 /// - **Server errors (#171).** A `/sync` answered with 5xx, 408 or 429 backs off that session's
 ///   reports for ``syncInterval`` doubled per consecutive failure, up to ``maxSyncBackoff``;
 ///   ``flush()`` ignores the backoff. Positions are still saved meanwhile, and a periodic report
-///   held back by the backoff falls due when it ends. Nothing wakes a paused session then (#337).
+///   held back by the backoff falls due when it ends; a wake then reports a paused session too,
+///   unless a report already went out since the backoff ended. Closing the session cancels it.
 ///   A 404 means the server no longer has the session (ABS keeps open sessions in memory, so a
 ///   restart drops them): the session sends no more `/sync`, and each later trigger drains the
 ///   saved position through PATCH instead, until the server rejects the session's own row.
-///   Listening time from that 404 on is not sent (#337).
+///   Listening time from that 404 on is not sent (to be decided with offline sessions, #158).
 /// - **Durable queue.** ``drainPendingProgress()`` PATCHes the connection's dirty rows, one group
 ///   per request from `LocalProgressStore.beginSend`, in its order (audio, finished, ebook). It
 ///   runs after every successful `/sync` and on ``flush()``; call it on reconnect and at launch.
@@ -46,7 +49,10 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   acknowledgement clears the dirty group, without clearing a newer edit. Clean rows are kept.
 ///   Failed settlements retain their token and outcome for the next drain. A PATCH rejected
 ///   for good (``isPermanent(_:)``: 400, 404, 410, 422) is settled with `rejectSend`, so the row
-///   stops being retried until it is edited again.
+///   stops being retried until it is edited again. A drain that stopped on any other failure
+///   (a PATCH, a pending row's GET or a store save) schedules one more drain, backed off like
+///   `/sync`; a drain that completes cleanly resets that backoff. Both wakes are cancelled on
+///   detach and quiesce.
 ///   Each pending row is fetched once before sending. Unusable or rejected progress defers that
 ///   row; a thrown lookup stops the pass. This protects observed server values, not another
 ///   device's write between GET and PATCH (the server offers no conditional write here).
@@ -56,7 +62,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   This only refreshes storage; it never changes playback or creates a report trigger.
 /// - **Reconnect.** Given a `NetworkPathSource`, an offline path followed by an online one runs
 ///   ``drainPendingProgress()``, which also retries the active baseline lookup that a failed or
-///   offline start skipped. Repeated online paths and an online first path don't drain.
+///   offline start skipped, as does an online path whose `onlineEpoch` grew (the offline path in
+///   between was dropped). Repeated online paths and an online first path don't drain.
 @MainActor
 public final class ProgressSyncer {
     /// Seconds between reports while playing (legacy `TIME_BETWEEN_SESSION_SYNC_IN_SECONDS`).
@@ -114,6 +121,9 @@ public final class ProgressSyncer {
     private var queuedSyncSessionID: String?
     /// Whether a ``flush()`` joined the queued `/sync`, so it goes out despite a backoff.
     private var queuedSyncIgnoresBackoff = false
+    /// The `/sync` inside `service.syncSession` now, resolved when the call returns. Its
+    /// session's final close waits for it; queued reports don't count.
+    private var inFlightSync: (sessionID: String, done: PlaybackCloseResult<Void>)?
     private var tail: Task<Void, Never>?
     private var persistenceTail: Task<Void, Never>?
     /// Test seam: hold local persistence independently of transport.
@@ -122,11 +132,15 @@ public final class ProgressSyncer {
     var beforeSessionAudioPreparation: (@MainActor () async -> Void)?
     /// Test seam: hold a prepared PATCH before its return is consumed by transport checks.
     var afterProgressSendPreparation: (@MainActor (ProgressPatch) async -> Void)?
+    /// Test seam: observes a drain ending, once any retry is scheduled.
+    var afterDrain: (@MainActor () -> Void)?
     /// Test seam before the active refresh's throwing provenance lookup.
     var beforeActiveProgressCapture: (@MainActor () async -> Void)?
     /// Test seam: observes admission without suspending between ownership validation and store submission.
     var activeProgressIntakeSubmitted: (@MainActor () -> Void)?
     private var pendingPositions: [MediaKey: Position] = [:]
+    /// The pending positions whose last save failed, as opposed to ones merely still queued.
+    private var failedPositions: [MediaKey: Position] = [:]
     private var positionRevision: UInt64 = 0
     private var positionReceipts: [MediaKey: [(revision: UInt64, receipt: PlaybackCloseResult<Void>)]] = [:]
     private var transportTasks: [UUID: Task<Void, Never>] = [:]
@@ -137,6 +151,15 @@ public final class ProgressSyncer {
     private var isDetached = false
     /// A drain is queued but not started; later requests join it.
     private var isDrainQueued = false
+    /// The `/sync` scheduled for when the current session's backoff ends. Readable for tests.
+    private(set) var syncWake: Task<Void, Never>?
+    /// The drain scheduled after a drain that stopped on a failure. Readable for tests.
+    private(set) var drainWake: Task<Void, Never>?
+    /// Consecutive drains that stopped on a failure.
+    private var drainFailures = 0
+    /// How the drain running now ended: on a failure, or after its last pending row and
+    /// confirmation (neither when it stopped early for another reason, such as a newer position).
+    private var drainOutcome: (failed: Bool, completed: Bool) = (false, false)
     /// Follows the network path; cancelled on detach and quiesce. Readable for tests to join.
     private(set) var pathTask: Task<Void, Never>?
     /// Test seam: called after each network path is handled, with whether it queued a drain
@@ -167,6 +190,8 @@ public final class ProgressSyncer {
 
     isolated deinit {
         pathTask?.cancel()
+        syncWake?.cancel()
+        drainWake?.cancel()
     }
 
     /// Stops following the source and quiesces transport. Owned position writes still finish.
@@ -187,6 +212,10 @@ public final class ProgressSyncer {
         isTransportQuiesced = true
         pathTask?.cancel()
         pathTask = nil
+        syncWake?.cancel()
+        syncWake = nil
+        drainWake?.cancel()
+        drainWake = nil
         for task in transportTasks.values { task.cancel() }
     }
 
@@ -221,13 +250,15 @@ public final class ProgressSyncer {
     /// Drains on each offline-to-online transition, not on repeated or initial online paths.
     /// The drain is queued, not awaited: the system source keeps only the newest path, so
     /// blocking here could miss an offline-to-online cycle while a drain's request is in flight.
+    /// An offline path the stream dropped still shows as a grown `onlineEpoch`.
     private func watch(_ paths: AsyncStream<NetworkPath>) {
         pathTask = Task { [weak self] in
-            var wasOnline: Bool?
+            var previous: NetworkPath?
             for await path in paths {
                 guard let self, !self.isDetached, !self.isTransportQuiesced else { return }
-                let reconnected = wasOnline == false && path.isOnline
-                wasOnline = path.isOnline
+                let reconnected =
+                    previous.map { path.isOnline && (!$0.isOnline || path.onlineEpoch != $0.onlineEpoch) } ?? false
+                previous = path
                 if reconnected { self.requestDrain() }
                 self.pathHandled?(path, reconnected)
             }
@@ -266,6 +297,8 @@ public final class ProgressSyncer {
         case .sessionStarted(let sessionID, let key):
             guard key.serverConnectionID == service.serverConnectionID else { return }
             current = CurrentSession(sessionID: sessionID, key: key)
+            syncWake?.cancel()
+            syncWake = nil
             isPlaying = false
             lastTick = nil
             loadedTime = nil
@@ -296,7 +329,10 @@ public final class ProgressSyncer {
         case .tick(let time):
             tick(time, now: now)
         case .sessionWillClose(let closing):
-            if current?.sessionID == closing.sessionID { current = nil }
+            if current?.sessionID == closing.sessionID {
+                current = nil
+                cancelSyncWake()
+            }
             isPlaying = false
             lastTick = nil
         case .itemChanged, .failed:
@@ -328,6 +364,7 @@ public final class ProgressSyncer {
             creditPlayedTime()
             listened = current?.listened ?? 0
             current = nil
+            cancelSyncWake()
         }
         guard
             let report = PlaybackSyncReport(
@@ -336,7 +373,8 @@ public final class ProgressSyncer {
         else { return nil }
         let receipt = PlaybackCloseResult<Void>()
         positionReceipts[closing.key, default: []].append((position.revision, receipt))
-        return PlaybackCloseHandoff(report: report, position: receipt)
+        let sessionSync = inFlightSync?.sessionID == closing.sessionID ? inFlightSync?.done : nil
+        return PlaybackCloseHandoff(report: report, position: receipt, sessionSync: sessionSync)
     }
 
     /// A final sample may advance after the last tick. Targets and stalls earn nothing, and
@@ -409,9 +447,13 @@ public final class ProgressSyncer {
             ignoringBackoff = queuedSyncIgnoresBackoff
         }
         guard await settleSessionAudioOutcomes() else { return }
-        guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty,
-            let session = current, session.sessionID == sessionID,
-            let position = session.position
+        guard !isDetached, !isTransportQuiesced else { return }
+        guard pendingPositions.isEmpty else {
+            // A paused session may never report again: the drain's retry saves and sends it.
+            if hasFailedPositionSave, drainWake == nil { scheduleDrainRetry() }
+            return
+        }
+        guard let session = current, session.sessionID == sessionID, let position = session.position
         else { return }
         // A failure answered while this report was queued may have abandoned or backed off the
         // session; its listening time stays for the next report.
@@ -454,12 +496,20 @@ public final class ProgressSyncer {
         // Ticks during the evidence save belong to the next report, not this captured delta.
         current?.listened -= listened
         let outcome: SessionAudioOutcome
+        // No suspension between the guard above and the call: a close sees it in flight.
+        let done = PlaybackCloseResult<Void>()
+        inFlightSync = (sessionID, done)
         do {
+            defer {
+                done.resolve(.success(()))
+                if inFlightSync?.done === done { inFlightSync = nil }
+            }
             try await service.syncSession(id: sessionID, report: report)
             outcome = .succeeded
             if current?.sessionID == sessionID {
                 current?.syncFailures = 0
                 current?.retryAt = nil
+                cancelSyncWake()
             }
         } catch {
             let abandoned = noteSyncFailure(error, sessionID: sessionID)
@@ -509,11 +559,48 @@ public final class ProgressSyncer {
             return true
         case .http(let status, _) where status == 408 || status == 429 || (500..<600).contains(status):
             let failures = (current?.syncFailures ?? 0) + 1
+            let backoff = Self.syncBackoff(afterFailures: failures)
+            let retryAt = clock.uptime() + backoff
             current?.syncFailures = failures
-            current?.retryAt = clock.uptime() + Self.syncBackoff(afterFailures: failures)
+            current?.retryAt = retryAt
+            // Report when the backoff ends even if no tick or pause triggers it (a paused session).
+            // The clock and the sleep are both monotonic, so the backoff has ended by then. Not
+            // if a newer failure moved it, or a report already went out since it ended. A report
+            // still in flight (a flush ignores the backoff) answers first: its success cancels
+            // this wake and a server error reschedules it; any other failure leaves it to retry.
+            let ownership = current?.ownership
+            syncWake?.cancel()
+            syncWake = scheduleWake(after: backoff) { syncer in
+                while let inFlight = syncer.inFlightSync, inFlight.sessionID == syncer.current?.sessionID {
+                    guard (try? await inFlight.done.wait()) != nil else { return }
+                }
+                guard !Task.isCancelled, !syncer.isDetached, !syncer.isTransportQuiesced,
+                    syncer.current?.ownership == ownership, syncer.current?.retryAt == retryAt
+                else { return }
+                syncer.syncWake = nil
+                if let sent = syncer.lastSyncAt, sent >= retryAt { return }
+                syncer.requestSync()
+            }
             return false
         default:
             return false
+        }
+    }
+
+    private func cancelSyncWake() {
+        syncWake?.cancel()
+        syncWake = nil
+    }
+
+    /// Runs `action` after `delay` monotonic seconds, unless cancelled, detached or quiesced first.
+    private func scheduleWake(
+        after delay: TimeInterval, _ action: @escaping @MainActor (ProgressSyncer) async -> Void
+    ) -> Task<Void, Never> {
+        let sleep = clock.sleep
+        return Task { [weak self] in
+            do { try await sleep(delay) } catch { return }
+            guard let self, !Task.isCancelled, !self.isDetached, !self.isTransportQuiesced else { return }
+            await action(self)
         }
     }
 
@@ -578,8 +665,10 @@ public final class ProgressSyncer {
                         for: key, token: position.token, now: position.editedAt)
                     // A newer event may have arrived while the save ran.
                     if pendingPositions[key] == position { pendingPositions[key] = nil }
+                    failedPositions[key] = nil
                     finishReceipts(for: key, through: position.revision, result: .success(()))
                 } catch {
+                    failedPositions[key] = position
                     finishReceipts(for: key, through: position.revision, result: .failure(error))
                     logger.error("Saving pending progress failed: \(String(describing: error), privacy: .public)")
                 }
@@ -595,8 +684,42 @@ public final class ProgressSyncer {
 
     // MARK: Durable queue
 
+    /// One drain pass. One that stopped on a failure schedules another, backed off like `/sync`.
     private func drain() async {
-        guard await settleSessionAudioOutcomes() else { return }
+        drainOutcome = (false, false)
+        await drainPass()
+        defer { afterDrain?() }
+        guard !isDetached, !isTransportQuiesced else { return }
+        // A position whose save failed stopped the drain as surely as a failed request did.
+        if drainOutcome.failed || hasFailedPositionSave {
+            scheduleDrainRetry()
+        } else if drainOutcome.completed {
+            drainFailures = 0
+            drainWake?.cancel()
+            drainWake = nil
+        }
+    }
+
+    /// Whether a pending position is one whose save failed, not a newer one still being saved.
+    private var hasFailedPositionSave: Bool {
+        pendingPositions.contains { failedPositions[$0.key] == $0.value }
+    }
+
+    /// Drains again after a backoff, which grows with each failed drain.
+    private func scheduleDrainRetry() {
+        drainFailures += 1
+        drainWake?.cancel()
+        drainWake = scheduleWake(after: Self.syncBackoff(afterFailures: drainFailures)) { syncer in
+            syncer.drainWake = nil
+            syncer.requestDrain()
+        }
+    }
+
+    private func drainPass() async {
+        guard await settleSessionAudioOutcomes() else {
+            drainOutcome.failed = true
+            return
+        }
         guard !isDetached, !isTransportQuiesced else { return }
         queuePersistence()
         await waitForPendingWrites()
@@ -609,6 +732,7 @@ public final class ProgressSyncer {
             rows = try await store.pendingSync(for: service.serverConnectionID)
         } catch {
             logger.error("Reading pending progress failed: \(String(describing: error), privacy: .public)")
+            drainOutcome.failed = true
             return
         }
         var attemptedConfirmations: [MediaKey: UUID] = [:]
@@ -624,6 +748,7 @@ public final class ProgressSyncer {
                 else { continue }
             } catch {
                 logger.error("Fetching pending progress failed: \(String(describing: error), privacy: .public)")
+                drainOutcome.failed = true
                 return
             }
             for _ in 0..<Self.maxSendsPerRow {
@@ -641,6 +766,7 @@ public final class ProgressSyncer {
                     if let patch { await afterProgressSendPreparation?(patch) }
                 } catch {
                     logger.error("Starting a progress send failed: \(String(describing: error), privacy: .public)")
+                    drainOutcome.failed = true
                     break
                 }
                 guard let patch else { break }
@@ -670,6 +796,7 @@ public final class ProgressSyncer {
                         guard await settle(patch, error: "rejected \(status)", rejected: true) else { return }
                         break
                     }
+                    drainOutcome.failed = true
                     guard await settle(patch, error: Self.caseName(error)) else { return }
                     if Self.isOffline(error) { return }
                     break
@@ -691,9 +818,11 @@ public final class ProgressSyncer {
                     confirmationOnly: true)
             } catch {
                 logger.error("Confirming progress failed: \(String(describing: error), privacy: .public)")
+                drainOutcome.failed = true
                 return
             }
         }
+        drainOutcome.completed = true
         await refreshActiveProgress(unlessAttempted: attemptedKeys)
     }
 
@@ -787,6 +916,7 @@ public final class ProgressSyncer {
             return true
         } catch {
             logger.error("Saving a progress outcome failed: \(String(describing: error), privacy: .public)")
+            drainOutcome.failed = true
             return false
         }
     }

@@ -90,6 +90,20 @@ struct ProgressSyncReconnectTests {
         #expect(try await f.s.store.progress(for: f.s.h.key("a"))?.needsServerSync == false)
     }
 
+    /// The stream dropped the offline path between two online ones; the grown epoch still
+    /// shows the reconnect (#337).
+    @Test func aReconnectWhoseOfflinePathWasDroppedStillDrains() async throws {
+        var f = try Fixture()
+        try await f.s.store.recordEdit(ActiveRefreshFixture.edit(50), for: f.s.h.key("a"), now: f.s.h.clock.now)
+        var reconnected = NetworkPath.wifi
+        reconnected.onlineEpoch = 1
+
+        #expect(await f.send(.wifi) == false)
+        #expect(await f.send(reconnected) == true)
+        #expect(f.s.service.patches == [.init(itemID: "a", update: SyncHarness.audio(50))])
+        #expect(await f.send(reconnected) == false)
+    }
+
     /// A baseline lookup that failed while offline is retried when the network comes back.
     @Test func reconnectRetriesTheActiveBaseline() async throws {
         var f = try Fixture()

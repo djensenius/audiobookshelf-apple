@@ -39,16 +39,22 @@ public struct APIProgressSyncService: ProgressSyncService {
     }
 }
 
-/// The wall clock (edit times) and a monotonic clock (listening time and cadence) for
-/// ``ProgressSyncer``; tests drive both by hand.
+/// The wall clock (edit times), a monotonic clock (listening time and cadence) and a sleep
+/// (retry wakes) for ``ProgressSyncer``; tests drive all three by hand.
 public struct ProgressSyncClock: Sendable {
     public var now: @Sendable () -> Date
     /// Monotonic seconds from an arbitrary origin.
     public var uptime: @Sendable () -> TimeInterval
+    /// Suspends for at least the given monotonic seconds; throws when cancelled.
+    public var sleep: @Sendable (TimeInterval) async throws -> Void
 
-    public init(now: @escaping @Sendable () -> Date, uptime: @escaping @Sendable () -> TimeInterval) {
+    public init(
+        now: @escaping @Sendable () -> Date, uptime: @escaping @Sendable () -> TimeInterval,
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
+    ) {
         self.now = now
         self.uptime = uptime
+        self.sleep = sleep
     }
 
     public static var live: ProgressSyncClock {

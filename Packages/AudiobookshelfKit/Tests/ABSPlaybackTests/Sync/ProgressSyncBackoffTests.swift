@@ -202,6 +202,8 @@ struct ProgressSyncBackoffTests {
         await s.coordinator.play(itemID: "a")
         await s.play(for: 15, settling: false)
         await s.service.waitForSyncs(1)
+        // a's close waits for its report, so b starts first only once the close wait times out.
+        s.h.sleep.elapsesImmediately = true
         await s.coordinator.play(itemID: "b")
         response.open()
         await s.settle()
