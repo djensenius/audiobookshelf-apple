@@ -580,6 +580,11 @@ public enum SchemaV1: VersionedSchema {
         /// The latest attempt that may have reached the server; `nil` when none could have.
         public var lastAttemptAt: Date?
         public var attempts: Int
+        /// The session's listening time the server acknowledged before the close: a 404's
+        /// lookup compares the session's stored record with it (ADR 0007).
+        public var ackedTotal: Double = 0
+        /// Lookups of the session's stored record that failed after the server answered 404.
+        public var failedLookups: Int = 0
 
         public init(
             serverConnectionID: UUID,
@@ -592,7 +597,9 @@ public enum SchemaV1: VersionedSchema {
             positionEditedAt: Date? = nil,
             capturedAt: Date,
             lastAttemptAt: Date? = nil,
-            attempts: Int = 0
+            attempts: Int = 0,
+            ackedTotal: Double = 0,
+            failedLookups: Int = 0
         ) {
             self.serverConnectionID = serverConnectionID
             self.sessionID = sessionID
@@ -605,6 +612,8 @@ public enum SchemaV1: VersionedSchema {
             self.capturedAt = capturedAt
             self.lastAttemptAt = lastAttemptAt
             self.attempts = attempts
+            self.ackedTotal = ackedTotal
+            self.failedLookups = failedLookups
         }
     }
 }

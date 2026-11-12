@@ -215,9 +215,13 @@ public final class ProgressSyncer {
         self.tickInterval = tickInterval
         observer = source.addObserver { [weak self] event in self?.handle(event) }
         source.finalCloseReport = { [weak self] closing in
-            guard let self, let handoff = closeReport(for: closing) else { return nil }
+            guard let self else { return nil }
+            // Read before closeReport ends the session: a 404's lookup compares with it.
+            let ackedTotal = current?.sessionID == closing.sessionID ? current?.ackedTotal ?? 0 : 0
+            guard let handoff = closeReport(for: closing) else { return nil }
             // closeReport just queued the closing position: its token stamps the retained close.
-            retainClose(handoff, for: closing, token: pendingPositions[closing.key]?.token)
+            retainClose(
+                handoff, for: closing, ackedTotal: ackedTotal, token: pendingPositions[closing.key]?.token)
             return handoff
         }
         source.quiesceProgressTransport = { [weak self] in self?.quiesceTransport() }
@@ -344,6 +348,7 @@ public final class ProgressSyncer {
             loadedTime = time
             lastSyncAt = now
             chapterIndex = source?.chapterIndex
+            creditCarriedListening()
             if source?.loadedPositionIsExplicit == true, let session = current {
                 // A chapter/start-time or pending seek/jump is new intent, not listening credit
                 // or a network trigger. It must supersede a held final close even with no tick.
@@ -663,6 +668,16 @@ public final class ProgressSyncer {
         guard delta > 0 else { return }
         logger.info(
             "Dropped \(delta, privacy: .public) s of unreconciled listening time: \(reason, privacy: .public)")
+    }
+
+    /// Adds the listening time carried for the loaded session's media (``CloseRetryQueue/carried``)
+    /// to its next report, once: like time a reconciliation recovered, a later ambiguous failure
+    /// doesn't resend it.
+    func creditCarriedListening() {
+        guard let session = current, session.hasLoaded, let seconds = closeQueue.takeCarried(for: session.key)
+        else { return }
+        current?.listened += seconds
+        current?.recovered += seconds
     }
 
     /// Records a server's answer to a failed `/sync`: 404 abandons the session, and 5xx, 408 and
