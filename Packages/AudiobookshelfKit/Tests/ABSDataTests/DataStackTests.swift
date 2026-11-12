@@ -28,7 +28,7 @@ private enum SupersetSchemaV2: VersionedSchema {
         [
             ServerConnectionRecord.self, SchemaV1.LocalLibraryItem.self, SchemaV1.LocalFile.self,
             SchemaV1.LocalMediaProgress.self, SchemaV1.DownloadRecord.self, SchemaV1.DownloadPart.self,
-            SchemaV1.PendingLocalSession.self, SchemaV1.PlaybackHistoryEvent.self,
+            SchemaV1.PendingLocalSession.self, SchemaV1.PlaybackHistoryEvent.self, SchemaV1.PendingSessionClose.self,
         ]
     }
 
@@ -104,7 +104,7 @@ private enum SupersetSchemaV2: VersionedSchema {
         #expect(ABSMigrationPlan.schemas.first == SchemaV1.self)
         #expect(ABSMigrationPlan.stages.isEmpty)
         #expect(SchemaV1.versionIdentifier == Schema.Version(1, 0, 0))
-        #expect(SchemaV1.models.count == 8)
+        #expect(SchemaV1.models.count == 9)
     }
 
     @Test func opensInMemoryStore() throws {
