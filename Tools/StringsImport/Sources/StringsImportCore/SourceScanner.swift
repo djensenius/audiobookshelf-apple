@@ -22,17 +22,29 @@ public enum SourceScanner {
     public static func scansForHardCodedStrings(_ path: String) -> Bool {
         hardCodedPaths.contains { path.hasPrefix($0 + "/") }
     }
+    /// `PreviewProvider` in an inheritance clause (`: PreviewProvider`, `, SwiftUI.PreviewProvider`),
+    /// not an identifier that merely contains it, such as `PreviewProviderView`.
+    static var previewConformance: Regex<Substring> { #/[:,]\s*(?:SwiftUI\.)?PreviewProvider\b/# }
+
     /// The opt-out comment, e.g. `// l10n-ignore: an example URL, not prose`.
     public static let ignoreMarker = "l10n-ignore"
 
     /// One Swift file, with its path relative to the repository root.
     public struct SourceFile: Sendable, Equatable {
         public var path: String
-        public var text: String
+        /// The source with `\r\n` and lone `\r` line breaks made `\n`, so every view of it
+        /// (lines, comment-stripped lines, previews and DEBUG code) numbers lines the same way.
+        /// Swift reads `\r\n` as one `Character`, so splitting on `"\n"` wouldn't break there.
+        public private(set) var text: String
 
         public init(path: String, text: String) {
             self.path = path
-            self.text = text
+            self.text = Self.normalizingLineBreaks(text)
+        }
+
+        static func normalizingLineBreaks(_ text: String) -> String {
+            guard text.utf8.contains(UInt8(ascii: "\r")) else { return text }
+            return text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
         }
 
         /// The 1-based numbers of the opted-out lines: those containing ``ignoreMarker``, and the
@@ -55,9 +67,11 @@ public enum SourceScanner {
         /// and line numbers match ``text``.
         var codeText: String { String(decoding: SourceLexer.blankingComments(Array(text.utf8)), as: UTF8.self) }
 
-        /// The 1-based numbers of the lines in previews (a `#Preview` or a `PreviewProvider` type,
-        /// from its line to its closing brace) or in the `#if DEBUG` branch of a conditional (not
-        /// its `#else`). Braces and `#` in comments and strings don't count.
+        /// The 1-based numbers of the lines in previews (a `#Preview` or a type or extension
+        /// conforming to `PreviewProvider`, from its line to its closing brace) or in the branch of
+        /// a conditional that is exactly `#if DEBUG` (not its `#else`, and not a compound condition
+        /// such as `#if DEBUG || os(macOS)`, which also builds in release). Braces and `#` in
+        /// comments and strings don't count.
         var previewAndDebugLines: Set<Int> {
             let code = String(decoding: SourceLexer.blankingComments(Array(text.utf8), strings: true), as: UTF8.self)
             var result: Set<Int> = []
@@ -70,12 +84,12 @@ public enum SourceScanner {
             for (index, line) in code.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
                 let directive = line.drop { $0.isWhitespace }.split(whereSeparator: \.isWhitespace).map(String.init)
                 switch directive.first {
-                case "#if": conditionals.append(directive.dropFirst().first == "DEBUG")
+                case "#if": conditionals.append(directive.dropFirst() == ["DEBUG"])
                 case "#elseif", "#else": if !conditionals.isEmpty { conditionals[conditionals.count - 1] = false }
                 case "#endif": _ = conditionals.popLast()
                 default: break
                 }
-                if previewDepth == nil, line.contains("#Preview") || line.contains("PreviewProvider") {
+                if previewDepth == nil, line.contains("#Preview") || line.contains(SourceScanner.previewConformance) {
                     previewDepth = depth
                     previewOpened = false
                 }

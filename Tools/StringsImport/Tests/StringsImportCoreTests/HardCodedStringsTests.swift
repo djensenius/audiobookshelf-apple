@@ -76,6 +76,52 @@ import Testing
         #expect(lines(text) == [8, 11, 13, 16, 18])
     }
 
+    /// Only a real conformance makes a preview: an identifier containing `PreviewProvider` is
+    /// production code.
+    @Test func skipsOnlyPreviewProviderConformances() {
+        let text = """
+            struct PreviewProviderView: View {
+                var body: some View { Text("Production") }
+            }
+            struct Row_Previews: Foo, PreviewProvider {
+                static var previews: some View { Text("Preview") }
+            }
+            extension Row: SwiftUI.PreviewProvider {
+                static var previews: some View { Text("Preview too") }
+            }
+            Text("After")
+            """
+        #expect(lines(text) == [2, 10])
+    }
+
+    /// Only a condition that is exactly `DEBUG` is skipped: a compound one also builds in release.
+    @Test func skipsOnlyExactDebugConditions() {
+        let text = """
+            #if DEBUG || os(macOS)
+            Text("macOS release")
+            #endif
+            #if DEBUG && os(iOS)
+            Text("Not handled: debug and iOS")
+            #endif
+            #if DEBUG  // A note.
+            Text("Debug")
+            #endif
+            """
+        #expect(lines(text) == [2, 5])
+    }
+
+    /// CRLF and lone CR line breaks number lines like LF ones. Swift reads `\r\n` as one
+    /// character, so before normalizing, the comment-stripped text (whose comment blanked the
+    /// `\r`) had more lines than the original and the scan indexed past it.
+    @Test func numbersCRLFAndCRLinesLikeLF() {
+        #expect(lines("// comment\r\nText(\"Hello\")\r\n") == [2])
+        #expect(lines("let a = 1\rText(\"Hello\")\r\nText(\"Again\")") == [2, 3])
+        let found = SourceScanner.hardCodedStrings(
+            in: .init(path: "Audiobookshelf/Features/A/A.swift", text: "// a\r\n    Text(\"Hello\")  \r\n"), keys: [])
+        #expect(found.map(\.code) == [#"Text("Hello")"#])
+        #expect(SourceScanner.SourceFile(path: "A.swift", text: "a\r\nb\rc\n").text == "a\nb\nc\n")
+    }
+
     /// A `#Preview` or `#if DEBUG` in a string or comment isn't one.
     @Test func ignoresDirectivesInStringsAndComments() {
         let text = """
@@ -128,6 +174,28 @@ import Testing
         let empty = try HardCodedBaseline(text: "").match(found)
         #expect(empty.new == found)
         #expect(empty.stale.isEmpty)
+    }
+
+    /// Additions over the target branch's baseline count duplicates: removing entries is fine,
+    /// a second copy of an entry is an addition.
+    @Test func additionsAreAMultisetDifference() throws {
+        let hello = "\(features)\tText(\"Hello\")"
+        let bye = "\(features)\tText(\"Bye\")"
+        let base = try HardCodedBaseline(text: "\(hello)\n\(bye)\n")
+        #expect(try HardCodedBaseline(text: "\(hello)\n\(bye)\n").additions(over: base).isEmpty)
+        #expect(try HardCodedBaseline(text: "# Removed one\n\(bye)\n").additions(over: base).isEmpty)
+        #expect(try HardCodedBaseline(text: "").additions(over: base).isEmpty)
+        let duplicated = try HardCodedBaseline(text: "\(hello)\n\(bye)\n\(hello)\n").additions(over: base)
+        #expect(duplicated.map(\.line) == [3])
+        let added = try HardCodedBaseline(text: "\(hello)\n\(features)\tText(\"New\")\n").additions(over: base)
+        #expect(added.map(\.entry.code) == [#"Text("New")"#])
+        #expect(try base.additions(over: HardCodedBaseline(text: "")).count == 2)
+    }
+
+    @Test func baseRefFollowsTheTargetBranchInCI() {
+        #expect(HardCodedBaseline.baseRef(environment: [:]) == "origin/main")
+        #expect(HardCodedBaseline.baseRef(environment: ["GITHUB_BASE_REF": ""]) == "origin/main")
+        #expect(HardCodedBaseline.baseRef(environment: ["GITHUB_BASE_REF": "release"]) == "origin/release")
     }
 }
 
@@ -194,6 +262,73 @@ import Testing
         // Moving the line keeps the entry.
         try write("\n\n\n        Text(\"Hello\")", to: path)
         #expect(run("--check").status == 0)
+    }
+
+    /// Runs git in `root`, failing the test if it fails.
+    func git(_ arguments: String...) throws {
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/env")
+        process.arguments =
+            [
+                "git", "-C", root.path(percentEncoded: false), "-c", "user.name=Test", "-c",
+                "user.email=test@example.com",
+            ]
+            + arguments
+        process.standardOutput = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        try #require(process.terminationStatus == 0, "git \(arguments.joined(separator: " ")) failed")
+    }
+
+    /// Commits the tree, with `baseline` as the target branch's baseline when given.
+    func commitBase(baseline: String? = nil) throws {
+        if let baseline { try write(baseline, to: HardCodedBaseline.path) }
+        try git("init", "-q")
+        try git("add", "-A")
+        try git("commit", "-q", "-m", "base")
+    }
+
+    /// A baseline entry for a new string that the target branch's baseline lacks fails, even
+    /// though the entry matches; removing entries (with their strings) passes.
+    @Test func baselineAdditionsOverTheBaseFail() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = "Audiobookshelf/Features/A/A.swift"
+        try write("Text(\"Old\")\nText(\"Older\")", to: path)
+        try commitBase(baseline: "\(path)\tText(\"Old\")\n\(path)\tText(\"Older\")\n")
+        #expect(run().status == 0)
+        #expect(run("--check", "--baseline-base", "HEAD").status == 0)
+
+        // Negative control: the same new string and entry pass without a readable base.
+        try write("Text(\"Old\")\nText(\"Older\")\nText(\"New\")", to: path)
+        try write(
+            "\(path)\tText(\"Old\")\n\(path)\tText(\"Older\")\n\(path)\tText(\"New\")\n", to: HardCodedBaseline.path)
+        let unchecked = run("--check", "--baseline-base", "no-such-ref")
+        #expect(unchecked.status == 0)
+        #expect(unchecked.log.contains { $0.hasPrefix("warning: can't read") && $0.contains("no-such-ref") })
+
+        let checked = run("--check", "--baseline-base", "HEAD")
+        #expect(checked.status == 1)
+        #expect(
+            errors(checked.log).map { String($0.prefix { $0 != ";" }) } == [
+                "error: Localization/hardcoded-strings-baseline.txt:3: \(path): not in HEAD's baseline"
+            ])
+
+        // Removing a string and its entry passes.
+        try write("Text(\"Old\")", to: path)
+        try write("\(path)\tText(\"Old\")\n", to: HardCodedBaseline.path)
+        #expect(run("--check", "--baseline-base", "HEAD").status == 0)
+    }
+
+    /// A base without the baseline file (before it existed) has no entries, so any entry is new.
+    @Test func baseWithoutABaselineAcceptsNoEntries() throws {
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = "Audiobookshelf/Features/A/A.swift"
+        try write("Text(L10n.string(\"ButtonCancel\"))", to: path)
+        #expect(run().status == 0)
+        try commitBase()
+        try write("Text(\"Hello\")", to: path)
+        try write("\(path)\tText(\"Hello\")\n", to: HardCodedBaseline.path)
+        #expect(run("--check", "--baseline-base", "HEAD").status == 1)
     }
 
     /// An entry whose string was localized fails, so the baseline only shrinks.

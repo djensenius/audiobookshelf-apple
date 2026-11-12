@@ -52,6 +52,14 @@ jobs:
       - name: Check project.xcproj is canonical
         run: mise run xcproj:check
 
+      # strings:check rejects hard-coded-strings baseline entries the target branch doesn't have,
+      # and the shallow checkout doesn't include that branch.
+      - name: Fetch the base branch
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags --depth=1 origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+
       - name: Check Localizable.xcstrings is up to date
         run: mise run strings:check
 

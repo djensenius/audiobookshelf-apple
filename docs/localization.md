@@ -108,14 +108,18 @@ and to the check, when it does.
   `.navigationTitle`, `.navigationSubtitle`, `.accessibilityLabel`, `.accessibilityHint`,
   `.accessibilityValue`, `.help`, `.alert`, `.confirmationDialog`, or a `prompt:` argument is
   reported with `file:line`, unless it is a key. Symbols and numbers (`Text(verbatim: "•")`) pass.
-  Only single-line literals on the call's line are seen. Previews (`#Preview { … }` and
-  `PreviewProvider` types) and the `#if DEBUG` branch of a conditional (not `#elseif DEBUG`) are
-  skipped.
+  Only single-line literals on the call's line are seen. Previews (`#Preview { … }` and types
+  conforming to `PreviewProvider`) and the branch of a conditional that is exactly `#if DEBUG`
+  are skipped; `#elseif DEBUG` and compound conditions such as `#if DEBUG || os(macOS)` are
+  checked.
 - **The baseline only shrinks.** `Localization/hardcoded-strings-baseline.txt` lists strings
   accepted until they're localized, one per line as `<file path><TAB><trimmed source line>`,
   matched by file and source rather than line number. A string with no entry fails, and so does
   an entry that no longer matches one: localize the string, then delete its entry. It was empty
-  when introduced; don't add entries for new code.
+  when introduced; don't add entries for new code. An entry that the target branch's baseline
+  doesn't have (counting duplicates) fails too: `origin/<GITHUB_BASE_REF>` in CI, which fetches
+  it, else `origin/main`, or `--baseline-base <ref>`. If that ref can't be read (not fetched),
+  the check warns and skips this comparison.
 
 To opt a line out of both checks (an example URL, a literal that only looks like a key), put
 `l10n-ignore` and the reason in a comment on that line or on a comment line just above it:

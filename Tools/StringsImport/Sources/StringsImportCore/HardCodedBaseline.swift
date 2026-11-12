@@ -6,7 +6,8 @@ import Foundation
 ///
 /// Entries match by file and source, not line number, so code moving around a file keeps its
 /// entry. A string with no entry fails `strings:check`, and so does an entry that matches
-/// nothing (the string was localized, edited or moved to another file), so the list only shrinks.
+/// nothing (the string was localized, edited or moved to another file). An entry the target
+/// branch's baseline doesn't have fails too (``additions(over:)``), so the list only shrinks.
 public struct HardCodedBaseline: Sendable, Equatable {
     public static let path = "Localization/hardcoded-strings-baseline.txt"
 
@@ -51,6 +52,49 @@ public struct HardCodedBaseline: Sendable, Equatable {
             return try HardCodedBaseline(text: "")
         }
         return try HardCodedBaseline(text: String(contentsOf: url, encoding: .utf8))
+    }
+
+    /// The git ref whose baseline this one may only shrink from: `origin/<GITHUB_BASE_REF>` for a
+    /// pull request in CI, else `origin/main`.
+    public static func baseRef(environment: [String: String]) -> String {
+        if let base = environment["GITHUB_BASE_REF"], !base.isEmpty { return "origin/\(base)" }
+        return "origin/main"
+    }
+
+    /// The baseline at git `ref` in the repository at `root`: empty if the file isn't there at
+    /// that ref, `nil` if git can't resolve the ref (not a repository, or a shallow clone that
+    /// hasn't fetched it).
+    public static func load(root: URL, ref: String) throws -> HardCodedBaseline? {
+        guard git(["rev-parse", "--verify", "--quiet", "\(ref)^{commit}"], root: root) != nil else { return nil }
+        guard let text = git(["show", "\(ref):\(path)"], root: root) else { return try HardCodedBaseline(text: "") }
+        return try HardCodedBaseline(text: text)
+    }
+
+    /// `git -C root <arguments>`'s standard output, or `nil` if it couldn't run or failed.
+    private static func git(_ arguments: [String], root: URL) -> String? {
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/env")
+        process.arguments = ["git", "-C", root.path(percentEncoded: false)] + arguments
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do { try process.run() } catch { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    /// The entries `base` doesn't have, counting duplicates (two equal entries here and one in
+    /// `base` is one addition), with their line numbers in this baseline.
+    public func additions(over base: HardCodedBaseline) -> [(line: Int, entry: Entry)] {
+        var available: [Entry: Int] = [:]
+        for (_, entry) in base.entries { available[entry, default: 0] += 1 }
+        return entries.filter { _, entry in
+            guard let count = available[entry], count > 0 else { return true }
+            available[entry] = count - 1
+            return false
+        }
     }
 
     /// Splits `strings` into those with no entry (`new`) and returns the entries that matched
