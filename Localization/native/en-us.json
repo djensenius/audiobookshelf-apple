@@ -118,6 +118,7 @@
   "LabelPodcastDetailTrailer": "Trailer",
   "LabelPodcastEpisodeManagement": "Manage Episodes",
   "LabelPodcastFeedInLibrary": "In library",
+  "LabelPodcastFeedUntitledEpisode": "Untitled episode",
   "LabelPreviousChapter": "Previous chapter",
   "LabelRemoveCustomHeader": "Remove {0}",
   "LabelRemoveUnnamedCustomHeader": "Remove header",

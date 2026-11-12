@@ -38,6 +38,32 @@ import Testing
         #expect(PodcastFeedEpisodePresentation.accessibilityValue(bare, isInLibrary: false, locale: locale).isEmpty)
     }
 
+    /// An untitled feed episode still gets a label VoiceOver users can tell apart: the number,
+    /// else the date, else the enclosure's file name, never the whole URL.
+    @Test func untitledFeedEpisodeLabelSaysWhichEpisode() throws {
+        func episode(_ fields: [String: RawJSONValue], url: String = "https://x/1.mp3") throws -> RSSFeedEpisode {
+            try #require(
+                RSSFeedEpisode(raw: .object(fields.merging(["enclosure": .object(["url": .string(url)])]) { $1 })))
+        }
+        func label(_ episode: RSSFeedEpisode) -> String {
+            PodcastFeedEpisodePresentation.accessibilityLabel(episode, locale: locale)
+        }
+        #expect(label(try episode(["title": .string("Pilot"), "episode": .string("4")])) == "Pilot")
+        #expect(
+            label(
+                try episode([
+                    "title": .string("  "), "episode": .string("4"), "publishedAt": .number(1_700_000_000_000),
+                ]))
+                == "Untitled episode, Episode #4")
+        let dated = try episode(["publishedAt": .number(1_700_000_000_000)])
+        let published = try #require(PodcastDetailPresentation.publishedText(dated.publishedAt, locale: locale))
+        #expect(label(dated) == "Untitled episode, \(published)")
+        #expect(
+            label(try episode([:], url: "https://cdn.example.com/show/ep%2012.mp3?token=secret"))
+                == "Untitled episode, ep 12.mp3")
+        #expect(label(try episode([:], url: "https://cdn.example.com")) == "Untitled episode")
+    }
+
     @Test func everyMenuTitleIsLocalized() {
         let keys =
             EpisodeListFilter.allCases.map(PodcastDetailPresentation.titleKey(for:))

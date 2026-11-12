@@ -205,7 +205,7 @@ private struct PodcastFeedEpisodeRow: View {
         .buttonStyle(.plain)
         .disabled(row.isInLibrary || isDisabled)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(verbatim: episode.title))
+        .accessibilityLabel(Text(verbatim: PodcastFeedEpisodePresentation.accessibilityLabel(episode, locale: locale)))
         .accessibilityValue(
             Text(
                 verbatim: PodcastFeedEpisodePresentation.accessibilityValue(
@@ -215,9 +215,30 @@ private struct PodcastFeedEpisodeRow: View {
     }
 }
 
-/// What VoiceOver reads after a feed episode's title, as the row shows it: the episode number,
-/// the publish date, In library, then the subtitle (whole, as the row truncates it).
+/// What VoiceOver reads for a feed episode's row.
 enum PodcastFeedEpisodePresentation {
+    /// The title; for an untitled episode, "Untitled episode" and what tells it apart: the
+    /// episode number, else the publish date, else the enclosure's file name (never the URL).
+    static func accessibilityLabel(_ episode: RSSFeedEpisode, locale: Locale) -> String {
+        let title = episode.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard title.isEmpty else { return title }
+        let detail =
+            episode.episode.map { L10n.string("LabelPodcastDetailEpisodeNumber", $0, locale: locale) }
+            ?? PodcastDetailPresentation.publishedText(episode.publishedAt, locale: locale)
+            ?? fileName(of: episode.enclosureURL)
+        return [L10n.string("LabelPodcastFeedUntitledEpisode", locale: locale), detail]
+            .compactMap { $0 }
+            .joined(separator: ", ")
+    }
+
+    /// The last path component of `url`, decoded; `nil` without one.
+    private static func fileName(of url: String) -> String? {
+        guard let name = URL(string: url)?.lastPathComponent, !name.isEmpty, name != "/" else { return nil }
+        return name
+    }
+
+    /// What VoiceOver reads after a feed episode's title, as the row shows it: the episode
+    /// number, the publish date, In library, then the subtitle (whole, as the row truncates it).
     static func accessibilityValue(_ episode: RSSFeedEpisode, isInLibrary: Bool, locale: Locale) -> String {
         [
             episode.episode.map { L10n.string("LabelPodcastDetailEpisodeNumber", $0, locale: locale) },
