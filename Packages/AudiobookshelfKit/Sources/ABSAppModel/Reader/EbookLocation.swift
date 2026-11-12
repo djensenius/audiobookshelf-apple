@@ -64,9 +64,9 @@ public enum EbookLocation: Sendable, Hashable {
     }
 
     /// The page to open in a document of `pageCount` pages: the saved page when the document
-    /// has it, else the first page, as in the legacy PDF and comic readers.
+    /// has it (`1...pageCount`), else the first page, as in the legacy PDF and comic readers.
     public func startPage(pageCount: Int) -> Int {
-        if case .page(let page) = self, page <= pageCount { page } else { 1 }
+        if case .page(let page) = self, page >= 1, page <= pageCount { page } else { 1 }
     }
 
     /// The `ebookProgress` of a page, by the web client's formula `(page - 1) / numPages`,

@@ -125,6 +125,8 @@ import Testing
         #expect(EbookLocation.page(4).startPage(pageCount: 10) == 4)
         #expect(EbookLocation.page(10).startPage(pageCount: 10) == 10)
         #expect(EbookLocation.page(11).startPage(pageCount: 10) == 1)
+        #expect(EbookLocation.page(0).startPage(pageCount: 10) == 1)
+        #expect(EbookLocation.page(-3).startPage(pageCount: 10) == 1)
         #expect(EbookLocation.cfi("epubcfi(/6/2)").startPage(pageCount: 10) == 1)
     }
 
