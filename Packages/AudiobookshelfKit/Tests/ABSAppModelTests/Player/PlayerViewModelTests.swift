@@ -31,6 +31,9 @@ private func invalidates(_ read: () -> Void, when change: () -> Void) -> Bool {
     return changed.value
 }
 
+/// The scrubber of the tests that scrub from a single window.
+private let owner = PlayerViewModel.ScrubOwner()
+
 private func restoredRecord(position: Double = 120, duration: Double? = 400) -> LastPlayedRecord {
     LastPlayedRecord(
         serverConnectionID: FakePlaybackControl.serverID, libraryItemID: "li_book", episodeID: nil, position: position,
@@ -56,6 +59,21 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
             #expect(!model.hasNextChapter)
             #expect(model.errorMessageKey == nil)
             #expect(!model.showsPause)
+        }
+    }
+
+    @Test func onlyAnEpisodeIsAPodcastEpisode() async throws {
+        try await withPlayer { model, playback, _, _ in
+            #expect(!model.isPodcastEpisode)
+            playback.load(FakePlaybackControl.bookSession())
+            #expect(!model.isPodcastEpisode)
+            playback.load(
+                PlaybackSession(
+                    id: "sess_pod", libraryItemId: "li_pod", episodeId: "ep_1", mediaType: .podcast,
+                    mediaMetadata: .podcast(PodcastMetadata(title: "The Show")), displayTitle: "Episode 1",
+                    duration: 60,
+                    audioTracks: [AudioTrack(index: 1, startOffset: 0, duration: 60, mimeType: "audio/mpeg")]))
+            #expect(model.isPodcastEpisode)
         }
     }
 
@@ -155,12 +173,12 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
     @Test func closeStopsForTheUser() async throws {
         try await withPlayer { model, playback, _, _ in
             playback.load(FakePlaybackControl.bookSession(), at: 150)
-            model.beginScrub()
+            model.beginScrub(owner: owner)
             model.close()
             #expect(playback.calls == [.stop(.user)])
             #expect(!model.hasSession)
             #expect(model.title.isEmpty)
-            await model.endScrub()
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.stop(.user)])
         }
     }
@@ -266,23 +284,23 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         try await withPlayer { model, playback, settings, _ in
             settings.chapterTrack = true
             playback.load(FakePlaybackControl.bookSession(), at: 150, playing: true)
-            model.beginScrub()
+            model.beginScrub(owner: owner)
             #expect(model.progress == 50.0 / 150)
-            model.scrub(to: 0.5)
+            model.scrub(to: 0.5, owner: owner)
             #expect(model.elapsed == 75)
             playback.currentTime = 160  // A tick.
             #expect(model.elapsed == 75)
             #expect(model.progress == 0.5)
-            model.scrub(to: 0.8)
+            model.scrub(to: 0.8, owner: owner)
             playback.currentTime = 170
             #expect(model.elapsed == 120)
             #expect(playback.calls.isEmpty)
 
-            await model.endScrub()
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.seek(220)])
             playback.currentTime = 230
             #expect(model.elapsed == 130)
-            await model.endScrub()
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.seek(220)])
         }
     }
@@ -291,9 +309,9 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         try await withPlayer { model, playback, settings, _ in
             settings.chapterTrack = true
             playback.load(FakePlaybackControl.bookSession(), at: 150)
-            model.scrub(to: 2)  // Begins implicitly; clamped to the chapter's end.
+            model.scrub(to: 2, owner: owner)  // Begins implicitly; clamped to the chapter's end.
             #expect(model.progress == 1)
-            await model.endScrub()
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.seek(250)])
         }
     }
@@ -302,11 +320,11 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         try await withPlayer { model, playback, settings, _ in
             settings.chapterTrack = false
             playback.load(FakePlaybackControl.bookSession(), at: 150)
-            model.beginScrub()
-            model.scrub(to: 0.25)
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.25, owner: owner)
             #expect(model.elapsed == 100)
             #expect(model.remaining == 300)
-            await model.endScrub()
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.seek(100)])
         }
     }
@@ -314,11 +332,11 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
     @Test func scrubForAnotherItemIsDropped() async throws {
         try await withPlayer { model, playback, _, _ in
             playback.load(FakePlaybackControl.bookSession(), at: 150)
-            model.beginScrub()
-            model.scrub(to: 0.9)
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.9, owner: owner)
             playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
             #expect(model.elapsed == 10)
-            await model.endScrub()
+            await model.endScrub(owner: owner)
             #expect(playback.calls.isEmpty)
         }
     }
@@ -326,8 +344,8 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
     @Test func scrubWithoutMovingDoesNotSeek() async throws {
         try await withPlayer { model, playback, _, _ in
             playback.load(FakePlaybackControl.bookSession(), at: 150)
-            model.beginScrub()
-            await model.endScrub()
+            model.beginScrub(owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls.isEmpty)
         }
     }
@@ -337,15 +355,15 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
     @Test func scrubOnAnEmptyRangeDoesNotSeek() async throws {
         try await withPlayer { model, playback, _, _ in
             playback.restore(restoredRecord(duration: nil))
-            model.beginScrub()
-            model.scrub(to: 0.5)
-            await model.endScrub()
-            model.scrub(to: 0.5)
-            await model.endScrub()
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
             playback.start(FakePlaybackControl.bookSession(), at: 120)
-            model.beginScrub()
-            model.scrub(to: 0.5)
-            await model.endScrub()
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls.isEmpty)
             #expect(model.elapsed == 0)
         }
@@ -356,13 +374,13 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
     @Test func aScrubSurvivesTheSameItemLoading() async throws {
         try await withPlayer { model, playback, _, _ in
             playback.restore(restoredRecord())
-            model.beginScrub()
-            model.scrub(to: 0.5)
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.5, owner: owner)
             playback.start(FakePlaybackControl.bookSession(), at: 120)
             #expect(model.elapsed == 200)
             playback.load(FakePlaybackControl.bookSession(), at: 120)
             #expect(model.elapsed == 200)
-            await model.endScrub()
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.seek(200)])
         }
     }
@@ -373,11 +391,11 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         try await withPlayer { model, playback, _, _ in
             playback.start(FakePlaybackControl.bookSession(), at: 0)
             playback.duration = 400
-            model.beginScrub()
-            model.scrub(to: 0.5)
-            await model.endScrub()
-            model.scrub(to: 0.5)
-            await model.endScrub()
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls.isEmpty)
         }
     }
@@ -387,16 +405,16 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         try await withPlayer { model, playback, settings, _ in
             settings.chapterTrack = false
             playback.load(FakePlaybackControl.bookSession(), at: 150)
-            model.beginScrub()
-            model.scrub(to: 0.9)
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.9, owner: owner)
             playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
-            model.scrub(to: 0.2)
+            model.scrub(to: 0.2, owner: owner)
             #expect(model.elapsed == 10)
-            await model.endScrub()
+            await model.endScrub(owner: owner)
             #expect(playback.calls.isEmpty)
             // The next gesture scrubs normally.
-            model.scrub(to: 0.5)
-            await model.endScrub()
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.seek(200)])
         }
     }
@@ -407,11 +425,11 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
             playback.restore(restoredRecord(position: 29))
             let fraction: Double = 29.0 / 400
             #expect(fraction * 400 != 29, "The seconds don't round-trip")
-            model.beginScrub()
-            model.scrub(to: model.progress)
-            await model.endScrub()
-            model.scrub(to: model.progress)
-            await model.endScrub()
+            model.beginScrub(owner: owner)
+            model.scrub(to: model.progress, owner: owner)
+            await model.endScrub(owner: owner)
+            model.scrub(to: model.progress, owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls.isEmpty)
         }
     }
@@ -424,12 +442,12 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
             #expect(model.chapterTitle == "Middle")
             let fraction: Double = (177.1 - 100) / 150
             #expect(100 + fraction * 150 != 177.1, "The seconds don't round-trip")
-            model.beginScrub()
-            model.scrub(to: model.progress)
-            await model.endScrub()
+            model.beginScrub(owner: owner)
+            model.scrub(to: model.progress, owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls.isEmpty)
-            model.scrub(to: 0.5)
-            await model.endScrub()
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.seek(175)])
         }
     }
@@ -439,18 +457,18 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         try await withPlayer { model, playback, settings, _ in
             settings.chapterTrack = false
             playback.load(FakePlaybackControl.bookSession(), at: 150)
-            model.beginScrub()
-            model.scrub(to: 0.9)
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.9, owner: owner)
             model.close()
             playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
-            model.scrub(to: 0.2)
+            model.scrub(to: 0.2, owner: owner)
             #expect(model.elapsed == 10)
-            await model.endScrub()
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.stop(.user)])
             // A fresh gesture scrubs normally.
-            model.beginScrub()
-            model.scrub(to: 0.5)
-            await model.endScrub()
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.stop(.user), .seek(200)])
         }
     }
@@ -460,14 +478,14 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
     @Test func scrubToTheSamePositionIsNotAMove() async throws {
         try await withPlayer { model, playback, _, _ in
             playback.restore(restoredRecord())
-            model.beginScrub()
-            model.scrub(to: 0.3)
-            await model.endScrub()
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.3, owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls.isEmpty)
-            model.beginScrub()
-            model.scrub(to: 0.5)
-            model.scrub(to: 0.3)
-            await model.endScrub()
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.5, owner: owner)
+            model.scrub(to: 0.3, owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.seek(120)])
         }
     }
@@ -476,28 +494,203 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         try await withPlayer { model, playback, settings, _ in
             settings.chapterTrack = true
             playback.load(FakePlaybackControl.bookSession(), at: 150)
-            model.beginScrub()
-            model.scrub(to: 0.9)
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.9, owner: owner)
             playback.stop(reason: .user)
             playback.load(FakePlaybackControl.bookSession(), at: 10)
             #expect(model.elapsed == 10)
             playback.currentTime = 20
             #expect(model.elapsed == 20)
-            await model.endScrub()
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.stop(.user)])
             // A new scrub starts from the current chapter, "Opening".
-            model.scrub(to: 0.5)
-            await model.endScrub()
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls == [.stop(.user), .seek(50)])
         }
     }
 
     @Test func beginScrubNeedsAnItem() async throws {
         try await withPlayer { model, playback, _, _ in
-            model.beginScrub()
-            model.scrub(to: 0.5)
-            await model.endScrub()
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
             #expect(playback.calls.isEmpty)
+        }
+    }
+
+    /// Two windows share the model: while one owns the scrub, the other's begin, moves, end and
+    /// cancel are ignored, and only the owner's end seeks, once.
+    @Test func anotherOwnerCannotMoveOrEndTheScrub() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            let windowA = PlayerViewModel.ScrubOwner()
+            let windowB = PlayerViewModel.ScrubOwner()
+            model.beginScrub(owner: windowA)
+            model.scrub(to: 0.5, owner: windowA)
+            model.beginScrub(owner: windowB)
+            model.scrub(to: 0.9, owner: windowB)
+            #expect(model.elapsed == 200)
+            await model.endScrub(owner: windowB)
+            model.cancelScrub(owner: windowB)
+            #expect(playback.calls.isEmpty)
+            #expect(model.elapsed == 200)
+
+            await model.endScrub(owner: windowA)
+            #expect(playback.calls == [.seek(200)])
+            await model.endScrub(owner: windowA)
+            #expect(playback.calls == [.seek(200)])
+            // Once A is done, B can scrub.
+            model.scrub(to: 0.25, owner: windowB)
+            await model.endScrub(owner: windowB)
+            #expect(playback.calls == [.seek(200), .seek(100)])
+        }
+    }
+
+    /// A scrubber that goes away cancels only its own scrub, without seeking.
+    @Test func cancelDropsOnlyTheOwnersScrubWithoutSeeking() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            let windowA = PlayerViewModel.ScrubOwner()
+            let windowB = PlayerViewModel.ScrubOwner()
+            model.scrub(to: 0.5, owner: windowA)
+            model.cancelScrub(owner: windowB)  // B's view disappears.
+            #expect(model.elapsed == 200)
+            #expect(playback.calls.isEmpty)
+
+            model.cancelScrub(owner: windowA)  // A's view disappears.
+            #expect(model.elapsed == 150)
+            await model.endScrub(owner: windowA)
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
+    /// A drag rejected because another window was scrubbing stays rejected: once an item change
+    /// cancels the other window's scrub, its next move doesn't scrub, or on release seek, the new item.
+    @Test func aRejectedGestureStaysIneligibleAfterAnItemChange() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            let windowA = PlayerViewModel.ScrubOwner()
+            let windowB = PlayerViewModel.ScrubOwner()
+            model.scrub(to: 0.5, owner: windowA)
+            model.scrub(to: 0.9, owner: windowB)  // Rejected: A is scrubbing.
+            playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
+            model.scrub(to: 0.2, owner: windowB)  // Nothing is scrubbing now, but B's drag continues.
+            #expect(model.elapsed == 10)
+            await model.endScrub(owner: windowB)
+            await model.endScrub(owner: windowA)
+            #expect(playback.calls.isEmpty)
+            // B's next drag scrubs normally.
+            model.scrub(to: 0.5, owner: windowB)
+            await model.endScrub(owner: windowB)
+            #expect(playback.calls == [.seek(200)])
+        }
+    }
+
+    /// Each window's cancellation is kept: a second item change, cancelling another window's
+    /// scrub, doesn't make the first window's continuing drag scrub a third item.
+    @Test func cancelledGesturesStayIneligibleAcrossItemChanges() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            let windowA = PlayerViewModel.ScrubOwner()
+            let windowB = PlayerViewModel.ScrubOwner()
+            model.scrub(to: 0.5, owner: windowA)
+            playback.load(FakePlaybackControl.bookSession(item: "li_second"), at: 10)  // Cancels A.
+            model.scrub(to: 0.25, owner: windowB)
+            #expect(model.elapsed == 100)
+            playback.load(FakePlaybackControl.bookSession(item: "li_third"), at: 20)  // Cancels B.
+            model.scrub(to: 0.9, owner: windowA)
+            model.scrub(to: 0.75, owner: windowB)
+            #expect(model.elapsed == 20)
+            await model.endScrub(owner: windowA)
+            await model.endScrub(owner: windowB)
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
+    /// A drag that began where no scrub could start (an item still starting, or one of unknown
+    /// duration) stays ineligible: if another item loads before it ends, its next move doesn't
+    /// scrub, or on release seek, that item.
+    @Test func aGestureThatCouldNotStartStaysIneligible() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.start(FakePlaybackControl.bookSession(), at: 0)
+            model.scrub(to: 0.5, owner: owner)  // Starting: no scrub.
+            playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
+            model.scrub(to: 0.9, owner: owner)
+            #expect(model.elapsed == 10)
+            await model.endScrub(owner: owner)
+            #expect(playback.calls.isEmpty)
+
+            playback.restore(restoredRecord(duration: nil))
+            model.scrub(to: 0.5, owner: owner)  // Unknown duration: no scrub.
+            playback.load(FakePlaybackControl.bookSession(item: "li_third"), at: 20)
+            model.scrub(to: 0.9, owner: owner)
+            #expect(model.elapsed == 20)
+            await model.endScrub(owner: owner)
+            #expect(playback.calls.isEmpty)
+
+            // The next gesture scrubs normally.
+            model.scrub(to: 0.5, owner: owner)
+            await model.endScrub(owner: owner)
+            #expect(playback.calls == [.seek(200)])
+        }
+    }
+
+    /// A view finishes its scrub synchronously when the gesture ends and seeks later; its
+    /// disappearing in between doesn't cancel the finished scrub, so the seek isn't lost.
+    @Test func aFinishedScrubSurvivesItsViewDisappearingBeforeTheSeek() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.scrub(to: 0.5, owner: owner)
+            let seek = try #require(model.finishScrub(owner: owner))
+            model.cancelScrub(owner: owner)  // The view disappears before the seek task runs.
+            await model.commitScrub(seek)
+            #expect(playback.calls == [.seek(200)])
+        }
+    }
+
+    /// A finished scrub's seek is dropped if the item changes before it runs.
+    @Test func aFinishedScrubDoesNotSeekAnotherItem() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.scrub(to: 0.5, owner: owner)
+            let seek = try #require(model.finishScrub(owner: owner))
+            playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
+            await model.commitScrub(seek)
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
+    @Test func aFinishedScrubDoesNotSeekTheSameItemLoadedAgain() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.scrub(to: 0.5, owner: owner)
+            let seek = try #require(model.finishScrub(owner: owner))
+            playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 10)
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            await model.commitScrub(seek)
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
+    @Test func aFinishedScrubDoesNotSeekAfterAClose() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.scrub(to: 0.5, owner: owner)
+            let seek = try #require(model.finishScrub(owner: owner))
+            model.close()
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            await model.commitScrub(seek)
+            #expect(!playback.calls.contains(.seek(200)))
         }
     }
 
@@ -619,10 +812,10 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
     @Test func scrubbingStopsTickInvalidation() async throws {
         try await withPlayer { model, playback, _, _ in
             playback.load(FakePlaybackControl.bookSession(), at: 150)
-            model.beginScrub()
+            model.beginScrub(owner: owner)
             #expect(!invalidates({ _ = model.progress }, when: { playback.currentTime = 151 }))
-            #expect(invalidates({ _ = model.progress }, when: { model.scrub(to: 0.1) }))
-            await model.endScrub()
+            #expect(invalidates({ _ = model.progress }, when: { model.scrub(to: 0.1, owner: owner) }))
+            await model.endScrub(owner: owner)
             #expect(invalidates({ _ = model.progress }, when: { playback.currentTime = 152 }))
         }
     }
