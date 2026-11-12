@@ -1,14 +1,6 @@
+import ABSCore
 import CoreGraphics
 import Foundation
-
-/// The reader's `spread` setting (ADR 0008, decision 6), as the legacy app and the EPUB bridge
-/// spell it.
-public enum ReaderSpreadSetting: String, Sendable, Hashable, CaseIterable {
-    /// Two pages when the layout is wide enough (``ReaderSpreadPolicy``).
-    case auto
-    /// Always one page.
-    case none
-}
 
 /// The platform a reader lays out for. Size classes describe the window only on iOS and iPadOS.
 public enum ReaderPlatform: Sendable, Hashable {
@@ -42,8 +34,8 @@ public enum ReaderSpreadPolicy {
     public static let minimumMacSpreadWidth: CGFloat = 800
 
     /// - Parameters:
-    ///   - setting: The reader's `spread` setting. ``ReaderSpreadSetting/none`` always gives a
-    ///     single page.
+    ///   - setting: The reader's `spread` setting (``ReaderSettings/spread``).
+    ///     ``ReaderSettings/Spread/none`` always gives a single page.
     ///   - platform: macOS ignores `sizeClass`, which doesn't describe a Mac window.
     ///   - sizeClass: The horizontal size class on iOS; `nil` counts as compact.
     ///   - size: The reader area, as measured with `onGeometryChange`.
@@ -51,7 +43,7 @@ public enum ReaderSpreadPolicy {
     ///     across it, or `nil` when it isn't (folded, or not a Duo). A spanned Duo spreads with
     ///     one page on each side whatever its size class says.
     public static func layout(
-        setting: ReaderSpreadSetting, platform: ReaderPlatform, sizeClass: ReaderSizeClass?, size: CGSize,
+        setting: ReaderSettings.Spread, platform: ReaderPlatform, sizeClass: ReaderSizeClass?, size: CGSize,
         hingeWidth: CGFloat?
     ) -> ReaderSpreadLayout {
         let width = size.width
