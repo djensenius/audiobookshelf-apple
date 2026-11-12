@@ -1299,10 +1299,42 @@ struct SleepTimerTests {
         }
         await until { harness.control.plays == 1 }
         await harness.control.finishSeek()
-        #expect(harness.control.seeks == (automatic ? [1010, 710] : [1010]))
+        #expect(harness.control.seeks == [1010, automatic ? 710 : 1010], "The reset's seek takes the expiry's over")
         #expect(harness.control.currentTime == (automatic ? 710 : 1010))
         #expect(harness.timer.isRunning)
         #expect(harness.feedback.resets == 1)
+    }
+
+    /// A restart during the expiry's own seek back to the fade waits for where playback lands: if it doesn't, nothing
+    /// plays, no timer runs and the grace period comes back, rather than the restart resuming before the seek.
+    @Test func aRestartDuringTheExpirySeekFailsWhenItDoesNotLand() async throws {
+        let harness = try expiringHarness(automatic: false)
+        harness.control.holdsSeeks = true
+        await harness.play(from: 1000, to: 1070)
+        await until { harness.control.seeks == [1010] }
+        harness.control.holdsSeeks = false
+        harness.control.seeksLand = false
+
+        #expect(await harness.timer.restart() == .failed)
+        await harness.control.finishSeek()
+        #expect(harness.control.seeks == [1010, 1010])
+        #expect(harness.control.plays == 0)
+        #expect(harness.timer.isRunning == false)
+        #expect(harness.timer.canRestart)
+    }
+
+    /// A restart whose play was accepted but never starts (the engine fails afterwards, say) leaves the restarted
+    /// timer inert, as any pause does: it neither counts down nor pauses again until playback plays.
+    @Test func aRestartedTimerOverPlaybackThatNeverStartsDoesNotCountDown() async throws {
+        let harness = try expiringHarness(automatic: false)
+        await harness.playToExpiry(from: 1000, to: 1070)
+        #expect(await harness.timer.restart() == .resumed)
+        let remaining = harness.timer.remaining
+        harness.control.isPlaying = false
+        await harness.advance(120)
+        #expect(harness.timer.isRunning)
+        #expect(harness.timer.remaining == remaining)
+        #expect(harness.control.pauseCount == 1, "Only the expiry's")
     }
 
     @Test func automaticChapterTimerRestartsFromTheRewoundPosition() async throws {

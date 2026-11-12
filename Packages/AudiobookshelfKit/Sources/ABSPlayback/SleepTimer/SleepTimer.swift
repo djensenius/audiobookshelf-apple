@@ -281,8 +281,8 @@ public final class SleepTimer {
     /// resumes after the pending rewind, with the reset feedback once it plays. A cancel, a start, a play, a pause or
     /// another item before that rewind lands wins: nothing resumes (only a cancel stops the restarted timer). If the
     /// rewind fails, or a seek moved playback or is moving it, the grace period and the rewind come back. The timer's
-    /// own seek back to the fade counts as having landed; one not yet started, the reset makes itself. Returns whether
-    /// it reset.
+    /// own seek back to the fade the reset seeks again and waits for while it's in flight, or makes itself if it hasn't
+    /// started. Returns whether it reset.
     @discardableResult
     public func reset() -> Bool {
         if let run {
@@ -417,7 +417,9 @@ public final class SleepTimer {
         }
         _ = takeQueuedFadeRewind()
         let position = control.intendedTime
-        let target = time < position ? time : nil
+        // A seek in flight (the expiry's own back to the fade, say) is sought again and awaited, so the play follows
+        // where it lands and a seek that doesn't land fails the restart rather than resuming before it.
+        let target = time < position || control.pendingSeekTarget != nil ? time : nil
         let id = runID, item = itemID
         return Task { [weak self] in
             await self?.resume(rewindingTo: target, from: position, runID: id, item: item) {
