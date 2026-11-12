@@ -34,8 +34,10 @@ final class ImageServices {
     ///   default, ``pipeline``'s ``ImagePipeline/trimMemory(toFraction:)``.
     /// - Parameter notifications: Where memory warnings arrive on iOS; tests pass their own, so
     ///   one test's warning doesn't reach another's services.
+    /// - Parameter covers: Where covers are fetched and cached; ``CoverSource/app`` by default.
     init(
         accounts: AccountManager?,
+        covers: CoverSource = .app,
         trim: (@Sendable (_ fraction: Double) async -> Void)? = nil,
         notifications: NotificationCenter = .default
     ) {
@@ -43,11 +45,12 @@ final class ImageServices {
         let online = self.online
         let pipeline = ImagePipeline(
             limits: limits,
-            fileStore: CoverFileStore(directory: CoverFileStore.defaultDirectory(), limit: limits.diskBytes),
+            fileStore: CoverFileStore(
+                directory: covers.directory ?? CoverFileStore.defaultDirectory(), limit: limits.diskBytes),
             // TODO(#143): pass the downloads' `DownloadedCoverLookup`, so downloaded items' covers
             // load from their files.
-            downloadedCovers: nil,
-            isOnline: { online.isOnline })
+            downloadedCovers: nil, sessionConfiguration: covers.sessionConfiguration,
+            isOnline: covers.isOnline ?? { online.isOnline })
         self.pipeline = pipeline
         participant = ImageParticipant(sink: pipeline)
         trimmer = MemoryTrimmer(trim: trim ?? { await pipeline.trimMemory(toFraction: $0) })
@@ -57,7 +60,7 @@ final class ImageServices {
         if let accounts {
             participant.followRemovals { Set(accounts.connections.map(\.id)) }
         }
-        followNetwork()
+        if covers.isOnline == nil { followNetwork() }
         #if os(iOS)
             memoryWarnings = Self.observeMemoryWarnings(in: notifications, calling: trimmer)
         #elseif os(macOS)
@@ -133,6 +136,18 @@ final class ImageServices {
             }
         }
     #endif
+}
+
+/// Where ``ImageServices`` fetches covers and caches them on disk, and when it may fetch.
+struct CoverSource {
+    var sessionConfiguration: URLSessionConfiguration = .ephemeral
+    /// The disk cache; `nil` for ``CoverFileStore/defaultDirectory(appGroup:)``.
+    var directory: URL?
+    /// Whether a fetch may go out; `nil` to follow the network monitor.
+    var isOnline: (@Sendable () -> Bool)?
+
+    /// The app's covers: the network, the shared cache and the network monitor.
+    static var app: CoverSource { CoverSource() }
 }
 
 /// Trims the cover memory cache for the system's memory events, from any thread: 0 on a memory
