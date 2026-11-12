@@ -200,7 +200,8 @@ private struct YearInReviewContentView: View {
             }
             #if os(iOS)
                 Button {
-                    Task { await saveToPhotos(image) }
+                    let key = renderKey
+                    Task { await saveToPhotos(image, renderedFor: key) }
                 } label: {
                     Label {
                         Text(verbatim: L10n.string("ButtonYearInReviewSaveToPhotos"))
@@ -219,8 +220,11 @@ private struct YearInReviewContentView: View {
     }
 
     #if os(iOS)
-        private func saveToPhotos(_ image: YearInReviewShareImage) async {
+        /// Saves `image`, rendered for `key`. The result is shown only if the selection is still
+        /// `key`'s: the saved PNG belongs to it, not to a year or layout picked meanwhile.
+        private func saveToPhotos(_ image: YearInReviewShareImage, renderedFor key: YearInReviewRenderKey) async {
             let outcome = await YearInReviewPhotoSaver(library: SystemPhotoLibrary()).save(png: image.png)
+            guard outcome.isShown(savedFrom: key, current: renderKey) else { return }
             if outcome == .saved {
                 confirm(outcome.messageKey)
             } else {

@@ -1,3 +1,4 @@
+import ABSAppModel
 import Foundation
 import Synchronization
 import Testing
@@ -90,6 +91,28 @@ private final class FakePhotoLibrary: PhotoLibraryAdding {
         let outcomes: [PhotoSaveOutcome] = [.saved, .denied, .restricted, .failed]
         #expect(Set(outcomes.map(\.messageKey)).count == outcomes.count)
         #expect(!PhotoSaveOutcome.saved.offersSettings)
+    }
+
+    /// A save finishing after the year, variant or layout changed shows nothing: its image is no
+    /// longer the one shown. Negative control: the same selection, refreshed or not, shows it.
+    @MainActor
+    @Test(arguments: [PhotoSaveOutcome.saved, .denied, .restricted, .failed])
+    func staleSaveCompletionsAreNotShown(outcome: PhotoSaveOutcome) {
+        let saved = YearInReviewRenderKey(
+            content: nil, year: 2024, variant: .user, scale: 2, locale: Locale(identifier: "en_US"), loadRevision: 1)
+        var refreshed = saved
+        refreshed.loadRevision = 2
+        #expect(outcome.isShown(savedFrom: saved, current: saved))
+        #expect(outcome.isShown(savedFrom: saved, current: refreshed))
+        var year = saved
+        year.year = 2023
+        var variant = saved
+        variant.variant = .server
+        var layout = saved
+        layout.layout = .banner
+        for current in [year, variant, layout] {
+            #expect(!outcome.isShown(savedFrom: saved, current: current))
+        }
     }
 
     #if os(macOS)

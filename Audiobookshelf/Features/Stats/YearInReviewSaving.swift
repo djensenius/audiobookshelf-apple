@@ -48,6 +48,14 @@ enum PhotoSaveOutcome: Sendable, Equatable {
 
     /// Whether the alert offers to open Settings, where photo access is changed.
     var offersSettings: Bool { self == .denied || self == .restricted }
+
+    /// Whether to show this outcome of saving the image rendered for `key` now that the
+    /// selection is `current`. A save can finish after the year, variant or layout changed;
+    /// its confirmation or alert would then describe an image that is no longer shown. A
+    /// refresh of the same selection still shows it.
+    func isShown(savedFrom key: YearInReviewRenderKey, current: YearInReviewRenderKey) -> Bool {
+        key.isSameSelection(as: current)
+    }
 }
 
 /// Saves the shared image to Photos with add-only access, asking for it the first time.
