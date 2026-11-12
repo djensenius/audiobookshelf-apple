@@ -13,7 +13,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   like `ProgressSyncer`'s pre-drain fetch (`captureProgressFetch`, then
 ///   `applyServerProgress(source: .fetch)`), so a newer location from another device replaces an
 ///   older unsent one instead of being PATCHed over later. It then opens at the newer valid
-///   location (``EbookResumePoint/resolve(kind:local:server:)``).
+///   location (``EbookResumePoint/resolve(kind:local:server:)``). If the merge replaced a valid
+///   local location with one this reader can't open, the replaced location is still offered.
 /// - **Local first, debounced.** ``record(_:progress:)`` takes every page turn at once (for
 ///   ``location``) but saves it only after ``debounce`` without another turn (ADR 0003: ebook
 ///   location changes are debounced before they reach the store). Each save goes to
@@ -32,7 +33,9 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 /// - **Reconnect.** Dirty rows are the durable queue: `ProgressSyncer` drains them when the
 ///   network comes back and at launch; ``syncPending()`` drains on demand.
 ///
-/// Saves and drains run one at a time, in order.
+/// Local saves run one at a time, in order, and never wait for the network: a save's drain runs
+/// on its own queue, after the saves before it, one drain at a time. A slow PATCH therefore
+/// can't hold back a later page turn's local save, and a drain doesn't keep the model alive.
 @MainActor
 @Observable
 public final class EbookProgressModel {
@@ -53,7 +56,10 @@ public final class EbookProgressModel {
 
     /// The waiting debounce. Readable for tests.
     @ObservationIgnored private(set) var debounceTask: Task<Void, Never>?
-    @ObservationIgnored private var tail: Task<Void, Never>?
+    /// The latest local save; the next save waits for it.
+    @ObservationIgnored private var saveTail: Task<Bool, Never>?
+    /// The latest drain; the next drain waits for it. Readable for tests.
+    @ObservationIgnored private(set) var drainTail: Task<Void, Never>?
     @ObservationIgnored private var unsaved: (location: EbookLocation, progress: Double?)?
     /// Counts updates of ``hasUnsyncedChanges`` from saves and drains, so ``resume()`` doesn't
     /// replace a newer one with the row it read before.
@@ -117,6 +123,8 @@ public final class EbookProgressModel {
     public func resume() async -> EbookResumePoint {
         guard kind.isSupported else { return .beginning }
         let capture = await store.captureProgressFetch(for: key)
+        // The merge below may replace a valid local location with one this reader can't open.
+        let beforeMerge = await readLocal()
         do {
             if let fetched = try await service.mediaProgress(itemID: key.libraryItemId, episodeID: key.episodeId),
                 let matching = Self.matching(fetched, key)
@@ -132,13 +140,16 @@ public final class EbookProgressModel {
         }
         serverSeed = knownServerProgress.flatMap(Self.baseline) ?? serverSeed
         let revision = syncStateRevision
-        var local: LocalMediaProgressDTO?
-        do {
-            local = try await store.progress(for: key)
-        } catch {
-            logger.error("Reading local ebook progress failed: \(Self.caseName(error), privacy: .public)")
-        }
-        let point = EbookResumePoint.resolve(kind: kind, local: local, server: knownServerProgress)
+        let local = await readLocal()
+        // Every group stays merged, but when the merge brought an ebook location this reader can't
+        // open (another format's CFI or page), the valid one it replaced is still a candidate. A
+        // location the server cleared isn't restored.
+        let style = kind.locationStyle
+        let candidate =
+            local?.ebookLocation != nil && EbookLocation(local?.ebookLocation, style: style) == nil
+                && EbookLocation(beforeMerge?.ebookLocation, style: style) != nil
+            ? beforeMerge : local
+        let point = EbookResumePoint.resolve(kind: kind, local: candidate, server: knownServerProgress)
         if location == nil {
             location = point.location
             progress = point.progress
@@ -166,7 +177,8 @@ public final class EbookProgressModel {
             // A newer turn cancels this task before replacing it.
             guard let self, !Task.isCancelled else { return }
             debounceTask = nil
-            await enqueue { [weak self] in await self?.save() }
+            // Saved locally here; the drain isn't awaited, so this task doesn't keep the model.
+            if await enqueueSave().value { enqueueDrain() }
         }
     }
 
@@ -175,57 +187,81 @@ public final class EbookProgressModel {
     public func flush() async {
         debounceTask?.cancel()
         debounceTask = nil
-        await enqueue { [weak self] in await self?.save() }
+        guard await enqueueSave().value else { return }
+        await enqueueDrain().value
     }
 
     /// Sends unsent changes without a new page turn: the reconnect hook.
     public func syncPending() async {
-        await enqueue { [weak self] in await self?.drain() }
+        await enqueueDrain().value
     }
 
     // MARK: - Private
 
-    private func enqueue(_ work: @escaping @MainActor () async -> Void) async {
-        let previous = tail
-        let task = Task { @MainActor in
-            await previous?.value
-            await work()
+    /// The local row, or `nil` when there is none or it can't be read.
+    private func readLocal() async -> LocalMediaProgressDTO? {
+        do {
+            return try await store.progress(for: key)
+        } catch {
+            logger.error("Reading local ebook progress failed: \(Self.caseName(error), privacy: .public)")
+            return nil
         }
-        tail = task
-        await task.value
     }
 
-    /// Saves the waiting turn locally, then drains. A failed local save sends nothing and keeps
-    /// the turn for the next save, unless a newer one replaced it.
-    private func save() async {
-        if let pending = unsaved {
-            unsaved = nil
-            let edit = ProgressEdit(ebook: .init(location: pending.location.stored, progress: pending.progress))
+    /// Queues ``save()`` behind the previous save only. Its value is whether to drain.
+    private func enqueueSave() -> Task<Bool, Never> {
+        let previous = saveTail
+        let task = Task { @MainActor [weak self] in
+            _ = await previous?.value
+            return await self?.save() ?? false
+        }
+        saveTail = task
+        return task
+    }
+
+    /// Queues a drain behind the previous drain and the saves queued so far. It holds the model
+    /// weakly, so a slow PATCH doesn't delay its `deinit`.
+    @discardableResult
+    private func enqueueDrain() -> Task<Void, Never> {
+        let (previous, saves) = (drainTail, saveTail)
+        let (syncer, store, key) = (syncer, store, key)
+        let task = Task { @MainActor [weak self] in
+            await previous?.value
+            _ = await saves?.value
+            await syncer.drainPendingProgress()
+            let row: LocalMediaProgressDTO?
             do {
-                let row = try await store.recordEdit(
-                    edit, for: key, serverProgress: serverSeed, localLibraryItemID: localLibraryItemID, now: now())
-                syncStateRevision += 1
-                hasUnsyncedChanges = row.ebookDirty
+                row = try await store.progress(for: key)
             } catch {
-                if unsaved == nil { unsaved = pending }
-                lastError = Self.caseName(error)
-                logger.error("Saving ebook progress failed: \(Self.caseName(error), privacy: .public)")
+                logger.error("Reading local ebook progress failed: \(Self.caseName(error), privacy: .public)")
                 return
             }
-        }
-        await drain()
-    }
-
-    /// Lets the syncer send the dirty rows, then reads back what it left for this one.
-    private func drain() async {
-        await syncer.drainPendingProgress()
-        do {
-            let row = try await store.progress(for: key)
+            guard let self else { return }
             syncStateRevision += 1
             hasUnsyncedChanges = row?.ebookDirty ?? false
             lastError = row?.lastSyncError
+        }
+        drainTail = task
+        return task
+    }
+
+    /// Saves the waiting turn locally. Returns `false` when the save failed, so nothing is sent;
+    /// the turn is kept for the next save, unless a newer one replaced it.
+    private func save() async -> Bool {
+        guard let pending = unsaved else { return true }
+        unsaved = nil
+        let edit = ProgressEdit(ebook: .init(location: pending.location.stored, progress: pending.progress))
+        do {
+            let row = try await store.recordEdit(
+                edit, for: key, serverProgress: serverSeed, localLibraryItemID: localLibraryItemID, now: now())
+            syncStateRevision += 1
+            hasUnsyncedChanges = row.ebookDirty
+            return true
         } catch {
-            logger.error("Reading local ebook progress failed: \(Self.caseName(error), privacy: .public)")
+            if unsaved == nil { unsaved = pending }
+            lastError = Self.caseName(error)
+            logger.error("Saving ebook progress failed: \(Self.caseName(error), privacy: .public)")
+            return false
         }
     }
 

@@ -169,6 +169,8 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         let task = try #require(model.debounceTask)
         clock.advance(by: .seconds(1))
         await task.value
+        // The debounce saves locally and starts the drain without waiting for it.
+        await model.drainTail?.value
 
         #expect(service.writes.value.map(\.update) == [.ebook(location: "5", progress: 0.4)])
         let row = try #require(try await store.progress(for: key))
@@ -193,11 +195,13 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         let first = try #require(model.debounceTask)
         clock.advance(by: .milliseconds(1))
         await first.value
+        await model.drainTail?.value
         turn(model, to: 3)
         #expect(await sleeps.next() == .seconds(2))
         let second = try #require(model.debounceTask)
         clock.advance(by: .seconds(2))
         await second.value
+        await model.drainTail?.value
 
         #expect(service.writes.value.map(\.update.ebookLocation) == ["2", "3"])
     }
@@ -209,6 +213,7 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         for page in 2...5 {
             turn(model, to: page)
             await model.debounceTask?.value
+            await model.drainTail?.value
         }
         #expect(service.writes.value.map(\.update.ebookLocation) == ["2", "3", "4", "5"])
     }
@@ -390,6 +395,67 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(!model.hasUnsyncedChanges)
     }
 
+    /// Waits until the store holds `location` for the row; `false` if it never does.
+    func stored(_ location: String) async -> Bool {
+        for attempt in 0..<2_000 {
+            if (try? await store.progress(for: key))?.ebookLocation == location { return true }
+            if attempt < 200 { await Task.yield() } else { try? await Task.sleep(for: .milliseconds(1)) }
+        }
+        return false
+    }
+
+    /// The model's own drain holds a PATCH of page 3. Later turns are still saved locally, after
+    /// their debounce and on flush, before that PATCH finishes; the syncer then sends the latest.
+    @Test func aSlowPatchDoesNotHoldBackLaterLocalSaves() async throws {
+        service.holdPatches.value = true
+        let model = makeModel()
+        var sleeps = clock.sleeps.makeAsyncIterator()
+        turn(model, to: 3)
+        #expect(await sleeps.next() == .seconds(2))
+        clock.advance(by: .seconds(2))
+        #expect(await eventually { service.heldCount == 1 })
+
+        time.value = t0.addingTimeInterval(10)
+        turn(model, to: 4)
+        #expect(await sleeps.next() == .seconds(2))
+        clock.advance(by: .seconds(2))
+        #expect(await stored("4"))
+
+        turn(model, to: 5)
+        let flush = Task { await model.flush() }
+        #expect(await stored("5"))
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["3"])
+
+        service.releasePatches()
+        await flush.value
+        #expect(service.server.value?.ebookLocation == "5")
+        #expect(service.inFlight.value.most == 1)
+        #expect(try await store.progress(for: key)?.needsServerSync == false)
+        #expect(!model.hasUnsyncedChanges)
+    }
+
+    /// A drain held at a PATCH doesn't keep the model alive, so releasing it saves its waiting
+    /// turn at once (`deinit`), and the syncer sends it later.
+    @Test func aSlowPatchDoesNotKeepAReleasedModel() async throws {
+        service.holdPatches.value = true
+        var model: EbookProgressModel? = makeModel()
+        var sleeps = clock.sleeps.makeAsyncIterator()
+        turn(try #require(model), to: 3)
+        #expect(await sleeps.next() == .seconds(2))
+        clock.advance(by: .seconds(2))
+        #expect(await eventually { service.heldCount == 1 })
+
+        weak var released = model
+        turn(try #require(model), to: 4)
+        model = nil
+        #expect(await eventually { released == nil })
+        #expect(await stored("4"))
+
+        service.releasePatches()
+        await syncer.drainPendingProgress()
+        #expect(await eventually { service.server.value?.ebookLocation == "4" })
+    }
+
     /// The syncer fetches before sending: a dirty audio group from older offline listening
     /// doesn't overwrite a newer server position, while one newer than the server is still sent
     /// (negative control).
@@ -459,6 +525,29 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         await model.syncPending()
         #expect(service.writes.value.map(\.update.ebookLocation) == ["3"])
         #expect(try await store.progress(for: key)?.ebookDirty == false)
+    }
+
+    /// A newer server CFI can't open in a PDF. The merge still takes the server's values, but the
+    /// PDF reader opens at the valid local page it replaced, not the start; an EPUB reader of
+    /// the same row opens at the CFI (control).
+    @Test(arguments: [
+        (ReaderKind.pdf, EbookResumePoint(location: .page(4), progress: 0.3, source: .local)),
+        (.epub, EbookResumePoint(location: .cfi("epubcfi(/6/8)"), progress: 0.6, source: .server)),
+    ])
+    func aNewerLocationForAnotherFormatKeepsTheValidLocalOne(kind: ReaderKind, expected: EbookResumePoint)
+        async throws
+    {
+        try await store.recordEdit(ProgressEdit(ebook: .init(location: "4", progress: 0.3)), for: key, now: t0)
+        var newer = serverProgress("epubcfi(/6/8)", progress: 0.6, at: t0.addingTimeInterval(60))
+        newer.currentTime = 200
+        newer.duration = 600
+        service.server.value = newer
+        let model = makeModel(kind)
+
+        #expect(await model.resume() == expected)
+        #expect(model.location == expected.location)
+        // The other groups are still reconciled.
+        #expect(try await store.progress(for: key)?.currentTime == 200)
     }
 
     /// Offline: the known progress is used when the server can't be reached.
