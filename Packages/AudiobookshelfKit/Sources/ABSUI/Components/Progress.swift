@@ -17,6 +17,7 @@ public struct ProgressRing: View {
     @ScaledMetric private var diameter: CGFloat
     @ScaledMetric private var lineWidth: CGFloat
     @Environment(\.locale) private var locale
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// - Parameters:
     ///   - progress: The fraction complete, `0...1`.
@@ -36,13 +37,18 @@ public struct ProgressRing: View {
                 .trim(from: 0, to: progress)
                 .stroke(tint, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-                .animation(.default, value: progress)
+                .animation(Self.animation(reduceMotion: reduceMotion), value: progress)
         }
         .padding(lineWidth / 2)
         .frame(width: diameter, height: diameter)
         .accessibilityElement()
         .accessibilityLabel(Text(verbatim: L10n.string("LabelProgress")))
         .accessibilityValue(Text(verbatim: progressAccessibilityValue(progress, locale: locale)))
+    }
+
+    /// How the ring moves to a new value: animated, or at once with Reduce Motion.
+    static func animation(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .default
     }
 }
 

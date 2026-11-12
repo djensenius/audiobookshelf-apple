@@ -26,12 +26,25 @@ extension View {
     /// Adds `actions` as a context menu and, with the same titles, as VoiceOver actions. The
     /// VoiceOver list omits ``ItemActionKind/openDetails``, which the default activation performs.
     public func itemActions(_ actions: [ItemAction], perform: @escaping (ItemActionKind) -> Void) -> some View {
-        contextMenu { ItemActionMenu(actions: actions, perform: perform) }
-            .accessibilityActions {
-                ForEach(actions.filter { $0.kind != .openDetails }) { action in
-                    Button(ItemPresentation.title(action.kind)) { perform(action.kind) }
-                }
+        itemActions(actions, perform: perform) { EmptyView() }
+    }
+
+    /// Adds `actions` as ``itemActions(_:perform:)`` does, followed by the screen's own buttons in `more`, in the
+    /// context menu and the VoiceOver actions alike.
+    public func itemActions<More: View>(
+        _ actions: [ItemAction], perform: @escaping (ItemActionKind) -> Void, @ViewBuilder more: () -> More
+    ) -> some View {
+        let more = more()
+        return contextMenu {
+            ItemActionMenu(actions: actions, perform: perform)
+            more
+        }
+        .accessibilityActions {
+            ForEach(actions.filter { $0.kind != .openDetails }) { action in
+                Button(ItemPresentation.title(action.kind)) { perform(action.kind) }
             }
+            more
+        }
     }
 }
 
