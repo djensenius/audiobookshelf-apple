@@ -722,6 +722,8 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         (.streamUnavailable(.missingAccessToken), .streamUnavailable),
         (.engine(.emptyTimeline), .playbackFailed),
         (.unexpected("boom"), .playbackFailed),
+        (.recoveryExhausted, .streamingInterrupted),
+        (.streamRejected, .streamRejected),
     ])
     func errorMapsToAMessage(error: PlaybackCoordinatorError, message: PlayerErrorMessage) async throws {
         try await withPlayer { model, playback, _, _ in

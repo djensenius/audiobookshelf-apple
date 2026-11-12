@@ -19,6 +19,8 @@ struct RootView: View {
     let lifecycle: SessionLifecycle
     let player: any PlayerSlotState
     let accounts: AccountManager?
+    /// The shared library, injected into the signed-in shell (`\.libraryStore`).
+    var library: LibraryParticipant?
     /// Given to the signed-in shell as `\.imagePipeline`; screens outside it see `nil`.
     var imagePipeline: ImagePipeline?
 
@@ -67,6 +69,12 @@ struct RootView: View {
             .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
     }
 
+    /// The shared library store while it serves `identity`'s account, `nil` otherwise.
+    private func servedStore(for identity: SessionIdentity) -> LibraryStore? {
+        guard let store = library?.store, store.serves(identity) else { return nil }
+        return store
+    }
+
     /// One link waits at a time: the last one received wins, including over a confirmed server
     /// switch's link (``SceneLinks``).
     private func receive(_ link: DeepLink) {
@@ -107,6 +115,14 @@ struct RootView: View {
             )
             .environment(\.imagePipeline, imagePipeline)
             .id(identity)
+            // Only while the store serves this shell's account: during a switch the outgoing
+            // shell stays up after the store attached the next account, and must not build
+            // services or read progress for it with its own library and item IDs.
+            .environment(\.libraryStore, servedStore(for: identity))
+            .environment(
+                \.itemProgressReader,
+                servedStore(for: identity).map { BrowsePresentation.progressReader($0.progress) }
+                    ?? .none)
         case .storeUnavailable:
             ErrorStateView(
                 title: L10n.string("MessageStoreUnavailable"),

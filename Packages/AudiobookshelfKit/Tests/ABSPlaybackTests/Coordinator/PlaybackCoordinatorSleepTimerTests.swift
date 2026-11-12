@@ -163,7 +163,8 @@ struct PlaybackCoordinatorSleepTimerTests {
         t.timer.cancel()
     }
 
-    @Test func remotePauseDuringGraceRewindCancelsTimerResume() async throws {
+    @Test(arguments: [false, true])
+    func remotePauseDuringGraceRewindCancelsTimerResume(outputLost: Bool) async throws {
         let t = try CoordinatorTimerHarness(automatic: true)
         await t.expire()
         await t.waitForFadeRewind()
@@ -175,7 +176,12 @@ struct PlaybackCoordinatorSleepTimerTests {
         #expect(!t.engine.isPlaybackRequested)
         let events = t.h.events.count
 
-        try await t.b.controller.perform(.pause)
+        if outputLost {
+            // Headphones unplugged while the reset's rewind is in flight: no restart on the speaker.
+            t.engine.pauseForOutputLoss()
+        } else {
+            try await t.b.controller.perform(.pause)
+        }
         #expect(t.h.events.since(events) == [.paused(time: 710)])
         gate.open()
         await until { t.h.events.events.last == .didSeek(time: 710) }

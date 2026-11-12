@@ -247,6 +247,7 @@
   "MessageLibraryFilterLoadFailed": "Couldn't load this library's filters.",
   "MessageLibraryFilterNoValues": "Nothing to filter by in this group.",
   "MessageLibraryItemsLoadFailed": "Couldn't load this library's items.",
+  "MessageLibraryPickerHint": "Switches the library this window shows.",
   "MessageLogsCopied": "Copied the logs",
   "MessageLogsCurrentLaunchOnly": "These logs cover only the current launch of the app. Tokens are always removed.",
   "MessageLogsLoadFailed": "Couldn't load the logs.",

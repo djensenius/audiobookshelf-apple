@@ -25,6 +25,7 @@ public enum SchemaV1: VersionedSchema {
             DownloadPart.self,
             PendingLocalSession.self,
             PlaybackHistoryEvent.self,
+            PendingSessionClose.self,
         ]
     }
 
@@ -557,5 +558,53 @@ public enum SchemaV1: VersionedSchema {
 
         public var nameValue: PlaybackHistoryEventName? { PlaybackHistoryEventName(rawValue: name) }
         public var typeValue: PlaybackHistoryEventType? { PlaybackHistoryEventType(rawValue: type) }
+    }
+
+    /// A streamed session's final `/close` the server didn't acknowledge, kept to retry (#382).
+    @Model public final class PendingSessionClose {
+        #Unique<PendingSessionClose>([\.serverConnectionID, \.sessionID])
+        #Index<PendingSessionClose>([\.serverConnectionID, \.capturedAt])
+
+        public var serverConnectionID: UUID
+        public var sessionID: String
+        public var libraryItemId: String
+        public var episodeId: String?
+        /// The close report: position, listening time not yet sent, and duration.
+        public var currentTime: Double
+        public var timeListened: Double
+        public var duration: Double
+        /// The audio edit time the close's own position committed with; `nil` when it never
+        /// committed, so a retry can't prove it is still the latest position.
+        public var positionEditedAt: Date?
+        public var capturedAt: Date
+        /// The latest attempt that may have reached the server; `nil` when none could have.
+        public var lastAttemptAt: Date?
+        public var attempts: Int
+
+        public init(
+            serverConnectionID: UUID,
+            sessionID: String,
+            libraryItemId: String,
+            episodeId: String? = nil,
+            currentTime: Double,
+            timeListened: Double,
+            duration: Double,
+            positionEditedAt: Date? = nil,
+            capturedAt: Date,
+            lastAttemptAt: Date? = nil,
+            attempts: Int = 0
+        ) {
+            self.serverConnectionID = serverConnectionID
+            self.sessionID = sessionID
+            self.libraryItemId = libraryItemId
+            self.episodeId = episodeId
+            self.currentTime = currentTime
+            self.timeListened = timeListened
+            self.duration = duration
+            self.positionEditedAt = positionEditedAt
+            self.capturedAt = capturedAt
+            self.lastAttemptAt = lastAttemptAt
+            self.attempts = attempts
+        }
     }
 }

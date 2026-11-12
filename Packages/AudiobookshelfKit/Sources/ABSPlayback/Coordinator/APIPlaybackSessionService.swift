@@ -33,7 +33,7 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
         try await client.mediaProgress(itemID: itemID, episodeID: episodeID)
     }
 
-    /// A token-fallback track (``TrackAuthentication/accessTokenQuery``) gets its access token from
+    /// Token-fallback tracks (``TrackAuthentication/accessTokenQuery``) share one access token from
     /// ``APIClient/accessToken(replacing:)``, so one that is about to expire is refreshed first.
     /// On a connection with custom headers the stream carries a new ``HeaderStreamingTransport``
     /// with those headers (ADR 0007 §6); a transcode session there fails to resolve.
@@ -52,9 +52,17 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
             throw StreamResolutionError.resolution(error)
         }
         var urls: [URL] = []
+        var streamToken: String?
         for track in plan.tracks {
             if track.authentication == .accessTokenQuery {
-                let token = try await accessToken()
+                // One token for every track, so the recorded token is the one each URL carries.
+                let token: String
+                if let streamToken {
+                    token = streamToken
+                } else {
+                    token = try await accessToken()
+                }
+                streamToken = token
                 guard let url = track.authorizedURL(accessToken: token) else {
                     throw StreamResolutionError.missingAccessToken
                 }
@@ -70,7 +78,7 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
                 HeaderStreamingTransport(
                     customHeaders: configuration.customHeaders, configuration: streamingConfiguration())
             }
-        return ResolvedStream(plan: plan, urls: urls, transport: transport)
+        return ResolvedStream(plan: plan, urls: urls, transport: transport, accessToken: streamToken)
     }
 
     /// A token for a URL the player loads outside the client; no tokens, or a session the server
@@ -85,5 +93,15 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
 
     public func closeSession(id: String, report: PlaybackSyncReport?) async throws {
         _ = try await client.send(SessionEndpoints.close(sessionID: id, report: report))
+    }
+
+    /// Replaces `rejected` (else the stored token) through the client's single-flight refresh; a
+    /// token another caller already replaced isn't refreshed again. ``APIError/notAuthenticated``
+    /// when signed out.
+    public func refreshStreamAccess(replacing rejected: String?) async throws {
+        var token = rejected
+        if token == nil { token = await client.currentAccessToken() }
+        guard let token else { throw APIError.notAuthenticated }
+        _ = try await client.accessToken(replacing: token)
     }
 }
