@@ -24,8 +24,11 @@ private struct MediaBadge: View {
 
     var body: some View {
         // Sized by the surrounding font, so it scales with Dynamic Type.
+        // A letter shape, not a colour, carries the meaning. VoiceOver reads the word, not an image.
         Image(systemName: systemImage)
             .foregroundStyle(.secondary)
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text(verbatim: L10n.string(labelKey)))
+            .accessibilityRemoveTraits(.isImage)
     }
 }

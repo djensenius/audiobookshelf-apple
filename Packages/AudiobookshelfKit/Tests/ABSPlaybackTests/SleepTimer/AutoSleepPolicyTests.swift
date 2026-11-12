@@ -20,7 +20,10 @@ struct AutoSleepPolicyTests {
         #expect(TimeOfDay("23:59") == TimeOfDay(hour: 23, minute: 59))
     }
 
-    @Test(arguments: ["24:00", "12:60", "6:00", "06:0", "0600", "06:00:00", "ab:cd", "+6:00", "", ":"])
+    @Test(arguments: [
+        "24:00", "12:60", "6:00", "06:0", "0600", "06:00:00", "ab:cd", "+6:00", "", ":", "12:5", "-0:30", "00:+1",
+        "１２:００", "٠٧:٠٠",
+    ])
     func rejectsMalformedTimes(_ text: String) {
         #expect(TimeOfDay(text) == nil)
     }
