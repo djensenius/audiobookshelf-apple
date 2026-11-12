@@ -33,6 +33,9 @@ public final class AudioEngine: AudioEngineProtocol {
     @ObservationIgnored public var onEvent: (@MainActor (AudioEngineEvent) -> Void)?
     /// Activated before playback and deactivated on ``stop()``. `nil` on macOS.
     @ObservationIgnored public var audioSession: (any AudioSessionActivating)?
+    /// The session ``unload()`` kept active for the next item. If that item's activation fails it
+    /// is released, so it doesn't keep other apps silent until a stop.
+    @ObservationIgnored private var holdsUnloadedSession = false
 
     /// Replaced after `AVPlayer.status` becomes `.failed` (ADR 0007 recovery), so it is observed:
     /// views reading ``routingPlayer`` follow the replacement.
@@ -175,7 +178,16 @@ public final class AudioEngine: AudioEngineProtocol {
         reset()
         refreshState()
         isAudioSessionActive = false
+        holdsUnloadedSession = false
         audioSession?.deactivate()
+    }
+
+    public func unload() {
+        loadGeneration += 1
+        reset()
+        refreshState()
+        holdsUnloadedSession = holdsUnloadedSession || isAudioSessionActive
+        isAudioSessionActive = false
     }
 
     public func setRate(_ rate: Float) {
@@ -402,9 +414,14 @@ public final class AudioEngine: AudioEngineProtocol {
             isPlaybackRequested = false
             player.pause()
             refreshState()
+            if holdsUnloadedSession {
+                holdsUnloadedSession = false
+                audioSession?.deactivate()
+            }
             onEvent?(.failed(.audioSessionActivationFailed(description: error.localizedDescription)))
             return
         }
+        holdsUnloadedSession = false
         if !isAudioSessionActive { isAudioSessionActive = true }
         player.defaultRate = defaultRate
         player.play()
