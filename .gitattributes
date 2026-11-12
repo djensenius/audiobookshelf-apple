@@ -1,0 +1,3 @@
+# Vendored as published upstream (ADR 0008): keep them byte-identical, trailing spaces included.
+Audiobookshelf/Features/Reader/EPUB/Web/LICENSE-* -whitespace
+Audiobookshelf/Features/Reader/EPUB/Web/*.min.js -whitespace

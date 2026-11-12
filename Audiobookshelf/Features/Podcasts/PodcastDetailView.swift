@@ -46,6 +46,7 @@ struct PodcastDetailScreen: View {
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(\.itemActions) private var itemActions
     @Environment(\.playItem) private var playItem
+    @Environment(\.addToPlaylist) private var addToPlaylist
 
     init(detail: ItemDetailModel, progress: ProgressCache, settings: AppSettings?) {
         _model = State(initialValue: PodcastDetailModel(detail: detail, cache: progress, settings: settings))
@@ -58,7 +59,8 @@ struct PodcastDetailScreen: View {
         let isGone = goneState.isGone(snapshot)
         let refreshFailure = ItemDetailRefreshFailure(model: model.detail, isGone: isGone)
         // A podcast gone from the server can't be played, as on the book screen.
-        let context = PodcastEpisodeActions.context(canPlay: playItem != nil && !isGone)
+        let context = PodcastEpisodeActions.context(
+            canPlay: playItem != nil && !isGone, canEditPlaylists: addToPlaylist != nil)
         let access = PodcastEpisodeManagementAccess(
             user: accounts?.authorization?.user, podcast: model.podcast, isGone: isGone)
         ScrollView {
@@ -149,9 +151,14 @@ struct PodcastDetailScreen: View {
         .padding(.vertical, ABSSpacing.xLarge)
     }
 
-    /// Plays or marks `episode`, as Home performs its card actions; a failure shows the alert.
+    /// Plays or marks `episode`, as Home performs its card actions; a failure shows the alert. Add to playlist opens
+    /// the sheet for the episode in the podcast's library.
     private func perform(_ kind: ItemActionKind, on episode: PodcastEpisode) {
         guard let summary = model.summary(for: episode) else { return }
+        guard kind != .addToPlaylist else {
+            addToPlaylist?(summary, libraryID: model.detail.item?.libraryId)
+            return
+        }
         let isFinished = model.itemProgress(for: episode)?.isFinished == true
         let actions = itemActions
         let play = playItem

@@ -168,6 +168,20 @@ import Testing
         #expect(PodcastEpisodeActions.available(for: nil, progress: nil, context: context, isGone: false).isEmpty)
     }
 
+    @Test func episodeRowsOfferAddToPlaylistWithPlaylistsUntilThePodcastIsGone() {
+        let episode = ItemSummary(id: "e1", itemID: "li", episodeID: "e1", kind: .episode, title: "E", duration: 600)
+        func kinds(canEditPlaylists: Bool, isGone: Bool = false) -> [ItemActionKind] {
+            PodcastEpisodeActions.available(
+                for: episode, progress: nil,
+                context: PodcastEpisodeActions.context(canPlay: true, canEditPlaylists: canEditPlaylists),
+                isGone: isGone
+            ).map(\.kind)
+        }
+        #expect(kinds(canEditPlaylists: true) == [.play, .markFinished, .addToPlaylist])
+        #expect(kinds(canEditPlaylists: false) == [.play, .markFinished])
+        #expect(kinds(canEditPlaylists: true, isGone: true).isEmpty)
+    }
+
     /// The shared controls of the podcast and Latest rows: Play's text, the finished toggle, the busy states and the
     /// progress bar.
     @Test func episodeRowControlsFollowStatusProgressAndBusyStates() {
