@@ -109,12 +109,15 @@ public struct EbookResumePoint: Sendable, Equatable {
     /// - On equal dates the server wins, so an unsent edit wins only when strictly newer, as when
     ///   the store merges. An undated server value loses to any local one.
     /// - A location that isn't valid for `kind` is not a candidate; with no candidate the reader
-    ///   opens at the start.
+    ///   opens at the start. An unsent edit this reader can't open doesn't hide the server's
+    ///   unchanged location.
     public static func resolve(kind: ReaderKind, local: LocalMediaProgressDTO?, server: MediaProgress?) -> Self {
         let style = kind.locationStyle
         var best: (point: EbookResumePoint, date: Date)?
+        let localSupersedesServer =
+            local?.ebookDirty == true && EbookLocation(local?.ebookLocation, style: style) != nil
         if let server, let location = EbookLocation(server.ebookLocation, style: style),
-            !(local?.ebookDirty == true && local?.serverEbookUnchanged(in: server) == true)
+            !(localSupersedesServer && local?.serverEbookUnchanged(in: server) == true)
         {
             let date = server.lastUpdate.map { Date(timeIntervalSince1970: Double($0) / 1000) } ?? .distantPast
             best = (EbookResumePoint(location: location, progress: server.ebookProgress, source: .server), date)

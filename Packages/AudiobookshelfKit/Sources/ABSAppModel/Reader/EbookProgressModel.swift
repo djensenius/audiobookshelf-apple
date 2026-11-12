@@ -60,7 +60,8 @@ public final class EbookProgressModel {
     @ObservationIgnored private var saveTail: Task<Bool, Never>?
     /// The latest drain; the next drain waits for it. Readable for tests.
     @ObservationIgnored private(set) var drainTail: Task<Void, Never>?
-    @ObservationIgnored private var unsaved: (location: EbookLocation, progress: Double?)?
+    /// The waiting turn, dated when it was recorded so a delayed or retried save keeps its age.
+    @ObservationIgnored private var unsaved: (location: EbookLocation, progress: Double?, at: Date)?
     /// Counts updates of ``hasUnsyncedChanges`` from saves and drains, so ``resume()`` doesn't
     /// replace a newer one with the row it read before.
     @ObservationIgnored private var syncStateRevision = 0
@@ -81,7 +82,7 @@ public final class EbookProgressModel {
     ///   - serverProgress: Progress already known (for example from `ProgressCache`), used when
     ///     ``resume()`` can't reach the server.
     ///   - clock: Times the debounce; tests pass a manual clock.
-    ///   - now: Dates local edits.
+    ///   - now: Dates local edits, when a page turn is recorded rather than when it is saved.
     public init(
         key: MediaKey, kind: ReaderKind, store: LocalProgressStore, service: any EbookProgressService,
         syncer: any ProgressDraining, localLibraryItemID: UUID? = nil, serverProgress: MediaProgress? = nil,
@@ -106,11 +107,12 @@ public final class EbookProgressModel {
     isolated deinit {
         debounceTask?.cancel()
         guard let pending = unsaved else { return }
-        let (store, key, seed, itemID, date) = (store, key, serverSeed, localLibraryItemID, now())
+        let (store, key, seed, itemID) = (store, key, serverSeed, localLibraryItemID)
         let edit = ProgressEdit(ebook: .init(location: pending.location.stored, progress: pending.progress))
         Task {
             do {
-                try await store.recordEdit(edit, for: key, serverProgress: seed, localLibraryItemID: itemID, now: date)
+                try await store.recordEdit(
+                    edit, for: key, serverProgress: seed, localLibraryItemID: itemID, now: pending.at)
             } catch {
                 logger.error("Saving ebook progress on close failed: \(Self.caseName(error), privacy: .public)")
             }
@@ -126,10 +128,14 @@ public final class EbookProgressModel {
         // The merge below may replace a valid local location with one this reader can't open.
         let beforeMerge = await readLocal()
         do {
-            if let fetched = try await service.mediaProgress(itemID: key.libraryItemId, episodeID: key.episodeId),
-                let matching = Self.matching(fetched, key)
-            {
+            let fetched = try await service.mediaProgress(itemID: key.libraryItemId, episodeID: key.episodeId)
+            if fetched == nil {
+                // The server has no progress: the known one is stale, to open at or to seed from.
+                knownServerProgress = nil
+                serverSeed = nil
+            } else if let matching = fetched.flatMap({ Self.matching($0, key) }) {
                 knownServerProgress = matching
+                serverSeed = Self.baseline(matching) ?? serverSeed
                 if let baseline = Self.baseline(matching) {
                     // Skipped by the store for a row edited since the capture.
                     try await store.applyServerProgress([key: baseline], capturedAt: capture.generation, source: .fetch)
@@ -138,7 +144,6 @@ public final class EbookProgressModel {
         } catch {
             logger.info("Ebook progress unavailable: \(Self.caseName(error), privacy: .public)")
         }
-        serverSeed = knownServerProgress.flatMap(Self.baseline) ?? serverSeed
         let revision = syncStateRevision
         let local = await readLocal()
         // Every group stays merged, but when the merge brought an ebook location this reader can't
@@ -169,7 +174,7 @@ public final class EbookProgressModel {
         guard location != self.location || progress != self.progress else { return }
         self.location = location
         self.progress = progress
-        unsaved = (location, progress)
+        unsaved = (location, progress, now())
         debounceTask?.cancel()
         let (clock, debounce) = (clock, debounce)
         debounceTask = Task { [weak self] in
@@ -253,7 +258,7 @@ public final class EbookProgressModel {
         let edit = ProgressEdit(ebook: .init(location: pending.location.stored, progress: pending.progress))
         do {
             let row = try await store.recordEdit(
-                edit, for: key, serverProgress: serverSeed, localLibraryItemID: localLibraryItemID, now: now())
+                edit, for: key, serverProgress: serverSeed, localLibraryItemID: localLibraryItemID, now: pending.at)
             syncStateRevision += 1
             hasUnsyncedChanges = row.ebookDirty
             return true

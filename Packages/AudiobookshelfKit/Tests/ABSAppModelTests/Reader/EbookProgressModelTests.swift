@@ -300,6 +300,25 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(model.lastError == nil)
     }
 
+    /// A retried save keeps the turn's own date: page 4, turned before another device saved page
+    /// 8, loses the merge to it when the retry comes later, so it isn't PATCHed over page 8.
+    @Test func aRetriedSaveIsDatedWhenTheTurnWasRecorded() async throws {
+        let model = makeModel()
+        model.record(.page(4), progress: 0.3)
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await model.flush()
+        #expect(try await store.progress(for: key) == nil)
+
+        service.server.value = serverProgress("8", progress: 0.7, at: t0.addingTimeInterval(10))
+        time.value = t0.addingTimeInterval(20)
+        await model.flush()
+
+        #expect(service.writes.value.isEmpty)
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.ebookLocation == "8")
+        #expect(!row.ebookDirty)
+    }
+
     /// A new row is seeded from known server progress (ADR 0003), so only the ebook group is
     /// dirty and the audio fields aren't sent.
     @Test func seedsANewRowFromServerProgress() async throws {
@@ -558,6 +577,26 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
             await model.resume() == EbookResumePoint(location: .cfi("epubcfi(/6/4)"), progress: nil, source: .server))
     }
 
+    /// A server that answers with no progress (it was removed) drops the known progress: the
+    /// reader opens at the start, and a new row isn't seeded with the removed fields.
+    @Test func noServerProgressDropsTheKnownOne() async throws {
+        var known = serverProgress("6", at: t0)
+        known.currentTime = 300
+        known.duration = 600
+        let model = makeModel(serverProgress: known)
+
+        #expect(await model.resume() == .beginning)
+        #expect(model.location == nil)
+        // A failed PATCH leaves the row as saved, without a confirmation merge.
+        service.patchErrors.value = [.http(status: 503, message: nil)]
+        model.record(.page(3), progress: 0.2)
+        await model.flush()
+        let row = try #require(try await store.progress(for: key))
+        #expect(row.ebookLocation == "3")
+        #expect(row.currentTime == 0)
+        #expect(row.duration == 0)
+    }
+
     @Test func resumeDoesNotMoveAnAlreadyTurnedPage() async throws {
         service.server.value = serverProgress("8", at: t0)
         let model = makeModel()
@@ -629,6 +668,23 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
 
         let ebookElsewhere = serverProgress("7", at: t0.addingTimeInterval(60))
         #expect(EbookResumePoint.resolve(kind: .pdf, local: local, server: ebookElsewhere).source == .server)
+    }
+
+    /// An unsent edit this reader can't open (an EPUB CFI for a PDF) doesn't hide the server's
+    /// unchanged page; the EPUB reader still opens at its own unsent edit (control).
+    @Test func anUnopenableUnsentEditKeepsTheUnchangedServerLocation() async throws {
+        let local = try await store.recordEdit(
+            ProgressEdit(ebook: .init(location: "epubcfi(/6/8)", progress: 0.6)), for: key,
+            serverProgress: baseline("4", at: t0), now: t0.addingTimeInterval(10))
+        #expect(local.ebookDirty)
+        let server = serverProgress("4", at: t0)
+
+        #expect(
+            EbookResumePoint.resolve(kind: .pdf, local: local, server: server)
+                == EbookResumePoint(location: .page(4), progress: nil, source: .server))
+        #expect(
+            EbookResumePoint.resolve(kind: .epub, local: local, server: server)
+                == EbookResumePoint(location: .cfi("epubcfi(/6/8)"), progress: 0.6, source: .local))
     }
 
     /// A clean row is dated by the baseline's `lastUpdate` when it is later than the edit.
