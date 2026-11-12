@@ -602,11 +602,13 @@ static, unauthenticated remote images (none are planned).
   - `PipelineImageHostingTests` checks the first frame by hosting
     `PipelineImage`: in `NSHostingView` on macOS (`mise run test:kit`), and in
     a `UIHostingController` in a window on the iOS Simulator. CI runs only the
-    macOS check. Run the iOS one locally from `Packages/AudiobookshelfKit`:
+    macOS check. Run the iOS one locally from `Packages/AudiobookshelfKit`
+    (the manifest has two products, so the test scheme is
+    `AudiobookshelfKit-Package`):
 
     ```sh
     udid=$(xcrun simctl list devices available | grep -E '^ +iPhone Duo [(]' | tail -n 1 | grep -oE '[0-9A-F-]{36}')
-    xcodebuild test -scheme AudiobookshelfKit \
+    xcodebuild test -scheme AudiobookshelfKit-Package \
       -destination "platform=iOS Simulator,id=$udid" \
       -derivedDataPath ../../.build/xcode-ios \
       -only-testing:ABSUITests/PipelineImageHostingTests

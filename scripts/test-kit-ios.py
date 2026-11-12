@@ -165,6 +165,19 @@ def verify_results(summary, tests, udid):
         print(f"Verified Passed: ABSPlaybackTests/ShakeDetectorTests/{name}")
 
 
+def test_scheme(listing):
+    """The scheme with the package's test action, from `xcodebuild -list -json` in the package.
+
+    Xcode names it after the only product when the manifest has one; with more (the widget's
+    AudiobookshelfWidgetKit), the per-product schemes can't test and it is `<package>-Package`.
+    """
+    schemes = listing["workspace"]["schemes"]
+    for name in ("AudiobookshelfKit-Package", "AudiobookshelfKit"):
+        if name in schemes:
+            return name
+    raise ValueError(f"No AudiobookshelfKit test scheme in: {schemes}")
+
+
 def main():
     # Read the deployment minimum without invoking SwiftPM or resolving packages.
     minimums = re.findall(r"\.iOS\(\.v(\d+(?:_\d+)*)\)", (PACKAGE / "Package.swift").read_text())
@@ -175,6 +188,8 @@ def main():
     udid = select_destination(devices, runtimes, version(minimums[0].replace("_", ".")),
                               os.environ.get("IOS_SIMULATOR_ID"))
 
+    scheme = test_scheme(json.loads(command(["xcodebuild", "-list", "-json"], capture=True, timeout=300)))
+
     parent = ROOT / ".build/kit-ios"
     parent.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="run.", dir=parent))
@@ -183,7 +198,7 @@ def main():
     print(f"Retaining iOS package test evidence and owned derived data: {work}", flush=True)
     (work / "destination.json").write_text(json.dumps({"udid": udid, "developerDir": os.environ["DEVELOPER_DIR"]}))
     command([
-        "xcodebuild", "test", "-scheme", "AudiobookshelfKit",
+        "xcodebuild", "test", "-scheme", scheme,
         "-destination", f"platform=iOS Simulator,id={udid}", "-destination-timeout", "60",
         "-only-testing:ABSPlaybackTests/ShakeDetectorTests",
         "-derivedDataPath", str(work / "DerivedData"), "-resultBundlePath", str(result),
