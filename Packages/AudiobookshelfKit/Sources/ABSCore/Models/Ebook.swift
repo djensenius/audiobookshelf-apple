@@ -68,4 +68,19 @@ public struct EbookFile: Sendable, Hashable, Codable, Identifiable {
     }
 
     public var id: String { ino }
+
+    private enum CodingKeys: String, CodingKey {
+        case ino, metadata, ebookFormat, addedAt, updatedAt
+    }
+
+    /// Legacy servers can send `ino: null` (or none); that's `""` rather than failing the whole
+    /// item. Nothing addresses the primary ebook by it except a download, which refuses a blank one.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ino = try container.decodeIfPresent(String.self, forKey: .ino) ?? ""
+        metadata = try container.decodeIfPresent(FileMetadata.self, forKey: .metadata)
+        ebookFormat = try container.decodeIfPresent(EbookFormat.self, forKey: .ebookFormat)
+        addedAt = try container.decodeIfPresent(Int.self, forKey: .addedAt)
+        updatedAt = try container.decodeIfPresent(Int.self, forKey: .updatedAt)
+    }
 }

@@ -35,6 +35,7 @@ private let server = "https://abs.example/abs"
         let endpoint = EmailEndpoints.sendEbookToDevice(libraryItemID: "li1", deviceName: "Kindle")
         #expect(endpoint.method == .post)
         #expect(endpoint.requiresAuthentication)
+        #expect(endpoint.followsRedirects && endpoint.staysOnOrigin)
         #expect(try url(endpoint) == "\(server)/api/emails/send-ebook-to-device")
         let body = try json(endpoint)
         #expect(Set(body.keys) == ["libraryItemId", "deviceName"])
@@ -67,6 +68,27 @@ private let server = "https://abs.example/abs"
         let body = try json(request.httpBody)
         #expect(body["libraryItemId"] as? String == "li1")
         #expect(body["deviceName"] as? String == "Kobo Libra")
+    }
+
+    /// A 307 or 308 to another origin isn't followed, so the item and device aren't re-posted
+    /// there and its reply isn't taken for a send; one on the server's origin still is.
+    @Test(arguments: [307, 308]) func clientRefusesCrossOriginSendRedirect(status: Int) async throws {
+        let other = StubServer { _ in .text("OK", status: 200) }
+        let origin = StubServer { _ in .redirect(to: "https://\(other.host)/x", status: status) }
+        await #expect(throws: APIError.redirectRefused(status: status)) {
+            try await makeClient(origin).send(
+                EmailEndpoints.sendEbookToDevice(libraryItemID: "li1", deviceName: "Kindle"))
+        }
+        #expect(other.requests.isEmpty)
+
+        let sameOrigin = StubServer { request in
+            request.url?.path() == "/abs/api/emails/send-ebook-to-device"
+                ? .redirect(to: "https://\(request.url?.host() ?? "")/abs/moved", status: status)
+                : .text("OK", status: 200)
+        }
+        _ = try await makeClient(sameOrigin).send(
+            EmailEndpoints.sendEbookToDevice(libraryItemID: "li1", deviceName: "Kindle"))
+        #expect(try json(sameOrigin.requests(path: "/abs/moved").first?.httpBody)["deviceName"] as? String == "Kindle")
     }
 
     /// The mailer's error text (server `EmailManager.sendEBookToDevice`) reaches the caller.

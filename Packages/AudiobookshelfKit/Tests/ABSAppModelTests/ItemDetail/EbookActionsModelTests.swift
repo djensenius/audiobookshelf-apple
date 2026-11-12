@@ -147,6 +147,33 @@ struct EbookActionsModelTests {
         #expect(changes.map(\.makesPrimary) == [false, true])
     }
 
+    /// A legacy server's item with `media.ebookFile.ino: null` decodes, and its ebooks still get
+    /// their status changes (from each file's `isSupplementary`) and send to device.
+    @Test func legacyNullEbookInodeDecodesAndReachesStatusActions() async throws {
+        let json = """
+            {"id":"li1","libraryId":"lib","mediaType":"book","media":{"id":"b1","libraryItemId":"li1",\
+            "metadata":{"title":"Book"},"ebookFile":{"ino":null,"metadata":{"filename":"a.epub","ext":".epub",\
+            "path":"/b/a.epub"},"ebookFormat":"epub"}},"libraryFiles":[\
+            {"ino":"a","metadata":{"filename":"a.epub","ext":".epub","path":"/b/a.epub"},"isSupplementary":null,\
+            "fileType":"ebook"},\
+            {"ino":"b","metadata":{"filename":"b.epub","ext":".epub","path":"/b/b.epub"},"isSupplementary":true,\
+            "fileType":"ebook"}]}
+            """
+        let legacy = try JSONDecoder().decode(LibraryItem.self, from: Data(json.utf8))
+        #expect(legacy.book?.ebookFile?.ino == "")
+        #expect(legacy.book?.ebookFile?.ebookFormat == .epub)
+        #expect(EbookActionsModel.devices(authorization: auth(), item: legacy, isGone: false).map(\.name) == ["Kindle"])
+
+        let changes = EbookActionsModel.statusChanges(authorization: auth(update: true), item: legacy, isGone: false)
+        #expect(changes.map(\.id) == ["a", "b"])
+        #expect(changes.map(\.makesPrimary) == [false, true])
+        let service = FakeEbookActionsService()
+        let model = EbookActionsModel(itemID: "li1", service: service)
+        let offered = model.offeredStatusChanges(authorization: auth(update: true), item: legacy, isGone: false)
+        #expect(await model.apply(changes[1], offered: offered) { true } == .statusChanged(changes[1]))
+        #expect(service.calls == ["toggle li1 b"])
+    }
+
     @Test func filesWithoutInodeOrNotEbooksAreSkipped() {
         let files = [
             ebook("", supplementary: true), ebook("  ", supplementary: true), ebook("a", supplementary: false),
