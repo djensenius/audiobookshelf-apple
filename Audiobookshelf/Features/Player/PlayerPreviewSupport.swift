@@ -68,6 +68,10 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
         await seek(to: currentTime + offset)
     }
 
+    func jumpOutcome(by offset: Double) async -> JumpOutcome {
+        await jump(by: offset).map(JumpOutcome.landed) ?? .deferred
+    }
+
     func setRate(_ rate: Double) {
         self.rate = rate
     }

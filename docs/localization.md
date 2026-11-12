@@ -63,6 +63,19 @@ locale.
 The importer fails if a native key also exists in `strings/`; pick another key. Native
 keys nobody has translated get the English fill like any other key.
 
+### App Intents
+
+App Intents titles, parameters and error dialogs resolve their `LocalizedStringResource` in the
+bundle that declares the intent (the app, or the widget extension for the shared intents), not
+in ABSUI's package bundle, so `L10n` can't serve them. Their keys start with `Intent` and live in
+`Localization/intents/en-us.json` (translations in `<file>.json` beside it); `mise run strings`
+writes them to `AudiobookshelfShared/Intents/AppIntents.xcstrings`, which both targets compile.
+Use them as `LocalizedStringResource("IntentPauseTitle", table: "AppIntents")`.
+
+App Shortcut phrases are the exception: Apple requires them to be English literals in the
+`AppShortcutsProvider`, with translations in an `AppShortcuts.xcstrings` catalog keyed by the
+English phrase. None are translated yet.
+
 Translations arrive through the upstream sync ([upstream-sync.md](upstream-sync.md)), not
 through Weblate commits to this repository; rerun `mise run strings` after syncing
 `strings/`. If upstream adds a locale, the importer either maps it or fails with a message
