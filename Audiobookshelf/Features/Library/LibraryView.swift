@@ -12,6 +12,8 @@ struct LibraryView: View {
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?
     @State private var host: LibraryModelHost?
+    /// The filter sheet's choices, for the same key as `host`.
+    @State private var filterHost: BrowseModelHost<LibraryFilterModel>?
     /// The screen's width once measured; the grid's columns decide the paging.
     @State private var width: CGFloat?
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -27,7 +29,7 @@ struct LibraryView: View {
         }
         Group {
             if let host, let model {
-                LibraryContent(model: model)
+                LibraryContent(model: model, filterModel: filterHost?.model(for: key))
                     // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
                     .environment(\.itemProgressReader, host.progressReader)
             } else {
@@ -49,6 +51,14 @@ struct LibraryView: View {
         // The first page waits for the width, so it is sized for the grid's columns.
         .task(id: LibraryTaskID(key: key, mediaType: mediaType, isMeasured: width != nil)) {
             host = LibraryPresentation.updated(host, for: key, mediaType: mediaType, store: store)
+            filterHost = BrowseModelHost.updated(filterHost, for: key, store: store) { key, services, _ in
+                LibraryFilterModel(client: services, connectionKey: key.connection)
+            }
+            if let filterModel = filterHost?.model, let model = host?.model,
+                LibraryPresentation.loadsFilterChoicesEarly(for: model.preferences.filter)
+            {
+                filterModel.load(libraryID: model.libraryID)
+            }
             guard let model = host?.model, width != nil else { return }
             LibraryPresentation.paging(
                 width: width, dynamicTypeSize: dynamicTypeSize, viewMode: model.preferences.viewMode
@@ -67,9 +77,16 @@ private struct LibraryTaskID: Hashable {
     let isMeasured: Bool
 }
 
-/// The items of one model as a grid or list, with the count in the title area; previews give it a fixture service.
+/// The items of one model as a grid or list, with the count in the title area and the sort, filter and view
+/// controls in the toolbar; previews give it a fixture service.
 struct LibraryContent: View {
     let model: LibraryItemsModel
+    /// The filter sheet's choices; without it there is no filter button.
+    var filterModel: LibraryFilterModel?
+    @State private var showsFilter = false
+    @Environment(Router.self) private var router: Router?
+    /// Between `onAppear` and `onDisappear`, which a covered stack screen or hidden tab isn't (as in `RefreshCommand`).
+    @State private var isVisible = false
     /// The last user refresh failed and nothing loaded since.
     @State private var refreshFailed = false
     /// Successful user refreshes; cards report appearing again after each (as in ``BrowseItemGrid``).
@@ -105,6 +122,25 @@ struct LibraryContent: View {
         .navigationSubtitle(
             Text(verbatim: LibraryPresentation.countText(total: model.total, mediaType: model.mediaType) ?? "")
         )
+        .onAppear { isVisible = true }
+        .onDisappear { isVisible = false }
+        .toolbar {
+            LibraryToolbar(
+                model: model, filterModel: filterModel, showsFilter: $showsFilter,
+                isFrontmost: RefreshCommandPlacement.root(.library).isFrontmost(in: router, isVisible: isVisible))
+        }
+        .sheet(isPresented: $showsFilter) {
+            if let filterModel {
+                LibraryFilterSheet(
+                    libraryID: model.libraryID, mediaType: model.mediaType, model: filterModel,
+                    selection: model.preferences.filter
+                ) { filter in model.update { $0.filter = filter } }
+            }
+        }
+        // An account switch takes the filter model away: the sheet would show another account's choices.
+        .onChange(of: filterModel == nil) { _, isGone in
+            if isGone { showsFilter = false }
+        }
         .refreshable { await refresh() }
         .refreshCommand(.root(.library), isDisabled: model.isLoading) { Task { await refresh() } }
         .onChange(of: model.error == nil) { _, cleared in
@@ -113,6 +149,8 @@ struct LibraryContent: View {
     }
 
     private func refresh() async {
+        // New genres, authors and series appear in the filter sheet too, once it has loaded them.
+        if let filterModel, filterModel.choices != nil { filterModel.reload() }
         refreshFailed = await BrowsePresentation.refresh(model.list)
         if !refreshFailed { refreshes += 1 }
     }
@@ -130,7 +168,12 @@ struct LibraryContent: View {
         var fails = false
 
         func libraries() async throws -> [Library] { [] }
-        func library(id: String) async throws -> LibraryWithFilterData { throw Failure() }
+        func library(id: String) async throws -> LibraryWithFilterData {
+            if fails { throw Failure() }
+            return LibraryWithFilterData(
+                library: Library(id: id, name: "Books", mediaType: .book),
+                filterData: LibraryFilterData(genres: ["Adventure", "Romance"], tags: ["Classics"]))
+        }
         func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
 
         func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<ABSCore.LibraryItem> {
@@ -138,6 +181,11 @@ struct LibraryContent: View {
             let books = SampleLibrary.books
             return PagedResults(results: books, total: books.count, limit: query.limit ?? 0, page: query.page ?? 0)
         }
+    }
+
+    @MainActor
+    private func previewFilterModel(fails: Bool = false) -> LibraryFilterModel {
+        LibraryFilterModel(client: LibraryPreviewService(fails: fails))
     }
 
     @MainActor
@@ -149,8 +197,9 @@ struct LibraryContent: View {
 
     #Preview("Grid") {
         @Previewable @State var model = previewModel()
+        @Previewable @State var filterModel = previewFilterModel()
         NavigationStack {
-            LibraryContent(model: model)
+            LibraryContent(model: model, filterModel: filterModel)
                 .navigationTitle(Text(verbatim: L10n.string(AppTab.library.titleKey)))
         }
         .task { await model.load()?.value }
@@ -160,8 +209,9 @@ struct LibraryContent: View {
 
     #Preview("List, largest text, dark") {
         @Previewable @State var model = previewModel(.list)
+        @Previewable @State var filterModel = previewFilterModel()
         NavigationStack {
-            LibraryContent(model: model)
+            LibraryContent(model: model, filterModel: filterModel)
                 .navigationTitle(Text(verbatim: L10n.string(AppTab.library.titleKey)))
         }
         .task { await model.load()?.value }
@@ -173,8 +223,9 @@ struct LibraryContent: View {
 
     #Preview("Failed") {
         @Previewable @State var model = previewModel(fails: true)
+        @Previewable @State var filterModel = previewFilterModel(fails: true)
         NavigationStack {
-            LibraryContent(model: model)
+            LibraryContent(model: model, filterModel: filterModel)
                 .navigationTitle(Text(verbatim: L10n.string(AppTab.library.titleKey)))
         }
         .task { await model.load()?.value }

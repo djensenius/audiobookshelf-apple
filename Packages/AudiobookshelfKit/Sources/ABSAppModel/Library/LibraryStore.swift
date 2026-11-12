@@ -306,6 +306,16 @@ public enum LibraryStoreError: Error, Equatable, Sendable {
     case serviceUnavailable(String)
 }
 
+/// The server address the client sends requests to, for links to the web client (Share);
+/// `APIClient` conforms.
+public protocol ServerURLProviding: Sendable {
+    func serverURL() async -> URL
+}
+
+extension APIClient: ServerURLProviding {
+    public func serverURL() -> URL { configuration.baseURL }
+}
+
 /// The services of the account a ``LibraryStore`` serves, for feature models; create it with
 /// ``LibraryStore/makeServices()``.
 ///
@@ -416,5 +426,12 @@ public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchSer
     }
     public func playlistDetail(id: String) async throws -> Playlist {
         try await send((any GroupsService).self) { try await $0.playlistDetail(id: id) }
+    }
+
+    // MARK: Server address (forwarded to the client's ServerURLProviding)
+
+    /// The current client's server address, which follows a reconnect with a new address.
+    public func serverURL() async throws -> URL {
+        try await send((any ServerURLProviding).self) { await $0.serverURL() }
     }
 }

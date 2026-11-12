@@ -127,8 +127,25 @@ public final class PlaybackCoordinator {
     @ObservationIgnored public var quiesceProgressTransport: (@MainActor () -> Void)?
     /// Called once before playback starts or resumes, before the resume seek; returns extra
     /// seconds to rewind (the sleep timer's `playbackWillStart`, P2-08). The extra rewind is
-    /// ignored for an explicit start time and for a restart from the end.
-    @ObservationIgnored public var willResume: (@MainActor () -> TimeInterval)?
+    /// ignored for an explicit start time and for a restart from the end. Assigning it directly
+    /// drops the owner recorded by ``setWillResume(_:owner:)``.
+    @ObservationIgnored public var willResume: (@MainActor () -> TimeInterval)? {
+        didSet { willResumeOwner = nil }
+    }
+    @ObservationIgnored private weak var willResumeOwner: AnyObject?
+
+    /// Installs `hook` as ``willResume`` on behalf of `owner`; ``clearWillResume(ownedBy:)``
+    /// removes it only while `owner` still holds it. `owner` is held weakly, so an object
+    /// clearing from its own `deinit` must pass a token it keeps, not itself.
+    public func setWillResume(_ hook: @escaping @MainActor () -> TimeInterval, owner: AnyObject) {
+        willResume = hook
+        willResumeOwner = owner
+    }
+
+    public func clearWillResume(ownedBy owner: AnyObject) {
+        if willResumeOwner === owner { willResume = nil }
+    }
+
     /// Picks what plays when an item ends (``PlaybackQueueAdvancer/attach(to:)``); without one,
     /// the item stays loaded at its end.
     @ObservationIgnored weak var nextItemProvider: (any NextItemProvider)?

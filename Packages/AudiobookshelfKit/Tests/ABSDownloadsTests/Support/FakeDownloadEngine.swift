@@ -10,7 +10,9 @@ import Synchronization
 /// queues the record in the store, and nothing ever downloads. A complete record marked
 /// ``settle(_:)`` is being finalised, which a stop leaves alone: ``finishSettling()`` then
 /// finalises it late, as the engine does, from the record as it was read then, even if it was
-/// deleted since: as a local item, deleting it by ID.
+/// deleted since: as a local item, deleting it by ID. Transfers that survived a relaunch
+/// (``survive(_:)``) are adopted when the session is created, as by the engine's activation,
+/// unless their record is paused; a pause stops an adopted one.
 actor FakeDownloadEngine: DownloadEngineControlling {
     struct ResumeFailure: Error {}
 
@@ -47,6 +49,14 @@ actor FakeDownloadEngine: DownloadEngineControlling {
     /// Whether ``resume(recordID:)`` deletes the record first, as a finalise running meanwhile does.
     private var finaliseBeforeResume = false
     private var failingResumes = 0
+    private var hasSession = false
+    private var sessionAvailable = true
+    /// Records whose surviving transfer isn't adopted yet.
+    private var survivors: Set<UUID> = []
+    /// Records whose surviving transfer was adopted and still runs, with the network access it
+    /// began under.
+    private(set) var runningSurvivors: Set<UUID> = []
+    private(set) var attaches = 0
 
     init(store: DownloadStore, localItems: LocalItemStore) {
         self.store = store
@@ -101,8 +111,35 @@ actor FakeDownloadEngine: DownloadEngineControlling {
         finaliseBeforeResume = true
     }
 
+    /// A transfer of `recordID` survived a relaunch; the session isn't created yet.
+    func survive(_ recordID: UUID) {
+        survivors.insert(recordID)
+    }
+
+    /// Makes every session creation fail, as when another process holds it.
+    func makeSessionUnavailable() {
+        sessionAvailable = false
+    }
+
+    func attachSurvivingTransfers() async -> Bool {
+        attaches += 1
+        return await ensureSession()
+    }
+
+    private func ensureSession() async -> Bool {
+        guard sessionAvailable else { return false }
+        guard !hasSession else { return true }
+        hasSession = true
+        for recordID in survivors where (try? await store.record(id: recordID))?.state != .paused {
+            runningSurvivors.insert(recordID)
+        }
+        survivors = []
+        return true
+    }
+
     func pause(recordID: UUID) async throws -> Bool {
         calls.append(.pause(recordID))
+        runningSurvivors.remove(recordID)
         return try await store.setState(.paused, forRecord: recordID)
     }
 
@@ -114,7 +151,10 @@ actor FakeDownloadEngine: DownloadEngineControlling {
         }
         resumed.append(recordID)
         if finaliseBeforeResume { try await store.deleteRecord(recordID) }
-        return try await store.setState(.queued, forRecord: recordID)
+        let queued = try await store.setState(.queued, forRecord: recordID)
+        // Like the engine's start, which creates the session first.
+        _ = await ensureSession()
+        return queued
     }
 }
 
