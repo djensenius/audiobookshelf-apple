@@ -21,6 +21,10 @@ let package = Package(
             ]
         )
     ],
+    dependencies: [
+        // CBZ comic archives (ADR 0008), the only approved third-party package. Pinned exactly.
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", exact: "0.9.20")
+    ],
     targets: [
         // Models and shared utilities.
         .target(name: "ABSCore"),
@@ -58,9 +62,16 @@ let package = Package(
         // bridge. Sits above every module except ABSUI and never imports ABSUI.
         .target(
             name: "ABSAppModel",
-            dependencies: ["ABSCore", "ABSAPI", "ABSRealtime", "ABSData", "ABSPlayback", "ABSDownloads"]
+            dependencies: [
+                "ABSCore", "ABSAPI", "ABSRealtime", "ABSData", "ABSPlayback", "ABSDownloads",
+                .product(name: "ZIPFoundation", package: "ZIPFoundation"),
+            ]
         ),
-        .testTarget(name: "ABSAppModelTests", dependencies: ["ABSAppModel"]),
+        // ZIPFoundation builds fixture comic archives at test time.
+        .testTarget(
+            name: "ABSAppModelTests",
+            dependencies: ["ABSAppModel", .product(name: "ZIPFoundation", package: "ZIPFoundation")]
+        ),
     ],
     swiftLanguageModes: [.v6]
 )
