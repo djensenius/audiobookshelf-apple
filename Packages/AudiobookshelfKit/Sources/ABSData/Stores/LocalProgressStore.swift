@@ -169,6 +169,14 @@ public enum SessionUploadResult: Sendable, Equatable {
         Set(ebookFetchRequests.values.map(\.key))
     }
 
+    /// A fetch captured at `capturedAt` found no progress on the server for `key`. Like a fetch
+    /// that found some, it answers a ``needsEbookFetch`` request made before it was issued.
+    public func answerEbookFetch(for key: MediaKey, capturedAt: ProgressGeneration) {
+        if let request = ebookFetchRequests[key.rawValue], capturedAt.value >= request.generation {
+            ebookFetchRequests[key.rawValue] = nil
+        }
+    }
+
     /// Captures the current generation; pass it to ``applyServerProgress(_:capturedAt:source:)``.
     public func captureGeneration() -> ProgressGeneration {
         ProgressGeneration(value: generation)
@@ -462,11 +470,7 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         // A fetch issued after a request answers it, whatever happens to its values.
         if source == .fetch {
-            for key in updates.keys {
-                if let request = ebookFetchRequests[key.rawValue], capturedAt.value >= request.generation {
-                    ebookFetchRequests[key.rawValue] = nil
-                }
-            }
+            for key in updates.keys { answerEbookFetch(for: key, capturedAt: capturedAt) }
         }
         if !ebookFetches.isEmpty {
             // Fetches already issued may predate the socket's value: only later ones answer it.

@@ -70,7 +70,10 @@ final class FakeProgressServer: ProgressSyncService, EbookProgressService {
         for continuation in waiting { continuation.resume() }
     }
 
+    let fetches = Locked(0)
+
     func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
+        fetches.value += 1
         if fetchFails.value { throw Failure() }
         return server.value
     }
@@ -477,6 +480,24 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(try await row().ebookLocation == "9")
         #expect(await store.needsEbookFetch.isEmpty)
         #expect(service.writes.value.isEmpty)
+    }
+
+    /// A fetch issued after the request that finds no progress (404) answers it too, so later
+    /// drains don't fetch again; one issued before the request doesn't.
+    @Test func noProgressOnTheServerAnswersAnEbookFetchRequest() async throws {
+        try await cleanRow("2")
+        let early = await store.captureGeneration()
+        try await apply(serverProgress("9", progress: 0.8, at: t0.addingTimeInterval(20)), source: .socket)
+        await store.answerEbookFetch(for: key, capturedAt: early)
+        #expect(await store.needsEbookFetch == [key])
+
+        service.server.value = nil
+        await syncer.drainPendingProgress()
+        #expect(await store.needsEbookFetch.isEmpty)
+        #expect(try await row().ebookLocation == "2")
+        let fetches = service.fetches.value
+        await syncer.drainPendingProgress()
+        #expect(service.fetches.value == fetches)
     }
 
     // MARK: - Resume

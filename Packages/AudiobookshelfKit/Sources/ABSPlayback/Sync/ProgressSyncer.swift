@@ -1004,7 +1004,9 @@ public final class ProgressSyncer {
         guard let progress else {
             // Both pinned servers return 404 for absent user progress; the canonical API maps
             // only that error to nil. Permit first-progress creation without inventing a dated
-            // zero baseline or releasing post-ACK socket suppression.
+            // zero baseline or releasing post-ACK socket suppression. It does answer an ebook
+            // fetch request: there's no other position to fetch.
+            await store.answerEbookFetch(for: key, capturedAt: capturedAt)
             return !(await store.hasChanged(key, since: capturedAt))
         }
         guard progress.libraryItemId == key.libraryItemId,

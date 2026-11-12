@@ -403,7 +403,8 @@ Model notes:
     Socket events don't merge ebook values: when one differs from the row it only
     records the row in `LocalProgressStore.needsEbookFetch` (with a new
     generation, so only a fetch issued afterwards clears it), and the syncer's
-    next drain fetches `/api/me/progress/:id` for it. Its audio and finished
+    next drain fetches `/api/me/progress/:id` for it (a 404 answers the request
+    too, `answerEbookFetch`). Its audio and finished
     values merge as usual. The reader resumes from the row (falling back to the
     server's value only when there is no row), and a clean row is refreshed from
     the server first. The trade-off, as in the legacy reader (`EpubReader.vue`
