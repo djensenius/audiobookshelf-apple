@@ -129,6 +129,8 @@
     struct PlayerDetailsPane: View {
         let model: PlayerViewModel
         @Binding var tab: PlayerDetailsTab
+        /// The bookmark form's target, which a host outside the arrangement presents.
+        @Binding var bookmarkEditor: BookmarkEditorTarget?
         @Environment(\.bookmarkStore) private var store
 
         var body: some View {
@@ -158,7 +160,7 @@
                         }
                     }
                 case .bookmarks:
-                    BookmarksPane(model: model, onSelect: {})
+                    BookmarksPane(model: model, editor: $bookmarkEditor, onSelect: {})
                 }
             }
             .frame(maxHeight: .infinity, alignment: .top)
@@ -234,6 +236,7 @@
 
     #Preview("Details pane") {
         @Previewable @State var tab = PlayerDetailsTab.chapters
-        PlayerDetailsPane(model: .preview(at: 9_500), tab: $tab)
+        @Previewable @State var editor: BookmarkEditorTarget?
+        PlayerDetailsPane(model: .preview(at: 9_500), tab: $tab, bookmarkEditor: $editor)
     }
 #endif

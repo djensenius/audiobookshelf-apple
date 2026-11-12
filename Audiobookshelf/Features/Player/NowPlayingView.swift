@@ -28,6 +28,9 @@ struct NowPlayingView: View {
     @State private var detailsTab = PlayerDetailsTab.chapters
     /// Whether the split arrangement is side by side, showing the details pane.
     @State private var isSplit = false
+    /// The details pane's bookmark form, presented from here so an edit survives the pane going
+    /// away when the arrangement changes.
+    @State private var bookmarkEditor: BookmarkEditorTarget?
     private var libraries = LibraryCoverSettings()
 
     init(model: PlayerViewModel, forcedLayout: PlayerLayout? = nil) {
@@ -54,6 +57,7 @@ struct NowPlayingView: View {
                         }
                     }
             }
+            .bookmarkEditor(model: model, target: $bookmarkEditor)
         }
         .sheet(item: $sheet) { sheet in
             PlayerSheetContent(sheet: sheet, model: model) { self.sheet = nil }
@@ -76,7 +80,7 @@ struct NowPlayingView: View {
                         NowPlayingTransport(model: model)
                         secondaryControls
                     } details: {
-                        PlayerDetailsPane(model: model, tab: $detailsTab)
+                        PlayerDetailsPane(model: model, tab: $detailsTab, bookmarkEditor: $bookmarkEditor)
                     } backdrop: {
                         PlayerBackdrop(model: model, shape: model.coverShape(in: libraries))
                     }
