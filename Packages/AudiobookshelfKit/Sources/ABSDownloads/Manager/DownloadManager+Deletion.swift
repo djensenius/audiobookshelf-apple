@@ -84,10 +84,10 @@ extension DownloadManager {
 
     /// The rest of the deletion of `item`, deleted from the store by a caller that holds it:
     /// its progress link, its cover refetch, cancelled (``cancelRefetch(of:)``), its cover
-    /// hand-off, then its files and `extra` (files already deleted from it). Its folder goes
-    /// with everything in it only when it is the folder ``DownloadLayout`` gives the item; any
-    /// other stored directory (a shallower one would hold other items) loses only the item's
-    /// files.
+    /// hand-off (its cover, or else the refetch's), then its files and `extra` (files already
+    /// deleted from it). Its folder goes with everything in it only when it is the folder
+    /// ``DownloadLayout`` gives the item; any other stored directory (a shallower one would
+    /// hold other items) loses only the item's files.
     private func finishRemoving(_ item: LocalLibraryItemDTO, alsoRemoving extra: [String]) async {
         await detachProgress("Couldn't detach progress from a deleted download") {
             try await $0.detach(itemID: item.id)
@@ -98,7 +98,7 @@ extension DownloadManager {
                     itemID: item.libraryItemId, updatedAt: Self.coverTimestamp(item.coverUpdatedAt)),
                 relativePath: path, isStored: true, updatedAt: item.coverUpdatedAt)
         }
-        var refetched: [String] = []
+        var refetched: (paths: [String], cover: CoverSource?) = ([], nil)
         do throws(DownloadManagerError) {
             refetched = try await cancelRefetch(of: Self.key(of: item))
         } catch {
@@ -106,12 +106,14 @@ extension DownloadManager {
             logError("Couldn't cancel a deleted item's cover download", error)
         }
         let paths =
-            extra + item.files.map(\.relativePath) + (item.coverRelativePath.map { [$0] } ?? []) + refetched
+            extra + item.files.map(\.relativePath) + (item.coverRelativePath.map { [$0] } ?? []) + refetched.paths
         let layoutFolder = try? DownloadLayout(
             connectionID: item.serverConnectionID, libraryItemID: item.libraryItemId, locations: locations
         ).folder
         let folder = item.relativeDirectory == layoutFolder ? item.relativeDirectory : nil
-        await cleanUp(after: Self.key(of: item), removing: paths, folder: folder, cover: cover)
+        // The refetch's cover goes on when the item had none (the reason for a refetch): an
+        // episode queued while it ran, and the local item that episode makes, get it.
+        await cleanUp(after: Self.key(of: item), removing: paths, folder: folder, cover: cover ?? refetched.cover)
     }
 
     /// The server's `updatedAt`, in milliseconds, that a cover time (a snapshot's

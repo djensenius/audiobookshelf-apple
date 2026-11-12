@@ -163,19 +163,28 @@ extension DownloadManager {
     /// keeping resume data, deleted, its transfer markers cleared), so the cover isn't fetched
     /// for an item that is gone. One that has completed meanwhile is left to the engine, which
     /// discards it (``DownloadUpdate/recordDiscarded(_:)``).
-    /// - Returns: the paths of the cancelled record's files, for the caller to remove.
-    func cancelRefetch(of itemKey: MediaKey) async throws(DownloadManagerError) -> [String] {
+    /// - Returns: the paths of the cancelled record's files, for the caller to remove, and its
+    ///   cover, for the caller to hand on (``handOffCover(_:of:)``): an episode queued while it
+    ///   ran was planned without a cover part, as it shared this one.
+    func cancelRefetch(
+        of itemKey: MediaKey
+    ) async throws(DownloadManagerError) -> (paths: [String], cover: CoverSource?) {
         guard let record = try await read({ try await self.store.record(key: itemKey) }), record.isCoverOnly,
             try await read({ try await self.store.setState(.paused, forRecord: record.id) })
-        else { return [] }
+        else { return ([], nil) }
         guard let deleted = try await deleteRefetch(record) else {
             _ = try? await read {
                 try await self.store.setState(record.state, forRecord: record.id, expecting: [.paused])
             }
             await refresh(record.id, announce: true)
-            return []
+            return ([], nil)
         }
-        return deleted.parts.map(\.destinationRelativePath)
+        let cover = deleted.parts.first { $0.kind == .cover }.map {
+            CoverSource(
+                serverPath: $0.serverPath, relativePath: $0.destinationRelativePath,
+                isStored: $0.state == .completed, updatedAt: deleted.media.coverUpdatedAt)
+        }
+        return (deleted.parts.map(\.destinationRelativePath), cover)
     }
 
     /// Stops and deletes the unfinished cover-only `record`, then reports it removed.

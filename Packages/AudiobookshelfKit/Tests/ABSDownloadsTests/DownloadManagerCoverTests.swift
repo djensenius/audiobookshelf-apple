@@ -344,6 +344,29 @@ import Testing
         #expect(await events.next { $0 == .recordRemoved(recordID: refetch.id) } != nil)
     }
 
+    /// An episode queued while the cover is fetched again shares that cover, so has no cover
+    /// part: deleting the local item cancels the refetch and hands its cover to the episode,
+    /// which fetches it.
+    @Test func deletingTheItemHandsTheRefetchCoverToAQueuedEpisode() async throws {
+        let (fixture, manager, events) = try await Self.started()
+        let (first, local) = try await Self.secondEpisodeCompleted(fixture, manager, events)
+        #expect(try await manager.cancel(recordID: first.id))
+        let refetch = try #require(try await fixture.store.record(key: fixture.key(Self.item)))
+        let cover = try #require(refetch.parts.first)
+        let queued = try await Self.enqueue("ep_3", fixture, manager)
+        try #require(!queued.parts.contains { $0.kind == .cover })
+
+        #expect(try await manager.deleteLocalItem(id: local.id))
+
+        #expect(try await fixture.store.record(id: refetch.id) == nil)
+        let handed = try #require(try await fixture.store.record(id: queued.id)?.parts.last)
+        #expect(handed.kind == .cover)
+        #expect(handed.state == .queued)
+        #expect(handed.serverPath == cover.serverPath)
+        #expect(handed.destinationRelativePath == cover.destinationRelativePath)
+        #expect(await fixture.engine.started.last == [handed.id])
+    }
+
     /// The local item was deleted just after its cover was fetched again, so the deletion
     /// couldn't cancel the refetch: once the engine discards it, its cover goes to an episode
     /// queued without one, completed, or else is removed.
