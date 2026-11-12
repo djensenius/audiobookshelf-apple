@@ -915,6 +915,7 @@ public actor DownloadEngine {
             logError("Couldn't mark a download's start; a file it moves is only kept once recorded", error)
         }
         let request: URLRequest
+        var unchecked: URLRequest?
         do {
             let credentials = try await credentials.credentials(
                 for: context.connectionID, replacing: rejectedAccessToken)
@@ -922,7 +923,13 @@ public actor DownloadEngine {
                 path: context.serverPath, configuration: credentials.configuration,
                 accessToken: credentials.accessToken)
             fresh.apply(await networkAccess())
+            unchecked = fresh
             request = try await preflight.check(fresh)
+        } catch DownloadRedirectPreflightError.noNetwork(let code) {
+            if launching[partID] == token, let unchecked {
+                await waitForNetwork(partID, launch: token, request: unchecked, code: code)
+            }
+            return
         } catch DownloadRedirectPreflightError.offOrigin {
             if launching[partID] == token {
                 await failPermanently(
@@ -1438,6 +1445,34 @@ public actor DownloadEngine {
                 return
             }
             await self?.retryNow(partID)
+        }
+    }
+
+    /// Queues the part until a network its request may use is available, then launches it
+    /// again. Unlike ``retry(_:code:message:transferFailed:activationOwnsSession:)`` this uses
+    /// none of the part's retries: being offline, or on a network the download settings forbid,
+    /// isn't the server failing. When the wait ends at once because a network was there after
+    /// all (a server that drops the connection, say), the failure is retried and counted. A stop
+    /// cancels the wait like a retry's.
+    private func waitForNetwork(_ partID: UUID, launch token: UUID, request: URLRequest, code: URLError.Code) async {
+        await persistIdle(partID) { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
+        // Stopped meanwhile. The wait begins after this launch returns, so it can launch again.
+        guard launching[partID] == token else { return }
+        let preflight = preflight
+        retries[partID] = Task { [weak self] in
+            let waited = await preflight.waitForNetwork(request)
+            await self?.networkWaitEnded(partID, waited: waited, code: code)
+        }
+    }
+
+    private func networkWaitEnded(_ partID: UUID, waited: Bool, code: URLError.Code) async {
+        guard !Task.isCancelled, retries.removeValue(forKey: partID) != nil else { return }
+        if waited {
+            await launch(partID)
+        } else {
+            await retry(
+                partID, code: .transfer, message: "Couldn't reach the server: \(URLError(code).localizedDescription)",
+                transferFailed: false)
         }
     }
 

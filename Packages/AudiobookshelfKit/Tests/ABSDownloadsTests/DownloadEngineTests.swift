@@ -239,6 +239,49 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
+    /// A preflight with no allowed network (offline, or cellular under a Wi-Fi-only setting)
+    /// waits for one without using a retry, however often it happens.
+    @Test func anOfflinePreflightWaitsForANetworkWithoutUsingRetries() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let offline = RetryPolicy.default.maxRetries + 2
+        let preflight = StubPreflight { request, attempt throws(DownloadRedirectPreflightError) in
+            if attempt < offline { throw .noNetwork(.notConnectedToInternet) }
+            return request
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine(preflight: preflight)
+
+        await engine.start(partIDs: [partID])
+
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(preflight.requests.count == offline + 1)
+        #expect(preflight.networkWaits == offline)
+        #expect(harness.requests.count == 1)
+    }
+
+    /// A network wait that ends at once found a network after all (a server dropping the
+    /// connection, say): that counts as a failure, so the part fails for good once the retries
+    /// are used up rather than relaunching forever.
+    @Test(.timeLimit(.minutes(1))) func aNetworkWaitThatDidNotWaitUsesARetry() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let preflight = StubPreflight(
+            answer: { _, _ throws(DownloadRedirectPreflightError) in throw .noNetwork(.networkConnectionLost) },
+            networkWait: { false })
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine(preflight: preflight)
+
+        await engine.start(partIDs: [partID])
+
+        guard case .partFailed(partID, record.id, .transfer, _, false) = await engine.nextPermanentFailure() else {
+            Issue.record("Expected the part to fail for good")
+            return
+        }
+        #expect(preflight.networkWaits == RetryPolicy.default.maxRetries + 1)
+        #expect(harness.requests.isEmpty)
+    }
+
     @Test(arguments: [408, 429, 500, 503])
     func retriesTransientStatus(status: Int) async throws {
         let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(status) : .status(200) }

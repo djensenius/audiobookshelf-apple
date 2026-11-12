@@ -262,14 +262,24 @@ iOS.
 - Retries already waiting in the process when the app goes to the background stay in the
   process; if iOS suspends it, they run when the app comes back.
 - Before each background task, the engine checks the download's redirects in the
-  foreground (#145): a `HEAD` request, or a `GET` of `bytes=0-0` when the server answers
-  405 or 501, on an ephemeral session. A hop that stays on the server's origin is
-  followed, with the bearer and custom headers, and the task starts at the final URL. A
-  hop to another origin (another host or port, or `https` to `http`) is refused before
-  it is sent, and the part fails for good with the `offOrigin` code without a transfer,
-  so custom headers (for example `CF-Access-Client-Id` and `CF-Access-Client-Secret`)
-  never reach the other host. If the check can't reach the server, the part is retried.
-- A redirect that appears only between the check and the transfer is still followed by
+  foreground (#145): it sends the transfer's own `GET`, with the same headers, on an
+  ephemeral session and cancels it once the response headers arrive, so a server that
+  redirects only some methods or ranges is checked as the transfer will meet it. A
+  background session follows redirects without asking its delegate (`NSURLSession.h`:
+  "For tasks in background sessions, redirections will always be followed and this
+  method will not be called"), so the check is the only place a hop can be refused. A
+  hop that stays on the server's origin is followed, with the bearer and custom
+  headers, and the task starts at the final URL. A hop to another origin (another host
+  or port, or `https` to `http`) is refused before it is sent, and the part fails for
+  good with the `offOrigin` code without a transfer, so custom headers (for example
+  `CF-Access-Client-Id` and `CF-Access-Client-Secret`) never reach the other host.
+- If the check finds no network the download may use (offline, or cellular, expensive or
+  Low Data Mode under the download settings), the part is queued and waits for one
+  without using a retry, then launches again; pausing it cancels the wait. If the wait
+  ends at once (a network was there after all), or the check can't reach the server,
+  the part is retried.
+- A redirect that appears only between the check and the transfer, or only for a resumed
+  transfer's `Range`, is still followed by
   the background session, which doesn't ask the app: custom headers would reach the
   target, but `URLSession` drops `Authorization`, so the bearer token doesn't. If the
   final response comes from a different origin, the engine fails the part for good and

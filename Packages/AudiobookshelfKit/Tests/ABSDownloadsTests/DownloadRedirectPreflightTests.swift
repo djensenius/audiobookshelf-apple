@@ -93,7 +93,8 @@ final class PreflightStubProtocol: URLProtocol, @unchecked Sendable {
         #expect(cleared == request)
         let sent = PreflightStubProtocol.requests(host: host)
         #expect(sent.map(\.url) == [url("/file")])
-        #expect(sent.map(\.httpMethod) == ["HEAD"])
+        #expect(sent.map(\.httpMethod) == ["GET"])
+        #expect(sent.first?.value(forHTTPHeaderField: "Range") == nil)
         #expect(sent.first?.value(forHTTPHeaderField: secret) == "proxy-secret")
         #expect(sent.first?.value(forHTTPHeaderField: "Authorization") == "Bearer tok")
     }
@@ -136,31 +137,61 @@ final class PreflightStubProtocol: URLProtocol, @unchecked Sendable {
         #expect(PreflightStubProtocol.requests(host: otherHost).isEmpty)
     }
 
-    /// A server that rejects `HEAD` is asked for the first byte instead, redirects included.
-    @Test(arguments: [405, 501])
-    func fallsBackToARangedGETWhenHEADIsRejected(status: Int) async throws {
-        let final = url("/media/file.mp3")
+    /// The check is the transfer's own request: a server that answers `HEAD` or a ranged `GET`
+    /// but redirects the full `GET` off its origin is refused, before the other origin sees it.
+    @Test func checksTheTransfersOwnRequest() async throws {
+        let target = "https://\(otherHost)/file"
         PreflightStubProtocol.register(host: host) { request in
-            if request.httpMethod == "HEAD" { return .status(status) }
-            return request.url?.path() == "/abs/file" ? .redirect(to: final.absoluteString) : .status(206)
+            if request.httpMethod != "GET" || request.value(forHTTPHeaderField: "Range") != nil { return .status(200) }
+            return .redirect(to: target)
         }
-        let request = try download()
+        PreflightStubProtocol.register(host: otherHost) { _ in .status(200) }
 
-        let cleared = try await preflight.check(request)
-
-        #expect(cleared.url == final)
-        #expect(cleared.value(forHTTPHeaderField: "Range") == nil)
-        let sent = PreflightStubProtocol.requests(host: host)
-        #expect(sent.map(\.httpMethod) == ["HEAD", "GET", "GET"])
-        #expect(sent.map(\.url) == [url("/file"), url("/file"), final])
-        #expect(sent.dropFirst().map { $0.value(forHTTPHeaderField: "Range") } == ["bytes=0-0", "bytes=0-0"])
+        await #expect(throws: DownloadRedirectPreflightError.offOrigin(URL(string: target)!)) {
+            try await preflight.check(try download())
+        }
+        #expect(PreflightStubProtocol.requests(host: otherHost).isEmpty)
     }
 
     @Test func reportsAnUnreachableServer() async throws {
-        PreflightStubProtocol.register(host: host) { _ in .fail(.notConnectedToInternet) }
+        PreflightStubProtocol.register(host: host) { _ in .fail(.cannotConnectToHost) }
 
-        await #expect(throws: DownloadRedirectPreflightError.unreachable(.notConnectedToInternet)) {
+        await #expect(throws: DownloadRedirectPreflightError.unreachable(.cannotConnectToHost)) {
             try await preflight.check(try download())
         }
+        // Without a network wait: a network was there, so the failure is the server's.
+        #expect(await preflight.waitForNetwork(try download()) == false)
+    }
+
+    /// No network, or none the download settings allow, isn't the server failing.
+    @Test(arguments: [
+        URLError.Code.notConnectedToInternet, .networkConnectionLost, .dataNotAllowed, .internationalRoamingOff,
+    ])
+    func reportsNoAllowedNetwork(code: URLError.Code) async throws {
+        PreflightStubProtocol.register(host: host) { _ in .fail(code) }
+
+        await #expect(throws: DownloadRedirectPreflightError.noNetwork(code)) {
+            try await preflight.check(try download())
+        }
+    }
+
+    /// A request refused for being cellular, expensive or constrained is waiting for a network too.
+    @Test(arguments: [
+        URLError.NetworkUnavailableReason.cellular, .expensive, .constrained,
+    ])
+    func classifiesAPolicyDenialAsNoNetwork(reason: URLError.NetworkUnavailableReason) {
+        let error = URLError(.cannotConnectToHost, userInfo: [NSURLErrorNetworkUnavailableReasonKey: reason.rawValue])
+
+        #expect(DownloadRedirectPreflightError.classify(error) == .noNetwork(.cannotConnectToHost))
+        #expect(
+            DownloadRedirectPreflightError.classify(URLError(.cannotConnectToHost))
+                == .unreachable(.cannotConnectToHost))
+    }
+
+    /// A network wait ends when the server answers.
+    @Test func aNetworkWaitEndsWithAnAnswer() async throws {
+        PreflightStubProtocol.register(host: host) { _ in .status(200) }
+
+        #expect(await preflight.waitForNetwork(try download()))
     }
 }

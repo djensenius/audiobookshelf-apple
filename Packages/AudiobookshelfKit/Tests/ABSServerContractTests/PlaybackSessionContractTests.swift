@@ -359,20 +359,6 @@ struct PlaybackSessionContractTests {
             #expect(partial.statusCode == 206)
             #expect(part == body[10...19])
 
-            // The foreground redirect check before a background download (#145): `HEAD`, or the
-            // first byte when a server rejects it.
-            var head = request
-            head.httpMethod = "HEAD"
-            let (headBody, headResponse) = try await fetch(head)
-            #expect(headResponse.statusCode == 200)
-            #expect(headBody.isEmpty)
-            #expect(headResponse.url == request.url)
-            var first = request
-            first.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-            let (firstByte, firstResponse) = try await fetch(first)
-            #expect(firstResponse.statusCode == 206)
-            #expect(firstByte == body.prefix(1))
-
             let rejected = try DownloadRequests.request(
                 path: path, configuration: session.configuration, accessToken: "not-a-token")
             #expect(try await fetch(rejected).1.statusCode == 401)
