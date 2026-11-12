@@ -152,7 +152,20 @@ public actor ImagePipeline {
     /// (#421). Pass the saved connections read from the store, never a list that may not have
     /// loaded yet. Servers given a builder in this process are kept too, so a connection saved
     /// after `saved` was read keeps its covers.
+    ///
+    /// Not ordered with ``setRequestBuilder(_:for:)``: the app sweeps through `ImageParticipant`,
+    /// which calls ``serversToSweep(keepingOnly:)`` and then ``removeServerUnlessInSession(_:)``
+    /// in each connection's queue, behind and before its builder installs.
     public func removeServers(keepingOnly saved: Set<UUID>) async {
+        for serverID in await serversToSweep(keepingOnly: saved) {
+            await removeServerUnlessInSession(serverID)
+        }
+    }
+
+    /// A sweep's first step: forgets the memory entries and loads of every server not in `saved`
+    /// and not given a builder in this process, and returns the servers with cached files not in
+    /// `saved`, for ``removeServerUnlessInSession(_:)``.
+    public func serversToSweep(keepingOnly saved: Set<UUID>) async -> Set<UUID> {
         let kept = saved.union(sessionServers)
         var unkept = Set(fetches.keys.map(\.key.serverID)).union(decodes.keys.map(\.key.serverID))
         memory.removeAll { entry in
@@ -161,15 +174,16 @@ public actor ImagePipeline {
             return true
         }
         for serverID in unkept.subtracting(kept) { forget(serverID) }
-        await fileStore.removeServers(keepingOnly: saved) { serverID in
-            await self.forgetUnlessInSession(serverID)
-        }
+        return await fileStore.servers(notIn: saved)
     }
 
-    /// Forgets `serverID` for a sweep, unless it has been given a builder in this process.
-    private func forgetUnlessInSession(_ serverID: UUID) -> Bool {
+    /// A sweep's removal of one server, as ``removeServer(_:)``, unless it has been given a
+    /// builder in this process (a session started since the saved connections were read).
+    /// Returns whether it was removed.
+    @discardableResult
+    public func removeServerUnlessInSession(_ serverID: UUID) async -> Bool {
         guard !sessionServers.contains(serverID) else { return false }
-        forget(serverID)
+        await removeServer(serverID)
         return true
     }
 

@@ -348,12 +348,17 @@ public actor CoverFileStore {
         keepingOnly kept: Set<UUID>, willRemove: @Sendable (UUID) async -> Bool = { _ in true }
     ) async -> Set<UUID> {
         var removed: Set<UUID> = []
-        for serverID in await Self.serverFolders(in: directory, hook: listingHook).subtracting(kept) {
+        for serverID in await servers(notIn: kept) {
             guard await willRemove(serverID) else { continue }
             await removeServer(serverID)
             removed.insert(serverID)
         }
         return removed
+    }
+
+    /// The servers with a folder here that aren't in `kept`, listed off the actor.
+    public func servers(notIn kept: Set<UUID>) async -> Set<UUID> {
+        await Self.serverFolders(in: directory, hook: listingHook).subtracting(kept)
     }
 
     /// Deletes a stored file that turned out not to decode, once its readers are done, but only
