@@ -300,11 +300,13 @@ let podcastFolders = [
         let model = makeModel()
         var calls = service.searches.calls.makeAsyncIterator()
         let folders = [LibraryFolder(id: "f3", fullPath: "/new")]
+        model.draft = NewPodcastDraft(
+            service: service, libraryID: "lib", folders: podcastFolders, feed: podcastFeed(), feedURL: "u")
         model.update(library: Library(id: "other", name: "X", folders: [], mediaType: .podcast))
         #expect(model.folders == podcastFolders)
         let settings = LibrarySettings(podcastSearchRegion: "gb")
         model.update(library: Library(id: "lib", name: "P", folders: folders, mediaType: .podcast, settings: settings))
-        #expect(model.folders == folders)
+        #expect(model.folders == folders && model.draft?.folders == folders)
         model.query = "q"
         model.submit()
         let call = try #require(await calls.next())

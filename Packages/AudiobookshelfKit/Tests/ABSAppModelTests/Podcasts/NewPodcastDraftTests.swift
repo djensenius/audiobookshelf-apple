@@ -89,6 +89,14 @@ import Testing
         #expect(NewPodcastDraft.sanitizedFilename(emoji).utf8.count <= NewPodcastDraft.maxFilenameBytes)
     }
 
+    @Test func refreshedFoldersKeepAChoiceThatStillExists() {
+        let draft = makeDraft(folders: [LibraryFolder(id: "f2", fullPath: "/old")])
+        draft.update(folders: [LibraryFolder(id: "f4", fullPath: "/x"), LibraryFolder(id: "f2", fullPath: "/moved")])
+        #expect(draft.folderID == "f2" && draft.path == "/moved/Directory Title")
+        draft.update(folders: [LibraryFolder(id: "f4", fullPath: "/x")])
+        #expect(draft.folderID == nil && draft.issues == [.folderMissing])
+    }
+
     @Test func aTitleAndAFolderAreRequired() {
         let draft = makeDraft()
         #expect(draft.issues.isEmpty && draft.canSubmit && draft.request != nil)

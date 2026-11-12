@@ -27,7 +27,7 @@ public final class NewPodcastDraft: Identifiable {
 
     public let libraryID: String
     /// The library's folders, in server order.
-    public let folders: [LibraryFolder]
+    public private(set) var folders: [LibraryFolder]
     /// Read-only, as in legacy.
     public let feedURL: String
     /// The cover the server downloads for the new podcast.
@@ -74,6 +74,12 @@ public final class NewPodcastDraft: Identifiable {
         explicit = directory?.explicit ?? metadata.isExplicit
         type = Self.first(metadata.type)
         folderID = folders.first?.id
+    }
+
+    /// Takes a refreshed library's folders, keeping the choice only while it still exists.
+    public func update(folders: [LibraryFolder]) {
+        self.folders = folders
+        if folder == nil { folderID = nil }
     }
 
     /// The chosen folder, if it's one of the library's.

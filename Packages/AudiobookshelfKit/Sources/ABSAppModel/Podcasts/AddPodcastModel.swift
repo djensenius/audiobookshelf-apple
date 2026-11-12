@@ -60,7 +60,6 @@ public enum AddPodcastAccess: Sendable, Hashable {
     }
 
     case ready(Key)
-    /// The user isn't an admin.
     case notAllowed
     /// The library holds books; the server would still create a podcast in its folder.
     case notPodcastLibrary
@@ -129,11 +128,12 @@ public final class AddPodcastModel {
         country = library.settings?.podcastSearchRegion
     }
 
-    /// Takes a refreshed library's folders and search region for later searches and forms.
+    /// Takes a refreshed library's folders, also for the open form, and search region.
     public func update(library: Library) {
         guard library.id == libraryID else { return }
         folders = library.folders ?? []
         country = library.settings?.podcastSearchRegion
+        draft?.update(folders: folders)
     }
 
     isolated deinit {

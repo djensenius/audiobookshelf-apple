@@ -135,6 +135,7 @@ import Testing
         let sent = try #require(stub.requests.first)
         #expect(sent.httpMethod == "POST")
         #expect(sent.url?.path() == path(stub, "/api/podcasts"))
+        #expect(PodcastEndpoints.create(request).staysOnOrigin && PodcastEndpoints.feed(rssFeed: "").staysOnOrigin)
         #expect(sent.value(forHTTPHeaderField: "Authorization") == "Bearer access-1")
         let object = try body(sent)
         #expect(Set(object.keys) == ["libraryId", "folderId", "path", "media"])

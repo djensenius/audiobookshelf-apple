@@ -150,9 +150,10 @@ struct AddPodcastContent: View {
         } else if model.searchError != nil {
             ErrorStateView(title: L10n.string("MessagePodcastSearchFailed"), retry: { model.submit() })
         } else if model.searchedTerm != nil {
-            AddPodcastPrompt(messageKey: "MessageNoPodcastsFound", systemImage: "magnifyingglass")
+            ErrorStateView(title: L10n.string("MessageNoPodcastsFound"), systemImage: "magnifyingglass")
         } else {
-            AddPodcastPrompt(messageKey: "MessagePodcastSearchField", systemImage: "dot.radiowaves.left.and.right")
+            ErrorStateView(
+                title: L10n.string("MessagePodcastSearchField"), systemImage: "dot.radiowaves.left.and.right")
         }
     }
 
@@ -164,22 +165,6 @@ struct AddPodcastContent: View {
         switch error {
         case .noFeed: L10n.string("MessagePodcastNoFeed")
         case .feedFailed: L10n.string("MessagePodcastFeedFailed")
-        }
-    }
-}
-
-private struct AddPodcastPrompt: View {
-    let messageKey: String
-    let systemImage: String
-
-    var body: some View {
-        ContentUnavailableView {
-            Label {
-                Text(verbatim: L10n.string(messageKey))
-            } icon: {
-                Image(systemName: systemImage)
-                    .accessibilityHidden(true)
-            }
         }
     }
 }

@@ -2,26 +2,24 @@ import ABSCore
 import Foundation
 
 /// Adding a podcast (legacy `add-podcast.vue`). The server's `PodcastController` answers ``feed(rssFeed:)`` and
-/// ``create(_:)`` with 403 unless the user is an admin or root; upload permission alone isn't enough.
+/// ``create(_:)`` with 403 unless the user is an admin or root. Both stay on origin: their bodies hold the feed URL.
 public enum PodcastEndpoints {
-    /// `GET /api/search/podcast?term=`: podcasts from the iTunes directory. `country` is the iTunes store, usually
-    /// the library's `podcastSearchRegion`; the server uses `us` without it. A blank term is a 400.
+    /// `GET /api/search/podcast`: iTunes directory podcasts; `country` (the library's region) defaults to `us`.
     public static func searchDirectory(term: String, country: String? = nil) -> Endpoint<[PodcastDirectoryResult]> {
         var query = [URLQueryItem(name: "term", value: term)]
         if let country, !country.isEmpty { query.append(URLQueryItem(name: "country", value: country)) }
         return Endpoint(.get, "/api/search/podcast", query: query)
     }
 
-    /// `POST /api/podcasts/feed` with `{rssFeed}`: the server fetches and parses the feed. An invalid URL is a 400,
-    /// and a feed it couldn't fetch or parse a 404.
+    /// `POST /api/podcasts/feed`: the server's parse of `rssFeed`; 400 for an invalid URL, 404 for an unusable feed.
     public static func feed(rssFeed: String) -> Endpoint<PodcastFeedResponse> {
-        Endpoint(.post, "/api/podcasts/feed", body: PodcastFeedRequest(rssFeed: rssFeed))
+        Endpoint(.post, "/api/podcasts/feed", body: PodcastFeedRequest(rssFeed: rssFeed), staysOnOrigin: true)
     }
 
     /// `POST /api/podcasts`: creates the podcast's folder and item. An existing or unusable path is a 400 with a
     /// plain-text message; an unknown library or folder a 404.
     public static func create(_ request: NewPodcastRequest) -> Endpoint<LibraryItem> {
-        Endpoint(.post, "/api/podcasts", body: request)
+        Endpoint(.post, "/api/podcasts", body: request, staysOnOrigin: true)
     }
 }
 
