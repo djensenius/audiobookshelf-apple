@@ -20,8 +20,10 @@ public protocol SleepTimerPlaybackControl: AnyObject {
     /// from a user's seek that superseded it and landed nearby.
     var pendingSeekTarget: Double? { get }
     func pause()
-    /// Resumes playback after a reset during the grace period.
-    func play()
+    /// Resumes playback after a reset during the grace period. Returns whether playback was requested: `false` when
+    /// it was refused (the audio session won't activate, say), so the timer reopens its grace period.
+    @discardableResult
+    func play() -> Bool
     /// Seeks to a timeline time: back to where the fade began, or a reset's rewind. Returns where playback
     /// landed, or `nil` when the seek didn't complete.
     func seek(to time: Double) async -> Double?
@@ -49,8 +51,11 @@ public final class AudioEngineSleepTimerControl: SleepTimerPlaybackControl {
         engine?.pause()
     }
 
-    public func play() {
-        engine?.play()
+    @discardableResult
+    public func play() -> Bool {
+        guard let engine else { return false }
+        engine.play()
+        return engine.isPlaybackRequested
     }
 
     public func seek(to time: Double) async -> Double? {

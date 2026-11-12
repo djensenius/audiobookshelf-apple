@@ -60,6 +60,20 @@ public final class SleepTimer {
     public private(set) var isAutomatic = false
     /// Whether the timer recently paused playback and a reset or play would restart it.
     public private(set) var canRestart = false
+    /// Whether the timer that can restart started automatically: cancelling it suppresses the automatic timer.
+    public var canRestartAutomatic: Bool { canRestart && expiredRun?.isAutomatic == true }
+    /// Identifies the timer running or in its grace period, `nil` when neither, so a confirmation can tell the timer
+    /// it was asked about from a newer one. A start, manual or automatic, makes a new identity; a reset or restart
+    /// keeps it. Not observed.
+    public var runIdentity: Int? { (run ?? expiredRun)?.identity }
+    /// Whether ``reset()`` or ``restart()`` would restart the expired timer now: not once the grace period is over
+    /// (which ``canRestart`` may not show yet), nor for an end-of-chapter timer with no chapter or track end ahead of
+    /// where it would restart (the end of the media). Reads the playback position; not observed.
+    public var isRestartAvailable: Bool {
+        guard run == nil, let expiredRun = restartableRun else { return false }
+        guard expiredRun.goal.isChapterEnd else { return true }
+        return chapterEnd(at: time(rewoundBy: rewindSeconds), skippingShortRemainder: true) != nil
+    }
     public var isRunning: Bool { mode != nil }
     /// Takes effect at the next tick; changes to the shake sensitivity apply immediately.
     public var options: SleepTimerOptions {
@@ -81,8 +95,22 @@ public final class SleepTimer {
         case played
     }
 
+    /// How ``restart()`` ended.
+    public enum RestartResult: Sendable, Equatable {
+        /// Playback resumed with the timer running again.
+        case resumed
+        /// Nothing restarted: no timer was in its grace period, or ``isRestartAvailable`` was false.
+        case unavailable
+        /// The rewind didn't land, or a seek moved playback: the grace period is back and the timer stopped.
+        case failed
+        /// A cancel, start, play, pause or another item came first; nothing resumed.
+        case superseded
+    }
+
     private struct Run {
         var goal: Goal
+        /// See ``runIdentity``.
+        var identity: Int
         var isAutomatic: Bool
         /// The item a chapter goal belongs to; once another loads, a seek retargets without keeping the goal.
         var item: String?
@@ -123,9 +151,14 @@ public final class SleepTimer {
     /// reset or play takes it over. A reset's `undo` can restore it with no task behind it; the next play or reset
     /// then delivers the seek.
     @ObservationIgnored private var queuedFadeRewind: (from: Double, to: Double)?
+    /// The expiry's seek back to the fade while it's in flight, so a restart that seeks there again and fails can
+    /// give it back as ``queuedFadeRewind``; the restart takes it over, and the expiry's task then stands down.
+    @ObservationIgnored private var fadeSeek: (expiry: Int, from: Double, to: Double)?
     @ObservationIgnored private var itemID: String?
     /// Changes when a run begins or stops, or playback plays or pauses, so a reset's resume can tell it was overtaken.
     @ObservationIgnored private var runID = 0
+    /// The last ``runIdentity`` given out.
+    @ObservationIgnored private var lastIdentity = 0
     /// The position and ``now`` at the last tick, seek or start, to spot seeks nobody reported.
     @ObservationIgnored private var lastPosition: Double?
     @ObservationIgnored private var lastTick: TimeInterval = 0
@@ -194,6 +227,22 @@ public final class SleepTimer {
         stopRun()
     }
 
+    /// Cancels the timer, as ``cancel(at:)`` does, only if it's still the one `identity` names (``runIdentity``).
+    /// Returns whether it did.
+    @discardableResult
+    public func cancel(identity: Int, at date: Date = .now) -> Bool {
+        guard runIdentity == identity else { return false }
+        cancel(at: date)
+        return true
+    }
+
+    /// Keeps the automatic timer from starting until the end of its window containing `date`, as cancelling it does,
+    /// without touching any timer. Outside a window, changes nothing.
+    public func suppressAutomaticTimer(at date: Date = .now) {
+        guard let end = options.autoSleep.window(containing: date, calendar: calendar)?.end else { return }
+        autoSleepSuppressedUntil = end
+    }
+
     /// Adds `seconds` of listening time. For end of chapter, the end moves past `seconds` of media at the current
     /// rate, skipping gaps between tracks, up to the end of the media. Unlike Android, a duration isn't capped at
     /// the media left: it only counts down while audio plays.
@@ -235,37 +284,26 @@ public final class SleepTimer {
     /// resumes after the pending rewind, with the reset feedback once it plays. A cancel, a start, a play, a pause or
     /// another item before that rewind lands wins: nothing resumes (only a cancel stops the restarted timer). If the
     /// rewind fails, or a seek moved playback or is moving it, the grace period and the rewind come back. The timer's
-    /// own seek back to the fade counts as having landed; one not yet started, the reset makes itself. Returns whether
-    /// it reset.
+    /// own seek back to the fade the reset seeks again and waits for while it's in flight, or makes itself if it hasn't
+    /// started. Returns whether it reset.
     @discardableResult
     public func reset() -> Bool {
         if let run {
             if case .length = run.goal, run.elapsed <= Self.resetGuard { return false }
-            guard control.isPlaying, begin(run.mode, isAutomatic: run.isAutomatic, at: control.currentTime) else {
-                return false
-            }
+            guard control.isPlaying,
+                begin(run.mode, isAutomatic: run.isAutomatic, identity: run.identity, at: control.currentTime)
+            else { return false }
             if options.playsResetFeedback { feedback?.playResetFeedback() }
             return true
         }
-        guard let expiredRun = restartableRun, let graceEnd else { return false }
-        let rewind = pendingRewind, fadeRewind = queuedFadeRewind
-        let time = time(rewoundBy: takeRewind())
-        guard begin(expiredRun.mode, isAutomatic: expiredRun.isAutomatic, at: time) else {
-            pendingRewind = rewind
-            return false
-        }
-        _ = takeQueuedFadeRewind()
-        let position = control.intendedTime
-        let target = time < position ? time : nil
-        let id = runID, item = itemID
-        Task { [weak self] in
-            await self?.resume(rewindingTo: target, from: position, runID: id, item: item) {
-                $0.startGrace(for: expiredRun, until: graceEnd)
-                $0.pendingRewind = rewind
-                $0.queuedFadeRewind = fadeRewind
-            }
-        }
-        return true
+        return restartExpiredRun() != nil
+    }
+
+    /// Restarts the timer that expired during the grace period, as ``reset()`` does, and waits until playback resumes
+    /// or the restart fails, for a control that has to say why it didn't.
+    public func restart() async -> RestartResult {
+        guard run == nil, let resumption = restartExpiredRun() else { return .unavailable }
+        return await resumption.value
     }
 
     /// Call before playback starts, and before the resume seek. Restarts a timer that expired during the grace
@@ -282,7 +320,9 @@ public final class SleepTimer {
         let fade = takeQueuedFadeRewind()
         guard run == nil else { return rewind + fade }
         if let expiredRun = restartableRun {
-            if begin(expiredRun.mode, isAutomatic: expiredRun.isAutomatic, at: time), options.playsResetFeedback {
+            if begin(expiredRun.mode, isAutomatic: expiredRun.isAutomatic, identity: expiredRun.identity, at: time),
+                options.playsResetFeedback
+            {
                 feedback?.playResetFeedback()
             }
         } else if shouldStartAutomatically(at: date), !begin(options.autoSleep.mode, isAutomatic: true, at: time) {
@@ -322,6 +362,7 @@ public final class SleepTimer {
         awaitsTimelineForAutoStart = false
         pendingRewind = nil
         queuedFadeRewind = nil
+        fadeSeek = nil
         endGrace()
         publish(remaining: remaining)
         updateShakeDetection()
@@ -367,8 +408,42 @@ public final class SleepTimer {
 
     // MARK: - Running
 
+    /// Restarts the expired run during its grace period, resuming playback after the pending rewind (see ``reset()``).
+    /// Returns the resumption, or `nil` when nothing restarted.
+    private func restartExpiredRun() -> Task<RestartResult, Never>? {
+        guard let expiredRun = restartableRun, let graceEnd else { return nil }
+        // The expiry's seek in flight, unless a seek of the user's superseded it: the restart's own seek replaces
+        // it, so a failure gives it back as queued.
+        let inFlightFade = fadeSeek.flatMap { seek in
+            control.pendingSeekTarget.map { abs($0 - seek.to) < Self.retainedSeekTolerance } == true
+                ? (from: seek.from, to: seek.to) : nil
+        }
+        let rewind = pendingRewind, fadeRewind = queuedFadeRewind ?? inFlightFade
+        let time = time(rewoundBy: takeRewind())
+        guard begin(expiredRun.mode, isAutomatic: expiredRun.isAutomatic, identity: expiredRun.identity, at: time)
+        else {
+            pendingRewind = rewind
+            return nil
+        }
+        _ = takeQueuedFadeRewind()
+        if inFlightFade != nil { fadeSeek = nil }
+        let position = control.intendedTime
+        // A seek in flight (the expiry's own back to the fade, say) is sought again and awaited, so the play follows
+        // where it lands and a seek that doesn't land fails the restart rather than resuming before it.
+        let target = time < position || control.pendingSeekTarget != nil ? time : nil
+        let id = runID, item = itemID
+        return Task { [weak self] in
+            await self?.resume(rewindingTo: target, from: position, runID: id, item: item) {
+                $0.startGrace(for: expiredRun, until: graceEnd)
+                $0.pendingRewind = rewind
+                $0.queuedFadeRewind = fadeRewind
+            } ?? .superseded
+        }
+    }
+
+    /// Starts a run; `identity` keeps a restarted run's (see ``runIdentity``), else it gets a new one.
     @discardableResult
-    private func begin(_ mode: SleepTimerMode, isAutomatic: Bool, at time: Double) -> Bool {
+    private func begin(_ mode: SleepTimerMode, isAutomatic: Bool, identity: Int? = nil, at time: Double) -> Bool {
         let goal: Goal
         switch mode {
         case .duration(let length):
@@ -384,9 +459,15 @@ public final class SleepTimer {
         stalePosition = time == control.currentTime ? nil : control.currentTime
         lastTick = now()
         startTicking()
-        update(Run(goal: goal, isAutomatic: isAutomatic, item: itemID), at: time)
+        let identity = identity ?? newIdentity()
+        update(Run(goal: goal, identity: identity, isAutomatic: isAutomatic, item: itemID), at: time)
         updateShakeDetection()
         return true
+    }
+
+    private func newIdentity() -> Int {
+        lastIdentity += 1
+        return lastIdentity
     }
 
     /// Stores `run` with what it has left at `time` (default: now): arms the chime above the lead time, skips it
@@ -476,6 +557,7 @@ public final class SleepTimer {
         if !run.wasCutShort { startGrace(for: run) }
         stopRun()
         expiryID += 1
+        fadeSeek = nil
         let rewind = run.isAutomatic ? options.autoSleep.rewindOnExpiry : nil
         guard let fadeStart = run.fadeStart, fadeStart < control.currentTime else {
             pendingRewind = rewind.map { ($0, control.currentTime) }
@@ -491,9 +573,13 @@ public final class SleepTimer {
         Task { [weak self, control] in
             guard self?.startsFadeRewind(of: id, item: item, from: pausedAt) == true else { return }
             let landed = await control.seek(to: fadeStart)
-            guard let self, isCurrent(item) else { return }
+            guard let self else { return }
+            // A restart that took the seek over keeps the rewind where it put it.
+            let isOwn = fadeSeek?.expiry == id
+            if isOwn { fadeSeek = nil }
+            guard isCurrent(item) else { return }
             let at = landed ?? (Self.isRetaining(control, seekTo: fadeStart) ? fadeStart : pausedAt)
-            if expiryID == id { pendingRewind?.at = at }
+            if expiryID == id, isOwn { pendingRewind?.at = at }
             if let landed { didSeek(to: landed) }
         }
     }
@@ -501,12 +587,13 @@ public final class SleepTimer {
     /// Whether expiry `id`'s queued seek back to the fade starts now: not once a reset or a play took it over, nor
     /// when another item, or a seek that landed or is in flight, came first (which drops the automatic rewind).
     private func startsFadeRewind(of id: Int, item: String?, from pausedAt: Double) -> Bool {
-        guard expiryID == id, queuedFadeRewind != nil else { return false }
+        guard expiryID == id, let queued = queuedFadeRewind else { return false }
         queuedFadeRewind = nil
         guard isCurrent(item), Self.isStill(control, at: pausedAt) else {
             pendingRewind = nil
             return false
         }
+        fadeSeek = (id, queued.from, queued.to)
         return true
     }
 
@@ -520,23 +607,29 @@ public final class SleepTimer {
 
     /// Plays after a grace-period reset, rewinding from `position` to `time` first, unless the run or the item
     /// changed, or playback played or paused, before or during the seek. When a seek moved playback from `position`
-    /// or is moving it (with or without a rewind), or the rewind doesn't land, `undo` reopens the grace period and the
+    /// or is moving it (with or without a rewind), or the rewind doesn't land, or the play is refused, `undo` reopens the grace period and the
     /// run stops.
     private func resume(
         rewindingTo time: Double?, from position: Double, runID id: Int, item: String?, undo: (SleepTimer) -> Void
-    ) async {
-        guard isCurrent(item, runID: id) else { return }
+    ) async -> RestartResult {
+        guard isCurrent(item, runID: id) else { return .superseded }
         var landed = Self.isStill(control, at: position) ? control.currentTime : nil
         if let time, landed != nil { landed = await control.seek(to: time) }
-        guard isCurrent(item, runID: id) else { return }
+        guard isCurrent(item, runID: id) else { return .superseded }
         guard let landed else {
             undo(self)
             stopRun()
-            return
+            return .failed
         }
         if time != nil { didSeek(to: landed) }
-        control.play()
+        // A refused play leaves playback paused: reopen the grace period, as when the rewind doesn't land.
+        guard control.play() else {
+            undo(self)
+            stopRun()
+            return .failed
+        }
         if options.playsResetFeedback { feedback?.playResetFeedback() }
+        return .resumed
     }
 
     /// Whether work begun on `item`, and during run `id` if given, still applies. Checked before and after a seek,
@@ -549,6 +642,11 @@ public final class SleepTimer {
     /// elsewhere.
     private func takeRewind() -> TimeInterval {
         defer { pendingRewind = nil }
+        return rewindSeconds
+    }
+
+    /// The pending rewind's seconds, unconsumed (see ``takeRewind()``).
+    private var rewindSeconds: TimeInterval {
         guard let pendingRewind, abs(heading - pendingRewind.at) < 1 else { return 0 }
         return pendingRewind.seconds
     }
