@@ -343,6 +343,7 @@ Cons:
      - Custom headers never add or replace cookies, so `AVURLAssetHTTPCookiesKey` is not used.
    - When a server config has custom headers, the app sends them on **all** `URLSession` API and download requests, next to the app's own `Authorization: Bearer`. That is broader than the legacy app, which sends them only on ping and login. Header values are secrets and live in the Keychain.
    - **Direct play** uses Option 4: a custom-scheme resource loader, used only for that server. It adds the custom headers and nothing else. `/public/session` needs no Bearer token, and the loader never sends `Authorization` or `Cookie`.
+     - **Deviation from Option 4 (#148):** the loader takes a snapshot of the custom headers when the stream is resolved, rather than reading the live server config. A header edited mid-session applies from the next resolved stream (the next play, or a session rebuild). This keeps the loader free of shared mutable state; a header-provider closure can replace the snapshot if live edits turn out to matter.
    - **HLS with custom headers is not supported** (Option 4 cannot cover segments, and Options 3 and 5 are rejected). A plain `AVURLAsset` has no public option for adding custom headers.
      - If such a server returns `playMethod == 2`, show "This file needs server transcoding, which isn't available when custom headers are configured."
      - Add a hint to let `/public/session/*` and `/hls/*` through the proxy without the header. On the Audiobookshelf side those paths are already protected only by unguessable session ids.
