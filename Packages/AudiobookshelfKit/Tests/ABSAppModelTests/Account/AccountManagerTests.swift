@@ -640,6 +640,24 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(try await harness.store.connection(id: id)?.signedOutAt == nil)
     }
 
+    @Test func handoffAccountOfAnExpiredSessionIsNotSignedIn() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let account = try #require(HandoffAccount(serverAddress: server.address, userID: server.userId))
+        let signedIn = await manager.connectionID(for: account)
+        #expect(signedIn == id)
+
+        server.revokeSession()
+        let client = try #require(manager.client)
+        await #expect(throws: APIError.sessionExpired) { try await client.send(AuthEndpoints.authorize()) }
+        // Kept without a sign-out, so it still matches; only its missing tokens rule it out.
+        #expect(manager.connections.first?.signedOutAt == nil)
+        let expired = await manager.connectionID(for: account)
+        #expect(expired == nil)
+    }
+
     @Test func unsupportedServerOnRestoreSignsOutKeepingTokens() async throws {
         let harness = try Harness()
         let server = FakeServer()
