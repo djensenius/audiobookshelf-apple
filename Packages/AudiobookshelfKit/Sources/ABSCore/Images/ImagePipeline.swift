@@ -157,6 +157,14 @@ public actor ImagePipeline {
     var memoryCost: (lru: Int, combined: Int) { (memory.totalCost, ledger.total) }
     /// Decodes waiting for memory, for tests.
     var memoryWaiterCount: Int { ledger.waiterCount }
+    /// The callers joined to `key`'s fetch (one per decode flight) and to its decode into `box`,
+    /// for tests that must know every caller has joined before the result arrives.
+    func waiterCounts(for key: ImageKey, box: PixelBox) -> (fetch: Int, decode: Int) {
+        (
+            fetches[FetchKey(key: key, skipsDownloaded: false)]?.waiterCount ?? 0,
+            decodes[MemoryKey(key: key, box: box)]?.waiterCount ?? 0
+        )
+    }
     /// The folder of this pipeline's temporary downloads, for tests.
     nonisolated var temporaryFolder: URL { sessionDelegate.temporaryFolder }
 
@@ -221,7 +229,7 @@ public actor ImagePipeline {
             throw skipsDownloaded ? ImagePipelineError.unsupportedImage : .fileMissing
         }
         try Task.checkCancellation()
-        let image = DecodedBitmap(cgImage, ledger: ledger)
+        let image = DecodedBitmap(cgImage, ledger: ledger, updatedAt: storeKey.key.updatedAt)
         ledger.unreserve(reserved)
         reserved = 0
         try cache(image, for: storeKey)
@@ -336,8 +344,9 @@ public actor ImagePipeline {
         if let builder = builders[key.serverID] {
             built = builder.imageRequest(for: key.source)
         } else if let url = key.externalURL {
-            // External covers never carry the server's headers, so no builder is needed.
-            built = URLRequest(url: url)
+            // External covers never carry the server's headers, so no builder is needed. Without
+            // the server's address, only a public `https` host is allowed.
+            built = ImageDestination.isAllowed(url, server: nil) ? URLRequest(url: url) : nil
         } else {
             built = nil
         }

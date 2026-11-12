@@ -30,9 +30,15 @@ final class StubProgressSyncService: ProgressSyncService {
         var sessionClient: SessionModelClient?
         var syncs: [(id: String, report: PlaybackSyncReport)] = []
         var patches: [Patch] = []
+        /// With a session client, a non-nil error fails the request before it reaches the model.
         var syncErrors: [APIError?] = []
         var patchErrors: [APIError?] = []
         var syncGates: [Gate] = []
+        /// Model `/sync` requests the client gives up on (`.timedOut`) once they have entered the
+        /// server; the model still completes each when the test opens its gates.
+        var abandonedSyncs: [ReconciliationSessionModel.Request] = []
+        /// Without a session client, `GET /api/session/:id` answers these in order, then 404.
+        var lookupReplies: [Result<PlaybackSession, APIError>] = []
         var serverSyncs: [ServerSync] = []
         var serverProgress: [MediaKey: MediaProgress] = [:]
         var fetches: [MediaKey] = []
@@ -126,6 +132,15 @@ final class StubProgressSyncService: ProgressSyncService {
         for continuation in reached { continuation.resume() }
         await gate?.wait()
         if let client = state.withLock({ $0.sessionClient }) {
+            // A queued error never reaches the model, like a failed connection.
+            if let error { throw error }
+            if let abandoned = state.withLock({ $0.abandonedSyncs.isEmpty ? nil : $0.abandonedSyncs.removeFirst() }) {
+                // The server carries on with the request; the client stops waiting for it.
+                Task { try? await client.model.sync(client, id: id, report: report) }
+                await abandoned.entered.wait()
+                state.withLock { $0.log.append("sync \(number) timed out") }
+                throw APIError.timedOut
+            }
             try await client.model.sync(client, id: id, report: report)
             state.withLock { $0.log.append("sync \(number) done") }
             return
@@ -153,6 +168,15 @@ final class StubProgressSyncService: ProgressSyncService {
         if let error { throw error }
     }
 
+    func openSession(id: String) async throws -> PlaybackSession {
+        let (client, reply) = state.withLock { state in
+            state.log.append("lookup \(id)")
+            return (state.sessionClient, state.lookupReplies.isEmpty ? nil : state.lookupReplies.removeFirst())
+        }
+        if let client { return try await client.model.lookup(client, id: id) }
+        return try (reply ?? .failure(.notFound)).get()
+    }
+
     func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws {
         let (gate, error, started) = state.withLock { state in
             state.patches.append(Patch(itemID: itemID, episodeID: episodeID, update: update))
@@ -176,6 +200,8 @@ struct SyncHarness {
     let h: CoordinatorHarness
     let service: StubProgressSyncService
     let syncer: ProgressSyncer
+    /// The syncer's retry wakes; they sleep until a test fires them.
+    let sleeper = ManualSleeper()
 
     init(
         progressStore: LocalProgressStore? = nil, connectionID: UUID = UUID(),
@@ -187,7 +213,8 @@ struct SyncHarness {
         let clock = h.clock
         syncer = ProgressSyncer(
             source: h.coordinator, service: service, store: h.progressStore,
-            clock: ProgressSyncClock(now: { clock.now }, uptime: { clock.now.timeIntervalSince1970 }),
+            clock: ProgressSyncClock(
+                now: { clock.now }, uptime: { clock.now.timeIntervalSince1970 }, sleep: sleeper.sleep),
             tickInterval: 0.5, paths: paths)
     }
 
@@ -234,4 +261,58 @@ final class StubNetworkPathSource: NetworkPathSource, Sendable {
     func paths() -> AsyncStream<NetworkPath> { stream }
 
     func send(_ path: NetworkPath) { continuation.yield(path) }
+}
+
+/// A sleep that ends only when a test fires it, recording each requested delay.
+final class ManualSleeper: Sendable {
+    private struct State {
+        var delays: [TimeInterval] = []
+        var waiting: [UUID: CheckedContinuation<Void, any Error>] = [:]
+        var credits = 0
+    }
+
+    private let state = Mutex(State())
+
+    /// Every delay requested so far, in order.
+    var delays: [TimeInterval] { state.withLock { $0.delays } }
+    /// The sleeps waiting now; a cancelled one leaves at once.
+    var waitingCount: Int { state.withLock { $0.waiting.count } }
+
+    @Sendable func sleep(_ delay: TimeInterval) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                // Cancellation is read under the lock the cancel handler takes, so a cancel can't
+                // fall between the check and registering (the handler would find no waiter).
+                let resume: Bool?
+                resume = state.withLock { state in
+                    state.delays.append(delay)
+                    if Task.isCancelled { return false }
+                    guard state.credits == 0 else {
+                        state.credits -= 1
+                        return true
+                    }
+                    state.waiting[id] = continuation
+                    return nil
+                }
+                switch resume {
+                case true?: continuation.resume()
+                case false?: continuation.resume(throwing: CancellationError())
+                case nil: break
+                }
+            }
+        } onCancel: {
+            state.withLock { $0.waiting.removeValue(forKey: id) }?.resume(throwing: CancellationError())
+        }
+    }
+
+    /// Ends every sleep waiting now or, if none is, the next one to start.
+    func fire() {
+        let waiting = state.withLock { state in
+            if state.waiting.isEmpty { state.credits += 1 }
+            defer { state.waiting.removeAll() }
+            return Array(state.waiting.values)
+        }
+        for continuation in waiting { continuation.resume() }
+    }
 }

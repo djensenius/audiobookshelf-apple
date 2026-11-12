@@ -28,8 +28,15 @@ final class FakeNowPlayingSession: NowPlayingSessionPublishing {
     /// The next this-many application-primary requests throw.
     var applicationPrimaryFailures = 0
 
+    /// Holds the next application-primary request until opened.
+    var applicationPrimaryGate: Gate?
+
     func becomeApplicationPrimary() async throws {
         primaryRequests.append("application")
+        if let gate = applicationPrimaryGate {
+            applicationPrimaryGate = nil
+            await gate.wait()
+        }
         if applicationPrimaryFailures > 0 {
             applicationPrimaryFailures -= 1
             throw CancellationError()

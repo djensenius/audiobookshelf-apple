@@ -111,8 +111,7 @@ public struct DownloadedCover: Sendable, Hashable {
 }
 
 /// Finds the cover file of a downloaded item, so offline items show covers with no network.
-/// Implemented in ABSAppModel over ABSData's `LocalItemStore`.
-// TODO(#143): add the ABSAppModel implementation once ABSData's `LocalItemStore` exists.
+/// Implemented by ABSAppModel's `LocalDownloadedCovers` over ABSData's `LocalItemStore`.
 public protocol DownloadedCoverLookup: Sendable {
     /// The local cover for `key`'s entity, whatever its version, or `nil`.
     func downloadedCover(for key: ImageKey) async -> DownloadedCover?

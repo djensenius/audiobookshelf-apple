@@ -29,6 +29,29 @@ public enum StringConverter {
         return result
     }
 
+    /// The CLDR plural categories a plural string may have.
+    public static let pluralCategories: Set<String> = ["zero", "one", "two", "few", "many", "other"]
+
+    /// Converts one form of a plural string like ``convert(_:isFormat:)``, except that `{0}` is the
+    /// count: `%1$lld`, an integer that picks the form (`L10n.plural`).
+    public static func convertPlural(_ value: String) -> String {
+        convert(value, isFormat: true).replacing("%1$@", with: "%1$lld")
+    }
+
+    /// Why a plural string's forms can't be used, or `nil` when they can: each category must be a
+    /// CLDR one, `other` is required, and every form must show the count `{0}` (the String Catalog
+    /// compiler requires it).
+    public static func pluralProblem(_ forms: [String: String]) -> String? {
+        if let category = forms.keys.sorted().first(where: { !pluralCategories.contains($0) }) {
+            return "has an unknown plural category \(category)"
+        }
+        if forms["other"] == nil { return "has no plural category other" }
+        if let category = forms.keys.sorted().first(where: { !placeholderIndices(in: forms[$0] ?? "").contains(0) }) {
+            return "doesn't show the count {0} in \(category)"
+        }
+        return nil
+    }
+
     /// HTML-like tags left in `value` after conversion.
     public static func unsupportedMarkup(in value: String) -> [String] {
         value.matches(of: /<\/?[A-Za-z][^>]*>/).map { String($0.output) }

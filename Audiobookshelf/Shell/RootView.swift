@@ -1,4 +1,5 @@
 import ABSAppModel
+import ABSCore
 import ABSUI
 import SwiftUI
 
@@ -18,6 +19,8 @@ struct RootView: View {
     let lifecycle: SessionLifecycle
     let player: any PlayerSlotState
     let accounts: AccountManager?
+    /// Given to the signed-in shell as `\.imagePipeline`; screens outside it see `nil`.
+    var imagePipeline: ImagePipeline?
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var links = SceneLinks()
@@ -102,6 +105,7 @@ struct RootView: View {
                         links.finishSwitch($0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
                     })
             )
+            .environment(\.imagePipeline, imagePipeline)
             .id(identity)
         case .storeUnavailable:
             ErrorStateView(

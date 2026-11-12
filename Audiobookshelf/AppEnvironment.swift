@@ -35,6 +35,8 @@ final class AppEnvironment {
     /// The download stack, or `nil` when the store couldn't be opened. Its lifecycle is
     /// launched here, so a launch without a window (CarPlay, a background wake) has an engine.
     let downloads: AppDownloads?
+    /// The cover image pipeline and its session participant (#182).
+    let images: ImageServices
 
     /// - Parameters:
     ///   - settings: The settings every scene shares.
@@ -94,6 +96,11 @@ final class AppEnvironment {
         self.player = PlaceholderPlayerState()
         self.downloads = downloads
         downloads?.lifecycle.launch()
+
+        // Images (#182).
+        let images = ImageServices(accounts: accounts)
+        lifecycle.register(images.participant, stage: .connect)
+        self.images = images
     }
 }
 

@@ -57,6 +57,8 @@ public final class LibraryStore {
     @ObservationIgnored private var loggedUnavailableServices: Set<String> = []
     /// Told of each view preferences save (``observeViewPreferences(connectionKey:owner:_:)``).
     @ObservationIgnored private var viewPreferencesObservers: [ViewPreferencesObserver] = []
+    /// Told of each socket change (``observeLibraryChanges(connectionKey:owner:_:)``).
+    @ObservationIgnored private var libraryChangeObservers: [LibraryChangeObserver] = []
 
     public init(settings: AppSettings) {
         self.settings = settings
@@ -340,6 +342,32 @@ public final class LibraryStore {
             observer.apply(libraryID, preferences)
         }
     }
+
+    // MARK: Live changes
+
+    /// Hands a socket change from `connectionKey`'s session to that account's observers. Dropped
+    /// unless the store serves that account, so a change from an ended or switched session never
+    /// reaches another account's models. Wire it as ``RealtimeBridge/onLibraryChange``:
+    ///
+    /// ```swift
+    /// bridge.onLibraryChange = { [weak store] in store?.applyLibraryChange($0, connectionKey: $1) }
+    /// ```
+    public func applyLibraryChange(_ change: LibraryChange, connectionKey: LibraryConnectionKey) {
+        guard connectionKey == self.connectionKey else { return }
+        libraryChangeObservers.removeAll { $0.owner == nil }
+        for observer in libraryChangeObservers where observer.connectionKey == connectionKey {
+            observer.apply(change)
+        }
+    }
+
+    /// Calls `apply` with each socket change for `connectionKey`'s account, of any library, for as
+    /// long as `owner` lives. Models filter by library and entity themselves.
+    public func observeLibraryChanges(
+        connectionKey: LibraryConnectionKey, owner: AnyObject, _ apply: @escaping @MainActor (LibraryChange) -> Void
+    ) {
+        libraryChangeObservers.removeAll { $0.owner == nil }
+        libraryChangeObservers.append(LibraryChangeObserver(owner: owner, connectionKey: connectionKey, apply: apply))
+    }
 }
 
 /// An observer of ``LibraryStore``'s saved view preferences, kept while its owner lives.
@@ -347,6 +375,13 @@ private struct ViewPreferencesObserver {
     weak var owner: AnyObject?
     let connectionKey: LibraryConnectionKey
     let apply: @MainActor (_ libraryID: String, _ preferences: LibraryViewPreferences) -> Void
+}
+
+/// An observer of ``LibraryStore``'s socket changes, kept while its owner lives.
+private struct LibraryChangeObserver {
+    weak var owner: AnyObject?
+    let connectionKey: LibraryConnectionKey
+    let apply: @MainActor (LibraryChange) -> Void
 }
 
 /// Thrown by ``LibraryStoreServices`` when the store's current client doesn't implement the
@@ -376,7 +411,7 @@ extension APIClient: ServerURLProviding {
 /// started before a ``LibraryStore/clear()``. When the current client doesn't implement the
 /// requested service, requests throw ``LibraryStoreError/serviceUnavailable(_:)``.
 public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchService, SeriesAuthorsService,
-    GroupsService
+    GroupsService, LatestEpisodesService
 {
     private weak var store: LibraryStore?
     /// The account the services belong to.
@@ -476,6 +511,14 @@ public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchSer
     }
     public func playlistDetail(id: String) async throws -> Playlist {
         try await send((any GroupsService).self) { try await $0.playlistDetail(id: id) }
+    }
+
+    // MARK: LatestEpisodesService
+
+    public func recentEpisodes(libraryID: String, page: Int, limit: Int) async throws -> RecentEpisodesPage {
+        try await send((any LatestEpisodesService).self) {
+            try await $0.recentEpisodes(libraryID: libraryID, page: page, limit: limit)
+        }
     }
 
     // MARK: Server address (forwarded to the client's ServerURLProviding)

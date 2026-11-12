@@ -23,15 +23,44 @@ public enum PlaybackStopReason: Sendable, Equatable {
 public struct PlaybackCloseHandoff: Sendable {
     public let report: PlaybackSyncReport
     let position: PlaybackCloseResult<Void>
+    /// Resolved once the closing session's `/sync` in flight returned.
+    let sessionSync: PlaybackCloseResult<Void>?
 
-    init(report: PlaybackSyncReport, position: PlaybackCloseResult<Void>) {
+    init(
+        report: PlaybackSyncReport, position: PlaybackCloseResult<Void>,
+        sessionSync: PlaybackCloseResult<Void>? = nil
+    ) {
         self.report = report
         self.position = position
+        self.sessionSync = sessionSync
     }
 
     /// Canceling a waiter never cancels ownership of the captured write.
     public func waitForAudioPosition() async throws {
         try await position.wait()
+    }
+
+    /// Waits until the closing session's `/sync` in flight returned, so a `/close` sent after it
+    /// is normally the server's last word on the session (#337), or until `sleep(timeout)` ends.
+    /// Returns at once when none was in flight; throws only when the waiting task is cancelled.
+    func waitForSessionSync(
+        timeout: Duration, sleep: @escaping @Sendable (Duration) async -> Void
+    ) async throws {
+        guard let sessionSync, sessionSync.result == nil else { return }
+        let first = PlaybackCloseResult<Void>()
+        let timer = Task {
+            await sleep(timeout)
+            first.resolve(.success(()))
+        }
+        let sync = Task {
+            _ = try? await sessionSync.wait()
+            first.resolve(.success(()))
+        }
+        defer {
+            timer.cancel()
+            sync.cancel()
+        }
+        try await first.wait()
     }
 }
 
@@ -74,6 +103,8 @@ final class PlaybackCloseResult<Value: Sendable>: Sendable {
     private let state = Mutex(State())
 
     var result: Result<Value, any Error>? { state.withLock { $0.result } }
+    /// Waiters suspended now (tests).
+    var waiterCount: Int { state.withLock { $0.waiters.count } }
 
     func resolve(_ result: Result<Value, any Error>) {
         let waiters = state.withLock { state in
@@ -110,6 +141,8 @@ final class PlaybackCloseOperation {
     let wasLoaded: Bool
     let handoff: PlaybackCloseHandoff?
     let transport = PlaybackCloseResult<Bool>()
+    /// Resolved as `/close` is called, or once it won't be: the next `/play` waits for it.
+    let dispatched = PlaybackCloseResult<Void>()
     var task: Task<Void, Never>?
 
     init(sessionID: String, wasLoaded: Bool, handoff: PlaybackCloseHandoff?) {

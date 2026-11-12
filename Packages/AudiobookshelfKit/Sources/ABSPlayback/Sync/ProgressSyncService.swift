@@ -12,6 +12,9 @@ public protocol ProgressSyncService: Sendable {
     func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress?
     /// `POST /api/session/:id/sync`. Must return only once the request's task has completed.
     func syncSession(id: String, report: PlaybackSyncReport) async throws
+    /// `GET /api/session/:id`: the open session, with the listening time the server has applied
+    /// to it. Throws `APIError.notFound` once it is no longer open.
+    func openSession(id: String) async throws -> PlaybackSession
     /// `PATCH /api/me/progress/:itemID[/:episodeID]` with one field group.
     func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws
 }
@@ -30,6 +33,10 @@ public struct APIProgressSyncService: ProgressSyncService {
         _ = try await client.send(SessionEndpoints.sync(sessionID: id, report: report))
     }
 
+    public func openSession(id: String) async throws -> PlaybackSession {
+        try await client.send(SessionEndpoints.openSession(id: id))
+    }
+
     public func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
         try await client.mediaProgress(itemID: itemID, episodeID: episodeID)
     }
@@ -39,16 +46,22 @@ public struct APIProgressSyncService: ProgressSyncService {
     }
 }
 
-/// The wall clock (edit times) and a monotonic clock (listening time and cadence) for
-/// ``ProgressSyncer``; tests drive both by hand.
+/// The wall clock (edit times), a monotonic clock (listening time and cadence) and a sleep
+/// (retry wakes) for ``ProgressSyncer``; tests drive all three by hand.
 public struct ProgressSyncClock: Sendable {
     public var now: @Sendable () -> Date
     /// Monotonic seconds from an arbitrary origin.
     public var uptime: @Sendable () -> TimeInterval
+    /// Suspends for at least the given monotonic seconds; throws when cancelled.
+    public var sleep: @Sendable (TimeInterval) async throws -> Void
 
-    public init(now: @escaping @Sendable () -> Date, uptime: @escaping @Sendable () -> TimeInterval) {
+    public init(
+        now: @escaping @Sendable () -> Date, uptime: @escaping @Sendable () -> TimeInterval,
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
+    ) {
         self.now = now
         self.uptime = uptime
+        self.sleep = sleep
     }
 
     public static var live: ProgressSyncClock {

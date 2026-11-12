@@ -13,11 +13,17 @@ struct AudiobookshelfApp: App {
 
     var body: some Scene {
         WindowGroup {
-            RootView(lifecycle: environment.lifecycle, player: environment.player, accounts: environment.accounts)
-                .environment(settings)
-                .modifier(AppThemeModifier(settings: settings))
+            RootView(
+                lifecycle: environment.lifecycle, player: environment.player, accounts: environment.accounts,
+                imagePipeline: environment.images.pipeline
+            )
+            .environment(settings)
+            .modifier(AppThemeModifier(settings: settings))
         }
-        .commands { SearchCommands() }
+        .commands {
+            SearchCommands()
+            RefreshCommands()
+        }
         // The system relaunches the app for finished background downloads; this waits until
         // the download engine has processed every event before the system suspends it again.
         .backgroundTask(.urlSession(DownloadEngine.sessionIdentifier)) {
@@ -33,6 +39,10 @@ struct AudiobookshelfApp: App {
             } else if phase == .background {
                 Task { await DownloadEngine.deactivate() }
             }
+        }
+        // Keeps less of the cover cache in memory while in the background.
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .background { environment.images.didEnterBackground() }
         }
 
         #if os(macOS)

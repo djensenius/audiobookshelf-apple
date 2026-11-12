@@ -427,11 +427,39 @@ import Testing
         await #expect(throws: CocoaError.self) { try await settle() }
         #expect(await store.hasUncommittedChanges == false)
         try await echo()
-        #expect(try await store.beginSend(for: key) == nil)  // The old send is still in flight.
+        // The old send is still in flight: the next send first retries its kept outcome.
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) { try await store.beginSend(for: key) }
+        try await echo()
 
         #expect(try await settle())
         try await echo()
         #expect(try await store.beginSend(for: key)?.values.audio?.currentTime == 300)
+    }
+
+    /// A recreated row's shield that couldn't be saved is saved by the next ``beginSend``, from
+    /// any caller, without the outcome being reported again (#337).
+    @Test(arguments: [false, true])
+    func nextSendSavesAKeptShield(_ succeeds: Bool) async throws {
+        let (store, _) = try makeStore()
+        try await store.recordEdit(
+            Self.seek(200), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(1))
+        let patch = try #require(try await store.beginSend(for: key))
+        #expect(try await store.deleteProgress(for: key))
+        try await store.recordEdit(
+            Self.seek(300), for: key, serverProgress: Self.server(lastUpdate: Self.t0), now: Self.at(5))
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) {
+            if succeeds {
+                try await store.completeSend(patch, serverLastUpdate: nil)
+            } else {
+                try await store.failSend(patch, error: "offline")
+            }
+        }
+
+        let next = try #require(try await store.beginSend(for: key))
+        #expect(next.values.audio?.currentTime == 300)
+        #expect(try await store.completeSend(patch, serverLastUpdate: nil) == false)
     }
 
     /// Server values merged while a PATCH is in flight update the row in place; the response
