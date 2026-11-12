@@ -280,13 +280,16 @@ final class HeaderResourceLoader: NSObject, AVAssetResourceLoaderDelegate, URLSe
                 contentType: type, contentLength: length, isByteRangeAccessSupported: false)
             return (information, 0, length.map { $0 - 1 })
         }
-        // `bytes <first>-<last>/<total or *>`
+        // `bytes <first>-<last>/<total or *>`, a forward interval whose byte count fits in `Int64`
+        // and that ends inside a numeric total.
         guard let header = response.value(forHTTPHeaderField: "Content-Range"),
             let match = header.firstMatch(of: /^\s*bytes\s+(\d+)-(\d+)\/(\d+|\*)\s*$/),
-            let first = Int64(match.1), let last = Int64(match.2)
+            let first = Int64(match.1), let last = Int64(match.2), first <= last, last < Int64.max
         else { return nil }
+        let total = match.3 == "*" ? nil : Int64(match.3)
+        if match.3 != "*" { guard let total, total > last else { return nil } }
         let information = ContentInformation(
-            contentType: type, contentLength: Int64(match.3), isByteRangeAccessSupported: true)
+            contentType: type, contentLength: total, isByteRangeAccessSupported: true)
         return (information, first, last)
     }
 

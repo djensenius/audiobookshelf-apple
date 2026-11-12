@@ -18,6 +18,8 @@ final class StreamStubProtocol: URLProtocol {
         var rangeStartsAt: Int?
         /// Ends every `206` at this offset at the latest, short of what was asked.
         var rangeEndsAt: Int?
+        /// Sent as every `206`'s `Content-Range` instead of the range served.
+        var contentRange: String?
         /// Answers a request for one of these paths with a 302 to its URL instead.
         var redirects: [String: String] = [:]
         /// Sends the body in chunks of this many bytes.
@@ -99,7 +101,7 @@ final class StreamStubProtocol: URLProtocol {
                 route.rangeStartsAt.map { min(max(requestedEnd, $0 + requestedEnd - start), total - 1) } ?? requestedEnd
             let start = route.rangeStartsAt ?? start
             status = 206
-            headers["Content-Range"] = "bytes \(start)-\(end)/\(total)"
+            headers["Content-Range"] = route.contentRange ?? "bytes \(start)-\(end)/\(total)"
             body = route.body.subdata(in: start..<(end + 1))
         }
         headers["Content-Length"] = String(body.count)

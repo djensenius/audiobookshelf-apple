@@ -11,6 +11,9 @@ import Testing
 struct HeaderStreamingTransportTests {
     static let proxyHeaders = ["CF-Access-Client-Id": "client", "CF-Access-Client-Secret": "secret"]
     static let body = Data((0..<1000).map { UInt8($0 % 251) })
+    /// `.never` with expensive paths counted as cellular, so every flag is off on every platform
+    /// (iOS keeps expensive access for a personal hotspot by default).
+    static let deniesMetered = NetworkAccess(policy: .never, treatsExpensiveAsCellular: true)
 
     private func transport(_ headers: [String: String] = proxyHeaders) -> HeaderStreamingTransport {
         HeaderStreamingTransport(customHeaders: headers, configuration: StreamStubProtocol.configuration())
@@ -177,6 +180,23 @@ struct HeaderStreamingTransportTests {
         }
     }
 
+    /// Reversed, overflowing or out-of-bounds ranges are refused rather than trusted.
+    @Test(
+        arguments: [
+            (0, "bytes 0-9223372036854775807/*"),
+            (0, "bytes 0-9/99999999999999999999"),
+            (100, "bytes 100-149/50"),
+            (100, "bytes 100-99/1000"),
+        ] as [(Int64, String)])
+    func invalidContentRangeFails(offset: Int64, contentRange: String) async throws {
+        let host = StreamStubProtocol.register(.init(body: Self.body, contentRange: contentRange))
+        let request = try await load(
+            "https://\(host)/t", range: RequestedRange(offset: offset, length: nil), through: transport())
+
+        #expect(request.error as? HeaderStreamingError == .invalidRange)
+        #expect(request.data.isEmpty)
+    }
+
     @Test func rangeClippedAtTheEndOfTheResourceSucceeds() async throws {
         let host = StreamStubProtocol.register(.init(body: Self.body))
         // The stub answers `bytes 900-999/1000` for a request that wants up to byte 1099.
@@ -315,7 +335,7 @@ struct HeaderStreamingTransportTests {
         let transport = HeaderStreamingTransport(customHeaders: Self.proxyHeaders, configuration: configuration)
         let request = try await load(
             "https://\(host)/t", range: RequestedRange(offset: 0, length: 2), through: transport,
-            networkAccess: NetworkAccess(policy: .never))
+            networkAccess: Self.deniesMetered)
 
         #expect(request.error == nil)
         let sent = try #require(StreamStubProtocol.requests(host).first)
@@ -352,7 +372,7 @@ struct HeaderStreamingTransportTests {
             .init(redirects: ["/public/session/s/track/1": "https://\(target)/cdn/track"]))
         let request = try await load(
             "https://\(origin)/public/session/s/track/1", range: RequestedRange(offset: 10, length: 20),
-            through: transport(), networkAccess: NetworkAccess(policy: .never))
+            through: transport(), networkAccess: Self.deniesMetered)
 
         #expect(request.error == nil)
         #expect(request.data == Self.body.subdata(in: 10..<30))
