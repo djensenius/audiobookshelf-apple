@@ -85,6 +85,14 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   ``drainPendingProgress()``, which also retries the active baseline lookup that a failed or
 ///   offline start skipped, as does an online path whose `onlineEpoch` grew (the offline path in
 ///   between was dropped). Repeated online paths and an online first path don't drain.
+/// - **History (#384).** Given a `PlaybackHistoryRecording`, the syncer records each of its
+///   sessions' events, with the position at the event: play, seek (not the resume landing) and
+///   stop. Pause (only from playing), finished (at the duration) and each periodic save carry
+///   the result of the `/sync` they trigger: not attempted when no `/sync` goes out (backoff,
+///   abandoned, skipped), or the `/close`'s result when the session closes first. Stop carries
+///   the `/close`'s result. A sync event is recorded when a fetch saved server progress for the
+///   loaded media at least a second from playback's position. Recording runs on its own serial
+///   tasks, which playback and sync never await; the store drops and logs an event it can't save.
 @MainActor
 public final class ProgressSyncer {
     /// Seconds between reports while playing (legacy `TIME_BETWEEN_SESSION_SYNC_IN_SECONDS`).
@@ -107,6 +115,8 @@ public final class ProgressSyncer {
         let ownership = UUID()
         let sessionID: String
         let key: MediaKey
+        /// The session's title, for playback history.
+        var title = ""
         /// `sessionStarted` precedes position resolution; only `loaded` makes the position reportable.
         var hasLoaded = false
         /// Listening time not yet handed to a report.
@@ -144,7 +154,8 @@ public final class ProgressSyncer {
     private var lastTick: (uptime: TimeInterval, mediaTime: Double)?
     private var lastSyncAt: TimeInterval?
     private var chapterIndex: Int?
-    /// The `didSeek` the coordinator emits right after `loaded` is the resume position, not a seek.
+    /// A `didSeek` landing on `loaded`'s time is the load's own position, not a new one to sync;
+    /// it's a history Seek only when the user chose it while loading (`loadLandingIsUserSeek`).
     private var loadedTime: Double?
     /// The session with a `/sync` queued but not started; later requests join it.
     private var queuedSyncSessionID: String?
@@ -153,6 +164,20 @@ public final class ProgressSyncer {
     /// The `/sync` inside `service.syncSession` now, resolved when the call returns. Its
     /// session's final close waits for it; queued reports don't count.
     private var inFlightSync: (sessionID: String, done: PlaybackCloseResult<Void>)?
+    private let history: PlaybackHistoryLog?
+    /// History events (pause, finished, save) waiting for their session's queued `/sync`.
+    private var queuedHistory: [String: [PlaybackHistoryLog.Event]] = [:]
+    /// A closed session's history (its queued triggers, then Stop) and its `/close`, held until
+    /// the close's `sessionWillClose` reaches this syncer. An event delivered before that (an
+    /// observer that ran first stopped on it) is the session's, recorded before Stop.
+    private struct ClosingHistory {
+        let sessionID: String
+        let position: Double
+        let duration: Double
+        var events: [PlaybackHistoryLog.Event]
+        let close: PlaybackCloseResult<Bool>?
+    }
+    private var closingHistory: [ClosingHistory] = []
     private var tail: Task<Void, Never>?
     private var persistenceTail: Task<Void, Never>?
     /// Test seam: hold local persistence independently of transport.
@@ -167,6 +192,8 @@ public final class ProgressSyncer {
     var beforeActiveProgressCapture: (@MainActor () async -> Void)?
     /// Test seam: observes admission without suspending between ownership validation and store submission.
     var activeProgressIntakeSubmitted: (@MainActor () -> Void)?
+    /// Test seam: runs just before a fetched progress's store merge is submitted.
+    var fetchedProgressIntakeSubmitted: (@MainActor () -> Void)?
     private(set) var pendingPositions: [MediaKey: Position] = [:]
     /// The pending positions whose last save failed, as opposed to ones merely still queued.
     private var failedPositions: [MediaKey: Position] = [:]
@@ -204,15 +231,18 @@ public final class ProgressSyncer {
     ///   `timeObserverInterval`).
     /// - Parameter paths: The network path, to drain when it comes back online (pass
     ///   `SystemNetworkPathSource`); `nil` leaves reconnect draining to the caller.
+    /// - Parameter history: Records the sessions' playback history; `nil` records none.
     public init(
         source: any PlaybackProgressSource, service: any ProgressSyncService, store: LocalProgressStore,
-        clock: ProgressSyncClock = .live, tickInterval: TimeInterval = 0.5, paths: (any NetworkPathSource)? = nil
+        clock: ProgressSyncClock = .live, tickInterval: TimeInterval = 0.5, paths: (any NetworkPathSource)? = nil,
+        history: (any PlaybackHistoryRecording)? = nil
     ) {
         self.source = source
         self.service = service
         self.store = store
         self.clock = clock
         self.tickInterval = tickInterval
+        self.history = history.map(PlaybackHistoryLog.init)
         observer = source.addObserver { [weak self] event in self?.handle(event) }
         source.finalCloseReport = { [weak self] closing in
             guard let self, let handoff = closeReport(for: closing) else { return nil }
@@ -241,6 +271,7 @@ public final class ProgressSyncer {
         source?.quiesceProgressTransport = nil
         source = nil
         current = nil
+        while let held = closingHistory.first { releaseClosingHistory(held.sessionID) }
     }
 
     /// Permanently prevents queued/new sync and PATCH calls and cancels issued calls best-effort.
@@ -333,7 +364,7 @@ public final class ProgressSyncer {
         switch event {
         case .sessionStarted(let sessionID, let key):
             guard key.serverConnectionID == service.serverConnectionID else { return }
-            current = CurrentSession(sessionID: sessionID, key: key)
+            current = CurrentSession(sessionID: sessionID, key: key, title: source?.sessionDisplayTitle ?? "")
             syncWake?.cancel()
             syncWake = nil
             isPlaying = false
@@ -341,6 +372,13 @@ public final class ProgressSyncer {
             loadedTime = nil
         case .loaded(let time):
             current?.hasLoaded = true
+            if let key = current?.key {
+                noteServerProgress(source?.startProgressChange, of: serverProgressOwner(for: key))
+            } else if let change = source?.startProgressChange, Self.movesStoredPosition(change) {
+                // An observer that ran first stopped on the load: the start's change is the closed
+                // session's, before its Stop.
+                holdBeforeStop(.sync, at: change.to, sync: .notAttempted, details: Self.fetchedDetails)
+            }
             loadedTime = time
             lastSyncAt = now
             chapterIndex = source?.chapterIndex
@@ -350,22 +388,43 @@ public final class ProgressSyncer {
                 queuePosition(session.key, time: time, duration: source?.duration ?? 0)
             }
         case .playbackStarted:
+            if current == nil {
+                holdBeforeStop(.play, sync: .notAttempted)
+            } else if let event = historyEvent(.play, at: source?.currentTime) {
+                history?.record([event], sync: .notAttempted)
+            }
             isPlaying = true
             lastSyncAt = now
             lastTick = source?.confirmedPlaybackTime.map { (now, $0) }
         case .paused, .ended:
+            // Pausing while already paused (a sleep timer cancelling its resume) isn't history.
+            let historyName: PlaybackHistoryEventName? =
+                if case .ended = event { .finished } else { isPlaying ? .pause : nil }
+            if current == nil, let historyName { holdBeforeStop(historyName) }
             creditPlayedTime()
             isPlaying = false
             lastTick = nil
-            requestSync()
+            requestSync(history: historyName)
         case .didSeek(let time):
             defer { loadedTime = nil }
             chapterIndex = source?.chapterIndex
             lastTick = isPlaying ? (now, time) : nil
-            if loadedTime != time { requestSync() }
+            // Landing on `loaded`'s time is no new position to send, but history follows its origin.
+            let isLoadLanding = loadedTime == time
+            let isUserSeek =
+                isLoadLanding ? source?.loadLandingIsUserSeek == true : time != source?.resumeRewindLanding
+            if isUserSeek {
+                if current == nil {
+                    holdBeforeStop(.seek, at: time, sync: .notAttempted)
+                } else if let event = historyEvent(.seek, at: time) {
+                    history?.record([event], sync: .notAttempted)
+                }
+            }
+            if !isLoadLanding { requestSync() }
         case .tick(let time):
             tick(time, now: now)
         case .sessionWillClose(let closing):
+            releaseClosingHistory(closing.sessionID)
             if current?.sessionID == closing.sessionID {
                 current = nil
                 cancelSyncWake()
@@ -389,7 +448,7 @@ public final class ProgressSyncer {
             chapterIndex = chapter
             requestSync()
         } else if playing, let lastSyncAt, now - lastSyncAt >= Self.syncInterval {
-            requestSync()
+            requestSync(history: .save)
         }
     }
 
@@ -397,7 +456,12 @@ public final class ProgressSyncer {
     /// no report carried yet.
     private func closeReport(for closing: ClosingSession) -> PlaybackCloseHandoff? {
         var listened: TimeInterval = 0
+        // The close carries the session's last report, so its result is theirs too.
+        var historyEvents: [PlaybackHistoryLog.Event] = []
         if current?.sessionID == closing.sessionID {
+            if let stop = historyEvent(.stop, at: closing.currentTime) {
+                historyEvents = (queuedHistory.removeValue(forKey: closing.sessionID) ?? []) + [stop]
+            }
             creditPlayedTime()
             listened = current?.listened ?? 0
             if let snapshot = current?.unreconciled {
@@ -411,11 +475,16 @@ public final class ProgressSyncer {
             let report = PlaybackSyncReport(
                 currentTime: closing.currentTime, timeListened: listened, duration: closing.duration),
             let position = queuePosition(closing.key, time: closing.currentTime, duration: closing.duration)
-        else { return nil }
+        else {
+            holdClosingHistory(historyEvents, of: closing, close: nil)
+            return nil
+        }
         let receipt = PlaybackCloseResult<Void>()
         positionReceipts[closing.key, default: []].append((position.revision, receipt))
         let sessionSync = inFlightSync?.sessionID == closing.sessionID ? inFlightSync?.done : nil
-        return PlaybackCloseHandoff(report: report, position: receipt, sessionSync: sessionSync)
+        let handoff = PlaybackCloseHandoff(report: report, position: receipt, sessionSync: sessionSync)
+        holdClosingHistory(historyEvents, of: closing, close: handoff.transport)
+        return handoff
     }
 
     /// A final sample may advance after the last tick. Targets and stalls earn nothing, and
@@ -437,6 +506,119 @@ public final class ProgressSyncer {
         return gap > maxTickGap ? tickInterval : gap
     }
 
+    // MARK: History
+
+    /// A history event for the current session, or `nil` when there is none (or no history).
+    private func historyEvent(_ name: PlaybackHistoryEventName?, at position: Double?) -> PlaybackHistoryLog.Event? {
+        guard history != nil, let name, let session = current else { return nil }
+        return .init(name: name, media: .init(key: session.key, displayTitle: session.title), position: position)
+    }
+
+    /// The loaded session a server progress merge for `key` belongs to in history.
+    private struct ServerProgressOwner {
+        let sessionID: String
+        let ownership: UUID
+        let media: PlaybackHistoryMedia
+    }
+
+    /// Captured before the merge is submitted: the session can close or detach while it's awaited.
+    private func serverProgressOwner(for key: MediaKey) -> ServerProgressOwner? {
+        guard history != nil, let session = current, session.key == key, session.hasLoaded else { return nil }
+        return .init(
+            sessionID: session.sessionID, ownership: session.ownership,
+            media: .init(key: session.key, displayTitle: session.title))
+    }
+
+    /// Server progress for `owner`'s media was saved; it's history if the save moved the stored
+    /// position by a second or more (a created row moved it from 0). If the session closed
+    /// meanwhile and its Stop is still held, the Sync goes before it.
+    private func noteServerProgress(_ change: ServerAudioPositionChange?, of owner: ServerProgressOwner?) {
+        guard let owner, let change, Self.movesStoredPosition(change) else { return }
+        if current?.ownership != owner.ownership,
+            holdBeforeStop(.sync, at: change.to, sync: .notAttempted, details: Self.fetchedDetails, of: owner.sessionID)
+        {
+            return
+        }
+        history?.record(
+            [.init(name: .sync, media: owner.media, position: change.to)], sync: .notAttempted,
+            details: Self.fetchedDetails)
+    }
+
+    private static let fetchedDetails = "Fetched from the server"
+
+    /// Whether saved server progress moved the stored position by a second or more (a created
+    /// row moved it from 0).
+    private static func movesStoredPosition(_ change: ServerAudioPositionChange) -> Bool {
+        abs(change.to - (change.from ?? 0)) >= 1
+    }
+
+    private func holdClosingHistory(
+        _ events: [PlaybackHistoryLog.Event], of closing: ClosingSession, close: PlaybackCloseResult<Bool>?
+    ) {
+        guard !events.isEmpty else { return }
+        closingHistory.append(
+            ClosingHistory(
+                sessionID: closing.sessionID, position: closing.currentTime, duration: closing.duration,
+                events: events, close: close))
+    }
+
+    /// Records a closed session's held history with its `/close`'s result.
+    private func releaseClosingHistory(_ sessionID: String) {
+        guard let index = closingHistory.firstIndex(where: { $0.sessionID == sessionID }) else { return }
+        let held = closingHistory.remove(at: index)
+        if let close = held.close {
+            history?.record(held.events, after: close)
+        } else {
+            history?.record(held.events, sync: .notAttempted)
+        }
+    }
+
+    /// An event that reached this syncer after its session closed (stopped by an observer that
+    /// ran first) goes before the closed session's Stop: Pause and Finished with the `/close`'s
+    /// result (it carries their report), others with `sync`. `position` defaults to the closing
+    /// position, or the duration for Finished. `sessionID` picks a held session other than the
+    /// first; returns whether one was held.
+    @discardableResult
+    private func holdBeforeStop(
+        _ name: PlaybackHistoryEventName, at position: Double? = nil, sync: PlaybackHistorySyncResult? = nil,
+        details: String? = nil, of sessionID: String? = nil
+    ) -> Bool {
+        guard
+            let index = sessionID.map({ id in closingHistory.firstIndex { $0.sessionID == id } })
+                ?? closingHistory.indices.first,
+            let stop = closingHistory[index].events.last
+        else { return false }
+        var held = closingHistory[index]
+        let at = position ?? (name == .finished ? held.duration : held.position)
+        held.events.insert(
+            .init(name: name, media: stop.media, position: at, sync: sync, details: details),
+            at: held.events.count - 1)
+        closingHistory[index] = held
+        return true
+    }
+
+    /// Records a report's triggers as soon as its result is known, not after the evidence and
+    /// drains that follow it, and empties them so they aren't recorded again.
+    private func recordHistory(_ events: inout [PlaybackHistoryLog.Event]?, sync: PlaybackHistorySyncResult) {
+        history?.record(events ?? [], sync: sync)
+        events = []
+    }
+
+    /// Takes the triggers in `ids` still queued for `sessionID`. Later ones, including a
+    /// replacement session's under a reused ID, wait for their own report.
+    private func takeQueuedHistory(_ sessionID: String, ids: Set<UUID>) -> [PlaybackHistoryLog.Event] {
+        guard let queued = queuedHistory[sessionID] else { return [] }
+        let taken = queued.filter { ids.contains($0.id) }
+        let rest = queued.filter { !ids.contains($0.id) }
+        queuedHistory[sessionID] = rest.isEmpty ? nil : rest
+        return taken
+    }
+
+    /// Waits until the history events handed over so far are recorded (tests).
+    func waitForHistory() async {
+        await history?.waitForIdle()
+    }
+
     // MARK: Queue
 
     private func enqueue(_ operation: @escaping @MainActor () async -> Void) {
@@ -451,7 +633,15 @@ public final class ProgressSyncer {
         transportTasks[id] = task
     }
 
-    private func requestSync(ignoringBackoff: Bool = false) {
+    /// - Parameter historyName: The history event this trigger records, with the `/sync`'s result
+    ///   (not attempted when none is sent).
+    private func requestSync(ignoringBackoff: Bool = false, history historyName: PlaybackHistoryEventName? = nil) {
+        let historyTrigger = historyEvent(
+            historyName, at: historyName == .finished ? source?.duration : source?.currentTime)
+        var historyQueued = false
+        defer {
+            if !historyQueued, let historyTrigger { history?.record([historyTrigger], sync: .notAttempted) }
+        }
         guard !isDetached, !isTransportQuiesced, let session = current, let source,
             session.hasLoaded,
             let position = queuePosition(session.key, time: source.currentTime, duration: source.duration)
@@ -469,6 +659,10 @@ public final class ProgressSyncer {
             if !session.isRowRejected { requestDrain() }
             return
         }
+        if let historyTrigger {
+            queuedHistory[sessionID, default: []].append(historyTrigger)
+            historyQueued = true
+        }
         guard queuedSyncSessionID != sessionID else {
             // A flush joining a queued report keeps its bypass of the backoff.
             if ignoringBackoff { queuedSyncIgnoresBackoff = true }
@@ -482,6 +676,13 @@ public final class ProgressSyncer {
     /// Sends the latest saved trigger for `sessionID`, if it is still current.
     private func sendSync(sessionID: String) async {
         await waitForPendingWrites()
+        // Until the `/sync` starts, a close may take these triggers and report them itself.
+        let historyIDs = Set(queuedHistory[sessionID]?.map(\.id) ?? [])
+        var historyEvents: [PlaybackHistoryLog.Event]?
+        var historyResult = PlaybackHistorySyncResult.notAttempted
+        defer {
+            history?.record(historyEvents ?? takeQueuedHistory(sessionID, ids: historyIDs), sync: historyResult)
+        }
         var ignoringBackoff = false
         if queuedSyncSessionID == sessionID {
             queuedSyncSessionID = nil
@@ -549,6 +750,7 @@ public final class ProgressSyncer {
         let outcome: SessionAudioOutcome
         // No suspension between the guard above and the call: a close sees it in flight.
         let done = PlaybackCloseResult<Void>()
+        historyEvents = takeQueuedHistory(sessionID, ids: historyIDs)
         inFlightSync = (sessionID, done)
         do {
             defer {
@@ -557,6 +759,8 @@ public final class ProgressSyncer {
             }
             try await service.syncSession(id: sessionID, report: report)
             outcome = .succeeded
+            historyResult = .succeeded
+            recordHistory(&historyEvents, sync: historyResult)
             if current?.sessionID == sessionID {
                 current?.ackedTotal += report.timeListened
                 current?.syncFailures = 0
@@ -564,6 +768,8 @@ public final class ProgressSyncer {
                 cancelSyncWake()
             }
         } catch {
+            historyResult = .failed(message: Self.caseName(error))
+            recordHistory(&historyEvents, sync: historyResult)
             let abandoned = noteSyncFailure(error, sessionID: sessionID)
             if case .notFound = error as? APIError {
                 // No session, so the server applied nothing; but there's no session to resend to.
@@ -991,8 +1197,9 @@ public final class ProgressSyncer {
             guard ownsActiveRefresh(session), let progress else { return }
             // No suspension between ownership admission and submission. Already-submitted
             // actor work is not retroactively cancelled; atomic store provenance still applies.
+            let owner = serverProgressOwner(for: session.key)
             activeProgressIntakeSubmitted?()
-            _ = try await store.applyStartProgress(progress, captured: capture)
+            noteServerProgress(try await store.applyStartProgressChange(progress, captured: capture), of: owner)
         } catch {
             logger.error("Refreshing active progress failed: \(String(describing: error), privacy: .public)")
         }
@@ -1041,9 +1248,12 @@ public final class ProgressSyncer {
             finishedAt: progress.finishedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) },
             ebookLocation: progress.ebookLocation, ebookProgress: progress.ebookProgress,
             lastUpdate: Date(timeIntervalSince1970: Double(lastUpdate) / 1000))
-        let merged = try await store.applyServerProgress(
+        let owner = serverProgressOwner(for: key)
+        fetchedProgressIntakeSubmitted?()
+        let merged = try await store.applyServerProgressChanges(
             [key: baseline], capturedAt: capturedAt, source: .fetch)
-        return merged.contains(key)
+        noteServerProgress(merged[key], of: owner)
+        return merged[key] != nil
     }
 
     /// Retry this exact local outcome before taking another PATCH. If the store released the

@@ -166,6 +166,31 @@ private final class Recorder: SessionParticipant {
         }
     }
 
+    // MARK: Stats service
+
+    @Test func theSignedInShellGetsTheActiveAccountsStatsService() async throws {
+        let environment = try makeEnvironment()
+        let accounts = try #require(environment.accounts)
+        let (a, b, hosts) = try await twoServers(environment, recorder: Recorder())
+        defer { cleanUp(hosts) }
+        let client = try #require(accounts.client)
+        #expect(RootView.statsService(accounts, for: b) as? APIClient === client)
+        // The outgoing shell of a switch, still up for A after accounts moved to B, gets none.
+        #expect(RootView.statsService(accounts, for: a) == nil)
+        #expect(RootView.statsService(nil, for: b) == nil)
+
+        let switched = try await #require(
+            AccountActions(lifecycle: environment.lifecycle).switchAccount(to: a.connectionID)
+        ).value
+        #expect(switched.succeeded)
+        let switchedClient = try #require(accounts.client)
+        #expect(RootView.statsService(accounts, for: a) as? APIClient === switchedClient)
+        #expect(RootView.statsService(accounts, for: b) == nil)
+
+        await environment.lifecycle.signOut()
+        #expect(RootView.statsService(accounts, for: a) == nil)
+    }
+
     // MARK: Account session adapter
 
     @Test func adapterReportsRestoringUntilTheServerAnswers() async throws {

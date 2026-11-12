@@ -204,6 +204,19 @@ public final class PlaybackCoordinator {
     /// Bumped by every resume and pause; a resume plays only if it's still the latest.
     @ObservationIgnored private var resumeIntent = 0
     private var resumingIntent: Int?
+    /// Where the latest automatic seek (a resume's rewind, or a load's late landing) landed; its
+    /// `didSeek` isn't a user seek (#384).
+    @ObservationIgnored public private(set) var resumeRewindLanding: Double?
+    /// The latest load's landing is a seek or jump the user made (while it loaded, or replacing
+    /// its pending target), not its own target: history records it as a seek even where it lands
+    /// exactly on `loaded`'s time (#384).
+    @ObservationIgnored public private(set) var loadLandingIsUserSeek = false
+    @ObservationIgnored private var seekIsResumeRewind = false
+    /// An automatic seek (an interrupted resume rewind, or the load's own) whose landing the engine
+    /// still owes; any other seek clears it.
+    @ObservationIgnored private var rewindAwaitsLanding = false
+    /// How the latest start's server progress moved the stored position (history, #384).
+    @ObservationIgnored public private(set) var startProgressChange: ServerAudioPositionChange?
     @ObservationIgnored private var closingSessionIDs: Set<String> = []
     @ObservationIgnored private var closeTasks: [UUID: Task<Void, Never>] = [:]
     /// When each close in ``closeTasks`` was sent, so a hanging one holds back only the first play
@@ -544,12 +557,15 @@ public final class PlaybackCoordinator {
         guard current == generation else { return }
         // Admit only after a successful load. Invalidation prevents a new submission, not an
         // already submitted actor mutation; the store independently checks atomic provenance.
+        startProgressChange = nil
+        var progressChange: ServerAudioPositionChange?
         if !Task.isCancelled, localReadSucceeded, let capture = started.progressCapture,
             case .success(let progress?) = server
         {
-            _ = try? await progressStore.applyStartProgress(progress, captured: capture)
+            progressChange = try? await progressStore.applyStartProgressChange(progress, captured: capture)
         }
         guard current == generation else { return }
+        startProgressChange = progressChange
         phase = .loaded
         isFinishingLoad = true
         defer { if current == generation { isFinishingLoad = false } }
@@ -561,6 +577,10 @@ public final class PlaybackCoordinator {
         let jumpOffset = pendingJumpOffset
         pendingJumpOffset = 0
         awaitingSeekLanding = true
+        // However late the engine lands the load's own target, that's not a user seek (#384).
+        rewindAwaitsLanding = true
+        resumeRewindLanding = nil
+        loadLandingIsUserSeek = false
         var seekTarget: Double?
         if let pending, pending != plannedStart {
             // A seek while loading: normalize before adding jumps, just as the initial load does.
@@ -569,6 +589,9 @@ public final class PlaybackCoordinator {
         // Use the requested resume anchor (or newer seek), not the engine's gap-snapped landing.
         if jumpOffset != 0 { seekTarget = (seekTarget ?? target) + jumpOffset }
         if let seekTarget {
+            // A seek or jump made while loading replaces the load's own target: a user seek.
+            rewindAwaitsLanding = false
+            loadLandingIsUserSeek = true
             await engine.seek(to: engine.timeline?.clamp(seekTarget) ?? seekTarget)
             guard current == generation, phase == .loaded else { return }
         }
@@ -580,6 +603,7 @@ public final class PlaybackCoordinator {
         // Even a newer seek or tick during catch-up must report its landing after `loaded`.
         if engine.pendingSeekTarget == nil, awaitingSeekLanding {
             awaitingSeekLanding = false
+            rewindAwaitsLanding = false
             emit(.didSeek(time: engine.currentTime))
         }
         guard current == generation, phase == .loaded else { return }
@@ -636,12 +660,15 @@ public final class PlaybackCoordinator {
         let extra = Self.nonNegative(willResume?() ?? 0)
         guard current == generation else { return }
         let target: Double?
+        var isRewind = false
         if let startTime {
             target = startTime
         } else if let pending = engine.pendingSeekTarget {
             // The user's interrupted seek is where playback goes: not rewound from the old
-            // position, nor replaced by the restart from the end.
+            // position, nor replaced by the restart from the end. Retrying an interrupted resume
+            // rewind keeps it a rewind, not a user seek.
             target = pending
+            isRewind = rewindAwaitsLanding
         } else if atEnd {
             target = 0
         } else {
@@ -654,8 +681,10 @@ public final class PlaybackCoordinator {
                 }
             let rewoundTarget = max(rewound - extra, 0)
             target = rewoundTarget < time ? rewoundTarget : nil
+            isRewind = true
         }
         if let target {
+            seekIsResumeRewind = isRewind
             await seek(to: target)
         }
         guard intent == resumeIntent, current == generation, phase == .loaded else { return }
@@ -699,6 +728,11 @@ public final class PlaybackCoordinator {
         case .loaded:
             let current = generation
             let target = engine.timeline?.clamp(time) ?? max(time, 0)
+            let isResumeRewind = seekIsResumeRewind
+            seekIsResumeRewind = false
+            resumeRewindLanding = nil
+            rewindAwaitsLanding = false
+            if !isResumeRewind { loadLandingIsUserSeek = true }
             reachedEnd = false
             awaitingSeekLanding = true
             // A seek during recovery takes over, and plays once it lands if recovery would have: a
@@ -716,13 +750,18 @@ public final class PlaybackCoordinator {
             defer { if let resume, resumingIntent == resume { resumingIntent = nil } }
             let result = await engine.seek(to: target)
             guard current == generation, phase == .loaded else { return .deferred }
+            // A newer seek owns the landing state now.
+            guard result != .superseded else { return .deferred }
             guard result == .completed else {
                 awaitingSeekLanding = isFinishingLoad || engine.pendingSeekTarget != nil
+                // The engine keeps an interrupted or failed target pending; a retry is still the rewind.
+                rewindAwaitsLanding = isResumeRewind && engine.pendingSeekTarget != nil
                 return result == .failed ? .failed : .deferred
             }
             let landed = engine.currentTime
             if awaitingSeekLanding, !isFinishingLoad {
                 awaitingSeekLanding = false
+                if isResumeRewind { resumeRewindLanding = landed }
                 emit(.didSeek(time: landed))
                 saveLastPlayed()
             }
@@ -928,6 +967,8 @@ public final class PlaybackCoordinator {
             // clearing the flag before emitting prevents later ticks from announcing it again.
             if awaitingSeekLanding, !isFinishingLoad, engine.pendingSeekTarget == nil {
                 awaitingSeekLanding = false
+                if rewindAwaitsLanding { resumeRewindLanding = engine.currentTime }
+                rewindAwaitsLanding = false
                 emit(.didSeek(time: engine.currentTime))
                 guard phase == .loaded else { return }
                 saveLastPlayed()
@@ -1275,6 +1316,7 @@ public final class PlaybackCoordinator {
         defer { closingPlaybackTime = nil }
         let wasLoaded = phase == .loaded
         awaitingSeekLanding = false
+        rewindAwaitsLanding = false
         if wasLoaded {
             unloadedPosition = position
             unloadedDuration = engine.duration
@@ -1309,7 +1351,11 @@ public final class PlaybackCoordinator {
         sessionID: String, report: PlaybackSyncReport? = nil,
         handoff: PlaybackCloseHandoff? = nil, wasLoaded: Bool = false
     ) {
-        guard closingSessionIDs.insert(sessionID).inserted else { return }
+        guard closingSessionIDs.insert(sessionID).inserted else {
+            // The server reused an ID whose close is pending: that close covers it, not this one.
+            handoff?.transport.resolve(.success(false))
+            return
+        }
         let operation = PlaybackCloseOperation(sessionID: sessionID, wasLoaded: wasLoaded, handoff: handoff)
         closeOperations.append(operation)
         guard permitsCloseTransport else {

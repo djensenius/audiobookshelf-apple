@@ -28,6 +28,9 @@ public final class Router {
     /// ``selectLibrary(id:kind:supportedSections:)``. A restored scene assumes every section of
     /// the library's kind until then, or every section when its kind is unknown.
     public private(set) var supportedSections: Set<AppTab> = []
+    /// Sections hidden on top of ``supportedSections`` before the library is checked, such as
+    /// Add podcast from a user known not to be allowed it; see ``withholdSections(_:)``.
+    public private(set) var withheldSections: Set<AppTab> = []
     /// Whether ``libraryID``, or having none, was checked against the account's loaded
     /// libraries. A restored or guessed library isn't, even with a kind: until it is, the
     /// scene may replace it without resetting the paths opened meanwhile.
@@ -106,10 +109,12 @@ public final class Router {
 
     /// The sections the sidebar shows, in sidebar order: ``supportedSections`` once a library is
     /// selected, and every section before that, so the sidebar is never empty while the scene
-    /// has no library yet. A user confirmed to have no libraries (``isLibraryChecked`` without a
-    /// library) gets none.
+    /// has no library yet; either way without ``withheldSections``. A user confirmed to have no
+    /// libraries (``isLibraryChecked`` without a library) gets none.
     public var visibleSections: [AppTab] {
-        libraryID == nil && !isLibraryChecked ? AppTab.sections : AppTab.sections.filter(supportedSections.contains)
+        let base =
+            libraryID == nil && !isLibraryChecked ? AppTab.sections : AppTab.sections.filter(supportedSections.contains)
+        return withheldSections.isEmpty ? base : base.filter { !withheldSections.contains($0) }
     }
 
     /// Asks the scene to switch to library `id`, for a deep link that knows only the ID.
@@ -153,6 +158,7 @@ public final class Router {
         libraryID = id
         libraryKind = kind
         self.supportedSections = supportedSections
+        withheldSections = []
         isLibraryChecked = true
         if pendingLibraryID == id { pendingLibraryID = nil }
         repairSections(supported: supportedSections)
@@ -201,19 +207,33 @@ public final class Router {
         libraryID = nil
         libraryKind = nil
         supportedSections = []
+        withheldSections = []
         isLibraryChecked = false
         librarySection = nil
         paths = [:]
     }
 
     /// Restores the library and its kind without resetting paths; used by snapshot restore.
-    /// Until the scene confirms the library, it shows every section of its kind, or every
-    /// section when the kind is unknown.
-    func restoreLibrary(id: String?, kind: LibraryKind?) {
+    /// Until the scene confirms the library, it shows `supportedSections`, by default every
+    /// section of its kind, or every section when the kind is unknown.
+    func restoreLibrary(id: String?, kind: LibraryKind?, supportedSections: Set<AppTab>? = nil) {
         libraryID = id
         libraryKind = kind
-        supportedSections = kind == nil ? Set(AppTab.sections) : AppTab.sections(for: kind)
+        self.supportedSections =
+            supportedSections ?? (kind == nil ? Set(AppTab.sections) : AppTab.sections(for: kind))
         isLibraryChecked = false
+    }
+
+    /// Hides exactly `sections` (``withheldSections``), such as Add podcast from a user known not
+    /// to be allowed it before the libraries load, showing again any withheld before; `[]` hides
+    /// none. Doesn't check or change the library. Newly hidden sections are repaired as
+    /// ``repairSections(supported:keepsLibraryPath:)`` does; an unchecked library keeps its
+    /// Library path, which may hold a launch link's screens.
+    func withholdSections(_ sections: Set<AppTab>) {
+        guard sections != withheldSections else { return }
+        let hidesMore = !sections.isSubset(of: withheldSections)
+        withheldSections = sections
+        if hidesMore { repairSections(supported: Set(visibleSections), keepsLibraryPath: !isLibraryChecked) }
     }
 
     /// Shows no library, for a user confirmed to have none: resets the library-scoped paths and
@@ -225,6 +245,7 @@ public final class Router {
         libraryID = nil
         libraryKind = nil
         supportedSections = []
+        withheldSections = []
         isLibraryChecked = true
         repairSections(supported: [])
     }

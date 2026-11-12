@@ -1,0 +1,60 @@
+{
+  "podcast": {
+    "metadata": {
+      "title": "Classic Tales",
+      "author": "Public Domain Players",
+      "description": "Stories from the public domain.",
+      "descriptionPlain": "Stories from the public domain.",
+      "type": "episodic",
+      "image": "https://example.com/cover.jpg",
+      "categories": ["Arts:Books"],
+      "feedUrl": "https://example.com/feed.xml",
+      "language": "en",
+      "explicit": "false"
+    },
+    "episodes": [
+      {
+        "enclosure": { "url": "https://example.com/ep1.mp3", "type": "audio/mpeg", "length": "1234" },
+        "description": "<p>The first one.</p>",
+        "descriptionPlain": "The first one.",
+        "pubDate": "Mon, 13 Nov 2023 22:13:20 GMT",
+        "guid": "ep-1",
+        "title": "Episode One",
+        "episodeType": "full",
+        "season": "1",
+        "episode": "1",
+        "author": "",
+        "duration": "00:30:00",
+        "explicit": "",
+        "subtitle": "Where it starts",
+        "durationSeconds": 1800,
+        "publishedAt": 1699913600000
+      },
+      {
+        "enclosure": { "url": "  https://example.com/ep3.mp3  ", "type": "audio/mpeg", "length": "99" },
+        "pubDate": "Mon, 27 Nov 2023 22:13:20 GMT",
+        "title": "Episode Three",
+        "episodeType": "full",
+        "season": "",
+        "episode": "3",
+        "duration": "",
+        "subtitle": "",
+        "durationSeconds": null,
+        "chapters": [{ "id": 0, "title": "Intro", "start": 0, "end": 12.5 }],
+        "publishedAt": 1701123200000
+      },
+      {
+        "enclosure": { "type": "audio/mpeg" },
+        "title": "No enclosure URL",
+        "publishedAt": 1701123200001
+      },
+      {
+        "enclosure": { "url": "https://example.com/bonus.mp3" },
+        "title": "Undated bonus",
+        "episode": "",
+        "publishedAt": null
+      }
+    ],
+    "numEpisodes": 4
+  }
+}
