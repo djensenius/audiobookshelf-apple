@@ -294,6 +294,91 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         }
     }
 
+    // MARK: Display options (#505)
+
+    @Test func trackTimesScaleTheElapsedTimeBySpeed() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = true
+            playback.load(FakePlaybackControl.bookSession(), at: 175)
+            playback.rate = 1.5
+            #expect(model.trackTimes == PlayerTrackTimes(progress: 0.5, elapsed: 50, remaining: 50))
+
+            model.toggleScaleElapsedTimeBySpeed()
+            #expect(!settings.scaleElapsedTimeBySpeed)
+            #expect(model.trackTimes == PlayerTrackTimes(progress: 0.5, elapsed: 75, remaining: 50))
+        }
+    }
+
+    @Test func theTotalTrackShowsTheWholeItemAlongsideTheChapter() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = true
+            playback.load(FakePlaybackControl.bookSession(), at: 175)
+            playback.rate = 2
+            #expect(model.totalTrackTimes == PlayerTrackTimes(progress: 0.4375, elapsed: 87.5, remaining: 112.5))
+
+            // While scrubbing it follows the scrub position.
+            model.scrub(to: 0.5, owner: owner)
+            playback.currentTime = 200  // A tick.
+            #expect(model.totalTrackTimes?.progress == 175.0 / 400)
+            model.cancelScrub(owner: owner)
+
+            model.toggleTotalTrack()
+            #expect(!settings.totalTrack)
+            #expect(model.totalTrackTimes == nil)
+        }
+    }
+
+    @Test func theTotalTrackIsHiddenWhenTheMainTrackIsTheWholeItem() async throws {
+        try await withPlayer { model, playback, settings, _ in
+            settings.chapterTrack = false
+            playback.load(FakePlaybackControl.bookSession(), at: 175)
+            #expect(model.totalTrackTimes == nil)
+            settings.chapterTrack = true
+            playback.load(FakePlaybackControl.bookSession(chapters: []), at: 175)
+            #expect(model.totalTrackTimes == nil)
+        }
+    }
+
+    @Test func turningTheTotalTrackOffTurnsTheChapterTrackOnAndPersists() async throws {
+        try await withPlayer { model, _, settings, defaults in
+            settings.chapterTrack = false
+            model.toggleTotalTrack()
+            #expect(!settings.totalTrack)
+            #expect(settings.chapterTrack)
+            #expect(defaults.object(forKey: AppSettings.Key.totalTrack.rawValue) as? Bool == false)
+            #expect(defaults.object(forKey: AppSettings.Key.chapterTrack.rawValue) as? Bool == true)
+
+            model.toggleChapterTrack()
+            #expect(!settings.chapterTrack)
+            #expect(settings.totalTrack)
+        }
+    }
+
+    @Test func lockingHidesTheSkipControlsAndRefusesScrubbing() async throws {
+        try await withPlayer { model, playback, settings, defaults in
+            settings.chapterTrack = true
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            model.toggleLock()
+            #expect(settings.lockPlayer)
+            #expect(defaults.object(forKey: AppSettings.Key.lockPlayer.rawValue) as? Bool == true)
+            #expect(!model.displayOptions.showsSkipControls)
+            #expect(!model.displayOptions.allowsScrubbing)
+
+            model.beginScrub(owner: owner)
+            model.scrub(to: 0.9, owner: owner)
+            await model.endScrub(owner: owner)
+            #expect(playback.calls.isEmpty)
+            #expect(model.elapsed == 50)
+
+            model.toggleLock()
+            #expect(model.displayOptions.showsSkipControls)
+            model.beginScrub(owner: owner)
+            model.scrub(to: 1, owner: owner)
+            await model.endScrub(owner: owner)
+            #expect(playback.calls == [.seek(250)])
+        }
+    }
+
     // MARK: Scrubbing
 
     @Test func scrubbingIgnoresTicksAndSeeksOnce() async throws {
@@ -731,6 +816,118 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
             #expect(model.errorMessageKey == message)
             playback.error = nil
             #expect(model.errorMessageKey == nil)
+        }
+    }
+
+    /// Recovery giving up offers Retry and Cancel; "ask" on a metered network offers to stream
+    /// anyway (#376), "never" doesn't; every other failure only dismisses.
+    @Test func onlyAnInterruptedStreamOrAConfirmationOffersActions() {
+        #expect(PlayerErrorMessage.streamingInterrupted.actions == [.retry, .cancel])
+        #expect(PlayerErrorMessage.streamingNeedsConfirmation.actions == [.streamAnyway, .cancel])
+        let others: [PlayerErrorMessage] = [
+            .streamingNotAllowed, .sessionStartFailed, .streamUnavailable, .playbackFailed, .streamRejected,
+        ]
+        for message in others { #expect(message.actions == [.dismiss]) }
+    }
+
+    /// Retry plays the kept item again (a fresh session where it stopped); Cancel stops it; OK
+    /// leaves it.
+    @Test(arguments: [PlayerErrorAction.retry, .cancel, .dismiss])
+    func theAlertsActionsDriveThePlayback(action: PlayerErrorAction) async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            playback.phase = .unloaded
+            playback.error = .recoveryExhausted
+            playback.clearCalls()
+
+            await model.respond(to: try #require(model.failure), with: action)
+
+            switch action {
+            case .retry: #expect(playback.calls == [.resume(rewindingBy: nil)])
+            case .cancel: #expect(playback.calls == [.stop(.user)])
+            default: #expect(playback.calls.isEmpty)
+            }
+        }
+    }
+
+    /// #376: "Stream anyway" replays the blocked play; its Cancel only clears the failure, leaving
+    /// the item playing.
+    @Test(arguments: [PlayerErrorAction.streamAnyway, .cancel, .dismiss])
+    func theConfirmationsActionsDriveThePlayback(action: PlayerErrorAction) async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            playback.error = .streamingNeedsConfirmation(.cellular, key: FakePlaybackControl.key())
+            playback.clearCalls()
+
+            await model.respond(to: try #require(model.failure), with: action)
+
+            switch action {
+            case .streamAnyway: #expect(playback.calls == [.confirmMeteredStreaming])
+            case .cancel: #expect(playback.calls == [.declineMeteredStreaming])
+            default: #expect(playback.calls.isEmpty)
+            }
+        }
+    }
+
+    /// The coordinator error behind each message with actions, for `item`.
+    private static func error(for message: PlayerErrorMessage, item: String = "li_book") -> PlaybackCoordinatorError {
+        message == .streamingNeedsConfirmation
+            ? .streamingNeedsConfirmation(.cellular, key: FakePlaybackControl.key(item: item)) : .recoveryExhausted
+    }
+
+    /// An alert left from an earlier failure acts on nothing: the item playing now stays.
+    @Test(arguments: [
+        (PlayerErrorMessage.streamingInterrupted, PlayerErrorAction.retry), (.streamingInterrupted, .cancel),
+        (.streamingNeedsConfirmation, .streamAnyway), (.streamingNeedsConfirmation, .cancel),
+    ])
+    func aStaleAlertsActionDoesNothing(message: PlayerErrorMessage, action: PlayerErrorAction) async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            playback.error = Self.error(for: message)
+            let stale = try #require(model.failure)
+            playback.error = nil
+            playback.clearCalls()
+
+            await model.respond(to: stale, with: action)
+
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
+    /// #543: a newer failure with the same message (another item, or the same item failing again)
+    /// is a different occurrence: the earlier alert's buttons do nothing on it, and its own work.
+    @Test(arguments: [
+        (PlayerErrorMessage.streamingInterrupted, PlayerErrorAction.retry), (.streamingInterrupted, .cancel),
+        (.streamingNeedsConfirmation, .streamAnyway), (.streamingNeedsConfirmation, .cancel),
+    ])
+    func anEarlierAlertDoesNotActOnALaterFailureWithTheSameMessage(
+        message: PlayerErrorMessage, action: PlayerErrorAction
+    ) async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            playback.error = Self.error(for: message)
+            let earlier = try #require(model.failure)
+            // Directly to another item's confirmation; through no failure for recovery.
+            if message == .streamingInterrupted { playback.error = nil }
+            playback.error = Self.error(for: message, item: "li_other")
+            let current = try #require(model.failure)
+            #expect(current.message == earlier.message)
+            #expect(current != earlier)
+            playback.clearCalls()
+
+            await model.respond(to: earlier, with: action)
+            #expect(playback.calls.isEmpty)
+
+            await model.respond(to: current, with: action)
+            #expect(!playback.calls.isEmpty)
+        }
+    }
+
+    @Test func theWaitingStateFollowsPlayback() async throws {
+        try await withPlayer { model, playback, _, _ in
+            #expect(!model.isWaitingForNetwork)
+            #expect(invalidates({ _ = model.isWaitingForNetwork }, when: { playback.isWaitingForNetwork = true }))
+            #expect(model.isWaitingForNetwork)
         }
     }
 

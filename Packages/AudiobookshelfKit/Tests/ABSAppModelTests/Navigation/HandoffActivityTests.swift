@@ -89,6 +89,48 @@ private let connectionB = UUID(uuidString: "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D
     }
 }
 
+/// The activity an item or episode screen publishes, read back by the receiver.
+@Suite struct HandoffPublishingTests {
+    @Test func anItemRoundTrips() throws {
+        let account = try account(address, "usr_1")
+        let userInfo = try #require(DeepLink.handoffUserInfo(itemID: "li_1", account: account))
+        #expect(userInfo == ["item": "li_1", "serverAddress": address, "userID": "usr_1"])
+        let activity = try #require(HandoffActivity(userInfo: userInfo))
+        #expect(activity.link == DeepLink(.item(id: "li_1", episodeID: nil)))
+        #expect(activity.account == account)
+    }
+
+    @Test func anEpisodeRoundTrips() throws {
+        let account = try account(otherAddress, "usr_2")
+        let userInfo = try #require(DeepLink.handoffUserInfo(itemID: "li_1", episodeID: "ep_1", account: account))
+        let activity = try #require(HandoffActivity(userInfo: userInfo))
+        #expect(activity.link == DeepLink(.item(id: "li_1", episodeID: "ep_1")))
+        #expect(activity.account == account)
+    }
+
+    @Test func anEmptyEpisodeIsLeftOut() throws {
+        let userInfo = DeepLink.handoffUserInfo(itemID: "li_1", episodeID: "", account: try account(address, "usr_1"))
+        #expect(userInfo?["episode"] == nil)
+        #expect(userInfo?["item"] == "li_1")
+    }
+
+    @Test func invalidIDsPublishNothing() throws {
+        let account = try account(address, "usr_1")
+        #expect(DeepLink.handoffUserInfo(itemID: "", account: account) == nil)
+        #expect(DeepLink.handoffUserInfo(itemID: "a\nb", account: account) == nil)
+        #expect(DeepLink.handoffUserInfo(itemID: "li_1", episodeID: " ", account: account) == nil)
+    }
+
+    @Test func aConnectionNamesItsAccountButNotItsID() throws {
+        let saved = connection(connectionA, address: address, userID: "usr_1")
+        let account = try #require(HandoffAccount(connection: saved))
+        #expect(account == HandoffAccount(serverAddress: address, userID: "usr_1"))
+        let userInfo = try #require(DeepLink.handoffUserInfo(itemID: "li_1", account: account))
+        #expect(!userInfo.values.contains(connectionA.uuidString))
+        #expect(HandoffAccount(connection: connection(connectionA, address: "not a url", userID: "usr_1")) == nil)
+    }
+}
+
 /// Matching the account to a saved connection, and what the router does with the result.
 @MainActor
 @Suite struct HandoffAccountResolutionTests {
@@ -183,6 +225,33 @@ private let connectionB = UUID(uuidString: "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D
         #expect(router.pendingServerSwitch == expected)
         #expect(router[path: .library].isEmpty)
     }
+
+    /// The scene resolves through the lifecycle, which asks its own account source.
+    @Test func theLifecycleResolvesThroughItsAccountSource() async throws {
+        let accounts = MatchingAccounts(connections: [connection(connectionB, address: address, userID: "usr_2")])
+        let lifecycle = SessionLifecycle(source: accounts)
+        let known = try #require(HandoffActivity(userInfo: payload(address, "usr_2")))
+        #expect(
+            await lifecycle.resolve(known)
+                == .open(DeepLink(.item(id: "li_1", episodeID: nil), serverID: connectionB.uuidString)))
+
+        let stranger = try #require(HandoffActivity(userInfo: payload(address, "usr_3")))
+        #expect(await lifecycle.resolve(stranger) == .accountNotSignedIn(try account(address, "usr_3")))
+    }
+
+    /// On a cold launch an activity can arrive before the accounts restored their saved
+    /// connections: the lifecycle resolves it only once they have.
+    @Test func theLifecycleResolvesOnceTheAccountsRestored() async throws {
+        let accounts = MatchingAccounts(
+            connections: [], restoring: [connection(connectionB, address: address, userID: "usr_2")])
+        let lifecycle = SessionLifecycle(source: accounts)
+        let known = try #require(HandoffActivity(userInfo: payload(address, "usr_2")))
+
+        #expect(
+            await lifecycle.resolve(known)
+                == .open(DeepLink(.item(id: "li_1", episodeID: nil), serverID: connectionB.uuidString)))
+        #expect(accounts.connections.count == 1)
+    }
 }
 
 /// An accounts source with saved connections, matched as `AccountManager` matches them.
@@ -190,13 +259,18 @@ private let connectionB = UUID(uuidString: "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D
 private final class MatchingAccounts: AccountSessionSource {
     var phase: AccountSessionPhase = .signedOut
     var client: APIClient?
-    let connections: [ServerConnectionDTO]
+    private(set) var connections: [ServerConnectionDTO]
+    /// The connections ``restore()`` loads, as `AccountManager` loads its saved ones at launch.
+    private let restoring: [ServerConnectionDTO]?
 
-    init(connections: [ServerConnectionDTO]) {
+    init(connections: [ServerConnectionDTO], restoring: [ServerConnectionDTO]? = nil) {
         self.connections = connections
+        self.restoring = restoring
     }
 
-    func restore() async throws {}
+    func restore() async throws {
+        if let restoring { connections = restoring }
+    }
     func logout() async -> URL? { nil }
     func `switch`(to connectionID: UUID) async throws {}
     func remove(_ connectionID: UUID) async throws -> URL? { nil }

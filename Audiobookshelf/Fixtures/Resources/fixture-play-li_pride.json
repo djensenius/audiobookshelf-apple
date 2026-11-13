@@ -1,0 +1,71 @@
+{
+  "id": "fixture-session-id",
+  "userId": "usr_fixture",
+  "libraryId": "lib_sample",
+  "libraryItemId": "li_pride",
+  "bookId": "book_li_pride",
+  "episodeId": null,
+  "mediaType": "book",
+  "mediaMetadata": {
+    "title": "Pride and Prejudice",
+    "subtitle": null,
+    "authors": [
+      {
+        "id": "aut_austen",
+        "name": "Jane Austen"
+      }
+    ],
+    "narrators": [
+      "LibriVox Volunteers"
+    ],
+    "series": [],
+    "genres": [
+      "Fiction"
+    ],
+    "publishedYear": "1813",
+    "publisher": "LibriVox",
+    "description": "A public-domain LibriVox recording.",
+    "language": "English",
+    "explicit": false,
+    "abridged": false
+  },
+  "chapters": [
+    {
+      "id": 0,
+      "start": 0,
+      "end": 30,
+      "title": "Chapter 1"
+    },
+    {
+      "id": 1,
+      "start": 30,
+      "end": 60,
+      "title": "Chapter 2"
+    }
+  ],
+  "displayTitle": "Pride and Prejudice",
+  "displayAuthor": "Jane Austen",
+  "coverPath": "/metadata/items/li_pride/cover.jpg",
+  "duration": 60,
+  "playMethod": 0,
+  "mediaPlayer": "AVPlayer",
+  "serverVersion": "2.26.0",
+  "date": "2023-11-14",
+  "dayOfWeek": "Tuesday",
+  "timeListening": 0,
+  "startTime": 0,
+  "currentTime": 0,
+  "startedAt": 1700000000000,
+  "updatedAt": 1700000000000,
+  "audioTracks": [
+    {
+      "index": 1,
+      "startOffset": 0,
+      "duration": 60,
+      "title": "pride_and_prejudice.m4a",
+      "contentUrl": "/api/items/li_pride/file/11",
+      "mimeType": "audio/mp4",
+      "codec": "aac"
+    }
+  ]
+}

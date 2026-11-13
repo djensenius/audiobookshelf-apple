@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSData
 import ABSRealtime
 import Foundation
 import Observation
@@ -45,7 +46,8 @@ public struct RealtimePlaybackSnapshot: Sendable, Hashable {
 ///
 /// A ``SessionStage/progressSource`` participant: on start it builds a socket from the session's
 /// `APIClient` and reads its events in its own task until the session ends.
-/// - `user_item_progress_updated` goes to the ``ProgressCache`` only when it is strictly newer
+/// - `user_item_progress_updated` without a `lastUpdate` is dropped: neither store can order it.
+///   Otherwise it goes to the ``ProgressCache`` only when it is strictly newer
 ///   than the cached entry (server times are milliseconds, so a tie may predate the cached
 ///   value; see ADR 0003). An update from this device's own playback session for the item the
 ///   player has open is its echo and is skipped, whatever its time (the cached value may carry a
@@ -60,8 +62,14 @@ public struct RealtimePlaybackSnapshot: Sendable, Hashable {
 ///   session's account.
 /// - `rss_feed_open` and `rss_feed_closed` go to ``onRssFeedChange``.
 ///
-/// Socket values aren't merged into `LocalProgressStore` for downloaded items (ADR 0003's
-/// `.socket` source); that is left to the session wiring.
+/// Every progress update other than such an echo is also merged into ``localProgress`` with
+/// ADR 0003's `.socket` source, whether or not the cache took it: the store keeps its own
+/// ordering, and only rows it already has (downloaded or locally played media) take the value.
+/// The cache is updated first, as the event is handled; the merges follow, one at a time in event
+/// order, keyed by the session's connection, and a merge still waiting when the session ends is
+/// dropped. Each store applies its own rules, so they can differ: after an acknowledged PATCH the
+/// local row keeps its position against a socket value that may predate it, while the cache, which
+/// shows the server's newest value, may take it.
 @MainActor
 @Observable
 public final class RealtimeBridge: SessionParticipant {
@@ -86,10 +94,15 @@ public final class RealtimeBridge: SessionParticipant {
     @ObservationIgnored public var onRemoteProgress: (@MainActor (UserItemProgressUpdate) -> Void)?
     /// What the player has open, or `nil` when nothing is.
     @ObservationIgnored public var playbackSnapshot: (@MainActor () -> RealtimePlaybackSnapshot?)?
+    /// Where socket progress is merged for media with a local row; `nil` merges nothing.
+    @ObservationIgnored public var localProgress: LocalProgressStore?
     /// Called after each event is handled; for tests.
     @ObservationIgnored var didHandle: (@MainActor (RealtimeEvent) -> Void)?
     /// Called as the bridge stops, before anything is cancelled; for tests.
     @ObservationIgnored var willDetach: (@MainActor () -> Void)?
+    /// Awaited by each merge into ``localProgress`` once the merges before it are done, just before
+    /// it applies its value; for tests to record and hold merges.
+    @ObservationIgnored var willMerge: (@MainActor (MediaKey, ProgressBaseline) async -> Void)?
 
     @ObservationIgnored private let progress: ProgressCache
     @ObservationIgnored private let makeSocket: SocketFactory
@@ -115,6 +128,8 @@ public final class RealtimeBridge: SessionParticipant {
     @ObservationIgnored private(set) var startTask: Task<Void, Never>?
     @ObservationIgnored private(set) var readerTask: Task<Void, Never>?
     @ObservationIgnored private(set) var tokenTask: Task<Void, Never>?
+    /// The latest merge into ``localProgress``; each waits for the one before it.
+    @ObservationIgnored private(set) var mergeTask: Task<Void, Never>?
 
     public init(
         progress: ProgressCache,
@@ -333,6 +348,7 @@ public final class RealtimeBridge: SessionParticipant {
 
     private func apply(_ update: UserItemProgressUpdate) {
         let incoming = update.progress
+        guard incoming.lastUpdate != nil else { return }
         let snapshot = playbackSnapshot?()
         let isOpen =
             snapshot.map { $0.libraryItemID == incoming.libraryItemId && $0.episodeID == incoming.episodeId } ?? false
@@ -345,9 +361,41 @@ public final class RealtimeBridge: SessionParticipant {
         {
             return
         }
+        merge(incoming)
         if Self.supersedes(incoming, cached) { progress.apply(incoming) }
         if isOpen, let snapshot, let onRemoteProgress, Self.offersJump(update, to: snapshot, cached: cached) {
             onRemoteProgress(update)
+        }
+    }
+
+    /// Merges dated `progress` into ``localProgress`` as a `.socket` value, after the merges before
+    /// it. A merge still waiting when the session ends is dropped.
+    private func merge(_ progress: MediaProgress) {
+        guard let store = localProgress, let identity, let lastUpdate = progress.lastUpdate else { return }
+        let key = MediaKey(
+            serverConnectionID: identity.connectionID, libraryItemId: progress.libraryItemId,
+            episodeId: progress.episodeId)
+        let server = ProgressBaseline(
+            currentTime: progress.currentTime, progress: progress.progress, duration: progress.duration,
+            isFinished: progress.isFinished,
+            finishedAt: progress.finishedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) },
+            ebookLocation: progress.ebookLocation, ebookProgress: progress.ebookProgress,
+            lastUpdate: Date(timeIntervalSince1970: Double(lastUpdate) / 1000))
+        let generation = generation
+        let previous = mergeTask
+        mergeTask = Task { [weak self] in
+            let capturedAt = await store.captureGeneration()
+            await previous?.value
+            guard let self, generation == self.generation else { return }
+            await self.willMerge?(key, server)
+            guard generation == self.generation else { return }
+            do {
+                try await store.applyServerProgress([key: server], capturedAt: capturedAt, source: .socket)
+            } catch {
+                Log.realtime.error(
+                    "Couldn't merge socket progress: \(Self.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"
+                )
+            }
         }
     }
 

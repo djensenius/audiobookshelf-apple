@@ -63,8 +63,8 @@ struct PlaybackRecoveryHost {
     /// Refreshes the access token once; returns the error that stops recovery, if any.
     var refresh: () async -> PlaybackCoordinatorError?
     /// Looks up the loaded session (`GET /api/session/{id}`); ``PlaybackSessionStatus/unknown``
-    /// with none.
-    var checkSession: () async -> PlaybackSessionStatus
+    /// with none. A lookup that refreshed the token spends the episode's refresh.
+    var checkSession: () async -> PlaybackSessionCheck
     /// Surfaces `error` and ends recovery.
     var giveUp: (PlaybackCoordinatorError) -> Void
 }
@@ -80,7 +80,8 @@ struct PlaybackRecoveryHost {
 ///   ``PlaybackCoordinatorError/recoveryExhausted``.
 /// - **401.** The first one in an episode refreshes the token, then rebuilds (counted against the
 ///   rebuild budget). A second one stops with ``PlaybackCoordinatorError/streamRejected``; there is
-///   never a second refresh.
+///   never a second refresh. A session lookup whose request refreshed the token spends that one
+///   refresh too (#491).
 /// - **Network and session.** Before each attempt, recovery waits while the network path is
 ///   unsatisfied (no budget is spent offline) for up to ``networkWaitLimit``, then gives up with
 ///   ``PlaybackCoordinatorError/recoveryExhausted``; once the path returns it skips that attempt's
@@ -111,6 +112,9 @@ final class PlaybackRecovery {
     }
 
     private struct Episode {
+        /// Kept across seek takeovers and rebuilds; a new episode, after another item's failure or
+        /// after one ended, gets a new one.
+        let id: Int
         var generation: Int
         var cause: Cause
         var wantsPlay: Bool
@@ -128,7 +132,10 @@ final class PlaybackRecovery {
     // Observed, as ``wantsPlay(at:)`` feeds the coordinator's play intent.
     private var episode: Episode?
     private var isRunning = false
+    /// The run waiting for an unsatisfied path; observed, as it feeds the player's waiting state.
+    private var waitingRun: Int?
     @ObservationIgnored private var token = 0
+    @ObservationIgnored private var lastEpisodeID = 0
     /// The generation of the rebuild in flight: failures at it are its new item's.
     @ObservationIgnored private var attemptGeneration: Int?
 
@@ -155,7 +162,9 @@ final class PlaybackRecovery {
             episode.playingSince = nil
             self.episode = episode
         } else {
-            episode = Episode(generation: generation, cause: .failure(failure), wantsPlay: wasPlaying)
+            lastEpisodeID += 1
+            episode = Episode(
+                id: lastEpisodeID, generation: generation, cause: .failure(failure), wantsPlay: wasPlaying)
         }
         // A run for an older generation (if any) is superseded.
         token += 1
@@ -194,6 +203,12 @@ final class PlaybackRecovery {
         isRunning && episode?.generation == generation
     }
 
+    /// Whether the run in flight for the item at `generation` is waiting for the network (ADR 0007's
+    /// "Waiting for network"): not once a seek, stop or newer run replaced it.
+    func isWaitingForNetwork(at generation: Int) -> Bool {
+        isRecovering(at: generation) && waitingRun != nil && waitingRun == token
+    }
+
     /// Playback left the playing state (a pause, a system pause, buffering): the
     /// ``episodeReset`` interval must start again.
     func notePlaybackStopped() {
@@ -227,14 +242,14 @@ final class PlaybackRecovery {
                 return giveUp(.recoveryExhausted, host)
             default: break
             }
-            let network = await waitForNetwork()
+            let network = await waitForNetwork(run)
             guard isCurrent(run, host) else { return }
             if network == .timedOut { return giveUp(.recoveryExhausted, host) }
             let returned = cameBack || network == .returned
             cameBack = false
             var session = PlaybackSessionStatus.unknown
             if returned || needsSessionCheck(current) {
-                session = await host.checkSession()
+                session = await checkSession(host)
                 guard isCurrent(run, host) else { return }
             }
             guard let episode = self.episode else { return }
@@ -253,7 +268,7 @@ final class PlaybackRecovery {
                 guard isCurrent(run, host) else { return }
             }
             // The path may have dropped during the lookup or backoff: no attempt (or budget) offline.
-            switch await waitForNetwork() {
+            switch await waitForNetwork(run) {
             case .online: break
             case .returned:
                 cameBack = true
@@ -322,8 +337,9 @@ final class PlaybackRecovery {
         case timedOut
     }
 
-    /// Waits while the network path is unsatisfied, up to ``networkWaitLimit``.
-    private func waitForNetwork() async -> NetworkWait {
+    /// Waits while the network path is unsatisfied, up to ``networkWaitLimit``; ``isWaitingForNetwork(at:)``
+    /// meanwhile, while `run` is current.
+    private func waitForNetwork(_ run: Int) async -> NetworkWait {
         guard let paths else { return .online }
         enum Event { case path(online: Bool), timedOut }
         let (events, sink) = AsyncStream<Event>.makeStream()
@@ -335,6 +351,7 @@ final class PlaybackRecovery {
         defer {
             forward.cancel()
             timer?.cancel()
+            if waitingRun == run { waitingRun = nil }
         }
         for await event in events {
             switch event {
@@ -343,6 +360,7 @@ final class PlaybackRecovery {
             case .path(online: false):
                 guard timer == nil else { continue }
                 logger.info("Recovery is waiting for the network")
+                waitingRun = run
                 timer = Task { [wait] in
                     await wait(Self.networkWaitLimit)
                     if !Task.isCancelled { sink.yield(.timedOut) }
@@ -362,7 +380,7 @@ final class PlaybackRecovery {
     /// the run goes on.
     private func rebuildAfterRefresh(_ run: Int, _ host: PlaybackRecoveryHost) async -> Bool {
         while true {
-            let network = await waitForNetwork()
+            let network = await waitForNetwork(run)
             guard isCurrent(run, host) else { return false }
             switch network {
             case .online: return await rebuild(run, host)
@@ -370,7 +388,7 @@ final class PlaybackRecovery {
                 giveUp(.recoveryExhausted, host)
                 return false
             case .returned:
-                let session = await host.checkSession()
+                let session = await checkSession(host)
                 guard isCurrent(run, host) else { return false }
                 if session == .unauthorized {
                     giveUp(.streamRejected, host)
@@ -410,6 +428,15 @@ final class PlaybackRecovery {
             }
             return true
         }
+    }
+
+    /// Looks up the session, charging a refresh its request made to the episode's one refresh,
+    /// even if a user seek took the run over meanwhile; not to an episode that replaced it.
+    private func checkSession(_ host: PlaybackRecoveryHost) async -> PlaybackSessionStatus {
+        let episodeID = episode?.id
+        let check = await host.checkSession()
+        if check.refreshedToken, let episodeID, episode?.id == episodeID { episode?.refreshed = true }
+        return check.status
     }
 
     private func giveUp(_ error: PlaybackCoordinatorError, _ host: PlaybackRecoveryHost) {

@@ -4,7 +4,8 @@ import ABSUI
 import SwiftUI
 
 /// The mini player (port of the collapsed `components/app/AudioPlayer.vue`): the cover and title
-/// open the full player, with play/pause, the jumps and a close button that stops playback.
+/// open the full player, with play/pause, the jumps and a close button that stops playback. While
+/// the player is locked (``PlayerDisplayOptions/isLocked``) the jumps go, as in legacy.
 ///
 /// On iOS it is the tab view's bottom accessory; when the tab bar collapses it to the inline
 /// placement only play/pause stays. At accessibility text sizes the cover, author and jumps go, so
@@ -52,7 +53,8 @@ struct MiniPlayerView: View {
         HStack(spacing: 8) {
             openButton
             TransportControls(
-                style: layout.transportStyle, showsPause: model.showsPause,
+                style: model.displayOptions.showsSkipControls ? layout.transportStyle : .playPauseOnly,
+                showsPause: model.showsPause,
                 isBuffering: model.isBuffering, jumpBackwardSeconds: model.jumpBackwardSeconds,
                 jumpForwardSeconds: model.jumpForwardSeconds, haptic: settings?.hapticFeedback ?? .off
             ) { action in
@@ -88,7 +90,12 @@ struct MiniPlayerView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(verbatim: model.title)
                         .font(.subheadline.weight(.semibold))
-                    if layout.showsCoverAndAuthor, !model.author.isEmpty {
+                    if layout.showsCloseAndProgress, model.isWaitingForNetwork {
+                        // Recovery waits for the network (ADR 0007's "Waiting for network").
+                        Text(verbatim: L10n.string(Self.waitingForNetworkKey))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if layout.showsCoverAndAuthor, !model.author.isEmpty {
                         Text(verbatim: model.author)
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -102,8 +109,14 @@ struct MiniPlayerView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(verbatim: L10n.string("LabelMiniPlayerAccessibility", model.title)))
+        .accessibilityValue(
+            Text(verbatim: model.isWaitingForNetwork ? L10n.string(Self.waitingForNetworkKey) : "")
+        )
         .accessibilityHint(Text(verbatim: L10n.string("LabelMiniPlayerHint")))
     }
+
+    /// The line shown, in place of the author, while recovery waits for the network.
+    static let waitingForNetworkKey = "MessageNoNetworkConnection"
 
     private var closeButton: some View {
         Button {

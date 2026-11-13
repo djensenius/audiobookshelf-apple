@@ -15,10 +15,16 @@ import Foundation
 struct AppDownloads {
     let engine: DownloadEngine
     let manager: DownloadManager
+    /// The downloaded items' only writer, shared by the engine and the manager, so its update
+    /// streams see every change.
+    let localItems: LocalItemStore
     let janitor: DownloadJanitor
     let controller: DownloadsController
     let lifecycle: DownloadsLifecycle
     let access: DownloadAccess
+    /// The downloaded items' cover files, which the image pipeline reads before the network
+    /// (ADR 0005, "Offline covers").
+    let covers: LocalDownloadedCovers
 
     /// - Parameters:
     ///   - root: the directory that holds `Downloads/` and `ResumeData/` (``DownloadLocations``);
@@ -41,7 +47,8 @@ struct AppDownloads {
         let engine = DownloadEngine(
             store: store, localItems: localItems,
             credentials: AccountDownloadCredentials { try await accounts.downloadAccess(for: $0, read: $1) },
-            vault: ResumeDataVault(directory: locations.resumeDataRoot), locations: locations,
+            vault: ResumeDataVault(directory: locations.resumeDataRoot),
+            sweepsOrphanedResumeData: dataStack.resolvedLocation == .appGroup, locations: locations,
             networkAccess: networkAccess.provider, makeSession: makeSession)
         let manager = DownloadManager(
             store: store, localItems: localItems, engine: engine, locations: locations,
@@ -69,8 +76,10 @@ struct AppDownloads {
                 }
             })
         return AppDownloads(
-            engine: engine, manager: manager, janitor: janitor, controller: controller, lifecycle: lifecycle,
+            engine: engine, manager: manager, localItems: localItems, janitor: janitor, controller: controller,
+            lifecycle: lifecycle,
             access: DownloadAccess(
-                requester: controller, status: StoredDownloadStatus(localItems: localItems, records: store)))
+                requester: controller, status: StoredDownloadStatus(localItems: localItems, records: store)),
+            covers: LocalDownloadedCovers(store: localItems, locations: locations))
     }
 }

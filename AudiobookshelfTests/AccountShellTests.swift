@@ -39,6 +39,15 @@ private final class Recorder: SessionParticipant {
         links.receive(link, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
     }
 
+    /// A continued Handoff activity reaching the root now, resolved as `RootView` resolves it.
+    /// - Returns: The account the root would say isn't signed in here.
+    func receive(_ handoff: HandoffActivity, _ lifecycle: SessionLifecycle) async -> HandoffAccount? {
+        let arrival = links.reserveArrival()
+        let (gate, epoch) = (lifecycle.gate, lifecycle.linkEpoch)
+        let resolution = await lifecycle.resolve(handoff)
+        return links.receive(resolution, gate: gate, epoch: epoch, arrival: arrival, currentEpoch: lifecycle.linkEpoch)
+    }
+
     /// The link the root hands the host now.
     func waitingLink(_ lifecycle: SessionLifecycle) -> DeepLink? {
         links.link(atEpoch: lifecycle.linkEpoch)
@@ -191,6 +200,50 @@ private final class Recorder: SessionParticipant {
         #expect(RootView.statsService(accounts, for: a) == nil)
     }
 
+    // MARK: Handoff
+
+    @Test func handoffNamesOnlyTheShownShellsActiveAccount() async throws {
+        let environment = try makeEnvironment()
+        let accounts = try #require(environment.accounts)
+        let (a, b, hosts) = try await twoServers(environment, recorder: Recorder())
+        defer { cleanUp(hosts) }
+        let active = try #require(accounts.activeConnection)
+        let account = try #require(HandoffAccount(connection: active))
+        #expect(HandoffPublishing.account(active: active, shown: .shell(b, opensLinks: true)) == account)
+        // The outgoing shell of a switch, still up for A after accounts moved to B, publishes nothing.
+        #expect(HandoffPublishing.account(active: active, shown: .shell(a, opensLinks: false)) == nil)
+        #expect(HandoffPublishing.account(active: active, shown: .shell(a, opensLinks: true)) == nil)
+        // Same connection, another user.
+        let otherUser = SessionIdentity(connectionID: b.connectionID, userID: "usr_someone_else")
+        #expect(HandoffPublishing.account(active: active, shown: .shell(otherUser, opensLinks: true)) == nil)
+        #expect(HandoffPublishing.account(active: nil, shown: .shell(b, opensLinks: true)) == nil)
+        for shown: SceneContent in [.loading, .signingOut, .connect, .storeUnavailable] {
+            #expect(HandoffPublishing.account(active: active, shown: shown) == nil, "\(shown)")
+        }
+    }
+
+    @Test func handoffPublishesOnlyTheSelectedTabsTopScreen() {
+        let router = Router()
+        let shown = { (itemID: String, episodeID: String?, owner: AppTab?) in
+            HandoffPublishing.isFrontmost(itemID: itemID, episodeID: episodeID, in: router, owner: owner)
+        }
+        router[path: .home] = [.item(id: "li_1")]
+        #expect(shown("li_1", nil, .home))
+        #expect(!shown("li_2", nil, .home))
+        // The same item kept appeared in a hidden tab (macOS), or that tab selected away from.
+        #expect(!shown("li_1", nil, .series))
+        router.selectedTab = .series
+        #expect(!shown("li_1", nil, .home))
+        // Covered by a screen pushed on top of it.
+        router.selectedTab = .home
+        router[path: .home].append(.episode(itemID: "li_1", episodeID: "ep_1"))
+        #expect(!shown("li_1", nil, .home))
+        #expect(shown("li_1", "ep_1", .home))
+        #expect(!shown("li_1", "ep_2", .home))
+        // Previews have no router.
+        #expect(HandoffPublishing.isFrontmost(itemID: "li_1", episodeID: nil, in: nil, owner: nil))
+    }
+
     // MARK: Account session adapter
 
     @Test func adapterReportsRestoringUntilTheServerAnswers() async throws {
@@ -228,6 +281,181 @@ private final class Recorder: SessionParticipant {
 
         #expect(adapter.phase == .active(identity, isOffline: true))
         #expect(adapter.client != nil && adapter.client === restored.client)
+    }
+
+    @Test func adapterResolvesAHandoffAccountToItsConnection() async throws {
+        let environment = try makeEnvironment()
+        let accounts = try #require(environment.accounts)
+        let host = Self.host("handoff-")
+        defer { cleanUp([host]) }
+        let identity = try await signIn(accounts, to: host)
+        let adapter = AccountSessionAdapter(accounts: accounts)
+        let active = try #require(accounts.activeConnection)
+
+        let account = try #require(HandoffAccount(connection: active))
+        #expect(await adapter.connectionID(for: account) == identity.connectionID)
+        let stranger = try #require(HandoffAccount(serverAddress: active.address, userID: "usr_someone_else"))
+        #expect(await adapter.connectionID(for: stranger) == nil)
+    }
+
+    /// A continued activity opens on the connection signed in to its account; one whose account
+    /// isn't signed in here opens nothing, rather than opening on the active account.
+    @Test func aContinuedActivityOpensOnlyOnItsAccount() async throws {
+        let environment = try makeEnvironment()
+        let lifecycle = environment.lifecycle
+        let accounts = try #require(environment.accounts)
+        let recorder = Recorder()
+        lifecycle.register(recorder, stage: .connect)
+        await lifecycle.start()
+        let host = Self.host("handoff-")
+        defer { cleanUp([host]) }
+        let identity = try await signIn(accounts, to: host)
+        await waitFor(.ready(identity, isOffline: false), in: lifecycle)
+        let active = try #require(accounts.activeConnection)
+        func activity(_ userID: String) throws -> HandoffActivity {
+            let account = try #require(HandoffAccount(serverAddress: active.address, userID: userID))
+            var userInfo: [AnyHashable: Any] = ["item": "li_1"]
+            userInfo.merge(account.userInfo) { $1 }
+            return try #require(HandoffActivity(userInfo: userInfo))
+        }
+
+        let stranger = try activity("usr_someone_else")
+        #expect(await recorder.receive(stranger, lifecycle) == stranger.account)
+        #expect(recorder.waitingLink(lifecycle) == nil)
+
+        #expect(await recorder.receive(try activity(identity.userID), lifecycle) == nil)
+        #expect(
+            recorder.waitingLink(lifecycle)
+                == DeepLink(.item(id: "li_1", episodeID: nil), serverID: identity.connectionID.uuidString))
+    }
+
+    /// A link received while a Handoff activity resolves is newer, so the activity's link is
+    /// dropped; one resolved with nothing newer waits as usual.
+    @Test(arguments: [false, true])
+    func aHandoffLinkDoesNotReplaceANewerLink(newerArrived: Bool) {
+        let identity = SessionIdentity(connectionID: UUID(), userID: "a")
+        let gate = AuthGate.ready(identity, isOffline: false)
+        let handoff = DeepLink(.item(id: "li_1", episodeID: nil), serverID: identity.connectionID.uuidString)
+        let newer = DeepLink(.downloads, serverID: nil)
+        var links = SceneLinks()
+
+        let arrival = links.reserveArrival()
+        if newerArrived { links.receive(newer, gate: gate, epoch: 1) }
+        let missing = links.receive(.open(handoff), gate: gate, epoch: 1, arrival: arrival, currentEpoch: 1)
+
+        #expect(missing == nil)
+        #expect(links.link(atEpoch: 1) == (newerArrived ? newer : handoff))
+    }
+
+    /// An activity that a newer link or activity replaced while it resolved doesn't say its
+    /// account is missing either, over the newer one's navigation.
+    @Test(arguments: [false, true])
+    func aReplacedHandoffReportsNoMissingAccount(newerIsHandoff: Bool) throws {
+        let identity = SessionIdentity(connectionID: UUID(), userID: "a")
+        let gate = AuthGate.ready(identity, isOffline: false)
+        let stranger = try #require(HandoffAccount(serverAddress: "https://abs.example.com", userID: "usr_2"))
+        let newer = DeepLink(.downloads, serverID: nil)
+        var links = SceneLinks()
+
+        let arrival = links.reserveArrival()
+        if newerIsHandoff { _ = links.reserveArrival() } else { links.receive(newer, gate: gate, epoch: 1) }
+        let missing = links.receive(
+            .accountNotSignedIn(stranger), gate: gate, epoch: 1, arrival: arrival, currentEpoch: 1)
+
+        #expect(missing == nil)
+        #expect(links.link(atEpoch: 1) == (newerIsHandoff ? nil : newer))
+    }
+
+    /// An activity whose lookup returns after the session changed is stale: a confirmed switch
+    /// doesn't take its link to the next account, and a missing account isn't reported.
+    @Test func aHandoffResolvedAfterTheSessionChangedDoesNothing() throws {
+        let identity = SessionIdentity(connectionID: UUID(), userID: "a")
+        let gate = AuthGate.ready(identity, isOffline: false)
+        let handoff = DeepLink(.item(id: "li_1", episodeID: nil), serverID: identity.connectionID.uuidString)
+        let confirmed = DeepLink(.downloads, serverID: UUID().uuidString)
+        let stranger = try #require(HandoffAccount(serverAddress: "https://abs.example.com", userID: "usr_2"))
+        var links = SceneLinks()
+
+        let opening = links.reserveArrival()
+        let began = links.beginSwitch(with: confirmed, epoch: 1)
+        // The switch's gate moved the epoch on before the lookup returned.
+        let missing = links.receive(.open(handoff), gate: gate, epoch: 1, arrival: opening, currentEpoch: 2)
+        links.finishSwitch(.switched(epoch: 2), gate: .ready(identity, isOffline: false), epoch: 2)
+        #expect(began && missing == nil)
+        #expect(links.link(atEpoch: 2) == confirmed)
+
+        let reporting = links.reserveArrival()
+        #expect(
+            links.receive(.accountNotSignedIn(stranger), gate: gate, epoch: 2, arrival: reporting, currentEpoch: 3)
+                == nil)
+    }
+
+    /// An activity is the newest link when it arrives, whatever it resolves to: the waiting link,
+    /// a confirmed switch's link, and the switch the dialog or router asks about go at once, so
+    /// none of them opens or switches once its account turns out not to be signed in here.
+    @Test(arguments: [false, true])
+    func aHandoffReplacesOlderLinksWhenItArrives(duringSwitch: Bool) throws {
+        let identity = SessionIdentity(connectionID: UUID(), userID: "a")
+        let gate = AuthGate.ready(identity, isOffline: false)
+        let other = ServerConnectionDTO(
+            id: UUID(), address: "https://books.example.org", userId: "usr_1", username: "reader",
+            authMethod: .local, createdAt: Date(timeIntervalSinceReferenceDate: 0))
+        let older = DeepLink(.downloads, serverID: other.id.uuidString)
+        let stranger = try #require(HandoffAccount(serverAddress: "https://abs.example.com", userID: "usr_2"))
+        let router = Router(identity: identity)
+        var links = SceneLinks()
+        var prompt = ServerSwitchPrompt()
+        if duringSwitch {
+            _ = links.beginSwitch(with: older, epoch: 1)
+        } else {
+            links.receive(older, gate: gate, epoch: 1)
+        }
+        router.open(older)
+        prompt.present(older, for: other)
+        let request = try #require(prompt.shown)
+
+        let arrival = links.reserveArrival()
+        // What the host does when the root's `handoffArrivals` changes.
+        prompt.supersede(in: router)
+        let missing = links.receive(
+            .accountNotSignedIn(stranger), gate: gate, epoch: 1, arrival: arrival, currentEpoch: 1)
+        if duringSwitch { links.finishSwitch(.switched(epoch: 2), gate: gate, epoch: 2) }
+
+        #expect(missing == stranger)
+        #expect(links.handoffArrivals == 1)
+        #expect(links.link(atEpoch: duringSwitch ? 2 : 1) == nil)
+        #expect(router.pendingServerSwitch == nil && prompt.shown == nil)
+        let taken = prompt.take(request)
+        #expect(!taken)
+    }
+
+    /// On a cold launch the activity can arrive before the saved accounts have loaded: it
+    /// resolves once they have, and opens on its account.
+    @Test func aHandoffAtLaunchWaitsForTheSavedAccounts() async throws {
+        let environment = try makeEnvironment()
+        let accounts = try #require(environment.accounts)
+        let host = Self.host("handoff-")
+        defer { cleanUp([host]) }
+        let identity = try await signIn(accounts, to: host)
+        let connection = try #require(accounts.activeConnection)
+        let account = try #require(HandoffAccount(connection: connection))
+        var userInfo: [AnyHashable: Any] = ["item": "li_1"]
+        userInfo.merge(account.userInfo) { $1 }
+        let activity = try #require(HandoffActivity(userInfo: userInfo))
+        let relaunched = try relaunchedAccounts(environment)
+        let lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: relaunched))
+        let recorder = Recorder()
+        #expect(relaunched.connections.isEmpty)
+
+        // The scene's task starts the lifecycle; the activity comes before its restore ran.
+        let launch = Task { await lifecycle.start() }
+        #expect(await recorder.receive(activity, lifecycle) == nil)
+        await launch.value
+
+        #expect(lifecycle.gate == .ready(identity, isOffline: false))
+        #expect(
+            recorder.waitingLink(lifecycle)
+                == DeepLink(.item(id: "li_1", episodeID: nil), serverID: identity.connectionID.uuidString))
     }
 
     // MARK: Account tab and server list
@@ -488,8 +716,8 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
     }
 
-    /// Pins today's behaviour: a wrong password restarts the running session (follow-up).
-    @Test func aWrongPasswordInTheSheetRestartsTheSession() async throws {
+    /// The server checks the password before the account change, so a wrong one ends nothing.
+    @Test func aWrongPasswordInTheSheetKeepsTheSession() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
         let accounts = try #require(environment.accounts)
@@ -510,35 +738,43 @@ private final class Recorder: SessionParticipant {
         await model.signIn()
 
         #expect(model.phase == .login && model.failure != nil)
-        #expect(Array(recorder.events.dropFirst(before)) == [.flush, .end(.switch), .start(a)])
+        #expect(recorder.events.count == before)
         #expect(lifecycle.gate == .ready(a, isOffline: false))
-        // The sheet's own change left A running, so trying again isn't refused as stale.
+        #expect(accounts.activeConnection?.id == a.connectionID && accounts.connections.count == 1)
         #expect(!model.isStale)
         await model.signIn()
-        #expect(Array(recorder.events.dropFirst(before)).count == 6)
+        #expect(model.phase == .login && model.failure != nil)
+        #expect(recorder.events.count == before)
     }
 
-    /// Cancelling the sheet's own sign-in, while its change unwinds, keeps the sheet open.
+    /// Cancelling the sheet's OpenID sign-in, before the server accepted it, keeps the sheet open
+    /// and ends nothing.
     @Test func cancellingTheSheetsSignInKeepsItOpen() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
         let accounts = try #require(environment.accounts)
+        let recorder = Recorder()
+        lifecycle.register(recorder, stage: .connect)
         await lifecycle.start()
         let hosts = [Self.host(), Self.host()]
         defer { cleanUp(hosts) }
         let a = try await signIn(accounts, to: hosts[0])
         await waitFor(.ready(a, isOffline: false), in: lifecycle)
+        let before = recorder.events.count
         let model = connectModel(accounts, lifecycle: lifecycle)
         model.startAddingServer()
         model.address = "https://\(hosts[1])"
         await model.submitAddress()
         let signingIn = await heldOpenID(model)
+        // The browser is open, outside the account change.
+        #expect(lifecycle.gate == .ready(a, isOffline: false))
 
         model.cancel()
-        #expect(model.phase == .login && lifecycle.readySession == nil && !model.isStale)
+        #expect(model.phase == .login && !model.isStale)
         await signingIn.value
-        await waitFor(.ready(a, isOffline: false), in: lifecycle)
-        #expect(!model.isStale)
+        #expect(recorder.events.count == before)
+        #expect(lifecycle.gate == .ready(a, isOffline: false) && !model.isStale)
+        #expect(accounts.activeConnection?.id == a.connectionID && accounts.connections.count == 1)
     }
 
     /// Another window's failed switch restarts B; the sheet opened before it closes.

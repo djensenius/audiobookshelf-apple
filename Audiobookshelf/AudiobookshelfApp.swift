@@ -10,6 +10,8 @@ struct AudiobookshelfApp: App {
     /// Shared by every scene and CarPlay.
     private let environment = AppEnvironment.shared
     private var settings: AppSettings { environment.settings }
+    /// The Downloads tab's services, built once.
+    private let downloads = AppEnvironment.shared.makeDownloadsServices()
     @Environment(\.scenePhase) private var scenePhase
     /// Readers open an ebook's downloaded copy when there is one.
     private let downloadedEbookFile = AppEnvironment.shared.dataStack.map {
@@ -30,10 +32,12 @@ struct AudiobookshelfApp: App {
                 library: environment.library,
                 imagePipeline: environment.images.pipeline, playback: environment.playback.participant
             )
+            .environment(\.downloads, downloads)
             .environment(settings)
             .environment(\.windowRoute, $windowRoute)
             .environment(\.downloadedEbookFile, downloadedEbookFile)
             .environment(\.downloadAccess, environment.downloads?.access)
+            .environment(\.currentPlayback, environment.playback.current)
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {

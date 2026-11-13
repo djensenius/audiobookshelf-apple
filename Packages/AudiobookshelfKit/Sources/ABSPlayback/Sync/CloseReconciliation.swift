@@ -61,10 +61,11 @@ extension ProgressSyncer {
         return notApplied && !matches(acked + close.timeListened) ? .notApplied : .undecidable
     }
 
-    /// Settles a retained close whose resend the server answered 404, or whose session must have
-    /// ended, by its session's stored record (``reconcileClose(_:page:)``). A lookup that fails
-    /// keeps it: later drains look again after ``closeRetryDelay(afterAttempts:)``, resending
-    /// nothing, and after ``maxCloseLookups`` failures it is undecidable. Offline, cancelled or
+    /// Settles a retained close whose resend the server answered 404, that admission skipped for
+    /// a newer session or position, or whose session must have ended, by its session's stored
+    /// record (``reconcileClose(_:page:)``). A lookup that fails keeps it: later drains look
+    /// again after ``closeRetryDelay(afterAttempts:)``, resending nothing, and after
+    /// ``maxCloseLookups`` failures it is undecidable. Offline, cancelled or
     /// once the syncer stopped, nothing changes. A lookup for a missing item (404) or one
     /// refused for good is undecidable.
     /// Returns `false` when the drain should stop.

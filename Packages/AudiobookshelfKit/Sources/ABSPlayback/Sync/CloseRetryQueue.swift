@@ -22,8 +22,9 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///
 /// The drain's ``ProgressSyncer/retryRetainedCloses()`` resends each close that is due, oldest
 /// first, once ``ProgressSyncer/admitDeferredReport(sessionID:key:currentTime:editedAt:)``
-/// admits it; a skip for a newer session or position removes it. A resend answered 404 is
-/// decided from the session's stored record (``ProgressSyncer/reconcileMissingClose(_:)``).
+/// admits it. A resend answered 404, and a close skipped for a newer session or position, which
+/// is never resent, are decided from the session's stored record
+/// (``ProgressSyncer/reconcileMissingClose(_:)``): time that never counted is carried (#383).
 @MainActor
 final class CloseRetryQueue {
     /// Sessions whose coordinator `/close` hasn't settled yet: the drain leaves them alone.
@@ -274,10 +275,11 @@ extension ProgressSyncer {
                 // the next drain reads it as saved.
                 drainOutcome.failed = true
                 continue
-            case .skip(let reason):
-                // TODO(#383): carry the skipped listening time.
-                Self.logDroppedClose(close.timeListened, reason: "admission skipped it (\(reason))")
-                guard await deleteRetainedClose(close) else { return false }
+            case .skip:
+                // Never resent (a newer session or position), so its session's stored record
+                // decides if it counted, as for a 404: the retry delay above let any attempt that
+                // reached the server apply first. Never counted, its time is carried (#383).
+                guard await reconcileMissingClose(close) else { return false }
                 continue
             }
             guard

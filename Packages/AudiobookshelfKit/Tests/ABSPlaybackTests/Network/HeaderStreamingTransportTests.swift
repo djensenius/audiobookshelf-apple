@@ -513,6 +513,31 @@ struct HeaderStreamingTransportTests {
         #expect(!StreamStubProtocol.requests(hosts[1]).isEmpty)
     }
 
+    /// A local track (a fixture or a download) on a custom-header connection loads directly:
+    /// through the transport it would become `abs-file`, which the loader rejects. A remote track
+    /// in the same source still goes through the transport.
+    @MainActor @Test func engineLoadsLocalTracksDirectlyBesideTheTransport() async throws {
+        let fixture = try AudioFixture(trackCount: 2)
+        let body = try Data(contentsOf: fixture.urls[1])
+        let host = StreamStubProtocol.register(.init(body: body, mimeType: "application/octet-stream"))
+        let remote = try #require(URL(string: "https://\(host)/public/session/s/track/2"))
+        let source = AudioEngineSource(
+            timeline: fixture.timeline, trackURLs: [fixture.urls[0], remote],
+            trackMIMETypes: ["audio/wav", "audio/wav"], headerTransport: transport())
+        let engine = AudioEngine(audioSession: nil, timeObserverInterval: 0.05)
+        engine.player.isMuted = true
+        defer { engine.stop() }
+
+        try await engine.load(source, at: 1)
+
+        #expect(engine.state == .paused)
+        #expect(engine.currentTrackIndex == 0)
+        let assetURLs = engine.player.items().compactMap { ($0.asset as? AVURLAsset)?.url }
+        #expect(assetURLs.count == 2)
+        #expect(assetURLs.first == fixture.urls[0])
+        #expect(assetURLs.last?.scheme == "abs-https")
+    }
+
     @MainActor @Test func coordinatorHandsTheStreamTransportToTheEngine() async throws {
         let h = try CoordinatorHarness()
         let tracks = try (1...2).map {
