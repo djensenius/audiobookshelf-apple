@@ -7,5 +7,7 @@ import WidgetKit
 struct AudiobookshelfWidgets: WidgetBundle {
     var body: some Widget {
         ContinueListeningWidget()
+        PlayPauseControl()
+        JumpBackControl()
     }
 }
