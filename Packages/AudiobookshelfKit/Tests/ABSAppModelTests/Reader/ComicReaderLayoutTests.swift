@@ -57,6 +57,15 @@ import Testing
         #expect(!ComicReaderLayout.isLandscape(CGSize(width: 100, height: 200)))
     }
 
+    @Test func scrollRowsAreAtLeastAQuarterAsTallAsWide() {
+        // A normal page keeps its shape; a strip of 4,000 × 1 gets a row 1,000 high, so only a
+        // few fit on screen at once.
+        #expect(ComicReaderLayout.scrollRowAspect(CGSize(width: 2, height: 3)) == CGSize(width: 2, height: 3))
+        #expect(ComicReaderLayout.scrollRowAspect(CGSize(width: 400, height: 100)) == CGSize(width: 400, height: 100))
+        #expect(ComicReaderLayout.scrollRowAspect(CGSize(width: 4000, height: 1)) == CGSize(width: 4000, height: 1000))
+        #expect(ComicReaderLayout.scrollRowAspect(CGSize(width: 100, height: 0)) == CGSize(width: 4, height: 1))
+    }
+
     @Test func spreadIndexFindsEitherPage() {
         let spreads = ComicReaderLayout.spreads(pageCount: 5, twoUp: true)
         #expect(ComicReaderLayout.spreadIndex(containing: 3, in: spreads) == 1)

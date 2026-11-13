@@ -78,6 +78,18 @@ public enum ComicReaderLayout {
         return (lowOverflow ? Int.min : low)...(highOverflow ? Int.max : high) ~= page
     }
 
+    /// The widest a vertical-scroll row may be for its height. A page wider than this is shown
+    /// letterboxed in a taller row, so very short pages can't put thousands of rows (and their
+    /// decodes) on screen at once.
+    public static let maxScrollRowAspect: CGFloat = 4
+
+    /// The aspect ratio of `size`'s row in vertical scroll: its own, unless it is wider than
+    /// ``maxScrollRowAspect`` or has no area.
+    public static func scrollRowAspect(_ size: CGSize) -> CGSize {
+        guard size.width > 0, size.height > 0 else { return CGSize(width: maxScrollRowAspect, height: 1) }
+        return CGSize(width: size.width, height: max(size.height, size.width / maxScrollRowAspect))
+    }
+
     /// Whether an image is landscape, which usually means a pre-joined spread.
     public static func isLandscape(_ size: CGSize) -> Bool {
         size.width > size.height

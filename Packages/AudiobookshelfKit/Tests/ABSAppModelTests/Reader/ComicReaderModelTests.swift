@@ -68,6 +68,18 @@ import UniformTypeIdentifiers
         }
     }
 
+    @Test func aCancelledPageRequestNeitherExtractsNorDecodes() async throws {
+        let archive = try ComicArchive(url: try makeComic(pages: 2), cacheDirectory: cache)
+        let request = Task.detached {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await archive.decodedPage(1, maxPixelSize: 100)
+        }
+
+        #expect(await request.value == nil)
+        #expect(await archive.extractionCount == 0)
+        #expect(await archive.decodedPage(1, maxPixelSize: 100) != nil)
+    }
+
     // MARK: Location and progress
 
     @Test func opensAtTheSavedPageWithoutReportingIt() async throws {

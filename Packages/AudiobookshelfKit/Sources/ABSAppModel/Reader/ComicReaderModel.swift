@@ -209,9 +209,10 @@ public final class ComicReaderModel {
 extension ComicArchive {
     /// Extracts and decodes page `number`, downsampled to `maxPixelSize` with its EXIF orientation
     /// applied. Both happen on the archive without a suspension, so another page's request can't
-    /// evict the extracted file before ImageIO reads it.
+    /// evict the extracted file before ImageIO reads it. A cancelled request (its page scrolled
+    /// away while it was queued on the archive) neither extracts nor decodes.
     func decodedPage(_ number: Int, maxPixelSize: Int) -> CGImage? {
-        guard let url = try? page(number),
+        guard !Task.isCancelled, let url = try? page(number), !Task.isCancelled,
             let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary)
         else { return nil }
         let options =

@@ -52,9 +52,11 @@ struct ComicReaderView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(background)
         .task(id: fileURL) {
+            let caches = URL.cachesDirectory.appending(path: "ComicPages")
+            Task.detached(priority: .utility) { ComicArchive.removeStaleCaches(in: caches) }
             let model = ComicReaderModel(
                 fileURL: fileURL,
-                cacheDirectory: URL.cachesDirectory.appending(path: "ComicPages/\(UUID().uuidString)"),
+                cacheDirectory: caches.appending(path: UUID().uuidString),
                 startLocation: startLocation, defaults: .standard, preferencesKey: preferencesKey,
                 onPageChange: onPageChange)
             self.model = model
@@ -209,13 +211,18 @@ private struct ComicPageView: View {
 
     var body: some View {
         Group {
-            if let image {
+            if let image, fillsWidth {
+                Color.clear.aspectRatio(ComicReaderLayout.scrollRowAspect(image.size), contentMode: .fit)
+                    .overlay {
+                        Image(decorative: image.image, scale: 1).resizable().aspectRatio(contentMode: .fit)
+                    }
+            } else if let image {
                 Image(decorative: image.image, scale: 1)
                     .resizable()
                     .aspectRatio(image.size, contentMode: .fit)
             } else if let size = model.pageSizes[page] {
                 // A released page keeps its height, so vertical scroll doesn't jump.
-                Color.clear.aspectRatio(size, contentMode: .fit)
+                Color.clear.aspectRatio(fillsWidth ? ComicReaderLayout.scrollRowAspect(size) : size, contentMode: .fit)
             } else if failed {
                 Image(systemName: "exclamationmark.triangle")
                     .foregroundStyle(.secondary)
