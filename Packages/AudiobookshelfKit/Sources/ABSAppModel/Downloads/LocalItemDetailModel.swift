@@ -73,22 +73,27 @@ public final class LocalItemDetailModel {
     /// and moves to the updates once a read (such as a retry) finds the item. Runs until the task
     /// is cancelled.
     public func observe() async {
-        // Subscribed before the read, so a completion during it is followed by another read.
+        // Subscribed before the read, so a completion during it is followed by another read. The
+        // forwarding task consumes the subscription from the start and is cancelled (ending the
+        // subscription) as soon as the store updates take over, so no events pile up unread.
         let events = await services.control.events()
-        await reload()
-        if let updates = await storeUpdates() {
-            await follow(updates)
-            return
-        }
         let (signals, signal) = AsyncStream.makeStream(of: Signal.self)
         let forwarding = Task {
             for await event in events { signal.yield(.event(event)) }
         }
-        itemFound = signal
         defer {
             forwarding.cancel()
+            signal.finish()
             itemFound = nil
         }
+        await reload()
+        if let updates = await storeUpdates() {
+            forwarding.cancel()
+            signal.finish()
+            await follow(updates)
+            return
+        }
+        itemFound = signal
         for await next in signals {
             switch next {
             case .event(.completed(_, let completedItemID, let key)):
@@ -101,6 +106,7 @@ public final class LocalItemDetailModel {
                 guard let updates = await storeUpdates() else { continue }
                 // Ends the events subscription; the store reports completions too.
                 forwarding.cancel()
+                signal.finish()
                 itemFound = nil
                 await follow(updates)
                 return

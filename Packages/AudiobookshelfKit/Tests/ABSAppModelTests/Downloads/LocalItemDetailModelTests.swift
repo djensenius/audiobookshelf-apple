@@ -50,10 +50,19 @@ private actor FakeLocalStore: DownloadControlling {
         return item?.id == id ? item : nil
     }
 
+    /// Event subscriptions not yet ended, as `DownloadManager` counts them until `onTermination`.
+    private(set) var liveEventSubscriptions = 0
+
     func events() -> AsyncStream<DownloadManagerEvent> {
         let (stream, continuation) = AsyncStream.makeStream(of: DownloadManagerEvent.self)
         subscribers.append(continuation)
+        liveEventSubscriptions += 1
+        continuation.onTermination = { _ in Task { await self.endEventSubscription() } }
         return stream
+    }
+
+    private func endEventSubscription() {
+        liveEventSubscriptions -= 1
     }
 
     func updates(_ connectionID: UUID) -> AsyncStream<[LocalLibraryItemDTO]> {
@@ -257,6 +266,24 @@ struct LocalItemDetailModelTests {
         #expect(!model.isDeleted)
     }
 
+    /// Once the store updates take over, the manager's events (unbounded) aren't read any more,
+    /// so the subscription must end rather than buffer them.
+    @Test func followingTheStoreUpdatesEndsTheEventSubscription() async throws {
+        let item = Self.podcast(episodes: ["e1"])
+        let store = FakeLocalStore(item: item)
+        let (model, cleanUp) = try await makeModel(store: store, itemID: item.id, storeUpdates: true)
+        defer { cleanUp() }
+
+        var live = await store.liveEventSubscriptions
+        for _ in 0..<500 where live > 0 {
+            try await Task.sleep(for: .milliseconds(10))
+            live = await store.liveEventSubscriptions
+        }
+
+        #expect(live == 0)
+        #expect(model.detail != nil)
+    }
+
     @Test func aRetryAfterAFailedFirstReadFollowsTheStoreUpdates() async throws {
         let item = Self.podcast(episodes: ["e1", "e2"])
         let store = FakeLocalStore(item: item)
@@ -277,6 +304,12 @@ struct LocalItemDetailModelTests {
 
         #expect(model.detail?.episodes.map(\.id) == ["e2"])
         #expect(model.detail?.totalBytes == 10)
+        var live = await store.liveEventSubscriptions
+        for _ in 0..<500 where live > 0 {
+            try await Task.sleep(for: .milliseconds(10))
+            live = await store.liveEventSubscriptions
+        }
+        #expect(live == 0)
     }
 
     @Test func theCoverIsTheDownloadedFile() async throws {
