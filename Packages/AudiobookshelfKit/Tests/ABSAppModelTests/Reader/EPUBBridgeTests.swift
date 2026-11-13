@@ -91,6 +91,23 @@ import Testing
         #expect(try decode(#"{"type":""}"#) == .unknown(""))
     }
 
+    @Test func skippedTypesAreNotDecoded() throws {
+        // An invalid body, so decoding it would throw.
+        let toc = Data(#"{"type":"toc","items":[{"id":5}]}"#.utf8)
+        #expect(try EPUBBridgeEvent.decode(toc, skipping: ["toc"]) == .unknown("toc"))
+        #expect(throws: EPUBBridgeDecodingError.self) { try EPUBBridgeEvent.decode(toc) }
+        #expect(try EPUBBridgeEvent.decode(Data(#"{"type":"ready"}"#.utf8), skipping: ["toc"]) == .ready)
+    }
+
+    @Test func messagesOverTheLimitAreNotParsed() throws {
+        let prefix = #"{"type":"locationsReady","locations":""#
+        let fits = String(repeating: "a", count: EPUBBridgeEvent.maxMessageBytes - prefix.utf8.count - 2)
+        #expect(try EPUBBridgeEvent.decode(Data((prefix + fits + #""}"#).utf8)) == .locationsReady(fits))
+        let over = Data((prefix + fits + #"a"}"#).utf8)
+        #expect(over.count == EPUBBridgeEvent.maxMessageBytes + 1)
+        #expect(throws: EPUBBridgeDecodingError.tooLarge) { try EPUBBridgeEvent.decode(over) }
+    }
+
     @Test func extraFieldsAreIgnored() throws {
         #expect(try decode(#"{"type":"ready","version":2}"#) == .ready)
     }

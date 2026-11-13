@@ -34,6 +34,46 @@ public enum PlayerErrorMessage: Sendable, Hashable {
         case .engine, .playback, .unexpected: self = .playbackFailed
         }
     }
+
+    /// The alert's buttons, in order. Recovery giving up offers Retry, which starts a fresh
+    /// recovery attempt, and Cancel, which stops playback (ADR 0007). A metered network set to
+    /// "ask" offers to stream anyway, and Cancel, which only clears the failure (#376). The
+    /// others only dismiss.
+    public var actions: [PlayerErrorAction] {
+        switch self {
+        case .streamingInterrupted: [.retry, .cancel]
+        case .streamingNeedsConfirmation: [.streamAnyway, .cancel]
+        case .streamingNotAllowed, .sessionStartFailed, .streamUnavailable, .playbackFailed, .streamRejected:
+            [.dismiss]
+        }
+    }
+}
+
+/// One occurrence of a playback failure, as an alert shows it: its message, and which failure it
+/// is, so an alert left from an earlier failure with the same message can't act on a newer one
+/// (another item, scope or account). See ``PlayerViewModel/failure``.
+public struct PlayerFailure: Sendable, Hashable {
+    public let message: PlayerErrorMessage
+    /// Changes with every change of the playback's failure.
+    public let occurrence: Int
+
+    public init(message: PlayerErrorMessage, occurrence: Int) {
+        self.message = message
+        self.occurrence = occurrence
+    }
+}
+
+/// A button on a playback failure's alert; see ``PlayerViewModel/respond(to:with:)``.
+public enum PlayerErrorAction: Sendable, Hashable {
+    /// Closes the alert, leaving playback as it is ("OK").
+    case dismiss
+    /// Plays the item again from where it stopped.
+    case retry
+    /// Plays what the streaming policy's "ask" blocked on the metered network ("Stream").
+    case streamAnyway
+    /// Clears the failure: stops playback after recovery gave up, and leaves it as it is after a
+    /// metered-network confirmation.
+    case cancel
 }
 
 /// State and commands for the mini player and the full player (port of
@@ -91,6 +131,9 @@ public final class PlayerViewModel {
     /// Counts item changes and closes, so a finished scrub can tell that its item went away even
     /// if the same item is back by the time it seeks.
     @ObservationIgnored private var itemGeneration = 0
+    /// Counts changes of the playback's failure (and of the playback itself), so each occurrence
+    /// has its own ``failure``.
+    private var errorOccurrence = 0
 
     /// Identifies one scrubber (one view's gesture), so scrubbers in different windows can't move
     /// or end each other's scrub. Make one per scrubber and keep it for the view's lifetime.
@@ -154,6 +197,7 @@ public final class PlayerViewModel {
         self.settings = settings
         trackDisplay()
         trackItem()
+        trackError()
     }
 
     // MARK: Item
@@ -194,6 +238,12 @@ public final class PlayerViewModel {
     /// must surface it too, not only the player bar.
     public var errorMessageKey: PlayerErrorMessage? { playback.error.map(PlayerErrorMessage.init) }
 
+    /// The current failure's occurrence, for its alert to pass back to ``respond(to:with:)``;
+    /// `nil` when there is none.
+    public var failure: PlayerFailure? {
+        errorMessageKey.map { PlayerFailure(message: $0, occurrence: errorOccurrence) }
+    }
+
     // MARK: Transport
 
     public var isPlaying: Bool { playback.isPlaying }
@@ -201,6 +251,9 @@ public final class PlayerViewModel {
     /// Whether the play/pause button shows pause: while play is requested, including while starting
     /// or stalled.
     public var showsPause: Bool { playback.isPlaybackRequested }
+    /// Whether playback waits for the network to return ("No network connection") before recovery
+    /// tries again.
+    public var isWaitingForNetwork: Bool { playback.isWaitingForNetwork }
     public var rate: Double { playback.rate }
     public var jumpForwardSeconds: Int { settings.jumpForwardTime }
     public var jumpBackwardSeconds: Int { settings.jumpBackwardsTime }
@@ -432,16 +485,21 @@ public final class PlayerViewModel {
         playback.stop(reason: .user)
     }
 
-    /// "Stream anyway" for ``PlayerErrorMessage/streamingNeedsConfirmation``: plays what the
-    /// streaming policy blocked (an item, or the queue's next one) on the metered network. Does
-    /// nothing for any other failure, and never overrides "never".
-    public func confirmMeteredStreaming() async {
-        await playback.confirmMeteredStreaming()
-    }
-
-    /// "Cancel" for ``PlayerErrorMessage/streamingNeedsConfirmation``: clears it without playing.
-    public func declineMeteredStreaming() {
-        playback.declineMeteredStreaming()
+    /// Handles a button on the alert for `failure`, while it is still the current ``failure``; an
+    /// alert left from an earlier one (another item, scope or account since, even with the same
+    /// message) does nothing.
+    public func respond(to failure: PlayerFailure, with action: PlayerErrorAction) async {
+        guard failure == self.failure else { return }
+        switch (action, failure.message) {
+        case (.dismiss, _): break
+        // The item stayed, unloaded where it stopped: playing it starts a new session there.
+        case (.retry, _): await playback.resume(rewindingBy: nil)
+        // Replays the blocked play on the metered network; "never" still blocks.
+        case (.streamAnyway, _): await playback.confirmMeteredStreaming()
+        // Declining the metered network leaves whatever plays as it is.
+        case (.cancel, .streamingNeedsConfirmation): playback.declineMeteredStreaming()
+        case (.cancel, _): close()
+        }
     }
 
     // MARK: Private
@@ -495,6 +553,21 @@ public final class PlayerViewModel {
             // Safe: every conformer is `@MainActor` (the protocol is), so its properties change, and
             // `onChange` runs, on the main actor. This keeps the capture synchronous, before the change.
             MainActor.assumeIsolated { self?.trackDisplay() }
+        }
+    }
+
+    /// Starts a new failure occurrence whenever the playback's failure changes, also to an equal
+    /// one from another playback (a scope or account switch).
+    private func trackError() {
+        withObservationTracking {
+            _ = playback.error
+        } onChange: { [weak self] in
+            // Safe for the same reason as in `trackDisplay()`.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.errorOccurrence += 1
+                self.trackError()
+            }
         }
     }
 

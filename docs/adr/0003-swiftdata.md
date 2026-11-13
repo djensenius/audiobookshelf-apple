@@ -586,9 +586,10 @@ Model notes:
   changed while the upload was in flight (its `updatedAt` no longer matches) is
   kept and sent again on the next sync. Within those rules the legacy rule applies:
   only sessions that are not `isActive` are deleted (all acknowledged ones on the
-  first sync after login).
+  first sync after login, which is the playback scope's sync at an online session
+  start, #184).
 - **History** stays on the device, as in the legacy app. Events older than 90 days
-  are deleted at launch.
+  are deleted at launch (`AppEnvironment.pruneHistory`, #184).
 - **Connections:** the session to restore is the connected record with the latest
   `lastUsedAt` (replacing `ServerConnectionConfigActiveIndex`). Removing a
   connection does not delete downloads, progress or history, and must not orphan
