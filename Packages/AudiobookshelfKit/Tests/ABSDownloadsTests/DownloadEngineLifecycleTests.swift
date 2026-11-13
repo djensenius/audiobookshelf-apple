@@ -2797,6 +2797,66 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
+    /// A transfer marker whose removal fails for another reason than being missing counts as
+    /// still there, even when its metadata can't be read either: the connection's marker stays,
+    /// so a relaunch after the requeue is lost still rejects the survivor's file.
+    @Test func survivorFileStaysRejectedWhenItsTransferMarkerCantBeRemoved() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let file = harness.fileURL("li_1/1.mp3")
+        try FileManager.default.createDirectory(at: harness.fileURL("li_1"), withIntermediateDirectories: true)
+        try Data("audio-bytes".utf8).write(to: file)
+        try harness.locations.markTransferStart(partID: partID)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date.now.addingTimeInterval(60)], ofItemAtPath: file.path(percentEncoded: false))
+        try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        // Neither removable nor readable: removing fails with a permission error, not ENOENT.
+        let transfers = harness.locations.transfersRoot.path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: transfers)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: transfers) }
+        let engine = harness.makeEngine()
+
+        #expect(await engine.attachSurvivingTransfers())
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: transfers)
+        // As if the process ended before the requeue was saved.
+        _ = try await harness.store.setPartState(.running, partID: partID, taskIdentifier: nil)
+        let relaunched = harness.makeEngine(registry: DownloadEngineRegistry())
+        #expect(await relaunched.activate())
+
+        #expect(await relaunched.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 1)
+    }
+
+    /// An automatic resume whose launch is suspended reading credentials when a deactivate
+    /// comes starts no transfer once the read returns: the part stays queued, and the next
+    /// activation starts it.
+    @Test func guardedResumeDeactivatedDuringItsLaunchWaitsForTheNextActivation() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        harness.credentials.hook.withLock { $0 = { await engine.deactivate() } }
+
+        let generation = await engine.quiesceGeneration()
+        #expect(try await engine.resume(recordID: record.id, unlessQuiescedSince: generation))
+
+        #expect(harness.credentials.calls.count == 1)
+        #expect(harness.requests.isEmpty)
+        // The launch had begun the part, so its record is downloading: the next activation
+        // restarts its queued parts either way.
+        #expect(try await harness.store.record(id: record.id)?.state == .downloading)
+        #expect(try await harness.store.part(id: partID)?.state == .queued)
+        harness.credentials.hook.withLock { $0 = nil }
+        #expect(await engine.activate())
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 1)
+    }
+
     /// A failure's replay of an automatic resume that began after a deactivate, while the
     /// failure was settling, starts nothing either: the next activation starts the part.
     @Test func replayOfAGuardedResumeWaitsForTheNextActivation() async throws {

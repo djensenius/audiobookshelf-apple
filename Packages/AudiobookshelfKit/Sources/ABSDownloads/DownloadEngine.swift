@@ -483,7 +483,7 @@ public actor DownloadEngine {
         }
         for partID in partIDs
         where tasks[partID] == nil && !settlingParts.contains(partID) && (!onlyWhileActive || restartsQueuedParts) {
-            await launch(partID, activationOwnsSession: activationOwnsSession)
+            await launch(partID, activationOwnsSession: activationOwnsSession, onlyWhileActive: onlyWhileActive)
         }
     }
 
@@ -1157,7 +1157,7 @@ public actor DownloadEngine {
             .flatMap(\.parts).filter { $0.state == .queued || $0.state == .failed || strandedRunning.contains($0.id) }
             .map(\.id)
         for partID in candidates where restartsQueuedParts {
-            await launch(partID)
+            await launch(partID, onlyWhileActive: true)
         }
     }
 
@@ -1172,9 +1172,12 @@ public actor DownloadEngine {
     /// - Parameters:
     ///   - rejectedAccessToken: after a 401, the token that was rejected.
     ///   - notBefore: the task's `earliestBeginDate`, for a retry created in the background.
+    ///   - onlyWhileActive: starts no transfer after a ``deactivate()`` that came while the launch
+    ///     was suspended (reading credentials, say): the part is left queued for the next
+    ///     ``activate()``.
     private func launch(
         _ partID: UUID, rejectedAccessToken: String? = nil, notBefore: Date? = nil,
-        activationOwnsSession: Bool = false
+        activationOwnsSession: Bool = false, onlyWhileActive: Bool = false
     ) async {
         if let stop = stopping[partID] { await stop.value }
         guard let context = contexts[partID], tasks[partID] == nil, retries[partID] == nil, launching[partID] == nil,
@@ -1289,6 +1292,11 @@ public actor DownloadEngine {
             await persistIdle(partID) { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
             return
         }
+        // Deactivated while the credentials or the preflight were awaited.
+        if onlyWhileActive, !restartsQueuedParts {
+            await persistIdle(partID) { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
+            return
+        }
         var resumeData: Data?
         // Resume data that can't be read now (the Keychain or the file is unavailable while the
         // device is locked) is kept for a later launch; this one starts from the beginning.
@@ -1336,6 +1344,28 @@ public actor DownloadEngine {
             }
         }
         guard tasks[partID] === task else { return }
+        // Deactivated while the part's state was saved: the task never ran, and the resume data
+        // it took is sealed again for the next activation's launch.
+        if onlyWhileActive, !restartsQueuedParts {
+            tasks[partID] = nil
+            ignoredTasks.insert(task.taskIdentifier)
+            task.cancel()
+            var hasResumeData = keepsResumeData
+            if let resumeData {
+                do {
+                    try vault.seal(
+                        resumeData, partID: partID, credentialTag: ResumeDataVault.credentialTag(for: request))
+                    hasResumeData = true
+                } catch {
+                    logError("Couldn't keep a download's resume data; it starts from the beginning", error)
+                }
+            }
+            contexts[partID]?.hasResumeData = hasResumeData
+            await persistIdle(partID) {
+                try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
+            }
+            return
+        }
         task.resume()
     }
 
