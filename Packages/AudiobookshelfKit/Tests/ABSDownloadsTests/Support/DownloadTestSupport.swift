@@ -332,6 +332,7 @@ final class DownloadHarness: Sendable {
         adoptionStarted: (@Sendable (UUID) async -> Void)? = nil,
         listing: (@Sendable () async -> Void)? = nil,
         beforeClearingResumeFlag: (@Sendable (UUID) async throws -> Void)? = nil,
+        afterUpsertingLocalItem: (@Sendable (UUID) async -> Void)? = nil,
         preflight: any DownloadRedirectPreflighting = StubPreflight(),
         prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadEngine {
@@ -350,7 +351,7 @@ final class DownloadHarness: Sendable {
             beforeStoppingSiblings: beforeStoppingSiblings, afterPermanentFailure: afterPermanentFailure,
             beforeReplayStart: beforeReplayStart, startFoundSettling: startFoundSettling,
             adoptionStarted: adoptionStarted, beforeClearingResumeFlag: beforeClearingResumeFlag,
-            preflight: preflight)
+            afterUpsertingLocalItem: afterUpsertingLocalItem, preflight: preflight)
     }
 
     func sessionFactory(

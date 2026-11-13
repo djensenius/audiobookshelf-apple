@@ -167,6 +167,8 @@ public actor DownloadEngine {
     private let adoptionStarted: (@Sendable (UUID) async -> Void)?
     /// Before a discard clears a part's resume-data flag; throwing fails that write.
     private let beforeClearingResumeFlag: (@Sendable (UUID) async throws -> Void)?
+    /// After a finalisation made a record a local item, before it deletes the record.
+    private let afterUpsertingLocalItem: (@Sendable (UUID) async -> Void)?
     /// Internal so tests can post events.
     let delegate = DownloadSessionDelegate()
 
@@ -333,6 +335,7 @@ public actor DownloadEngine {
         startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil,
         adoptionStarted: (@Sendable (UUID) async -> Void)? = nil,
         beforeClearingResumeFlag: (@Sendable (UUID) async throws -> Void)? = nil,
+        afterUpsertingLocalItem: (@Sendable (UUID) async -> Void)? = nil,
         preflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight()
     ) {
         (updates, updateContinuation) = AsyncStream.makeStream()
@@ -359,6 +362,7 @@ public actor DownloadEngine {
         self.startFoundSettling = startFoundSettling
         self.adoptionStarted = adoptionStarted
         self.beforeClearingResumeFlag = beforeClearingResumeFlag
+        self.afterUpsertingLocalItem = afterUpsertingLocalItem
         registry.register(self)
     }
 
@@ -714,14 +718,13 @@ public actor DownloadEngine {
         await waitForFailuresForGood(of: connectionID)
         let discarded = await discardResumeData(connectionID: connectionID)
         // The session's listing cancelled the survivors, or adopted them before this call, which
-        // cancelled them above; the marker stays until the resume data is gone too.
-        if discarded {
+        // cancelled them above; the marker stays until the resume data is gone too. Only the
+        // last quiesce under way clears it, releases the hold and finalises the records it held:
+        // another may still seal more, or fail to delete it.
+        if discarded, quiescingConnections.count(where: { $0 == connectionID }) == 1 {
             clearSurvivorsToStop(connectionID)
-            // The last quiesce under way releases the hold and finalises the records it held.
-            if quiescingConnections.count(where: { $0 == connectionID }) == 1 {
-                undiscardedSignOuts.remove(connectionID)
-                await finaliseCompletedRecords()
-            }
+            undiscardedSignOuts.remove(connectionID)
+            await finaliseCompletedRecords()
         }
         return records != nil && discarded
     }
@@ -1646,16 +1649,20 @@ public actor DownloadEngine {
     /// Makes a complete record a local item, then deletes it. A cover-only record whose local
     /// item is gone is deleted and reported discarded instead. A failure is logged; the next
     /// activation repeats it. A held connection's record (``undiscardedSignOuts``) is left to
-    /// the quiesce or activation that releases the hold.
+    /// the quiesce or activation that releases the hold, also when the hold begins while the
+    /// local item is written.
     private func finalise(_ record: DownloadRecordDTO) async {
         guard !undiscardedSignOuts.contains(record.key.serverConnectionID), finalising.insert(record.id).inserted
         else { return }
         defer { finalising.remove(record.id) }
         do {
             let item = try await localItems.upsertFromDownload(record, now: now())
+            await afterUpsertingLocalItem?(record.id)
+            guard !undiscardedSignOuts.contains(record.key.serverConnectionID) else { return }
             try await store.deleteRecord(record.id)
             updateContinuation.yield(.recordComplete(recordID: record.id, itemID: item.id))
         } catch LocalItemStore.StoreError.itemNotFound {
+            guard !undiscardedSignOuts.contains(record.key.serverConnectionID) else { return }
             do {
                 if try await store.deleteRecord(record.id) != nil {
                     updateContinuation.yield(.recordDiscarded(record))
