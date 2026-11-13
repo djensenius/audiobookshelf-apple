@@ -49,9 +49,14 @@ struct AudiobookshelfApp: App {
             InspectorCommands()
         }
         // The system relaunches the app for finished background downloads; this waits until
-        // the download engine has processed every event before the system suspends it again.
+        // the download engine has processed every event before the system suspends it again,
+        // once the download folders are prepared.
         .backgroundTask(.urlSession(DownloadEngine.sessionIdentifier)) {
-            await DownloadEngine.handleBackgroundEvents()
+            if let downloads = await environment.downloads {
+                await downloads.lifecycle.handleBackgroundEvents()
+            } else {
+                await DownloadEngine.handleBackgroundEvents()
+            }
         }
         // Every phase from launch on, in order: activating resumes transfers and sweeps orphaned
         // downloads; in the background, transfers the system cancels wait for the next
