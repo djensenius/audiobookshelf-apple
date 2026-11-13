@@ -59,6 +59,7 @@ struct AppPlayback {
             },
             makeScope: { Self.makeScope(for: $0, settings: settings, policy: policy) })
         lifecycle.register(participant, stage: .progressSource)
+        removesQueues(of: accounts, from: queueStore(settings: settings))
         return AppPlayback(current: current, player: player, writer: writer, participant: participant)
     }
 
@@ -74,7 +75,7 @@ struct AppPlayback {
 
     /// One account session's scope, over an engine of its own. The connection's last-played record
     /// and queue are kept in the settings' defaults, under keys of their own.
-    private static func makeScope(
+    static func makeScope(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy
     ) -> PlaybackScope {
         #if os(iOS)
@@ -89,7 +90,7 @@ struct AppPlayback {
             deviceIdentifiers: request.deviceIdentifiers, writer: request.writer, settings: settings,
             policy: policy, engine: engine, tickInterval: tickInterval,
             lastPlayed: { PlaybackScope.lastPlayedStore(for: $0, defaults: settings.defaults) },
-            queueStore: UserDefaultsPlaybackQueueStore(defaults: settings.defaults))
+            queueStore: queueStore(settings: settings))
         return PlaybackScope.make(configuration) { coordinator in
             // No artwork or App Intents entities yet.
             NowPlayingBridge(
@@ -99,7 +100,7 @@ struct AppPlayback {
     }
 }
 
-/// Sets `\.playItem`, `\.bookmarkStore` and `\.sleepTimer` from the running account session's
+/// Sets `\.playItem`, `\.bookmarkStore`, `\.sleepTimer` and `\.playbackQueue` from the running account session's
 /// playback, each `nil` between sessions; the sleep timer is `nil` until the scope has one (#185).
 /// A view modifier, so it follows the participant as each session starts and ends. The signed-in
 /// shell passes the participant only while it serves the shell's account
@@ -112,5 +113,6 @@ struct PlaybackEnvironment: ViewModifier {
             .environment(\.playItem, participant?.playItem)
             .environment(\.bookmarkStore, participant?.bookmarks)
             .environment(\.sleepTimer, participant?.sleepTimer)
+            .environment(\.playbackQueue, participant?.queue)
     }
 }

@@ -4,7 +4,8 @@ import ABSUI
 import SwiftUI
 
 /// The mini player (port of the collapsed `components/app/AudioPlayer.vue`): the cover and title
-/// open the full player, with play/pause, the jumps and a close button that stops playback.
+/// open the full player, and their context menu opens the scene's queue inspector, with
+/// play/pause, the jumps and a close button that stops playback.
 ///
 /// On iOS it is the tab view's bottom accessory; when the tab bar collapses it to the inline
 /// placement only play/pause stays. At accessibility text sizes the cover, author and jumps go, so
@@ -103,6 +104,20 @@ struct MiniPlayerView: View {
         .buttonStyle(.plain)
         .accessibilityLabel(Text(verbatim: L10n.string("LabelMiniPlayerAccessibility", model.title)))
         .accessibilityHint(Text(verbatim: L10n.string("LabelMiniPlayerHint")))
+        .contextMenu {
+            Button {
+                router.isQueueInspectorPresented = true
+            } label: {
+                Label {
+                    Text(verbatim: L10n.string("HeaderUpNext"))
+                } icon: {
+                    Image(systemName: "list.bullet")
+                }
+            }
+        }
+        .accessibilityAction(named: Text(verbatim: L10n.string("HeaderUpNext"))) {
+            router.isQueueInspectorPresented = true
+        }
     }
 
     private var closeButton: some View {

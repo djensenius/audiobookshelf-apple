@@ -42,8 +42,8 @@ final class PlaceholderPlayerState: PlayerSlotState {
 /// - Both: the queue is an inspector, which compact width shows as a sheet.
 ///
 /// The mini and full players are ``MiniPlayerView`` and ``NowPlayingView`` when `player` is a
-/// ``PlayerViewModel``, as in the app, else placeholders. The queue inspector is a placeholder
-/// until #60.
+/// ``PlayerViewModel``, as in the app, else placeholders. The queue inspector is
+/// ``QueueInspector``.
 ///
 /// Without a session the full player closes, also when it is opened with none (on macOS, the
 /// flag resets and the window closes itself). A queue auto-advance that passes through `.idle`
@@ -158,7 +158,7 @@ struct PlayerSlot: ViewModifier {
                     errorAlert(fullPlayer, isEnabled: true)
                 }
                 .inspector(isPresented: $router.isQueueInspectorPresented) {
-                    QueueInspectorPlaceholder()
+                    QueueInspector(router: router)
                 }
         #else
             content
@@ -169,7 +169,7 @@ struct PlayerSlot: ViewModifier {
                     }
                 }
                 .inspector(isPresented: $router.isQueueInspectorPresented) {
-                    QueueInspectorPlaceholder()
+                    QueueInspector(router: router)
                 }
                 .onChange(of: router.isFullPlayerPresented) { _, isPresented in
                     if Self.opensNowPlayingWindow(isPresented: isPresented, hasSession: player.hasSession) {
@@ -256,15 +256,3 @@ private struct MiniPlayerPlaceholder: View {
         }
     }
 #endif
-
-private struct QueueInspectorPlaceholder: View {
-    var body: some View {
-        ContentUnavailableView {
-            Label {
-                Text(verbatim: L10n.string("MessageNoItems"))
-            } icon: {
-                Image(systemName: "list.bullet")
-            }
-        }
-    }
-}

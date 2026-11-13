@@ -124,7 +124,9 @@ struct TestDownloads {
 
             #expect(environment.accounts != nil)
             #expect(environment.downloads == nil)
-            #expect(environment.accounts?.credentialsRemoved == nil)
+            // No downloads to stop on an expiry; a removal still deletes the saved play queue
+            // (PlaybackQueueWiringTests).
+            #expect(environment.accounts?.credentialsExpired == nil)
 
             await environment.lifecycle.start()
 

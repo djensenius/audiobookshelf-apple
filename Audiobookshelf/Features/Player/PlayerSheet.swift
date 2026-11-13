@@ -5,14 +5,14 @@ import SwiftUI
 /// A sheet the full player presents. ``NowPlayingView`` holds one per window, so opening a sheet in
 /// one window doesn't open it in another (ADR 0004).
 enum PlayerSheet: String, Identifiable {
-    case chapters, bookmarks, speed, sleepTimer
+    case chapters, bookmarks, speed, sleepTimer, queue
 
     var id: String { rawValue }
 }
 
 /// The view for each ``PlayerSheet``. Each sheet and its toolbar slot live in their own file
 /// (`ChaptersSheet.swift`, `BookmarksSheet.swift`, `PlaybackSpeedSheet.swift`,
-/// `SleepTimerSheet.swift`) and apply ``SwiftUICore/View/playerSheetStyle(title:detents:onDone:)``
+/// `SleepTimerSheet.swift`, `QueueSheet.swift`) and apply ``SwiftUICore/View/playerSheetStyle(title:detents:onDone:)``
 /// themselves, so changing one sheet doesn't touch this host or the player.
 struct PlayerSheetContent: View {
     let sheet: PlayerSheet
@@ -26,6 +26,7 @@ struct PlayerSheetContent: View {
         case .bookmarks: BookmarksSheet(model: model, close: close)
         case .speed: PlaybackSpeedSheet(model: model, close: close)
         case .sleepTimer: SleepTimerSheet(model: model, close: close)
+        case .queue: QueueSheet(close: close)
         }
     }
 }

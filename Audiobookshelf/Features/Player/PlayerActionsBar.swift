@@ -2,8 +2,8 @@ import ABSAppModel
 import ABSUI
 import SwiftUI
 
-/// The full player's bottom toolbar: chapters, bookmarks, the sleep timer and more (the legacy
-/// player's top bar and menu). Each slot lives in its sheet's file and sets `sheet` to present it;
+/// The full player's bottom toolbar: chapters, bookmarks, the sleep timer, the queue and more (the
+/// legacy player's top bar and menu). Each slot lives in its sheet's file and sets `sheet` to present it;
 /// More is a disabled placeholder.
 ///
 /// While the player is split, its details pane shows chapters and bookmarks, so the bar leaves
@@ -28,6 +28,7 @@ struct PlayerActionsBar: ToolbarContent {
                 BookmarksSlot(model: model, sheet: $sheet)
             }
             SleepTimerSlot(model: model, sheet: $sheet)
+            QueueSlot(sheet: $sheet)
             Button {
             } label: {
                 Label {
