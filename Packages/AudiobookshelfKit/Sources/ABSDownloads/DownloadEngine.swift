@@ -229,6 +229,10 @@ public actor DownloadEngine {
     /// Records whose `failed` state couldn't be saved after a part failed for good. Their parts
     /// can't launch until ``reconcile()`` saves it.
     private var pendingRecordFailures: Set<UUID> = []
+    /// Records a ``resume(recordID:unlessQuiescedSince:)`` has queued but not yet checked against
+    /// the quiesce generation. Their parts can't launch (an activation's restart, a retry) until
+    /// the check passes and the resume starts them itself.
+    private var validatingResumes: Set<UUID> = []
     /// The connections of the failures for good under way, from the start of their handling
     /// until their replay has started, and the ``quiesce(connectionID:pausing:)`` calls waiting
     /// for them.
@@ -573,6 +577,10 @@ public actor DownloadEngine {
         resumeGenerations[recordID, default: 0] += 1
         resumingRecords.insert(recordID)
         defer { resumingRecords.remove(recordID) }
+        // Until the check below, nothing else may launch the queued record: a quiesce that already
+        // passed over it wouldn't stop the transfer.
+        if generation != nil { validatingResumes.insert(recordID) }
+        defer { validatingResumes.remove(recordID) }
         guard try await store.setState(.queued, forRecord: recordID),
             let record = try await readRecord(store, recordID)
         else { return false }
@@ -582,6 +590,7 @@ public actor DownloadEngine {
             _ = try await store.setState(.paused, forRecord: recordID, expecting: [.queued])
             return false
         }
+        validatingResumes.remove(recordID)
         await start(partIDs: record.parts.filter { $0.state != .completed }.map(\.id), resumingRecordID: recordID)
         return true
     }
@@ -1052,7 +1061,8 @@ public actor DownloadEngine {
     ) async {
         if let stop = stopping[partID] { await stop.value }
         guard let context = contexts[partID], tasks[partID] == nil, retries[partID] == nil, launching[partID] == nil,
-            !settling.contains(partID), !pendingRecordFailures.contains(context.recordID)
+            !settling.contains(partID), !pendingRecordFailures.contains(context.recordID),
+            !validatingResumes.contains(context.recordID)
         else { return }
         guard session != nil, !isInvalidatingSession else {
             deferredLaunches.insert(partID)

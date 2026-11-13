@@ -824,6 +824,45 @@ import Testing
         never.open()
     }
 
+    /// While a guarded resume has queued the record but not yet checked the generation (its read
+    /// held), an activation's restart doesn't launch it: once the check finds the quiesce, the
+    /// record goes back to paused with no transfer, instead of running past the quiesce.
+    @Test func activationDoesNotLaunchARecordAwaitingAGuardedResumesCheck() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .paused)
+        let holdsRead = Mutex(false)
+        let (reads, readReached) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let engine = harness.makeEngine(readRecord: { store, id in
+            if holdsRead.withLock({ $0 }) {
+                readReached.yield()
+                await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+            }
+            return try await store.record(id: id)
+        })
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        let generation = await engine.quiesceGeneration()
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+
+        holdsRead.withLock { $0 = true }
+        let resume = Task { try await engine.resume(recordID: record.id, unlessQuiescedSince: generation) }
+        for await _ in reads { break }
+        #expect(try await harness.store.record(id: record.id)?.state == .queued)
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        #expect(try await harness.store.part(id: partID)?.state == .queued)
+
+        release.open()
+        #expect(try await resume.value == false)
+        #expect(try await harness.store.record(id: record.id)?.state == .paused)
+        #expect(try await harness.store.part(id: partID)?.state == .queued)
+        #expect(harness.requests.isEmpty)
+        never.open()
+    }
+
     /// A quiesce rejects its server's transfers that survived a relaunch before it waits for
     /// the session, so the activation it waits for (or one beginning once that one failed)
     /// cancels them instead of adopting them.
