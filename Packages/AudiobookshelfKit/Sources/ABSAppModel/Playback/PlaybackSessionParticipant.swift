@@ -88,8 +88,8 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     /// between sessions and for a scope without one.
     public private(set) var sleepTimer: SleepTimer?
     /// The current account's bookmarks (#57's D13): a store of its own for each session; `nil`
-    /// between sessions. The socket's `user_updated` doesn't reach it yet: #59's app wiring
-    /// connects `RealtimeBridge.onUserUpdated` to ``BookmarkStore/replaceAll(from:)``.
+    /// between sessions. The app's `RealtimeBridge` replaces its list on the socket's `user_updated`
+    /// (``RealtimeBridge/route(library:accounts:bookmarks:playback:localProgress:)``).
     public private(set) var bookmarks: BookmarkStore?
     /// The latest ended session's close outcome, or why it isn't durable; `nil` until it finishes.
     /// A retirement the lifecycle cancelled can finish after a later session ended; its result is

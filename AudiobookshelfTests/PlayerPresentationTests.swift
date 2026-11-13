@@ -84,6 +84,20 @@ import Testing
         #expect(L10n.string(key) != key)
     }
 
+    /// #376: only "ask" offers to stream anyway ("Stream", then Cancel); "never" and other
+    /// failures don't.
+    @Test(arguments: [
+        PlayerErrorMessage.streamingNeedsConfirmation, .streamingNotAllowed, .sessionStartFailed,
+        .streamUnavailable, .streamingInterrupted, .streamRejected, .playbackFailed,
+    ])
+    func onlyAConfirmationOffersToStream(_ error: PlayerErrorMessage) {
+        #expect(error.actions.contains(.streamAnyway) == (error == .streamingNeedsConfirmation))
+        if error == .streamingNeedsConfirmation {
+            #expect(error.actions.map(PlayerSlot.labelKey(for:)) == ["ButtonStream", "ButtonCancel"])
+            #expect(error.actions.map(PlayerSlot.role(for:)) == [nil, .cancel])
+        }
+    }
+
     /// A scene shows a failure until it's dismissed there, and a different failure after that.
     @Test func anErrorShowsUntilItsSceneDismissesIt() {
         #expect(PlayerSlot.shownError(current: .playbackFailed, dismissed: nil) == .playbackFailed)

@@ -141,6 +141,7 @@ struct PlayerSlot: ViewModifier {
         switch action {
         case .dismiss: "ButtonOk"
         case .retry: "ButtonRetry"
+        case .streamAnyway: "ButtonStream"
         case .cancel: "ButtonCancel"
         }
     }
@@ -149,7 +150,7 @@ struct PlayerSlot: ViewModifier {
     nonisolated static func role(for action: PlayerErrorAction) -> ButtonRole? {
         switch action {
         case .dismiss, .cancel: .cancel
-        case .retry: nil
+        case .retry, .streamAnyway: nil
         }
     }
 

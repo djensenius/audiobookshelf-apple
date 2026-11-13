@@ -54,6 +54,9 @@ struct TestDownloads {
             #expect(environment.downloads != nil)
             // The library is the lifecycle's seeder, and stays cleared while signed out.
             #expect(environment.library != nil)
+            #expect(environment.realtime?.bridge.connectionState == .idle)
+            // Socket progress merges through the environment's one writer.
+            #expect(environment.realtime?.bridge.localProgress === environment.localProgress)
             #expect(environment.lifecycle.gate == .launching)
 
             await environment.lifecycle.start()
@@ -105,6 +108,8 @@ struct TestDownloads {
             let stack = try #require(environment.downloads)
             // A removal stops the downloads once its credentials are deleted.
             #expect(environment.accounts?.credentialsRemoved != nil)
+            // A sign-in over a saved session stops and resumes them (#386).
+            #expect(environment.accounts?.credentialsReplaced != nil)
 
             // The launch the environment began; the same task, so this waits for it.
             await stack.lifecycle.launch().value

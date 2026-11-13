@@ -18,6 +18,8 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
         case jump(Double)
         case setRate(Double)
         case stop(PlaybackStopReason)
+        case confirmMeteredStreaming
+        case declineMeteredStreaming
     }
 
     var phase: PlaybackCoordinator.Phase = .idle
@@ -107,6 +109,14 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
         timeline = nil
         isPlaying = false
         isPlaybackRequested = false
+    }
+
+    func confirmMeteredStreaming() async {
+        calls.append(.confirmMeteredStreaming)
+    }
+
+    func declineMeteredStreaming() {
+        calls.append(.declineMeteredStreaming)
     }
 
     // MARK: Fixtures

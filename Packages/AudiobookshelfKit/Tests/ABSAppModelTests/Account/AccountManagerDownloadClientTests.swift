@@ -301,6 +301,37 @@ private final class TokenServer: Sendable {
         #expect(reported.withLock { $0 } == [idA])
     }
 
+    // MARK: - Replacement
+
+    /// A sign-in over a saved session is reported, whether the connection was the active one or
+    /// another was; a first sign-in, which replaces nothing, isn't.
+    @Test(arguments: [false, true])
+    func replacingASavedSessionIsReported(active: Bool) async throws {
+        let reported = Mutex<[UUID]>([])
+        manager.credentialsReplaced = { id in reported.withLock { $0.append(id) } }
+        let serverA = TokenServer(userId: "usr-a")
+        let idA = try await signIn(to: serverA)
+        if !active { _ = try await signIn(to: TokenServer(userId: "usr-b")) }
+        #expect(reported.withLock { $0 }.isEmpty)
+
+        #expect(try await signIn(to: serverA) == idA)
+
+        #expect(reported.withLock { $0 } == [idA])
+    }
+
+    /// A sign-in after a sign-out deleted the session replaces nothing.
+    @Test func signingInAfterASignOutReportsNoReplacement() async throws {
+        let reported = Mutex(0)
+        manager.credentialsReplaced = { _ in reported.withLock { $0 += 1 } }
+        let serverA = TokenServer(userId: "usr-a")
+        _ = try await signIn(to: serverA)
+        _ = await manager.logout()
+
+        _ = try await signIn(to: serverA)
+
+        #expect(reported.withLock { $0 } == 0)
+    }
+
     // MARK: - Removal
 
     /// The downloads are stopped once the session is deleted, but while the connection is

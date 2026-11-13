@@ -86,6 +86,14 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
         isPlaybackRequested = false
     }
 
+    func confirmMeteredStreaming() async {
+        error = nil
+    }
+
+    func declineMeteredStreaming() {
+        error = nil
+    }
+
     private static let session = PlaybackSession(
         id: "preview", libraryItemId: "li_preview", mediaType: .book, mediaMetadata: .book(BookMetadata(title: "Dune")),
         chapters: [

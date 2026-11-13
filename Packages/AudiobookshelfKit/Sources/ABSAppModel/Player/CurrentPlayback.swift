@@ -82,4 +82,12 @@ public final class CurrentPlayback: PlayerPlaybackControlling {
     public func stop(reason: PlaybackStopReason) {
         current?.stop(reason: reason)
     }
+
+    public func confirmMeteredStreaming() async {
+        await current?.confirmMeteredStreaming()
+    }
+
+    public func declineMeteredStreaming() {
+        current?.declineMeteredStreaming()
+    }
 }
