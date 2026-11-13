@@ -80,6 +80,9 @@ public final class PlaybackScope {
         /// `{ SleepTimerAttachment(coordinator: $0, settings: settings) }` with the settings every
         /// scene shares. `nil` leaves the scope without one.
         public var makeSleepTimer: (@MainActor (PlaybackCoordinator) -> SleepTimerAttachment)?
+        /// The network path recovery waits on; the app sets `SystemNetworkPathSource()`. `nil`
+        /// treats it as always satisfied.
+        public var networkPaths: (any NetworkPathSource)?
 
         public init(
             connectionID: UUID, client: APIClient?, features: ServerFeatures?,
@@ -159,7 +162,7 @@ public final class PlaybackScope {
             engine: configuration.engine, sessions: services, progressStore: configuration.writer,
             settings: configuration.settings, policy: configuration.policy,
             lastPlayedStore: configuration.lastPlayed(configuration.connectionID),
-            backgroundActivity: configuration.backgroundActivity)
+            backgroundActivity: configuration.backgroundActivity, networkPaths: configuration.networkPaths)
         let syncer = ProgressSyncer(
             source: coordinator, service: services, store: configuration.writer,
             tickInterval: configuration.tickInterval, paths: nil)

@@ -624,6 +624,22 @@ import Testing
         #expect(url.lastPathComponent == "page-1.jpg")
     }
 
+    @Test func staleCachesAreRemovedButOpenArchivesKeepTheirs() async throws {
+        let caches = root.appending(path: "caches")
+        let open = caches.appending(path: "open")
+        let stale = caches.appending(path: "stale")
+        let comic = try ComicArchive(url: try makeZip(pages("1.jpg")), cacheDirectory: open)
+        let page = try await comic.page(1)
+        try FileManager.default.createDirectory(at: stale, withIntermediateDirectories: true)
+        try Data("killed reader's page".utf8).write(to: stale.appending(path: "page-1.jpg"))
+
+        ComicArchive.removeStaleCaches(in: caches)
+
+        #expect(try FileManager.default.contentsOfDirectory(atPath: caches.path) == ["open"])
+        #expect(FileManager.default.fileExists(atPath: page.path))
+        #expect(await comic.extractionCount == 1)
+    }
+
     @Test func parentDirectoryEntriesAreNotPages() {
         #expect(ComicArchive.pageOrder(["../../escape1.jpg", "a/../2.jpg", "3.jpg"]) == ["3.jpg"])
     }
