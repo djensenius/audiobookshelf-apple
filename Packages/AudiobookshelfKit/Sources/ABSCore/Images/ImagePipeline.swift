@@ -1,5 +1,7 @@
 import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Loads, downsamples, and caches cover and author images for every consumer: SwiftUI views,
 /// CarPlay, Now Playing, and widgets (ADR 0005).
@@ -129,6 +131,39 @@ public actor ImagePipeline {
     /// ``image(for:pixelBox:)`` instead.
     public func cgImage(for key: ImageKey, size: CGSize) async throws -> CGImage {
         try await image(for: key, pixelBox: PixelBox(width: size.width, height: size.height)).cgImage
+    }
+
+    /// The ``CoverFileStore`` file holding exactly `key`'s cover, written now if it's missing, for
+    /// a reader that only has the store: the widget (ADR 0005, "Widgets"). It skips the memory
+    /// LRU, which a stored file may have outlived or never come from. In order:
+    /// 1. the stored file;
+    /// 2. a downloaded cover at least as new as `key`, downsampled to `key`'s bucket and stored
+    ///    as JPEG; an older one is never stored under `key`;
+    /// 3. the network.
+    ///
+    /// Offline, or when the fetch or the write fails, it throws and stores nothing.
+    public func ensureCoverFile(for key: ImageKey) async throws -> URL {
+        guard !removedServers.contains(key.serverID) else { throw ImagePipelineError.noRequest }
+        if let stored = await fileStore.lookup(key) { return stored.url }
+        if let cover = await downloadedCovers?.downloadedCover(for: key), Self.isFresh(cover, for: key) {
+            let generation = await fileStore.generation(for: key.serverID)
+            // A damaged or oversized download falls through to the network, as on display.
+            if let jpeg = try? await Self.downsampledJPEG(of: cover.fileURL, bucket: key.bucket, in: temporaryFolder) {
+                defer { try? FileManager.default.removeItem(at: jpeg) }
+                return try await fileStore.insert(moving: jpeg, for: key, pathExtension: "jpg", generation: generation)
+                    .url
+            }
+        }
+        let fetched = try await fetchedFile(for: FetchKey(key: key, skipsDownloaded: true))
+        // A store that isn't writable hands back the bare download, which isn't the file asked for.
+        guard fetched.storedVersion != nil else { throw CocoaError(.fileWriteUnknown) }
+        return fetched.url
+    }
+
+    /// Keeps the cover files of `keys` out of the disk cache's LRU eviction, replacing the keys
+    /// passed before: pass the current widget snapshot's (``CoverFileStore/exemptFromEviction(_:)``).
+    public func exemptFromEviction(_ keys: Set<ImageKey>) async {
+        await fileStore.exemptFromEviction(keys)
     }
 
     /// Evicts memory LRU entries until it holds at most `fraction` of the cap: 0 on a memory
@@ -438,6 +473,28 @@ public actor ImagePipeline {
             let lease = FileLease { try? FileManager.default.removeItem(at: temporary) }
             return FetchedFile(url: temporary, updatedAt: key.updatedAt, lease: lease)
         }
+    }
+
+    /// `url` downsampled to `bucket`'s width (never upscaled), with its EXIF orientation applied,
+    /// as a new JPEG file in `folder`.
+    @concurrent private static func downsampledJPEG(
+        of url: URL, bucket: ImageWidthBucket, in folder: URL
+    ) async throws -> URL {
+        let info = try await ImageDecoder.inspect(url)
+        let image = try await ImageDecoder.decode(info, box: PixelBox(width: 1200, height: 1200), bucket: bucket)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let output = folder.appending(path: "\(UUID().uuidString).jpg")
+        guard
+            let destination = CGImageDestinationCreateWithURL(
+                output as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
+        else { throw CocoaError(.fileWriteUnknown) }
+        CGImageDestinationAddImage(
+            destination, image, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            try? FileManager.default.removeItem(at: output)
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return output
     }
 
     private static func pathExtension(for response: URLResponse, key: ImageKey) -> String {
