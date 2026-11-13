@@ -73,6 +73,14 @@ public final class CarPlayBrowseModel {
 
     private var isServed: Bool { store.serves(identity) }
 
+    /// Whether CarPlay's pushed lists stay open when the root model's load trigger changes to
+    /// `identity`: while it's still this model's account, whatever the Continue tab shows. Its
+    /// loading or failure after a library switch leaves browsing alone; a sign-out or an account
+    /// switch closes it.
+    public func keepsBrowsing(for identity: SessionIdentity?) -> Bool {
+        identity != nil && identity == self.identity
+    }
+
     // MARK: - Lists
 
     /// The library the Latest tab shows: CarPlay's library when it's a podcast library, else the
@@ -89,7 +97,8 @@ public final class CarPlayBrowseModel {
     }
 
     /// The page of `destination`'s list from `offset`, as loaded so far: empty until its first
-    /// page arrives, and for a library the store no longer has.
+    /// page arrives (so no "More…" row hides the loading or failure message), and for a library
+    /// the store no longer has.
     public func list(_ destination: CarPlayDestination, offset: Int = 0) -> CarPlayList {
         let empty = CarPlayList(destination: destination, title: title(of: destination), sections: [])
         guard isServed else { return empty }
@@ -102,7 +111,8 @@ public final class CarPlayBrowseModel {
             guard let library = store.library(id: id) else { return empty }
             return builder.library(library, offset: offset)
         default:
-            guard let libraryID = destination.libraryID, isKnown(libraryID), let source = sources[destination]
+            guard let libraryID = destination.libraryID, isKnown(libraryID), let source = sources[destination],
+                status(destination) == .loaded
             else { return empty }
             switch (destination, source) {
             case (.series, .series(let model)):

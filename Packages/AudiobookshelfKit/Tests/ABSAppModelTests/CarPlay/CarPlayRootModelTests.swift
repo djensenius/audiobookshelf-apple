@@ -674,6 +674,33 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
         }
     }
 
+    @Test func browsingStaysOpenWhileTheContinueTabReloadsButNotAfterTheAccountChanges() async throws {
+        try await withLibrarySettings { settings in
+            let service = FakeCarPlayBrowseService()
+            service.libraryList.value = [makeLibrary("books"), makeLibrary("talk", mediaType: .podcast)]
+            let (store, browse) = await makeBrowse(service, settings: settings, identity: carAccountA)
+            let harness = Harness(store: store)
+            let model = harness.model()
+            await model.update()
+            #expect(model.content != .loading)
+            #expect(browse.keepsBrowsing(for: model.loadTrigger.identity))
+
+            // Opening another library in CarPlay reloads the Continue tab for it: the lists
+            // pushed to get there stay open.
+            let talk = try #require(browse.list(.libraries).rows.first { $0.id == "talk" })
+            #expect(browse.open(talk) != nil)
+            #expect(model.loadTrigger.libraryID == "talk")
+            #expect(model.content == .loading)
+            #expect(browse.keepsBrowsing(for: model.loadTrigger.identity))
+
+            // Signing out or switching accounts closes them.
+            harness.gate = .connect
+            #expect(!browse.keepsBrowsing(for: model.loadTrigger.identity))
+            harness.gate = .ready(carAccountB, isOffline: false)
+            #expect(!browse.keepsBrowsing(for: model.loadTrigger.identity))
+        }
+    }
+
     private static let sherlockKey = MediaKey(
         serverConnectionID: carAccountA.connectionID, libraryItemId: SampleLibrary.sherlock.id)
     nonisolated private static let sherlockOnServerB = MediaKey(

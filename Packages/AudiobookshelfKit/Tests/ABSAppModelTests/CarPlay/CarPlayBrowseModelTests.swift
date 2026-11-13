@@ -24,6 +24,16 @@ struct FakeCarPlayBrowseService: CarPlayBrowseService {
     let recent = Locked<[String: [RecentEpisode]]>([:])
     let requests = Locked<[String]>([])
     let failsLibraries = Locked(false)
+    let failsBooks = Locked(false)
+    /// While set, a books request waits for ``releaseBooks()``.
+    let holdsBooks = Locked(false)
+    let heldBooks = Locked<[CheckedContinuation<Void, Never>]>([])
+
+    func releaseBooks() {
+        let held = heldBooks.value
+        heldBooks.value = []
+        held.forEach { $0.resume() }
+    }
 
     private func slice<Element: Sendable>(_ all: [Element], page: Int?, limit: Int?) -> PagedResults<Element> {
         let page = page ?? 0
@@ -61,6 +71,8 @@ struct FakeCarPlayBrowseService: CarPlayBrowseService {
     func authorDetail(id: String) async throws -> AuthorDetailResponse { throw TestError.unexpected }
     func filteredBooksPage(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
         requests.value.append("books \(libraryID) \(query.filter?.queryValue ?? "-") \(query.page ?? 0)")
+        if holdsBooks.value { await withCheckedContinuation { heldBooks.value.append($0) } }
+        if failsBooks.value { throw TestError.offline }
         var all = books.value[libraryID] ?? []
         if let filter = query.filter, filter.group == "series" {
             all = all.filter { $0.series?.id == filter.value }
@@ -271,6 +283,52 @@ private func ids(_ list: CarPlayList) -> [String] { list.rows.map(\.id) }
             await model.refresh(.libraries)
             #expect(store.hasLoaded && model.status(.libraries) == .loaded)
             #expect(ids(model.list(.libraries)) == ["books"])
+        }
+    }
+
+    @Test func aListShowsNoMoreRowUntilItsFirstPageLoads() async throws {
+        try await withLibrarySettings { settings in
+            let service = FakeCarPlayBrowseService()
+            service.libraryList.value = [makeLibrary("books")]
+            service.books.value = ["books": BrowseFixtures.books(3)]
+            let (_, model) = await makeBrowse(service, settings: settings)
+            let books = CarPlayDestination.items(libraryID: "books")
+
+            // The first request is pending: the list is empty, for the loading message.
+            service.holdsBooks.value = true
+            let load = Task { await model.load(books) }
+            while service.heldBooks.value.isEmpty { await Task.yield() }
+            #expect(model.status(books) == .loading)
+            #expect(model.list(books).rows.isEmpty)
+
+            // It failed: still empty, for the failure message.
+            service.holdsBooks.value = false
+            service.failsBooks.value = true
+            service.releaseBooks()
+            await load.value
+            #expect(model.status(books) == .failed)
+            #expect(model.list(books).rows.isEmpty)
+
+            service.failsBooks.value = false
+            await model.refresh(books)
+            #expect(model.list(books).rows.count == 3)
+        }
+    }
+
+    @Test func aLoadedPageWithNoRowsToShowStillOffersMore() async throws {
+        try await withLibrarySettings { settings in
+            let service = FakeCarPlayBrowseService()
+            service.libraryList.value = [makeLibrary("books")]
+            service.series.value = ["books": (0..<25).map { Series(id: "s\($0)", name: "Series \($0)") }]
+            // Series rows would open a fourth list, past this depth limit, so none show.
+            let (_, model) = await makeBrowse(
+                service, settings: settings, limits: CarPlayLimits(maximumItemCount: 5, maximumDepth: 3))
+            let series = CarPlayDestination.series(libraryID: "books")
+            await model.load(series)
+            #expect(model.status(series) == .loaded)
+            let rows = model.list(series).rows
+            #expect(rows.count == 1)
+            #expect(rows.allSatisfy { if case .more = $0.action { true } else { false } })
         }
     }
 

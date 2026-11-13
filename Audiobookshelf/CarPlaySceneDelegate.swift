@@ -9,7 +9,8 @@
     ///
     /// The root is a tab bar with the Continue tab. When the model has no rows to show (loading,
     /// signed out, the store unavailable, a failed load), the tab's list is empty and shows the
-    /// state's message instead, and anything pushed over it is popped. Tapping a row plays it
+    /// state's message instead; anything pushed over it is popped only when the account signs out
+    /// or switches (``CarPlayBrowseModel/keepsBrowsing(for:)``). Tapping a row plays it
     /// through the model and pushes Now Playing once it starts. A play that fails, or that the
     /// streaming policy blocks on a metered network, presents an alert instead
     /// (``CarPlayRootModel/alert``): Stream or Cancel for "ask", the reason alone otherwise. The
@@ -174,9 +175,6 @@
             guard content != shownContent, let continueTemplate else { return }
             shownContent = content
             guard case .tabs(let list, let playingRowID) = content else {
-                if let interfaceController, interfaceController.templates.count > 1 {
-                    interfaceController.popToRootTemplate(animated: true, completion: nil)
-                }
                 continueTemplate.emptyViewTitleVariants = [Self.title(of: content)]
                 continueTemplate.emptyViewSubtitleVariants = Self.subtitle(of: content).map { [$0] } ?? []
                 continueTemplate.updateSections([])
@@ -334,7 +332,11 @@
         /// for the previous one, and loads the tabs' roots, which retries a failed load when the
         /// connection comes back.
         private func updateBrowse(for identity: SessionIdentity?) {
-            if identity != browse?.identity {
+            if browse?.keepsBrowsing(for: identity) != true {
+                // Signed out or switched: close the old account's pushed lists and Now Playing.
+                if let interfaceController, interfaceController.templates.count > 1 {
+                    interfaceController.popToRootTemplate(animated: true, completion: nil)
+                }
                 let store = AppEnvironment.shared.library?.store
                 browse = identity.flatMap { identity in
                     guard let store, let service = store.makeServices() else { return nil }
