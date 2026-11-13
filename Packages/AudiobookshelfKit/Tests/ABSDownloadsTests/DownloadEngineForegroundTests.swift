@@ -268,6 +268,77 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
+    /// Reactivated while a stopped launch's late running save is pending: the activation read
+    /// the stop's `queued`, so its launch would be refused once that save lands, and forget the
+    /// part, leaving it running with no transfer. It waits for the save and its repair instead,
+    /// and the part gets a transfer.
+    @Test func anActivationThatReadTheStopsQueuedStateWaitsForTheLateSave() async throws {
+        let gate = StubGate()
+        // Held until the part is checked, so the transfer can't complete before the read.
+        let harness = try await DownloadHarness(customHeaders: Self.headers) { _ in .status(200, gate: gate) }
+        let partID = UUID()
+        // Holds the activation's read of the records, taken while the part is queued.
+        let snapshot = StubGate()
+        let (snapshotTaken, takeSnapshot) = AsyncStream.makeStream(of: Void.self)
+        // The activation's launch is waiting, or (without the wait) the activation is done.
+        let (activationSettled, settleActivation) = AsyncStream.makeStream(of: Void.self)
+        // One-shot hooks: the launch that follows passes the same seams.
+        let state = Mutex<(engine: DownloadEngine?, deactivates: Bool, holdsRead: Bool, releases: Bool)>(
+            (nil, true, false, true))
+        let engine = harness.makeEngine(
+            readRecords: { store in
+                let records = try await store.allRecords()
+                let holds = state.withLock { state in
+                    defer { state.holdsRead = false }
+                    return state.holdsRead
+                }
+                if holds {
+                    takeSnapshot.yield()
+                    await withCheckedContinuation { continuation in snapshot.run { continuation.resume() } }
+                }
+                return records
+            },
+            beforeSavingRunning: { _ in
+                let (engine, deactivates) = state.withLock { state in
+                    defer { state.deactivates = false }
+                    return (state.engine, state.deactivates)
+                }
+                guard deactivates, let engine else { return }
+                await engine.deactivate()
+                state.withLock { $0.holdsRead = true }
+                #expect(await engine.activate())
+                for await _ in snapshotTaken { break }
+            },
+            beforeRequeueingInactive: { _ in
+                let (engine, releases) = state.withLock { state in
+                    defer { state.releases = false }
+                    return (state.engine, state.releases)
+                }
+                guard releases, let engine else { return }
+                snapshot.open()
+                Task {
+                    await engine.waitForRestart()
+                    settleActivation.yield()
+                }
+                for await _ in activationSettled { break }
+            },
+            waitingForRunningSave: { _ in settleActivation.yield() },
+            hasForegroundSession: true)
+        state.withLock { $0.engine = engine }
+        // Activated before the record exists, so only this start launches the part.
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        try await harness.addRecord(parts: [partID])
+
+        await engine.start(partIDs: [partID])
+
+        try #require(await engine.hasTransfer(partID))
+        #expect(try await harness.store.part(id: partID)?.state == .running)
+        gate.open()
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 1)
+    }
+
     /// Backgrounded after a foreground transfer finished but before the engine handled its
     /// completion: the finished task isn't stopped, so its moved file completes the part rather
     /// than the part being queued to download again.

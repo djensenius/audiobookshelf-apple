@@ -338,6 +338,7 @@ final class DownloadHarness: Sendable {
         launchContinued: (@Sendable (UUID) async -> Void)? = nil,
         beforeSavingRunning: (@Sendable (UUID) async -> Void)? = nil,
         beforeRequeueingInactive: (@Sendable (UUID) async -> Void)? = nil,
+        waitingForRunningSave: (@Sendable (UUID) async -> Void)? = nil,
         preflight: any DownloadRedirectPreflighting = StubPreflight(),
         hasForegroundSession: Bool = false,
         sweepsOrphanedResumeData: Bool = true,
@@ -364,6 +365,7 @@ final class DownloadHarness: Sendable {
             adoptionStarted: adoptionStarted, beforeClearingResumeFlag: beforeClearingResumeFlag,
             afterUpsertingLocalItem: afterUpsertingLocalItem, launchContinued: launchContinued,
             beforeSavingRunning: beforeSavingRunning, beforeRequeueingInactive: beforeRequeueingInactive,
+            waitingForRunningSave: waitingForRunningSave,
             preflight: preflight)
     }
 

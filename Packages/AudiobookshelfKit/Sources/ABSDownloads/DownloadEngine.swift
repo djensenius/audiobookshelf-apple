@@ -189,6 +189,8 @@ public actor DownloadEngine {
     /// Before a launch writes its part back as queued: one that may only start while active,
     /// or one stopped while it saved the part as running.
     private let beforeRequeueingInactive: (@Sendable (UUID) async -> Void)?
+    /// Before a launch waits for another launch's running save (``savingRunning``).
+    private let waitingForRunningSave: (@Sendable (UUID) async -> Void)?
     /// Internal so tests can post events.
     let delegate = DownloadSessionDelegate()
 
@@ -234,6 +236,10 @@ public actor DownloadEngine {
     private var strandedRunning: Set<UUID> = []
     /// Stops under way: until one has queued its part, the store still has it `running`.
     private var stopping: [UUID: Task<Void, Never>] = [:]
+    /// Launches saving their part as running, with the launches waiting for them. A stop can
+    /// overtake that save, which the launch then repairs; until it has, another launch would
+    /// read the stop's `queued` and be refused once the save lands, so it waits.
+    private var savingRunning: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     /// The last resume-data sweep failed; the next ``activate()`` runs it again.
     private var isResumeDataSweepPending = false
     /// Parts sealed while a retried sweep reads the records, which it keeps; `nil` otherwise.
@@ -400,6 +406,7 @@ public actor DownloadEngine {
         launchContinued: (@Sendable (UUID) async -> Void)? = nil,
         beforeSavingRunning: (@Sendable (UUID) async -> Void)? = nil,
         beforeRequeueingInactive: (@Sendable (UUID) async -> Void)? = nil,
+        waitingForRunningSave: (@Sendable (UUID) async -> Void)? = nil,
         preflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight()
     ) {
         (updates, updateContinuation) = AsyncStream.makeStream()
@@ -432,6 +439,7 @@ public actor DownloadEngine {
         self.launchContinued = launchContinued
         self.beforeSavingRunning = beforeSavingRunning
         self.beforeRequeueingInactive = beforeRequeueingInactive
+        self.waitingForRunningSave = waitingForRunningSave
         registry.register(self)
     }
 
@@ -1373,6 +1381,11 @@ public actor DownloadEngine {
         activationOwnsSession: Bool = false, onlyWhileActive: Bool = false
     ) async {
         if let stop = stopping[partID] { await stop.value }
+        while savingRunning[partID] != nil {
+            if let waitingForRunningSave { await waitingForRunningSave(partID) }
+            if savingRunning[partID] == nil { break }
+            await withCheckedContinuation { savingRunning[partID, default: []].append($0) }
+        }
         guard let context = contexts[partID], tasks[partID] == nil, retries[partID] == nil, launching[partID] == nil,
             !settling.contains(partID), !pendingRecordFailures.contains(context.recordID),
             validatingResumes[context.recordID] == nil
@@ -1525,6 +1538,9 @@ public actor DownloadEngine {
             .init(destination: destination, expectedBytes: context.expectedBytes, maxBytes: context.maxBytes),
             for: partID)
         throttle.reset(partID)
+        savingRunning[partID] = savingRunning[partID] ?? []
+        var isSavingRunning = true
+        defer { if isSavingRunning { endSavingRunning(partID) } }
         if let beforeSavingRunning { await beforeSavingRunning(partID) }
         let recorded: Bool
         do {
@@ -1558,9 +1574,13 @@ public actor DownloadEngine {
             await persistIdle(partID) {
                 try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
             }
+            isSavingRunning = false
+            endSavingRunning(partID)
             if restartsQueuedParts { await launch(partID, onlyWhileActive: true) }
             return
         }
+        isSavingRunning = false
+        endSavingRunning(partID)
         // The resume data now lives in the task.
         if resumeData != nil { vault.delete(partID: partID) }
         contexts[partID]?.hasResumeData = keepsResumeData
@@ -1596,6 +1616,16 @@ public actor DownloadEngine {
         }
         contexts[partID]?.onlyWhileActive = false
         task.resume()
+    }
+
+    /// Ends a launch's running save (``savingRunning``), resuming the launches waiting for it.
+    private func endSavingRunning(_ partID: UUID) {
+        for waiter in savingRunning.removeValue(forKey: partID) ?? [] { waiter.resume() }
+    }
+
+    /// Whether `partID` has a transfer, for tests.
+    func hasTransfer(_ partID: UUID) -> Bool {
+        tasks[partID] != nil
     }
 
     /// Ends a launch that wrote its part back as queued because the app was inactive. An
