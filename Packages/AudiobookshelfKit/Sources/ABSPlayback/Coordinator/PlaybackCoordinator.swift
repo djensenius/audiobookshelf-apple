@@ -245,6 +245,10 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private let recovery: PlaybackRecovery
     @ObservationIgnored private var recoveryAttempt: Int?
     @ObservationIgnored private var recoveryAttemptError: PlaybackCoordinatorError?
+    /// The item the user agreed to stream on a metered network, so its recovery rebuilds don't ask
+    /// again; starting another item (also by an auto-advance), or a play without that consent,
+    /// clears it.
+    @ObservationIgnored private var meteredConsent: MediaKey?
     /// The access token in the loaded stream's URLs: the one a 401 rejected.
     @ObservationIgnored private var streamAccessToken: String?
     /// The latest start asked for an HLS transcode (the direct-play to HLS fallback): recovery
@@ -387,6 +391,7 @@ public final class PlaybackCoordinator {
             return block(.streamingNeedsConfirmation(reason, key: key), startTime: startTime)
         case .denied(let reason): return block(.streamingNotAllowed(reason, key: key))
         }
+        meteredConsent = allowingMeteredNetwork ? key : nil
         await start(key: key, startTime: startTime, prepared: nil)
     }
 
@@ -420,6 +425,9 @@ public final class PlaybackCoordinator {
         key: MediaKey, startTime: Double?, prepared: PreparedNextItem?, playing: Bool = true,
         forceTranscode: Bool = false
     ) async {
+        // Consent is for one item: an auto-advance (or anything else) starting another drops it,
+        // so coming back to the item later asks again; its own rebuilds keep it.
+        if meteredConsent != key { meteredConsent = nil }
         let itemID = key.libraryItemId
         let episodeID = key.episodeId
         generation += 1
@@ -810,6 +818,13 @@ public final class PlaybackCoordinator {
                 awaitingSeekLanding = isFinishingLoad || engine.pendingSeekTarget != nil
                 // The engine keeps an interrupted or failed target pending; a retry is still the rewind.
                 rewindAwaitsLanding = isResumeRewind && engine.pendingSeekTarget != nil
+                // An interrupted seek that took over recovery reports no failure, so recovery won't
+                // run again: keep its play, which the engine starts once the pending target lands.
+                if result == .interrupted, let resume, resume == resumeIntent, !isFinishingLoad,
+                    !engine.isPlaybackRequested
+                {
+                    startEngine()
+                }
                 return result == .failed ? .failed : .deferred
             }
             let landed = engine.currentTime
@@ -888,10 +903,30 @@ public final class PlaybackCoordinator {
         }
     }
 
+    /// Whether recovery is waiting for the network to return before its next attempt (ADR 0007's
+    /// "Waiting for network"), spending none of its budget; it gives up after five minutes.
+    public var isWaitingForNetwork: Bool { recovery.isWaitingForNetwork(at: generation) }
+
     /// Sets and saves the playback rate. Rates the settings reject are ignored.
     public func setRate(_ rate: Double) {
         settings.playbackRate = rate
         engine.setRate(Float(self.rate))
+    }
+
+    /// Replaces a session the server no longer has (its `/sync` answered 404, as after a server
+    /// restart) with a new one for the same media at ``currentTime``, playing only if playback was
+    /// requested: an explicit start, like recovery's rebuild, so neither server progress nor
+    /// auto-rewind moves it (#184). Does nothing unless `sessionID` is still the loaded session,
+    /// or while a play waits on its streaming-policy check or recovery is rebuilding.
+    public func replaceGoneSession(_ sessionID: String) async {
+        guard !isRetired, phase == .loaded, session?.id == sessionID, let key = mediaKey, pendingPlayKey == nil,
+            !recovery.isRecovering(at: generation)
+        else { return }
+        logger.info("The server no longer has the playback session; starting a new one at the same position")
+        // A play an interruption held still holds it on the new session (`start` takes
+        // `generation + 1` at once).
+        if heldPlay?.generation == generation { heldPlay?.generation = generation + 1 }
+        await start(key: key, startTime: currentTime, prepared: nil, playing: isPlaybackRequested)
     }
 
     /// Ordinary user stop remains reusable and clears LastPlayed. Account end permanently
@@ -1339,11 +1374,22 @@ public final class PlaybackCoordinator {
 
     /// A recovery rebuild: closes the session and starts a new one at `target` (an explicit
     /// start, so neither server progress nor auto-rewind moves it). Takes `generation + 1` at once.
-    /// A forced transcode stays forced (ADR 0007).
+    /// The path and setting now decide first, as for an auto-advance (no waiting): a block leaves
+    /// the item as it is and recovery gives up with it, unless the user agreed to this item on a
+    /// metered network. A forced transcode stays forced (ADR 0007).
     private func rebuildForRecovery(
         at target: Double, playing: Bool, forceTranscode: Bool
     ) async -> PlaybackRecoveryRebuild {
         guard let key = mediaKey, phase == .loaded || phase == .unloaded else { return .superseded }
+        switch policy.currentStreamingDecision() {
+        case .allowed: break
+        case .askUser where meteredConsent == key: break
+        case .askUser(let reason):
+            // ``confirmMeteredStreaming()`` plays it again where recovery stopped.
+            blockedPlay = (key, target)
+            return .failed(.streamingNeedsConfirmation(reason, key: key), generation: generation)
+        case .denied(let reason): return .failed(.streamingNotAllowed(reason, key: key), generation: generation)
+        }
         let attempt = generation + 1
         recoveryAttempt = attempt
         recoveryAttemptError = nil

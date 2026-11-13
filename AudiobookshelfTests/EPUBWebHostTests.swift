@@ -709,6 +709,32 @@ private final class ReaderPage {
         #expect(page.last("error") == nil)
     }
 
+    /// Closing the reader (it was dismissed) settles an `open` that would never finish, so the
+    /// task awaiting it doesn't keep the web view alive; nothing more is sent or posted.
+    @Test(.timeLimit(.minutes(1))) func closingSettlesAPendingOpen() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(openedHangs: true)
+        var settled = false
+        let opening = Task {
+            defer { settled = true }
+            try await page.open("tiny")
+        }
+        while try await page.evaluate("typeof window.fakeHeldOpen") != #""function""# {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let posted = page.events.count
+
+        page.controller.close()
+        for _ in 0..<500 where !settled { try await Task.sleep(for: .milliseconds(20)) }
+
+        #expect(settled)
+        if settled { await #expect(throws: EPUBReaderController.CommandError.closed) { try await opening.value } }
+        await #expect(throws: EPUBReaderController.CommandError.closed) {
+            try await page.controller.send(Data(#"{"type":"next"}"#.utf8))
+        }
+        #expect(page.events.count == posted)
+    }
+
     /// A section that fails to display releases epub.js's queue, so `next` and `prev` still run,
     /// whether a command displayed it or epub.js did.
     @Test(.timeLimit(.minutes(1))) func aFailedDisplayReleasesEpubJSsQueue() async throws {

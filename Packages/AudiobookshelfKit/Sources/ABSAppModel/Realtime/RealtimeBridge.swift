@@ -46,7 +46,8 @@ public struct RealtimePlaybackSnapshot: Sendable, Hashable {
 ///
 /// A ``SessionStage/progressSource`` participant: on start it builds a socket from the session's
 /// `APIClient` and reads its events in its own task until the session ends.
-/// - `user_item_progress_updated` goes to the ``ProgressCache`` only when it is strictly newer
+/// - `user_item_progress_updated` without a `lastUpdate` is dropped: neither store can order it.
+///   Otherwise it goes to the ``ProgressCache`` only when it is strictly newer
 ///   than the cached entry (server times are milliseconds, so a tie may predate the cached
 ///   value; see ADR 0003). An update from this device's own playback session for the item the
 ///   player has open is its echo and is skipped, whatever its time (the cached value may carry a
@@ -61,9 +62,14 @@ public struct RealtimePlaybackSnapshot: Sendable, Hashable {
 ///   session's account.
 /// - `rss_feed_open` and `rss_feed_closed` go to ``onRssFeedChange``.
 ///
-/// Every dated progress update other than such an echo is also merged into ``localProgress``
-/// with ADR 0003's `.socket` source, whether or not the cache took it: the store keeps its own
+/// Every progress update other than such an echo is also merged into ``localProgress`` with
+/// ADR 0003's `.socket` source, whether or not the cache took it: the store keeps its own
 /// ordering, and only rows it already has (downloaded or locally played media) take the value.
+/// The cache is updated first, as the event is handled; the merges follow, one at a time in event
+/// order, keyed by the session's connection, and a merge still waiting when the session ends is
+/// dropped. Each store applies its own rules, so they can differ: after an acknowledged PATCH the
+/// local row keeps its position against a socket value that may predate it, while the cache, which
+/// shows the server's newest value, may take it.
 @MainActor
 @Observable
 public final class RealtimeBridge: SessionParticipant {
@@ -94,6 +100,9 @@ public final class RealtimeBridge: SessionParticipant {
     @ObservationIgnored var didHandle: (@MainActor (RealtimeEvent) -> Void)?
     /// Called as the bridge stops, before anything is cancelled; for tests.
     @ObservationIgnored var willDetach: (@MainActor () -> Void)?
+    /// Awaited by each merge into ``localProgress`` once the merges before it are done, just before
+    /// it applies its value; for tests to record and hold merges.
+    @ObservationIgnored var willMerge: (@MainActor (MediaKey, ProgressBaseline) async -> Void)?
 
     @ObservationIgnored private let progress: ProgressCache
     @ObservationIgnored private let makeSocket: SocketFactory
@@ -339,6 +348,7 @@ public final class RealtimeBridge: SessionParticipant {
 
     private func apply(_ update: UserItemProgressUpdate) {
         let incoming = update.progress
+        guard incoming.lastUpdate != nil else { return }
         let snapshot = playbackSnapshot?()
         let isOpen =
             snapshot.map { $0.libraryItemID == incoming.libraryItemId && $0.episodeID == incoming.episodeId } ?? false
@@ -377,6 +387,8 @@ public final class RealtimeBridge: SessionParticipant {
             let capturedAt = await store.captureGeneration()
             await previous?.value
             guard let self, generation == self.generation else { return }
+            await self.willMerge?(key, server)
+            guard generation == self.generation else { return }
             do {
                 try await store.applyServerProgress([key: server], capturedAt: capturedAt, source: .socket)
             } catch {
