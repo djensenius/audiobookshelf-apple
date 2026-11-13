@@ -233,12 +233,19 @@ public final class CarPlayRootModel {
 
     /// Stream for ``PlayerErrorMessage/streamingNeedsConfirmation``: plays the blocked item on the
     /// metered network. The policy is checked again, so "never" still blocks. `nil` without that
-    /// alert.
+    /// alert. The consent goes to the player only if, when the task runs, the block is still the
+    /// one asked about, in the same session, with no later operation; otherwise it's discarded,
+    /// so it can't authorize another item's block or a rebound playback's.
     @discardableResult
     public func confirmStreaming() -> Task<CarPlayPlayOutcome, Never>? {
-        guard alert == .streamingNeedsConfirmation, let playback, let identity else { return nil }
+        guard alert == .streamingNeedsConfirmation, let blocked = failedPlay, let playback, let identity else {
+            return nil
+        }
         let origin = begin(identity)
         return Task {
+            guard origin.operation == operation, isCurrent(origin), isCurrent(blocked.origin),
+                playback.error == blocked.error
+            else { return .discarded }
             await playback.confirmMeteredStreaming()
             return finish(origin, threw: false)
         }

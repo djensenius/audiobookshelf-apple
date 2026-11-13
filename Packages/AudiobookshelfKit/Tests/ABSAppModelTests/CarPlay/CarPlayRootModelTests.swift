@@ -304,6 +304,25 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
         }
     }
 
+    /// #544: Stream's consent goes to the player only for the block it was asked about. If the
+    /// phone blocks another item, or the playback rebinds to another session, before its task
+    /// runs, nothing is forwarded.
+    @Test(arguments: [false, true])
+    func aConfirmationIsntForwardedAfterANewerBlockOrARebind(rebinds: Bool) async throws {
+        try await withLibrarySettings { settings in
+            let (harness, model) = try await blockedHarness(settings: settings)
+            let confirm = try #require(model.confirmStreaming())
+            if rebinds {
+                harness.session = PlaybackSessionToken()
+            } else {
+                harness.playback.error = .streamingNeedsConfirmation(.cellular, key: Self.frankensteinKey)
+            }
+            #expect(await confirm.value == .discarded)
+            #expect(harness.playback.calls.isEmpty)
+            #expect(model.alert == nil)
+        }
+    }
+
     /// #544: Cancel declines the block, which clears the player's error and the prompt.
     @Test func aBlockedPlayDeclinedClearsThePrompt() async throws {
         try await withLibrarySettings { settings in
@@ -486,6 +505,29 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
         }
     }
 
+    /// #544: a play outlives its CarPlay connection, but its start pushes Now Playing only on the
+    /// connection it was tapped on, not on one made before it ends. A joined tap isn't waited on
+    /// twice; a start (and only a start) on the current connection shows Now Playing.
+    @Test func aPlayFromADisconnectedConnectionDoesntShowNowPlaying() async throws {
+        let waiter = CarPlayNowPlayingWaiter()
+        let (starts, start) = AsyncStream<Void>.makeStream()
+        let play = Task<CarPlayPlayOutcome, Never> {
+            for await _ in starts {}
+            return .started
+        }
+        let wait = try #require(waiter.wait(for: play))
+        #expect(waiter.wait(for: play) == nil)
+
+        waiter.disconnect()
+        let newConnectionWait = try #require(waiter.wait(for: play))
+        start.finish()
+        #expect(await wait.value == false)
+        #expect(await newConnectionWait.value == true)
+
+        let failed = Task<CarPlayPlayOutcome, Never> { .failed }
+        #expect(await waiter.wait(for: failed)?.value == false)
+    }
+
     /// #544: one alert at a time. A change while one is shown dismisses it; the alert wanted
     /// when the dismissal completes is presented then, through any changes (and `nil`) meanwhile.
     @Test func thePresenterShowsTheLatestAlertOnceTheDismissalCompletes() {
@@ -516,6 +558,8 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
 
     private static let sherlockKey = MediaKey(
         serverConnectionID: carAccountA.connectionID, libraryItemId: SampleLibrary.sherlock.id)
+    private static let frankensteinKey = MediaKey(
+        serverConnectionID: carAccountA.connectionID, libraryItemId: SampleLibrary.frankenstein.id)
     private static let needsConfirmation = PlaybackCoordinatorError.streamingNeedsConfirmation(
         .cellular, key: sherlockKey)
 

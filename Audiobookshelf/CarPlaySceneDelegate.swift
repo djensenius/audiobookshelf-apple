@@ -27,8 +27,8 @@
         private var loadedTrigger: CarPlayRootModel.LoadTrigger?
         private var hasShownContinue = false
         private var alerts = CarPlayAlertPresenter<PlayerErrorMessage>()
-        /// The plays awaited to show Now Playing; a tap that joins one isn't awaited twice.
-        private var awaitedPlays: Set<Task<CarPlayPlayOutcome, Never>> = []
+        /// The plays awaited to show Now Playing, by connection.
+        private let nowPlayingWaiter = CarPlayNowPlayingWaiter()
         private var pixelBox = PixelBox(width: 1, height: 1)
         /// The covers the rows show, kept so the pipeline doesn't evict them (``CoverImage``).
         private var covers: [ImageKey: CoverImage] = [:]
@@ -86,6 +86,7 @@
             loadedTrigger = nil
             hasShownContinue = false
             alerts = CarPlayAlertPresenter()
+            nowPlayingWaiter.disconnect()
             self.interfaceController = nil
         }
 
@@ -175,13 +176,12 @@
         }
 
         /// Pushes Now Playing once `play` has started; a failed or blocked play shows its alert
-        /// instead, and a discarded one nothing.
+        /// instead, and a discarded one nothing. A play from a connection that has since
+        /// disconnected pushes nothing, even onto a newer connection.
         private func showNowPlaying(after play: Task<CarPlayPlayOutcome, Never>) {
-            guard awaitedPlays.insert(play).inserted else { return }
+            guard let wait = nowPlayingWaiter.wait(for: play) else { return }
             Task { [weak self] in
-                let outcome = await play.value
-                self?.awaitedPlays.remove(play)
-                guard outcome == .started, let interfaceController = self?.interfaceController else { return }
+                guard await wait.value, let interfaceController = self?.interfaceController else { return }
                 let nowPlaying = CPNowPlayingTemplate.shared
                 guard !interfaceController.templates.contains(where: { $0 === nowPlaying }) else { return }
                 interfaceController.pushTemplate(nowPlaying, animated: true, completion: nil)
