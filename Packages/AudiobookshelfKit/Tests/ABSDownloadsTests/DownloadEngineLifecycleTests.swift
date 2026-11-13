@@ -2857,6 +2857,78 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
+    /// An activation while a guarded launch writes its part back as queued (deactivated during
+    /// its credentials) skips the part, as the launch still holds it: the launch then starts it.
+    @Test(.timeLimit(.minutes(1))) func reactivationWhileAGuardedLaunchRequeuesStartsThePart() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
+        let current = Mutex<DownloadEngine?>(nil)
+        let engine = harness.makeEngine(beforeRequeueingInactive: { _ in
+            guard let engine = current.withLock({ $0 }) else { return }
+            #expect(await engine.activate())
+            await engine.waitForRestart()
+        })
+        current.withLock { $0 = engine }
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        let deactivates = Mutex(true)
+        harness.credentials.hook.withLock {
+            $0 = {
+                // Once: the launch's restart reads the credentials again.
+                if deactivates.withLock({ state in
+                    defer { state = false }; return state
+                }) {
+                    await engine.deactivate()
+                }
+            }
+        }
+
+        let generation = await engine.quiesceGeneration()
+        #expect(try await engine.resume(recordID: record.id, unlessQuiescedSince: generation))
+        harness.credentials.hook.withLock { $0 = nil }
+
+        try #require(try await harness.store.part(id: partID)?.state == .running)
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 1)
+    }
+
+    /// The same once the task exists: deactivated while the part is saved as running, the launch
+    /// cancels the task and writes the part back as queued; an activation meanwhile skipped it,
+    /// so the launch then starts it.
+    @Test(.timeLimit(.minutes(1))) func reactivationWhileAGuardedLaunchRequeuesItsTaskStartsThePart()
+        async throws
+    {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
+        let current = Mutex<(engine: DownloadEngine?, deactivates: Bool)>((nil, false))
+        let engine = harness.makeEngine(
+            beforeSavingRunning: { _ in
+                let (engine, deactivates) = current.withLock { state in
+                    defer { state.deactivates = false }
+                    return (state.engine, state.deactivates)
+                }
+                if deactivates { await engine?.deactivate() }
+            },
+            beforeRequeueingInactive: { _ in
+                guard let engine = current.withLock({ $0.engine }) else { return }
+                #expect(await engine.activate())
+                await engine.waitForRestart()
+            })
+        current.withLock { $0.engine = engine }
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        current.withLock { $0.deactivates = true }
+
+        let generation = await engine.quiesceGeneration()
+        #expect(try await engine.resume(recordID: record.id, unlessQuiescedSince: generation))
+
+        try #require(try await harness.store.part(id: partID)?.state == .running)
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 1)
+    }
+
     /// A quiesce that attaches the session keeps the connection's marker when a rejected
     /// survivor's part couldn't be queued again and its transfer marker can't be removed: a
     /// relaunch after access is restored still rejects the survivor's file.
