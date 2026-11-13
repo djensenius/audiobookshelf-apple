@@ -22,6 +22,10 @@ extension View {
 /// without one (previews); Add to playlist opens ``AddToPlaylistSheet`` for the book, so it needs the account's
 /// playlist writes (`playlists`).
 ///
+/// RSS Feed (``RssFeedEntryButton``) follows for admins once the book has loaded with something to
+/// publish or a feed open (``RssFeedItemEntry``), showing whether the feed is open; podcasts, which
+/// have no More menu, keep it in the toolbar.
+///
 /// The ebook entries (``ItemDetailEbookEntries``) follow, gated by ``EbookActionsModel`` on the
 /// signed-in account's authorization and the loaded item; they're hidden offline and without an
 /// account (previews). The model is made per item model, so a reused view never acts on the
@@ -45,6 +49,7 @@ private struct ItemDetailMoreMenu: ViewModifier {
     /// isn't shown there.
     @State private var feedbackLifetime = EbookFeedbackLifetime()
     @State private var addToPlaylist: AddToPlaylistModel?
+    @State private var rssFeed = RssFeedEntryState()
 
     /// What the ebook actions are made for.
     private struct EbookActionsKey: Hashable {
@@ -59,6 +64,7 @@ private struct ItemDetailMoreMenu: ViewModifier {
         // without a client, while the model is kept for the next one.
         let ebookActions = ebookActions.flatMap { $0.itemID == model.itemID && accounts?.client != nil ? $0 : nil }
         let canEditPlaylists = playlists != nil
+        let rssFeedEntry = RssFeedItemEntry(item: model.item)
         content
             .modifier(
                 DetailMoreMenu(model: model) { [model] isGone in
@@ -71,8 +77,15 @@ private struct ItemDetailMoreMenu: ViewModifier {
                     if let ebookActions {
                         ebookEntries(ebookActions, isGone: isGone)
                     }
+                    if let rssFeedEntry {
+                        RssFeedEntryButton(
+                            target: rssFeedEntry.target, isOpen: rssFeedEntry.isOpen,
+                            hasEpisodesWithoutPubDate: rssFeedEntry.hasEpisodesWithoutPubDate, state: rssFeed,
+                            inMenu: true)
+                    }
                 }
             )
+            .rssFeedSheet(rssFeed)
             .sheet(isPresented: $showsDetails) {
                 ItemDetailInfoSheet(model: model)
             }

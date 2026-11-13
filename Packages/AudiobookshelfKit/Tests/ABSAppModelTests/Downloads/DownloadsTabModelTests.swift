@@ -75,14 +75,33 @@ private actor FakeControl: DownloadControlling {
 private actor ItemSource {
     private(set) var reads = 0
     var items: [LocalLibraryItemDTO] = []
+    /// Whether reads throw, as a store that can't be opened would.
+    private var failing = false
+    private var subscribers: [AsyncStream<[LocalLibraryItemDTO]>.Continuation] = []
 
+    /// Sets the items, as a write to the store would, and sends them to ``updates(_:)``.
     func set(_ items: [LocalLibraryItemDTO]) {
         self.items = items
+        for subscriber in subscribers { subscriber.yield(items) }
     }
 
-    func read(_ connectionID: UUID) -> [LocalLibraryItemDTO] {
+    func fail(_ failing: Bool) {
+        self.failing = failing
+    }
+
+    func read(_ connectionID: UUID) throws -> [LocalLibraryItemDTO] {
         reads += 1
+        if failing { throw CocoaError(.fileReadUnknown) }
         return items.filter { $0.serverConnectionID == connectionID }
+    }
+
+    /// Like `LocalItemStore.updates(serverConnectionID:)`: the items now, then after each ``set(_:)``.
+    func updates(_ connectionID: UUID) -> AsyncStream<[LocalLibraryItemDTO]> {
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: [LocalLibraryItemDTO].self, bufferingPolicy: .bufferingNewest(1))
+        subscribers.append(continuation)
+        continuation.yield(items)
+        return stream
     }
 }
 
@@ -92,10 +111,11 @@ struct DownloadsTabModelTests {
     static let connection = DownloadsListingTests.connection
 
     /// A started model over `control`, observing ``connection`` until `cleanUp`; returns after
-    /// the first read.
+    /// the first read. With `followsUpdates`, it reads `source` again after each of its writes.
     private func makeModel(
         path: NetworkPath = .wifi, policy: CellularPolicy = .always, control: FakeControl = FakeControl(),
-        source: ItemSource = ItemSource(), records: [DownloadRecordDTO] = []
+        source: ItemSource = ItemSource(), followsUpdates: Bool = false, records: [DownloadRecordDTO] = [],
+        storedRecords: (@Sendable () async throws -> [DownloadRecordDTO])? = nil
     ) async throws -> (DownloadsTabModel, cleanUp: () -> Void) {
         let suiteName = "ABSAppModelTests.DownloadsTab.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -106,12 +126,14 @@ struct DownloadsTabModelTests {
         let controller = DownloadsController(
             manager: control, monitor: monitor, settings: settings,
             networkAccess: DownloadNetworkAccess(defaults: defaults, treatsExpensiveAsCellular: false),
-            storedRecords: { records }, pathTimeout: .seconds(30))
+            storedRecords: storedRecords ?? { records }, pathTimeout: .seconds(30))
         await controller.start()
+        let updates: (@Sendable (UUID) async throws -> AsyncStream<[LocalLibraryItemDTO]>)? =
+            followsUpdates ? { @Sendable connectionID in await source.updates(connectionID) } : nil
         let model = DownloadsTabModel(
             services: DownloadsServices(
-                controller: controller, control: control, localItems: { await source.read($0) },
-                availableCapacity: { 1_000 }))
+                controller: controller, control: control, localItemUpdates: updates,
+                localItems: { try await source.read($0) }, availableCapacity: { 1_000 }))
         let (reloads, report) = AsyncStream.makeStream(of: Void.self)
         model.reloaded = { report.yield() }
         let observing = Task { await model.observe(connectionID: Self.connection) }
@@ -247,5 +269,98 @@ struct DownloadsTabModelTests {
         await model.delete(itemID: UUID())
 
         #expect(model.notice == .deleteFailed)
+    }
+
+    /// When the stored downloads under way can't be read, the model says so instead of listing
+    /// no downloads, and ``DownloadsTabModel/reload()`` reads them again until a read succeeds.
+    /// The negative control: before that read, the queued download is missing.
+    @Test func aFailedQueueReadIsShownAndReloadReadsItAgain() async throws {
+        let queued = DownloadsListingTests.record("Queued", state: .queued)
+        let reads = Locked(0)
+        let failing = Locked(true)
+        let (model, cleanUp) = try await makeModel(storedRecords: {
+            reads.value += 1
+            if failing.value { throw CocoaError(.fileReadUnknown) }
+            return [queued]
+        })
+        defer { cleanUp() }
+
+        // Two reads at start, and two more at the first reload.
+        #expect(reads.value == 4)
+        #expect((model.queueLoadError as? CocoaError)?.code == .fileReadUnknown)
+        #expect(model.listing.downloads.isEmpty)
+
+        failing.value = false
+        await model.reload()
+        #expect(reads.value == 5)
+        #expect(model.queueLoadError == nil)
+        #expect(model.listing.downloads.map(\.id) == [queued.id])
+
+        await model.reload()
+        #expect(reads.value == 5)
+    }
+
+    /// A failed read of the items keeps listing those of the last read, with
+    /// ``DownloadsTabModel/loadError`` for the view to show beside them, and no storage total
+    /// until a read succeeds again. The negative controls: the total before the failure and
+    /// after the next read.
+    @Test func aFailedItemReadKeepsTheListButHidesTheStorageTotal() async throws {
+        let source = ItemSource()
+        await source.set([DownloadsListingTests.item("Walden", files: [DownloadsListingTests.file(size: 100)])])
+        let (model, cleanUp) = try await makeModel(source: source)
+        defer { cleanUp() }
+        #expect(model.loadError == nil)
+        #expect(model.downloadedBytes == 100)
+
+        await source.fail(true)
+        await model.reload()
+        #expect((model.loadError as? CocoaError)?.code == .fileReadUnknown)
+        #expect(model.listing.books.map(\.title) == ["Walden"])
+        #expect(model.downloadedBytes == nil)
+
+        await source.fail(false)
+        await model.reload()
+        #expect(model.loadError == nil)
+        #expect(model.downloadedBytes == 100)
+    }
+
+    /// When the first read of the items fails, the downloads under way are still listed, with
+    /// the error, and no storage total rather than one of 0 bytes.
+    @Test func aFailedFirstItemReadListsTheQueueWithoutAStorageTotal() async throws {
+        let queued = DownloadsListingTests.record("Queued", state: .queued)
+        let source = ItemSource()
+        await source.fail(true)
+        let (model, cleanUp) = try await makeModel(source: source, records: [queued])
+        defer { cleanUp() }
+
+        #expect(model.isLoaded)
+        #expect(model.loadError != nil)
+        #expect(model.listing.downloads.map(\.id) == [queued.id])
+        #expect(model.listing.downloadedBytes == 0)
+        #expect(model.downloadedBytes == nil)
+    }
+
+    /// Each window has its own model; one following the store's updates reads the items again
+    /// after a deletion in another window, which writes to the store. The negative control: a
+    /// model without them keeps listing the deleted item.
+    @Test func aDeletionInAnotherWindowIsReadByEveryModelFollowingTheStore() async throws {
+        let source = ItemSource()
+        let walden = DownloadsListingTests.item("Walden", files: [DownloadsListingTests.file(size: 100)])
+        await source.set([walden])
+        let (following, cleanUpFollowing) = try await makeModel(source: source, followsUpdates: true)
+        defer { cleanUpFollowing() }
+        let (unfollowing, cleanUpUnfollowing) = try await makeModel(source: source)
+        defer { cleanUpUnfollowing() }
+        #expect(following.listing.downloadedBytes == 100)
+
+        let (reloads, report) = AsyncStream.makeStream(of: Void.self)
+        following.reloaded = { report.yield() }
+        // Another window's model deletes the item through the manager, which writes the store.
+        await source.set([])
+        for await _ in reloads { break }
+
+        #expect(following.listing.books.isEmpty)
+        #expect(following.listing.downloadedBytes == 0)
+        #expect(unfollowing.listing.books.map(\.title) == ["Walden"])
     }
 }

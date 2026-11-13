@@ -39,8 +39,10 @@ final class ConnectTestKeychain: KeychainStoring {
 /// the authorization of a saved session (`/api/authorize`) like a proxy (403), `hold-` holds it
 /// until ``release(_:)``, `old-` answers it with an unsupported server version, `bad-` refuses
 /// every password (`/login`, 401), and `oidc-` returns an end-session `redirect_url` from `/logout`.
+/// A host passed to ``revoke(_:)`` refuses its session (`/api/authorize` and `/auth/refresh`, 401).
 final class ConnectTestProtocol: URLProtocol {
     static let requests = Mutex<[String: [URLRequest]]>([:])
+    private static let revoked = Mutex<Set<String>>([])
     private static let held = Mutex<(responses: [String: [HeldResponse]], released: Set<String>)>(([:], []))
     static let endSessionURL = URL(string: "https://idp.example.com/logout?state=test-state")!
 
@@ -69,8 +71,14 @@ final class ConnectTestProtocol: URLProtocol {
         for response in responses { response.send() }
     }
 
+    /// Expires the session `host` signed in with: its authorization and refresh answer 401.
+    static func revoke(_ host: String) {
+        revoked.withLock { _ = $0.insert(host) }
+    }
+
     static func forget(_ host: String) {
         requests.withLock { $0[host] = nil }
+        revoked.withLock { _ = $0.remove(host) }
         held.withLock { state in
             state.responses[host] = nil
             state.released.remove(host)
@@ -89,7 +97,11 @@ final class ConnectTestProtocol: URLProtocol {
         let json: String
         var status = 200
         var headers = ["Content-Type": "application/json"]
+        let isRevoked = Self.revoked.withLock { $0.contains(host) }
         switch url.path() {
+        case "/api/authorize" where isRevoked, "/auth/refresh" where isRevoked:
+            status = 401
+            json = "{}"
         case "/api/authorize" where host.hasPrefix("offline-"):
             status = 403
             json = "{}"

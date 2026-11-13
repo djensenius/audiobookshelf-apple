@@ -33,11 +33,18 @@ final class AppEnvironment {
     /// ``AuthGate/storeUnavailable(_:)``, because nothing can be restored or saved.
     let dataStack: DataStack?
     let accounts: AccountManager?
+    /// The one writer of local listening progress (`LocalProgressStore` must be shared), or `nil`
+    /// when the store couldn't be opened. Downloads link their progress rows in it (#74), and every
+    /// playback scope writes through it (#183).
+    let localProgress: LocalProgressStore?
     let lifecycle: SessionLifecycle
     /// The stable device ID for playback sessions (ADR 0007), kept in the same Keychain as the
     /// accounts. It doesn't need the store, so it exists even when ``dataStack`` is `nil`.
     let deviceIdentifiers: any DeviceIdentifying
-    let player: any PlayerSlotState
+    /// The one player every scene and CarPlay share: ``playback``'s, idle between sessions.
+    let player: PlayerViewModel
+    /// Each signed-in account's playback scope and the player's playback (#183).
+    let playback: AppPlayback
     /// The download stack, or `nil` when the store couldn't be opened. Its lifecycle is
     /// launched here, so a launch without a window (CarPlay, a background wake) has an engine.
     let downloads: AppDownloads?
@@ -51,7 +58,7 @@ final class AppEnvironment {
     /// - Parameters:
     ///   - settings: The settings every scene shares.
     ///   - storeLocation: Where the store lives; tests and previews pass `.inMemory`.
-    ///   - downloadsRoot: Where downloads live (``AppDownloads/make(dataStack:accounts:settings:root:makeSession:)``);
+    ///   - downloadsRoot: Where downloads live (``AppDownloads/make(dataStack:accounts:settings:root:makeSession:progress:)``);
     ///     tests pass a temporary directory, and `nil` leaves out the download stack.
     ///   - makeDownloadSession: The download engine's session; tests pass a non-background one.
     ///   - covers: Where the cover pipeline fetches and caches covers.
@@ -65,6 +72,7 @@ final class AppEnvironment {
     ) {
         let dataStack: DataStack?
         let accounts: AccountManager?
+        let localProgress: LocalProgressStore?
         let lifecycle: SessionLifecycle
         var downloads: AppDownloads?
         do {
@@ -74,12 +82,15 @@ final class AppEnvironment {
                 validator: ServerValidator(sessionConfiguration: sessionConfiguration),
                 openID: OIDCLoginService(sessionConfiguration: sessionConfiguration),
                 sessionConfiguration: sessionConfiguration, settings: settings)
+            let progress = LocalProgressStore(modelContainer: stack.container)
             downloads = downloadsRoot.map {
                 AppDownloads.make(
-                    dataStack: stack, accounts: manager, settings: settings, root: $0, makeSession: makeDownloadSession)
+                    dataStack: stack, accounts: manager, settings: settings, root: $0, makeSession: makeDownloadSession,
+                    progress: progress)
             }
             dataStack = stack
             accounts = manager
+            localProgress = progress
             lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: manager))
             if let downloads {
                 lifecycle.register(downloads.lifecycle, stage: .connect)
@@ -97,15 +108,21 @@ final class AppEnvironment {
             Log.data.fault("The on-device store couldn't be opened: \(reason, privacy: .public)")
             dataStack = nil
             accounts = nil
+            localProgress = nil
             lifecycle = SessionLifecycle(storeUnavailable: error)
         }
         self.settings = settings
         self.dataStack = dataStack
         self.accounts = accounts
+        self.localProgress = localProgress
         self.lifecycle = lifecycle
-        self.deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
-        // Replaced by the playback coordinator's view model with the player UI (#56).
-        self.player = PlaceholderPlayerState()
+        let deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
+        self.deviceIdentifiers = deviceIdentifiers
+        let playback = AppPlayback.make(
+            writer: localProgress, accounts: accounts, lifecycle: lifecycle, settings: settings,
+            deviceIdentifiers: deviceIdentifiers)
+        self.playback = playback
+        self.player = playback.player
         self.downloads = downloads
         downloads?.lifecycle.launch()
         self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
@@ -120,6 +137,8 @@ final class AppEnvironment {
         let widgetSnapshots = Self.makeWidgetSnapshotWriter(
             accounts: accounts, lifecycle: lifecycle, storeLocation: storeLocation)
         lifecycle.register(widgetSnapshots, stage: .connect)
+        // The app's one player, across every account's session: its item and play state.
+        widgetSnapshots.follow(playback.player)
         self.widgetSnapshots = widgetSnapshots
     }
 }

@@ -89,7 +89,8 @@ private struct ItemDetailHost {
 }
 
 /// The states of one item's screen: loading, failed, not found, a podcast, or the book. Only the
-/// book's states get the item's navigation title and the More menu here; both get RSS Feed.
+/// book's states get the item's navigation title and the More menu here, which has the book's RSS
+/// Feed; the podcast's is in the toolbar, as it has no More menu.
 struct ItemDetailScreen: View {
     let model: ItemDetailModel
     /// The server's address, for the More menu's Share; without it there is no Share.
@@ -109,7 +110,6 @@ struct ItemDetailScreen: View {
                     .navigationBarTitleDisplayMode(.inline)
                 #endif
                 .itemDetailMoreMenu(model: model, serverURL: serverURL, playlists: playlists)
-                .rssFeedEntry(RssFeedItemEntry(item: model.item))
         }
     }
 

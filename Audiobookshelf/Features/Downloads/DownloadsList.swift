@@ -44,13 +44,14 @@ struct DownloadsList: View {
 
     @ViewBuilder
     private func content(_ listing: DownloadsListing) -> some View {
+        let isEmpty = mode == .all ? listing.isEmpty : listing.downloads.isEmpty
         if !model.isLoaded, mode == .all {
             LoadingView()
-        } else if mode == .all, model.loadError != nil, listing.isEmpty {
-            ErrorStateView(title: L10n.string("MessageDownloadsLoadFailed")) {
+        } else if isEmpty, let failure = loadFailure {
+            ErrorStateView(title: failure) {
                 Task { await model.reload() }
             }
-        } else if mode == .all ? listing.isEmpty : listing.downloads.isEmpty {
+        } else if isEmpty {
             ContentUnavailableView {
                 Label {
                     Text(verbatim: L10n.string("MessageNoDownloads"))
@@ -63,8 +64,17 @@ struct DownloadsList: View {
             List {
                 if mode == .all {
                     Section {
-                        DownloadsStorageRow(used: listing.downloadedBytes, available: model.availableBytes)
+                        // No total until the items are read: those listed may be stale.
+                        if let used = model.downloadedBytes {
+                            DownloadsStorageRow(used: used, available: model.availableBytes)
+                        }
+                        if model.loadError != nil {
+                            loadFailedRow(L10n.string("MessageDownloadsLoadFailed"))
+                        }
                     }
+                }
+                if model.queueLoadError != nil {
+                    Section { loadFailedRow(L10n.string("MessageDownloadQueueLoadFailed")) }
                 }
                 downloadingSection(listing)
                 if mode == .all {
@@ -73,6 +83,33 @@ struct DownloadsList: View {
                 }
             }
         }
+    }
+
+    /// Why an empty list couldn't be read: the downloaded items (`.all` only), or the stored
+    /// downloads under way; `nil` when both were read.
+    private var loadFailure: String? {
+        if mode == .all, model.loadError != nil { return L10n.string("MessageDownloadsLoadFailed") }
+        return model.queueLoadError != nil ? L10n.string("MessageDownloadQueueLoadFailed") : nil
+    }
+
+    /// Shown above a non-empty list when the downloaded items or the stored downloads under way
+    /// couldn't be read, so what's missing or stale isn't silent; Retry reads them again.
+    private func loadFailedRow(_ message: String) -> some View {
+        HStack(spacing: ABSSpacing.medium) {
+            Label {
+                Text(verbatim: message)
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(ABSColor.mutedForeground)
+                    .accessibilityHidden(true)
+            }
+            Spacer(minLength: ABSSpacing.small)
+            Button(L10n.string("ButtonRetry")) {
+                Task { await model.reload() }
+            }
+            .buttonStyle(.borderless)
+        }
+        .font(.footnote)
     }
 
     @ViewBuilder
@@ -142,8 +179,11 @@ struct DownloadsList: View {
         .disabled(model.busy.contains(podcast.id))
     }
 
+    /// Not `.destructive`: the list would remove the row before the confirmation (as in
+    /// `BookmarksSheet`); the row goes once the confirmed deletion is read back.
     private func deleteButton(_ pending: PendingDelete) -> some View {
-        Button(L10n.string("ButtonDelete"), role: .destructive) { pendingDelete = pending }
+        Button(L10n.string("ButtonDelete")) { pendingDelete = pending }
+            .tint(.red)
     }
 
     private func delete(_ pending: PendingDelete) async {

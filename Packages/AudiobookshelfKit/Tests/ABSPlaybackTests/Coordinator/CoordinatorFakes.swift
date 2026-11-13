@@ -263,6 +263,8 @@ final class StubSessionService: PlaybackSessionService {
         /// The `rejected` token of each refresh.
         var refreshedTokens: [String?] = []
         var refreshError: APIError?
+        /// Holds the next refresh before it completes.
+        var refreshGate: Gate?
         var starts: [String] = []
         var closes: [String] = []
         var canceledCloses: [String] = []
@@ -271,6 +273,13 @@ final class StubSessionService: PlaybackSessionService {
         var count = 0
         var openSessions: [String] = []
         var takenOver: [String] = []
+        /// What `GET /api/session/{id}` answers, and the ids looked up.
+        var sessionStatus = PlaybackSessionStatus.unknown
+        /// Whether the lookup's request refreshed the access token.
+        var sessionRefreshesToken = false
+        var sessionLookups: [String] = []
+        /// Holds the next lookup before it answers.
+        var sessionGate: Gate?
     }
 
     let serverConnectionID: UUID
@@ -287,6 +296,22 @@ final class StubSessionService: PlaybackSessionService {
     var openSessions: [String] { state.withLock { $0.openSessions } }
     /// The sessions the server closed because another start took over.
     var takenOver: [String] { state.withLock { $0.takenOver } }
+
+    func sessionStatus(id: String) async -> PlaybackSessionStatus {
+        let gate = state.withLock {
+            $0.sessionLookups.append(id)
+            let gate = $0.sessionGate
+            $0.sessionGate = nil
+            return gate
+        }
+        await gate?.wait()
+        return state.withLock { $0.sessionStatus }
+    }
+
+    func sessionCheck(id: String) async -> PlaybackSessionCheck {
+        let status = await sessionStatus(id: id)
+        return PlaybackSessionCheck(status: status, refreshedToken: state.withLock { $0.sessionRefreshesToken })
+    }
 
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
         // As the API client's request does, a start for a cancelled caller sends nothing and throws.
@@ -386,12 +411,15 @@ final class StubSessionService: PlaybackSessionService {
     }
 
     func refreshStreamAccess(replacing rejected: String?) async throws {
-        let error = state.withLock {
+        let (error, gate) = state.withLock {
             $0.refreshes += 1
             $0.refreshedTokens.append(rejected)
             $0.log.append("refresh")
-            return $0.refreshError
+            let gate = $0.refreshGate
+            $0.refreshGate = nil
+            return ($0.refreshError, gate)
         }
+        await gate?.wait()
         if let error { throw error }
     }
 

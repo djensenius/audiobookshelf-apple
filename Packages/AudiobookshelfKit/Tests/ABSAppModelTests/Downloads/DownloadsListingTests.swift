@@ -178,6 +178,30 @@ struct DownloadsListingTests {
         #expect(unsized.parts.map(\.expectedBytes) == [0])
     }
 
+    /// A retry or restart without resume data starts over below the saved bytes: with live
+    /// progress, the row, its byte label and the ring show the live bytes, not the larger saved
+    /// ones. The negative control: without live progress, the saved bytes stand.
+    @Test func liveBytesBelowTheSavedOnesWin() throws {
+        let restarted = Self.record("Restarted", state: .downloading, parts: [(100, 80)])
+        let listing = DownloadsListing(
+            items: [], records: [restarted], progress: [restarted.id: .init(fraction: 0.1, bytes: 10)],
+            serverConnectionID: Self.connection)
+
+        let download = try #require(listing.downloads.first)
+        #expect(download.status == .downloading(0.1))
+        #expect(download.bytesWritten == 10)
+        #expect(download.expectedBytes == 100)
+        #expect(listing.downloadingFraction == 0.1)
+        #expect(
+            DownloadsListing.status(of: restarted, progress: .init(fraction: 0.1, bytes: 10)) == .downloading(0.1))
+
+        let saved = DownloadsListing(
+            items: [], records: [restarted], progress: [:], serverConnectionID: Self.connection)
+        #expect(saved.downloads.first?.status == .downloading(0.8))
+        #expect(saved.downloads.first?.bytesWritten == 80)
+        #expect(saved.downloadingFraction == 0.8)
+    }
+
     /// Sizes come from the server, so sums that overflow `Int64` saturate, and fractions are
     /// summed as `Double`, instead of trapping. The negative control: the same sums overflow.
     @Test func byteTotalsSaturateInsteadOfOverflowing() throws {

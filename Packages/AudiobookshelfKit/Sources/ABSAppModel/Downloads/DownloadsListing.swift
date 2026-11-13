@@ -191,16 +191,17 @@ public struct DownloadsListing: Sendable, Equatable {
         var written: Double
         var expected: Double
 
-        /// The parts' stored bytes, or the live `progress`. Its fraction is `bytes` over the
-        /// expected sizes the transfers have learned, which can differ from the stored ones, so
-        /// that size is `bytes` over the fraction; while the fraction is 0 no size is known
-        /// live, and the stored one stands.
+        /// The live `progress`, or without it the parts' stored bytes. The live bytes are what the
+        /// transfers hold now, even below the stored ones: a retry or restart without resume
+        /// data starts over. Its fraction is `bytes` over the expected sizes the transfers have
+        /// learned, which can differ from the stored ones, so that size is `bytes` over the
+        /// fraction; while the fraction is 0 no size is known live, and the stored one stands.
         init(_ record: DownloadRecordDTO, progress: Progress?) {
             written = record.parts.reduce(0.0) { $0 + Double(max($1.bytesWritten, 0)) }
             expected = record.parts.reduce(0.0) { $0 + Double(max($1.expectedBytes, 0)) }
             guard let progress else { return }
             let live = Double(max(progress.bytes, 0))
-            written = max(written, live)
+            written = live
             if progress.fraction >= 1 {
                 expected = live
             } else if progress.fraction > 0 {

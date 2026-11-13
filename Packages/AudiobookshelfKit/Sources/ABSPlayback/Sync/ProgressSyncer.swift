@@ -31,7 +31,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   missing rows. Their throwing receipts acknowledge only committed audio, not listening time.
 /// - **Failures.** The position stays in the durable retry queue. Listening time is carried into the next
 ///   report when the request clearly never reached the server (DNS, connect, TLS, auth) or
-///   was turned away before the session handler ran (408, 429).
+///   was turned away before the session handler ran (408, 429); if its session closed
+///   meanwhile, into the media's next session (#383).
 /// - **Ambiguous failures (#381).** After a timeout, lost response or 5xx the server may or may
 ///   not have applied the report, so its listening time is kept as an unreconciled snapshot.
 ///   The first report after ``reconcileDelay`` reads the session (`GET /api/session/:id`) and
@@ -54,7 +55,9 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   A 404 means the server no longer has the session (ABS keeps open sessions in memory, so a
 ///   restart drops them): the session sends no more `/sync`, and each later trigger drains the
 ///   saved position through PATCH instead, until the server rejects the session's own row.
-///   Listening time from that 404 on is not sent (to be decided with offline sessions, #158).
+///   The server answers 404 before applying anything, so the 404'd report's listening time is
+///   carried to the media's next session (``CloseRetryQueue/carried``), and so is the time
+///   played after it, which the session's `/close` meets 404 with (#383).
 /// - **Durable queue.** ``drainPendingProgress()`` PATCHes the connection's dirty rows, one group
 ///   per request from `LocalProgressStore.beginSend`, in its order (audio, finished, ebook). It
 ///   runs after every successful `/sync` and on ``flush()``; call it on reconnect and at launch.
@@ -126,6 +129,9 @@ public final class ProgressSyncer {
         /// An ambiguously failed report's listening time, how much of it was already a resend
         /// (which isn't resent again), and the monotonic time the client gave up on it.
         var unreconciled: (delta: TimeInterval, resent: TimeInterval, failedAt: TimeInterval)?
+        /// A snapshot was dropped after its lookup failed, its outcome unknown: the server may hold
+        /// more than `ackedTotal` until a later lookup reads its total.
+        var hasUnknownOutcome = false
         /// Of `listened`, the time a reconciliation recovered: already sent once, so a later
         /// ambiguous failure doesn't resend it. Consumed and restored together with `listened`.
         var recovered: TimeInterval = 0
@@ -161,9 +167,9 @@ public final class ProgressSyncer {
     private var queuedSyncSessionID: String?
     /// Whether a ``flush()`` joined the queued `/sync`, so it goes out despite a backoff.
     private var queuedSyncIgnoresBackoff = false
-    /// The `/sync` inside `service.syncSession` now, resolved when the call returns. Its
-    /// session's final close waits for it; queued reports don't count.
-    private var inFlightSync: (sessionID: String, done: PlaybackCloseResult<Void>)?
+    /// The `/sync` inside `service.syncSession` now, resolved when the call returns, with the
+    /// listening time it reports. Its session's final close waits for it; queued reports don't count.
+    private var inFlightSync: (sessionID: String, done: PlaybackCloseResult<Void>, listened: TimeInterval)?
     private let history: PlaybackHistoryLog?
     /// History events (pause, finished, save) waiting for their session's queued `/sync`.
     private var queuedHistory: [String: [PlaybackHistoryLog.Event]] = [:]
@@ -245,9 +251,24 @@ public final class ProgressSyncer {
         self.history = history.map(PlaybackHistoryLog.init)
         observer = source.addObserver { [weak self] event in self?.handle(event) }
         source.finalCloseReport = { [weak self] closing in
-            guard let self, let handoff = closeReport(for: closing) else { return nil }
+            guard let self else { return nil }
+            // Read before closeReport ends the session: a 404's lookup compares with them. A
+            // `/sync` still out may apply after the close; the lookup allows for that only when
+            // no earlier report's outcome is unknown too (unreconciled, or dropped after a failed
+            // lookup), so either outcome tells.
+            let session = current?.sessionID == closing.sessionID ? current : nil
+            let ackedTotal = session?.ackedTotal ?? 0
+            var inFlightTotal: TimeInterval = 0
+            if let session, session.unreconciled == nil, !session.hasUnknownOutcome,
+                let sync = inFlightSync, sync.sessionID == session.sessionID
+            {
+                inFlightTotal = sync.listened
+            }
+            guard let handoff = closeReport(for: closing) else { return nil }
             // closeReport just queued the closing position: its token stamps the retained close.
-            retainClose(handoff, for: closing, token: pendingPositions[closing.key]?.token)
+            retainClose(
+                handoff, for: closing, ackedTotal: ackedTotal, inFlightTotal: inFlightTotal,
+                token: pendingPositions[closing.key]?.token)
             return handoff
         }
         source.quiesceProgressTransport = { [weak self] in self?.quiesceTransport() }
@@ -382,6 +403,7 @@ public final class ProgressSyncer {
             loadedTime = time
             lastSyncAt = now
             chapterIndex = source?.chapterIndex
+            creditCarriedListening()
             if source?.loadedPositionIsExplicit == true, let session = current {
                 // A chapter/start-time or pending seek/jump is new intent, not listening credit
                 // or a network trigger. It must supersede a held final close even with no tick.
@@ -751,7 +773,7 @@ public final class ProgressSyncer {
         // No suspension between the guard above and the call: a close sees it in flight.
         let done = PlaybackCloseResult<Void>()
         historyEvents = takeQueuedHistory(sessionID, ids: historyIDs)
-        inFlightSync = (sessionID, done)
+        inFlightSync = (sessionID, done, listened)
         do {
             defer {
                 done.resolve(.success(()))
@@ -772,13 +794,10 @@ public final class ProgressSyncer {
             recordHistory(&historyEvents, sync: historyResult)
             let abandoned = noteSyncFailure(error, sessionID: sessionID)
             if case .notFound = error as? APIError {
-                // No session, so the server applied nothing; but there's no session to resend to.
+                // No session, so the server applied nothing, but there's no session to resend to:
+                // the media's next session reports it, as a 404'd close's time (#383).
                 outcome = .notDelivered
-                if listened > 0 {
-                    logger.info(
-                        "Dropped \(listened, privacy: .public) s of listening time: the server no longer has the session (#337)"
-                    )
-                }
+                carryUndeliveredListening(listened, for: session.key, reason: "the server no longer has the session")
                 if abandoned, let snapshot = current?.unreconciled {
                     current?.unreconciled = nil
                     logDroppedSnapshot(snapshot.delta, reason: "the server no longer has the session")
@@ -788,11 +807,10 @@ public final class ProgressSyncer {
                 if current?.sessionID == sessionID {
                     current?.listened += listened
                     current?.recovered += resent
-                } else if listened > 0 {
-                    // TODO(#158): carry it into the closed session's reconciliation.
-                    logger.info(
-                        "Dropped \(listened, privacy: .public) s of listening time: the session closed before it could be resent"
-                    )
+                } else {
+                    // The session closed while it was out, and its close carried only later time.
+                    carryUndeliveredListening(
+                        listened, for: session.key, reason: "the session closed before it could be resent")
                 }
             } else {
                 outcome = .ambiguous
@@ -840,6 +858,7 @@ public final class ProgressSyncer {
         do {
             serverTotal = try await service.openSession(id: sessionID).timeListening
         } catch {
+            if current?.ownership == ownership { current?.hasUnknownOutcome = true }
             logDroppedSnapshot(snapshot.delta, reason: "the session lookup failed (\(Self.caseName(error)))")
             return
         }
@@ -849,6 +868,7 @@ public final class ProgressSyncer {
         }
         let acked = session.ackedTotal
         current?.ackedTotal = serverTotal
+        current?.hasUnknownOutcome = false
         if serverTotal >= acked + snapshot.delta - Self.reconcileTolerance {
             return
         }
@@ -869,6 +889,33 @@ public final class ProgressSyncer {
         guard delta > 0 else { return }
         logger.info(
             "Dropped \(delta, privacy: .public) s of unreconciled listening time: \(reason, privacy: .public)")
+    }
+
+    /// Adds the listening time carried for the loaded session's media (``CloseRetryQueue/carried``)
+    /// to its next report, once: like time a reconciliation recovered, a later ambiguous failure
+    /// doesn't resend it. An abandoned session reports nothing more, so it leaves the time for
+    /// the media's next session.
+    func creditCarriedListening() {
+        guard let session = current, session.hasLoaded, !session.isAbandoned,
+            let seconds = closeQueue.takeCarried(for: session.key)
+        else { return }
+        current?.listened += seconds
+        current?.recovered += seconds
+    }
+
+    /// Carries a report's listening time that the server certainly never applied, but that its
+    /// session can no longer send, to `key`'s next loaded session (#383). A stopped syncer has no
+    /// next session: the time is logged as dropped.
+    private func carryUndeliveredListening(_ seconds: TimeInterval, for key: MediaKey, reason: String) {
+        guard seconds > 0 else { return }
+        guard !isDetached, !isTransportQuiesced else {
+            logger.info(
+                "Dropped \(seconds, privacy: .public) s of listening time: \(reason, privacy: .public), and the syncer stopped"
+            )
+            return
+        }
+        closeQueue.carry(seconds, for: key)
+        creditCarriedListening()
     }
 
     /// Records a server's answer to a failed `/sync`: 404 abandons the session, and 5xx, 408 and

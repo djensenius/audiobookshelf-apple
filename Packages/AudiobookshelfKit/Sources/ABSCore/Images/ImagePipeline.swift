@@ -1,5 +1,7 @@
 import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Loads, downsamples, and caches cover and author images for every consumer: SwiftUI views,
 /// CarPlay, Now Playing, and widgets (ADR 0005).
@@ -27,6 +29,9 @@ public actor ImagePipeline {
     private var sessionServers: Set<UUID> = []
     private var fetches: [FetchKey: Flight<FetchedFile>] = [:]
     private var decodes: [MemoryKey: Flight<DecodedBitmap>] = [:]
+    /// ``ensureCoverFile(for:)`` calls in progress per server, which a sweep removes like
+    /// tracked loads: one may be about to store its server's first cover.
+    private var ensuring: [UUID: Int] = [:]
     /// Network requests started, for tests.
     private(set) var networkFetchCount = 0
     /// Decodes that took the large-decode slot, for tests.
@@ -131,6 +136,47 @@ public actor ImagePipeline {
         try await image(for: key, pixelBox: PixelBox(width: size.width, height: size.height)).cgImage
     }
 
+    /// The ``CoverFileStore`` file holding exactly `key`'s cover, written now if it's missing, for
+    /// a reader that only has the store: the widget (ADR 0005, "Widgets"). It skips the memory
+    /// LRU, which a stored file may have outlived or never come from. In order:
+    /// 1. the stored file;
+    /// 2. a downloaded cover at least as new as `key`, downsampled to `key`'s bucket and stored
+    ///    as JPEG; an older one is never stored under `key`;
+    /// 3. the network.
+    ///
+    /// Offline, or when the fetch or the write fails, it throws and stores nothing.
+    public func ensureCoverFile(for key: ImageKey) async throws -> URL {
+        guard !removedServers.contains(key.serverID) else { throw ImagePipelineError.noRequest }
+        ensuring[key.serverID, default: 0] += 1
+        defer {
+            ensuring[key.serverID, default: 1] -= 1
+            if ensuring[key.serverID] == 0 { ensuring[key.serverID] = nil }
+        }
+        if let stored = await fileStore.lookup(key) { return stored.url }
+        if let cover = await downloadedCovers?.downloadedCover(for: key), Self.isFresh(cover, for: key) {
+            let generation = await fileStore.generation(for: key.serverID)
+            // The server may have been removed while the lookup was suspended, and `generation`
+            // is then the post-removal one, which `insert` would accept.
+            guard !removedServers.contains(key.serverID) else { throw ImagePipelineError.noRequest }
+            // A damaged or oversized download falls through to the network, as on display.
+            if let jpeg = try? await Self.downsampledJPEG(of: cover.fileURL, bucket: key.bucket, in: temporaryFolder) {
+                defer { try? FileManager.default.removeItem(at: jpeg) }
+                return try await fileStore.insert(moving: jpeg, for: key, pathExtension: "jpg", generation: generation)
+                    .url
+            }
+        }
+        let fetched = try await fetchedFile(for: FetchKey(key: key, skipsDownloaded: true))
+        // A store that isn't writable hands back the bare download, which isn't the file asked for.
+        guard fetched.storedVersion != nil else { throw CocoaError(.fileWriteUnknown) }
+        return fetched.url
+    }
+
+    /// Keeps the cover files of `keys` out of the disk cache's LRU eviction, replacing the keys
+    /// passed before: pass the current widget snapshot's (``CoverFileStore/exemptFromEviction(_:)``).
+    public func exemptFromEviction(_ keys: Set<ImageKey>) async {
+        await fileStore.exemptFromEviction(keys)
+    }
+
     /// Evicts memory LRU entries until it holds at most `fraction` of the cap: 0 on a memory
     /// warning, 0.25 when entering the background on iOS, 0.5 on a macOS pressure warning.
     public func trimMemory(toFraction fraction: Double) {
@@ -164,12 +210,14 @@ public actor ImagePipeline {
 
     /// A sweep's first step: forgets the memory entries and loads of every server not in `saved`
     /// and not given a builder in this process, and returns those servers and the ones with
-    /// cached files not in `saved`, for ``removeServerUnlessInSession(_:)``. A forgotten load may
-    /// be past its cancellation check and about to store its server's first cover, so its server
-    /// is removed even without a folder: the removal refuses that write.
+    /// cached files not in `saved`, for ``removeServerUnlessInSession(_:)``. A forgotten load (or
+    /// an ``ensureCoverFile(for:)`` in progress) may be past its checks and about to store its
+    /// server's first cover, so its server is removed even without a folder: the removal refuses
+    /// that write.
     public func serversToSweep(keepingOnly saved: Set<UUID>) async -> Set<UUID> {
         let kept = saved.union(sessionServers)
         var unkept = Set(fetches.keys.map(\.key.serverID)).union(decodes.keys.map(\.key.serverID))
+            .union(ensuring.keys)
         memory.removeAll { entry in
             guard !kept.contains(entry.key.serverID) else { return false }
             unkept.insert(entry.key.serverID)
@@ -438,6 +486,40 @@ public actor ImagePipeline {
             let lease = FileLease { try? FileManager.default.removeItem(at: temporary) }
             return FetchedFile(url: temporary, updatedAt: key.updatedAt, lease: lease)
         }
+    }
+
+    /// `url` downsampled to `bucket`'s width (never upscaled), with its aspect ratio and EXIF
+    /// orientation kept, as a new JPEG file in `folder`. Only the width is bounded, like the
+    /// server's `width=` rendition, so a tall cover isn't cut to a display box.
+    @concurrent private static func downsampledJPEG(
+        of url: URL, bucket: ImageWidthBucket, in folder: URL
+    ) async throws -> URL {
+        let info = try await ImageDecoder.inspect(url)
+        let scale = min(Double(bucket.rawValue) / Double(info.width), 1)
+        let longSide = max(1, Int((Double(max(info.width, info.height)) * scale).rounded()))
+        guard
+            let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+            let image = CGImageSourceCreateThumbnailAtIndex(
+                source, 0,
+                [
+                    kCGImageSourceThumbnailMaxPixelSize: longSide,
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                ] as CFDictionary)
+        else { throw ImagePipelineError.unsupportedImage }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let output = folder.appending(path: "\(UUID().uuidString).jpg")
+        guard
+            let destination = CGImageDestinationCreateWithURL(
+                output as CFURL, UTType.jpeg.identifier as CFString, 1, nil)
+        else { throw CocoaError(.fileWriteUnknown) }
+        CGImageDestinationAddImage(
+            destination, image, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            try? FileManager.default.removeItem(at: output)
+            throw CocoaError(.fileWriteUnknown)
+        }
+        return output
     }
 
     private static func pathExtension(for response: URLResponse, key: ImageKey) -> String {

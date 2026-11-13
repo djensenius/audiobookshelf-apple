@@ -9,6 +9,11 @@ import Observation
 public struct DownloadsServices {
     public let controller: DownloadsController
     public let control: any DownloadControlling
+    /// A connection's downloaded items after every write, as the writer's
+    /// `LocalItemStore.updates(serverConnectionID:)` streams them, or `nil`. With it, every
+    /// ``DownloadsTabModel`` reads the items again after any change, a deletion in another window
+    /// included; without it, only after its own deletions and completed downloads.
+    public let localItemUpdates: (@Sendable (UUID) async throws -> AsyncStream<[LocalLibraryItemDTO]>)?
     /// A connection's downloaded items, as `LocalItemStore.items(serverConnectionID:)` reads them.
     public let localItems: @Sendable (UUID) async throws -> [LocalLibraryItemDTO]
     /// One downloaded item, as `LocalItemStore.item(id:)` reads it; `nil` once it's deleted.
@@ -18,12 +23,14 @@ public struct DownloadsServices {
 
     public init(
         controller: DownloadsController, control: any DownloadControlling,
+        localItemUpdates: (@Sendable (UUID) async throws -> AsyncStream<[LocalLibraryItemDTO]>)? = nil,
         localItems: @escaping @Sendable (UUID) async throws -> [LocalLibraryItemDTO],
         localItem: @escaping @Sendable (UUID) async throws -> LocalLibraryItemDTO? = { _ in nil },
         availableCapacity: @escaping @Sendable () async throws -> Int64
     ) {
         self.controller = controller
         self.control = control
+        self.localItemUpdates = localItemUpdates
         self.localItems = localItems
         self.localItem = localItem
         self.availableCapacity = availableCapacity
@@ -33,8 +40,12 @@ public struct DownloadsServices {
 /// The Downloads tab's state and actions for the signed-in connection (#75): its
 /// ``DownloadsListing``, the free space, and cancelling, retrying and deleting.
 ///
-/// - ``observe(connectionID:)`` reads the downloaded items, then reads them again whenever a
-///   download completes, so a finished download moves from Downloading to the list.
+/// - ``observe(connectionID:)`` reads the downloaded items, then reads them again after every
+///   write to the store (``DownloadsServices/localItemUpdates``), so a finished download moves
+///   from Downloading to the list, and a deletion in another window leaves this one too. Without
+///   those updates it reads them again whenever a download completes.
+/// - ``reload()`` also reads the stored downloads under way again if they couldn't be read
+///   (``queueLoadError``).
 /// - A retry the user starts goes through the download cellular policy, like a new request
 ///   (``DownloadsController/request(item:episodeID:connectionID:)``): on a metered path,
 ///   ``CellularPolicy/ask`` sets ``Notice/confirmMeteredRetry(_:)`` and
@@ -62,6 +73,13 @@ public final class DownloadsTabModel {
     public private(set) var isLoaded = false
     /// Why the last read failed, or `nil`.
     public private(set) var loadError: (any Error)?
+    /// Why the stored downloads under way couldn't be read (``DownloadsController/loadError``),
+    /// or `nil`; only the downloads whose events arrived since are listed. ``reload()`` reads
+    /// them again.
+    public var queueLoadError: (any Error)? { services.controller.loadError }
+    /// The bytes the listed books and podcasts use, or `nil` until a read of them succeeds: after
+    /// a failed one (``loadError``), the items listed are those of an earlier read, or none.
+    public var downloadedBytes: Int64? { isLoaded && loadError == nil ? listing.downloadedBytes : nil }
     /// The bytes still available for downloads, or `nil` while unknown.
     public private(set) var availableBytes: Int64?
     public var notice: Notice?
@@ -88,14 +106,21 @@ public final class DownloadsTabModel {
 
     // MARK: - Loading
 
-    /// Reads the items of `connectionID`, then again after every completed download, until the
-    /// task is cancelled.
+    /// Reads the items of `connectionID`, then again after every write to the store (or, without
+    /// ``DownloadsServices/localItemUpdates``, every completed download), until the task is
+    /// cancelled.
     public func observe(connectionID: UUID?) async {
         if self.connectionID != connectionID {
             self.connectionID = connectionID
             items = []
             loadError = nil
             isLoaded = false
+        }
+        // Its first snapshot is the items as they are, so it is read once, then again after
+        // every write: a completed download, or a deletion in any window.
+        if let connectionID, let updates = try? await services.localItemUpdates?(connectionID) {
+            for await _ in updates { await reload() }
+            return
         }
         // Subscribed before the read, so a completion during it is followed by another read.
         let events = await services.control.events()
@@ -105,10 +130,12 @@ public final class DownloadsTabModel {
         }
     }
 
-    /// Reads the items and the free space again.
+    /// Reads the items and the free space again, and the stored downloads under way if they
+    /// couldn't be read (``queueLoadError``).
     public func reload() async {
         readGeneration += 1
         let generation = readGeneration
+        await services.controller.retryLoadingStoredRecords()
         guard let connectionID else {
             items = []
             isLoaded = true

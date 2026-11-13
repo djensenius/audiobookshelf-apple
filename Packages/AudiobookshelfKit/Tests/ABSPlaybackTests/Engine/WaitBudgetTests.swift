@@ -1,3 +1,4 @@
+import ABSTestSupport
 import Foundation
 import Testing
 
@@ -50,6 +51,33 @@ struct WaitBudgetTests {
         }
         #expect(!held)
         #expect(checks == 20)
+    }
+
+    /// The sleep-timer tests' `until` (10 s, yielding): a stall longer than that is one step.
+    @Test func untilOutlastsAStallLongerThanItsTimeout() async {
+        let time = FakeTime()
+        var checks = 0
+        await until(now: { time.now }) {
+            checks += 1
+            if checks == 1 { time.advance(by: .seconds(30)) }
+            return checks >= 3
+        }
+        // Held on the third check; `until` checks once more to report.
+        #expect(checks == 4)
+    }
+
+    @Test func untilStillTimesOutWhenTheConditionNeverHolds() async {
+        let time = FakeTime()
+        var checks = 0
+        await withKnownIssue {
+            await until(now: { time.now }) {
+                checks += 1
+                time.advance(by: .milliseconds(50))
+                return false
+            }
+        }
+        // 10 s of 50 ms steps, plus the final check that records the issue.
+        #expect(checks == 201)
     }
 
     @Test func budgetChargesAtMostOneStepPerCheck() {

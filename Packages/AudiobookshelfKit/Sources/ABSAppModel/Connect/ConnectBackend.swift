@@ -58,8 +58,15 @@ extension ConnectBackend {
 /// With a `lifecycle` (adding a server while signed in), a sign-in or resume is an account change
 /// (``SessionLifecycle/performAccountChange(from:_:)``) from the session the sheet opened on, and
 /// a removal goes through ``SessionLifecycle/removeAccount(_:)``. Resuming the active connection
-/// or a signed-out one ends nothing. The change starts before the server checks the credentials,
-/// so a wrong password still restarts the running session; checking first is a follow-up.
+/// or a signed-out one ends nothing. A sign-in is checked with the server first
+/// (``AccountManager/authenticate(local:username:password:)``), outside the change, so a wrong
+/// password or a cancelled OpenID sign-in leaves the running session untouched; only saving and
+/// activating it (``AccountManager/activate(_:)``) is the change. If the change is refused, the
+/// checked sign-in's server session is ended (``AccountManager/discard(_:)``).
+///
+/// Without a `lifecycle` (the first sign-in), a sign-in is one ``AccountManager`` call
+/// (``AccountManager/connect(local:username:password:)``), which a later call supersedes even
+/// while the server checks it.
 @Observable final class AccountConnectBackend: ConnectBackend {
     let accounts: AccountManager
     private let validator: ServerValidator
@@ -85,14 +92,18 @@ extension ConnectBackend {
 
     func signIn(to server: ConnectServer, username: String, password: String) async throws {
         let server = try Self.validated(server)
-        try await changingAccount {
-            try await accounts.connect(local: server, username: username, password: password)
+        guard lifecycle != nil else {
+            return try await accounts.connect(local: server, username: username, password: password)
         }
+        try await activating(try await accounts.authenticate(local: server, username: username, password: password))
     }
 
     func signIn(openIDTo server: ConnectServer, authenticator: any WebAuthenticator) async throws {
         let server = try Self.validated(server)
-        try await changingAccount { try await accounts.connect(oidc: server, authenticator: authenticator) }
+        guard lifecycle != nil else {
+            return try await accounts.connect(oidc: server, authenticator: authenticator)
+        }
+        try await activating(try await accounts.authenticate(oidc: server, authenticator: authenticator))
     }
 
     func resume(_ id: UUID) async throws -> Bool {
@@ -121,6 +132,22 @@ extension ConnectBackend {
             _ = try await lifecycle.removeAccount(id)
         } else {
             _ = try await accounts.remove(id)
+        }
+    }
+
+    /// Activates a checked sign-in as an account change, or ends its server session if the
+    /// change doesn't run it.
+    private func activating(_ signIn: AuthenticatedSignIn) async throws {
+        var activated = false
+        do {
+            try Task.checkCancellation()
+            try await changingAccount {
+                activated = true
+                try await accounts.activate(signIn)
+            }
+        } catch {
+            if !activated { await accounts.discard(signIn) }
+            throw error
         }
     }
 

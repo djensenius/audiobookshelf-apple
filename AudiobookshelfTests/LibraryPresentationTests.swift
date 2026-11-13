@@ -16,6 +16,8 @@ private actor GatedLibraryClient: LibraryService {
     private let items: [String: [ABSCore.LibraryItem]]
     private var holding: Set<String> = []
     private var held: [String: [CheckedContinuation<Void, Never>]] = [:]
+    /// Callers of ``waitForHeldRequest(_:)`` waiting for a request of a library to be held.
+    private var heldWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     private(set) var requests: [(libraryID: String, query: LibraryQuery)] = []
     var failing = false
 
@@ -36,14 +38,11 @@ private actor GatedLibraryClient: LibraryService {
         for continuation in held.removeValue(forKey: libraryID) ?? [] { continuation.resume() }
     }
 
-    /// Waits until a request of `libraryID` is held.
-    func waitForHeldRequest(_ libraryID: String) async throws {
-        var attempts = 0
-        while held[libraryID, default: []].isEmpty, attempts < 1_000 {
-            attempts += 1
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        #expect(!held[libraryID, default: []].isEmpty)
+    /// Returns once a request of `libraryID` is held: at once if one is, otherwise when the next
+    /// one is. The suite's time limit fails a test whose request never comes.
+    func waitForHeldRequest(_ libraryID: String) async {
+        guard held[libraryID, default: []].isEmpty else { return }
+        await withCheckedContinuation { heldWaiters[libraryID, default: []].append($0) }
     }
 
     func libraries() async throws -> [Library] {
@@ -60,7 +59,10 @@ private actor GatedLibraryClient: LibraryService {
     func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<ABSCore.LibraryItem> {
         requests.append((libraryID, query))
         if holding.contains(libraryID) {
-            await withCheckedContinuation { held[libraryID, default: []].append($0) }
+            await withCheckedContinuation {
+                held[libraryID, default: []].append($0)
+                for waiter in heldWaiters.removeValue(forKey: libraryID) ?? [] { waiter.resume() }
+            }
         }
         if failing { throw Failure() }
         let all = items[libraryID] ?? []
@@ -132,7 +134,7 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
 }
 
 @MainActor
-@Suite struct LibraryPresentationTests {
+@Suite(.timeLimit(.minutes(1))) struct LibraryPresentationTests {
     @Test func modelUsesTheSavedPreferencesAndSavesChangesForItsAccount() async throws {
         let client = GatedLibraryClient(items: ["lib_a": books("a", 3, in: "lib_a")])
         try await withStore(client) { store in
@@ -194,7 +196,7 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
 
             await client.hold("lib_a")
             let load = model.load()
-            try await client.waitForHeldRequest("lib_a")
+            await client.waitForHeldRequest("lib_a")
             #expect(LibraryPresentation.state(of: model) == .loading)
             await client.setFailing(true)
             await client.release("lib_a")
@@ -356,7 +358,7 @@ private func shownIDs(_ host: LibraryModelHost?, for key: BrowseModelKey) -> [St
             // Library A's second page is in flight when the router switches to library B.
             await client.hold("lib_a")
             let pageA = hostA.model.list.loadNextPage()
-            try await client.waitForHeldRequest("lib_a")
+            await client.waitForHeldRequest("lib_a")
             let keyB = try #require(BrowseModelKey(store: store, libraryID: "lib_b"))
             // Before the screen's task replaces the model, B shows the placeholder, not A's items.
             #expect(shownIDs(hostA, for: keyB).isEmpty)

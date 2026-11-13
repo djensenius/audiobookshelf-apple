@@ -104,4 +104,12 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
         guard let token else { throw APIError.notAuthenticated }
         _ = try await client.accessToken(replacing: token)
     }
+
+    public func sessionStatus(id: String) async -> PlaybackSessionStatus {
+        await sessionCheck(id: id).status
+    }
+
+    public func sessionCheck(id: String) async -> PlaybackSessionCheck {
+        await .lookUp(id: id, on: client)
+    }
 }
