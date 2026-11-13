@@ -180,6 +180,10 @@ public actor DownloadEngine {
     /// After a network wait's, a retry delay's or a recreated session's continuation of a part's
     /// launch returns.
     private let launchContinued: (@Sendable (UUID) async -> Void)?
+    /// After a launch created its task, before it saves the part as running.
+    private let beforeSavingRunning: (@Sendable (UUID) async -> Void)?
+    /// Before a launch that may only start while active writes its part back as queued.
+    private let beforeRequeueingInactive: (@Sendable (UUID) async -> Void)?
     /// Internal so tests can post events.
     let delegate = DownloadSessionDelegate()
 
@@ -364,6 +368,8 @@ public actor DownloadEngine {
         beforeClearingResumeFlag: (@Sendable (UUID) async throws -> Void)? = nil,
         afterUpsertingLocalItem: (@Sendable (UUID) async -> Void)? = nil,
         launchContinued: (@Sendable (UUID) async -> Void)? = nil,
+        beforeSavingRunning: (@Sendable (UUID) async -> Void)? = nil,
+        beforeRequeueingInactive: (@Sendable (UUID) async -> Void)? = nil,
         preflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight()
     ) {
         (updates, updateContinuation) = AsyncStream.makeStream()
@@ -393,6 +399,8 @@ public actor DownloadEngine {
         self.beforeClearingResumeFlag = beforeClearingResumeFlag
         self.afterUpsertingLocalItem = afterUpsertingLocalItem
         self.launchContinued = launchContinued
+        self.beforeSavingRunning = beforeSavingRunning
+        self.beforeRequeueingInactive = beforeRequeueingInactive
         registry.register(self)
     }
 
@@ -1361,7 +1369,9 @@ public actor DownloadEngine {
         }
         // Deactivated while the credentials or the preflight were awaited.
         if contexts[partID]?.onlyWhileActive == true, !restartsQueuedParts {
+            if let beforeRequeueingInactive { await beforeRequeueingInactive(partID) }
             await persistIdle(partID) { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
+            await restartIfReactivated(partID, token: token)
             return
         }
         var resumeData: Data?
@@ -1385,6 +1395,7 @@ public actor DownloadEngine {
             .init(destination: destination, expectedBytes: context.expectedBytes, maxBytes: context.maxBytes),
             for: partID)
         throttle.reset(partID)
+        if let beforeSavingRunning { await beforeSavingRunning(partID) }
         let recorded: Bool
         do {
             recorded = try await store.setPartState(
@@ -1428,13 +1439,24 @@ public actor DownloadEngine {
                 }
             }
             contexts[partID]?.hasResumeData = hasResumeData
+            if let beforeRequeueingInactive { await beforeRequeueingInactive(partID) }
             await persistIdle(partID) {
                 try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
             }
+            await restartIfReactivated(partID, token: token)
             return
         }
         contexts[partID]?.onlyWhileActive = false
         task.resume()
+    }
+
+    /// Ends a launch that wrote its part back as queued because the app was inactive. An
+    /// activation meanwhile skipped the part, as this launch still held it: the part restarts
+    /// now, as that activation's restart would have started it.
+    private func restartIfReactivated(_ partID: UUID, token: UUID) async {
+        guard launching[partID] == token else { return }
+        launching[partID] = nil
+        if restartsQueuedParts { await launch(partID, onlyWhileActive: true) }
     }
 
     // MARK: - Events
