@@ -278,6 +278,26 @@ struct PlaybackCoordinatorMediaLeaseTests {
         let time = h.engine.loads.last?.time ?? -1
         #expect(forgetsRecord ? time == 0 : time > 0)
     }
+
+    /// A discard of A is pending while the account switches away and back: the replacement scope
+    /// doesn't restore A's record, so once the discard clears it, the replacement's account end
+    /// can't save A's old position again. Control: with no action pending, it restores A.
+    @Test(arguments: [true, false])
+    func aReplacementScopeDoesntRestoreMediaAnActionHolds(actionPending: Bool) throws {
+        h.lastPlayed.record = h.record("A", position: 2400, age: 60)
+        let action = actionPending ? leases.acquire(h.key("A"), for: .progressAction) : nil
+        coordinator.stop(reason: .accountSwitch)
+        let replacement = try CoordinatorHarness(
+            lastPlayed: h.lastPlayed, connectionID: h.connectionID, mediaLeases: leases)
+
+        #expect(replacement.coordinator.restoreLastPlayed() == !actionPending)
+        guard let action else { return }
+        // The discard's local sync clears the record, then the action ends.
+        h.lastPlayed.clear()
+        action.release()
+        replacement.coordinator.stop(reason: .expired)
+        #expect(h.lastPlayed.record == nil)
+    }
 }
 
 // MARK: - MediaLeases

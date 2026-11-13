@@ -530,7 +530,8 @@ private let forwardings: [StoreServiceForwarding] = [
 }
 
 extension LibraryStoreServicesTests {
-    enum AcceptedAction: String, CaseIterable { case discard, finished, notFinished }
+    /// `discardNotFound`: the server answers the DELETE with 404, as the progress is already gone.
+    enum AcceptedAction: String, CaseIterable { case discard, discardNotFound, finished, notFinished }
 
     /// The server accepted an action while the account switched away: the action still updates
     /// the account's local row, so its dirty position can't recreate discarded progress or undo
@@ -558,7 +559,7 @@ extension LibraryStoreServicesTests {
             let target = ItemActionTarget(libraryItemID: "li", duration: 60)
             let request = Task {
                 switch action {
-                case .discard: try await window.discardProgress(target)
+                case .discard, .discardNotFound: try await window.discardProgress(target)
                 case .finished: try await window.markFinished(target)
                 case .notFinished: try await window.markNotFinished(target)
                 }
@@ -570,14 +571,24 @@ extension LibraryStoreServicesTests {
             await store.connect(client: WritingClient(name: "b", writes: writes), connectionKey: serverB)
             store.clear()
             await store.connect(client: WritingClient(name: "a2", writes: writes), connectionKey: serverA)
-            held.reply.resume()
+            if action == .discardNotFound {
+                held.reply.resume(throwing: APIError.notFound)
+            } else {
+                held.reply.resume()
+            }
             await #expect(throws: CancellationError.self) { try await request.value }
-            #expect(writes.value == [action == .discard ? "a:delete:progress-li" : "a:li"])
+            let expectedWrites: [String] =
+                switch action {
+                case .discard: ["a:delete:progress-li"]
+                case .discardNotFound: []
+                case .finished, .notFinished: ["a:li"]
+                }
+            #expect(writes.value == expectedWrites)
             #expect(store.progress.progress(libraryItemID: "li") == nil)
 
             let row = try await local.progress(for: key)
             switch action {
-            case .discard: #expect(row == nil)
+            case .discard, .discardNotFound: #expect(row == nil)
             case .finished: #expect(row?.isFinished == true)
             case .notFinished: #expect(row?.isFinished == false && row?.currentTime == 0)
             }

@@ -948,11 +948,14 @@ public final class PlaybackCoordinator {
 
     /// Publishes the last-played item for this connection, paused at its saved position, with
     /// its display metadata in ``restoredRecord``, without starting a session or loading the
-    /// engine. Returns whether an item was restored.
+    /// engine. Returns whether an item was restored. A progress action on the record's media
+    /// (``MediaLeases``) skips it: the action clears the record, and a snapshot taken first would
+    /// save the old position again at account end (#368).
     @discardableResult
     public func restoreLastPlayed() -> Bool {
         guard !isRetired, phase == .idle, let record = lastPlayedStore.load(),
-            record.serverConnectionID == sessions.serverConnectionID
+            record.serverConnectionID == sessions.serverConnectionID,
+            mediaLeases?.isHeld(record.key, by: .progressAction) != true
         else { return false }
         generation += 1
         mediaKey = record.key

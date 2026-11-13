@@ -686,8 +686,14 @@ extension LibraryStoreServices: ProgressWriting {
     public func progressID(itemID: String, episodeID: String?) async throws -> String? {
         try await send((any ProgressWriting).self) { try await $0.progressID(itemID: itemID, episodeID: episodeID) }
     }
+    /// A 404 means the progress is already gone, so it succeeds here, before a clear or switch
+    /// would turn the failure into cancellation and skip the local sync.
     public func deleteProgress(id: String) async throws {
-        try await send((any ProgressWriting).self, keepsSuccess: true) { try await $0.deleteProgress(id: id) }
+        try await send((any ProgressWriting).self, keepsSuccess: true) {
+            do {
+                try await $0.deleteProgress(id: id)
+            } catch APIError.notFound {}
+        }
     }
 }
 
