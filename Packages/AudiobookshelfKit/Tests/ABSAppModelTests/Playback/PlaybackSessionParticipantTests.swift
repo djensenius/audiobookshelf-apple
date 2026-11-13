@@ -361,7 +361,9 @@ private struct Harness {
     /// The negative control: without a client, there's no server to sync with.
     @Test func aSessionWithoutAClientDoesNotSync() async throws {
         let harness = try Harness()
-        try await harness.started()
+        // Not `started()`, which clears the log the start wrote.
+        await harness.lifecycle.start()
+        #expect(await eventually { harness.log.entries.contains("a.restore") })
         for _ in 0..<50 { await Task.yield() }
 
         #expect(!harness.log.entries.contains { $0.hasPrefix("a.sync") })
