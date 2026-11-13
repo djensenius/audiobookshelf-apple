@@ -66,6 +66,7 @@ chapters Opening, Middle and Ending). Podcasts: *Synthetic Cast* with one 20 s M
 | `ProgressContractTests` | Each progress group, `lastUpdate`, finished and auto-finish, ebook progress, batch update, delete |
 | `LocalProgressContractTests` | `LocalProgressStore` sending to the server and settling on what it holds |
 | `BookmarkContractTests` | Create at whole and fractional times, rename on an existing time, update, delete by `pathTime`, a second delete (404), `GET /api/me` across items with raw counts, empty title (400) |
+| `PodcastCreationContractTests` | Its own pass ([below](#podcast-creation-and-feed-lookup)): `POST /api/podcasts` returns the expanded item at the requested path; the same path again (400 `Podcast already exists`), an unknown folder (404), a non-admin (403 `Forbidden`, also for feed lookup); `POST /api/podcasts/feed` with an invalid URL (400 with a message) and a loopback feed (404) |
 
 Not covered yet: listening stats, Socket.IO events
 (`ABSRealtime`) and OpenID sign-in (see [oidc.md](oidc.md) for the manual check).
@@ -86,6 +87,7 @@ The suite asserts these per version. Other versions check only what holds for al
 | Refresh token replaced by a refresh | rejected at once | accepted for 10 minutes, with the current refresh token returned |
 | `DELETE /api/me/progress/:id` twice | 200 | 404 |
 | MP3 duration of a 30 s file | about 30.1 s (encoder padding) | 30 s |
+| `relPath` of a podcast from `POST /api/podcasts` | the whole path without its leading `/` (it strips `folder.fullPath`, which the model lacks) | relative to the folder |
 
 Behaviour that holds on both, and that fixtures did not capture:
 
@@ -192,6 +194,35 @@ would be counted twice; the delay bounds that risk, it doesn't remove it. The fa
 `abandonedSyncs` gives up with `.timedOut` once the request has entered the model, which then
 applies it when the test opens its gates. A snapshot still unreconciled when the session closes
 is dropped (#382).
+
+## Podcast creation and feed lookup
+
+`PodcastCreationContractTests` adds a podcast to the seeded podcast library, whose item count
+`LibraryContractTests` and `ExpandedPodcastContractTests` pin, and suites run in parallel. So
+`scripts/test-server.sh test` runs it in its own `swift test` pass with
+`ABS_PODCAST_WRITE_CONTRACT=1`, after the ordinary pass (which clears the variable) and before
+owned search; anywhere else the suite is skipped. To run it alone, set the variable and pass
+`--filter PodcastCreationContractTests`. Each created item is hard-deleted by its exact ID
+(`DELETE /api/items/:id?hard=1`, which also removes its folder) on success and failure, and the
+test then checks the item is a 404 and the library is back to one item. The request has no
+`imageUrl`, so the server downloads no cover.
+
+Apart from the created item's `relPath` (see [Differences between versions](#differences-between-versions);
+the app reads it only as a fallback book title), both pinned releases share what the suite checks. 2.37.2
+also refuses an empty `path` and a path outside the selected folder (400); the suite doesn't
+exercise those, because 2.26.0 would write outside the library folder. The app builds the path
+inside the folder, and the server's own 403 body (`Forbidden`) is not shown to the user (the app
+shows its own message for anything but a 400).
+
+Not covered:
+
+- **A valid feed.** `getPodcastFeed` fetches through `ssrf-req-filter`, which refuses loopback
+  and private addresses, so a feed served by the test host or the server itself is a 404 (the
+  suite pins that). Covering a parsed `PodcastFeedResponse` would need
+  `SSRF_REQUEST_FILTER_WHITELIST` on the server and a feed the server can reach, or internet
+  access; the response shape is pinned only by the `podcast-feed.json` fixture.
+- **`GET /api/search/podcast`.** The server asks the iTunes directory, so it needs internet
+  access and its results change; the shape is pinned only by `podcast-directory-search.json`.
 
 ## Add a contract
 
