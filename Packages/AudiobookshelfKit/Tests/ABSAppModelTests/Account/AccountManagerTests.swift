@@ -1940,4 +1940,170 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         await restoring.value
         #expect(manager.state == expected && manager.activeConnection?.id == expectedID)
     }
+
+    // MARK: - #227
+
+    /// An expiry while the connection is being removed doesn't save its sign-out, expecting the
+    /// delete. When the delete fails, the removal saves it, so the tokens aren't restored offline.
+    @Test func failedRemovalSavesTheSignOutOfASessionThatExpiredMeanwhile() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let client = try #require(manager.client)
+        let deleting = StubGate()
+        manager.willDeleteRemovedSession = { await deleting.pass() }
+        let removing = Task { try await manager.remove(id) }
+        await deleting.arrived()
+
+        // The Keychain can delete neither the expired session nor, then, the connection's items.
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        server.revokeSession()
+        await #expect(throws: APIError.sessionExpired) { try await client.send(AuthEndpoints.authorize()) }
+        #expect(try await harness.store.connection(id: id)?.signedOutAt == nil)
+        deleting.open()
+        await #expect(throws: KeychainError(status: errSecInteractionNotAllowed)) { try await removing.value }
+        #expect(try harness.session(id) != nil)
+        #expect(manager.connections.map(\.id) == [id] && manager.connections.first?.signedOutAt != nil)
+
+        server.update { $0.isOffline = true }
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        #expect(relaunched.state == .signedOut && relaunched.connections.map(\.id) == [id])
+    }
+
+    /// The store needn't run its jobs in call order, so an expiry's sign-out can be saved before a
+    /// sign-in's mark as used, which clears a sign-out. The sign-in saves it again.
+    @Test func signInMarkingUsedKeepsTheSignOutOfAnExpiryMeanwhile() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let oldClient = try #require(manager.client)
+        let validated = try await validate(server)
+        manager.willMarkUsed = {
+            manager.willMarkUsed = nil
+            // The active client uses the new session, which the server rejects; the Keychain can't
+            // delete it, so the expiry saves the sign-out.
+            harness.keychain.failWrites(with: errSecInteractionNotAllowed) { data in
+                // The delete keeps the custom headers, so it writes the item without the session.
+                data.map { !String(decoding: $0, as: UTF8.self).contains("accessToken") } ?? true
+            }
+            server.revokeSession()
+            _ = try? await oldClient.send(AuthEndpoints.authorize())
+        }
+
+        await #expect(throws: AccountError.server(.sessionExpired)) {
+            try await manager.connect(local: validated, username: "david", password: "pw")
+        }
+        #expect(manager.state == .signedOut && manager.lastError == .server(.sessionExpired))
+        #expect(try await harness.store.connection(id: id)?.signedOutAt != nil)
+        #expect(try harness.session(id) != nil)
+
+        server.update { $0.isOffline = true }
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        #expect(relaunched.state == .signedOut && relaunched.connections.first?.signedOutAt != nil)
+    }
+
+    /// As for a sign-in: a switch's mark as used doesn't lose the sign-out of an expiry meanwhile.
+    @Test func switchMarkingUsedKeepsTheSignOutOfAnExpiryMeanwhile() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let first = FakeServer()
+        let firstID = try await signIn(manager, to: first)
+        _ = try await signIn(manager, to: FakeServer(userId: "usr-2"))
+        manager.willMarkUsed = {
+            manager.willMarkUsed = nil
+            guard let client = manager.client else { return }
+            harness.keychain.failWrites(with: errSecInteractionNotAllowed) { data in
+                // The delete keeps the custom headers, so it writes the item without the session.
+                data.map { !String(decoding: $0, as: UTF8.self).contains("accessToken") } ?? true
+            }
+            first.revokeSession()
+            _ = try? await client.send(AuthEndpoints.authorize())
+        }
+
+        try await manager.switch(to: firstID)
+        #expect(manager.state == .signedOut && manager.lastError == .server(.sessionExpired))
+        #expect(try await harness.store.connection(id: firstID)?.signedOutAt != nil)
+        #expect(try harness.session(firstID) != nil)
+    }
+
+    /// Two removals of one connection overlap: the first failing doesn't stop the second's
+    /// connection counting as being removed, so no download client is made for it meanwhile.
+    @Test func aFailedRemovalDoesNotEndAnOverlappingRemovalOfTheConnection() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let otherID = try await signIn(manager, to: FakeServer())
+        _ = try await signIn(manager, to: FakeServer(userId: "usr-2"))
+        #expect(await manager.downloadClient(for: otherID) != nil)
+        let firstGate = StubGate()
+        let secondGate = StubGate()
+        var arrivals = 0
+        manager.willDeleteRemovedSession = {
+            arrivals += 1
+            await (arrivals == 1 ? firstGate : secondGate).pass()
+        }
+        let firstRemoval = Task { try await manager.remove(otherID) }
+        await firstGate.arrived()
+        let secondRemoval = Task { try await manager.remove(otherID) }
+        await secondGate.arrived()
+
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        firstGate.open()
+        await #expect(throws: KeychainError(status: errSecInteractionNotAllowed)) { try await firstRemoval.value }
+        harness.keychain.failWrites(with: nil)
+        #expect(await manager.downloadClient(for: otherID) == nil)
+
+        secondGate.open()
+        try await secondRemoval.value
+        #expect(manager.connections.count == 1 && manager.connections.first?.id != otherID)
+        #expect(try harness.session(otherID) == nil)
+    }
+
+    /// A failed removal of the active connection doesn't put it back over a newer call, here a
+    /// logout that found nothing to sign out of, which leaves the state as the removal did.
+    @Test func failedRemovalDoesNotReviveTheActiveConnectionAfterANewerCall() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let id = try await signIn(manager, to: FakeServer())
+        let deleting = StubGate()
+        manager.willDeleteRemovedSession = { await deleting.pass() }
+        let removing = Task { try await manager.remove(id) }
+        await deleting.arrived()
+
+        #expect(await manager.logout() == nil)
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        deleting.open()
+        await #expect(throws: KeychainError(status: errSecInteractionNotAllowed)) { try await removing.value }
+        #expect(manager.state == .signedOut && manager.activeConnection == nil && manager.client == nil)
+    }
+
+    /// Nor over another connection that a sign-in started earlier made active meanwhile, which
+    /// doesn't begin a newer call.
+    @Test func failedRemovalDoesNotReviveTheActiveConnectionOverAnotherThatSignedIn() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let firstID = try await signIn(manager, to: FakeServer())
+        let second = FakeServer(userId: "usr-2")
+        let validated = try await validate(second)
+        let login = second.hold("/login")
+        let signingIn = Task { try await manager.connect(local: validated, username: "david", password: "pw") }
+        await login.arrived()
+        let deleting = StubGate()
+        manager.willDeleteRemovedSession = { await deleting.pass() }
+        let removing = Task { try await manager.remove(firstID) }
+        await deleting.arrived()
+
+        login.open()
+        try await signingIn.value
+        let user = try #require(manager.state.user)
+        #expect(user.connectionID != firstID)
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        deleting.open()
+        await #expect(throws: KeychainError(status: errSecInteractionNotAllowed)) { try await removing.value }
+        #expect(manager.state == .signedIn(user) && manager.activeConnection?.id == user.connectionID)
+        #expect(try harness.session(firstID) != nil)
+    }
 }
