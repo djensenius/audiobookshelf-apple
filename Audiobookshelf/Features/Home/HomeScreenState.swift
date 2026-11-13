@@ -236,6 +236,23 @@ enum HomePresentation {
         shelf?.sections(for: isConnected ? libraryKind : nil) ?? []
     }
 
+    /// Whether `section` is one of the downloaded shelves (``DownloadedShelfModel/sections(for:)``),
+    /// whose items can be from any of the account's libraries rather than the selected one.
+    static func isDownloaded(_ section: HomeSection) -> Bool {
+        [DownloadedShelfModel.booksSectionID, DownloadedShelfModel.podcastsSectionID].contains(section.id)
+    }
+
+    /// The library Add to playlist lists and creates playlists in for `item` on `section`, for
+    /// ``AddToPlaylistAction``: `nil`, the scene's library, on the server's shelves, which are that
+    /// library's. A downloaded item can be from another of the account's libraries and the download
+    /// doesn't record which, so its own is read from the server, which Add to playlist needs anyway.
+    static func playlistLibraryID(
+        for item: ItemSummary, in section: HomeSection, items: any ItemDetailService
+    ) async throws -> String? {
+        guard isDownloaded(section) else { return nil }
+        return try await items.item(id: item.itemID).libraryId
+    }
+
     /// The sections Home shows: online, the server's and then the downloaded ones; disconnected,
     /// only the downloaded ones, as legacy and ADR 0004 do.
     static func sections(server: [HomeSection], downloaded: [HomeSection], isConnected: Bool) -> [HomeSection] {

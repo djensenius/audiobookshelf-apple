@@ -34,7 +34,7 @@ struct HomeShelvesView: View {
 
 /// One section as a shelf of the cards its kind calls for. Opens a card in a new window itself
 /// (``OpenInNewWindow``), where the device has windows, and adds it to a playlist through `\.addToPlaylist`, while
-/// the account can edit playlists.
+/// the account can edit playlists, in the item's library (``HomePresentation/playlistLibraryID(for:in:items:)``).
 struct HomeSectionRow: View {
     let section: HomeSection
     let context: ItemActionContext
@@ -46,6 +46,9 @@ struct HomeSectionRow: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.supportsMultipleWindows) private var supportsMultipleWindows
     @Environment(\.addToPlaylist) private var addToPlaylist
+    @Environment(\.libraryStore) private var store
+    /// A downloaded item's library couldn't be read for Add to playlist.
+    @State private var playlistLibraryFailed = false
     private var libraries = LibraryCoverSettings()
 
     var body: some View {
@@ -54,6 +57,35 @@ struct HomeSectionRow: View {
             cardWidth: HomePresentation.cardWidth(for: section.kind)
         ) { entry in
             card(for: entry)
+        }
+        .alert(
+            Text(verbatim: L10n.string("MessagePlaylistsListLoadFailed")), isPresented: $playlistLibraryFailed
+        ) {
+            Button(L10n.string("ButtonOk")) {}
+        }
+    }
+
+    /// Opens Add to playlist for `item` in its library, or says the playlists couldn't be loaded
+    /// when a downloaded item's library can't be read, rather than listing another library's.
+    private func openAddToPlaylist(for item: ItemSummary) {
+        guard let addToPlaylist else { return }
+        guard HomePresentation.isDownloaded(section) else {
+            addToPlaylist(item)
+            return
+        }
+        guard let items = store?.makeServices() else {
+            playlistLibraryFailed = true
+            return
+        }
+        let section = section
+        Task {
+            do {
+                let libraryID = try await HomePresentation.playlistLibraryID(for: item, in: section, items: items)
+                addToPlaylist(item, libraryID: libraryID)
+            } catch is CancellationError {
+            } catch {
+                playlistLibraryFailed = true
+            }
         }
     }
 
@@ -67,7 +99,7 @@ struct HomeSectionRow: View {
                 case .openDetails: open(ItemCardActions.route(for: item))
                 case .openInNewWindow:
                     OpenInNewWindow.open(ItemCardActions.route(for: item), from: router, with: openWindow)
-                case .addToPlaylist: addToPlaylist?(item)
+                case .addToPlaylist: openAddToPlaylist(for: item)
                 default: perform(kind, item)
                 }
             }

@@ -18,6 +18,47 @@ private struct EmptyLibraryService: LibraryService {
     func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> { throw Unused() }
 }
 
+/// Serves items' libraries and records the item lookups and the libraries Add to playlist lists
+/// and creates playlists in.
+private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
+    struct Unknown: Error {}
+    struct Unused: Error {}
+
+    private let libraries: [String: String]
+    private(set) var lookedUp: [String] = []
+    private(set) var listed: [String] = []
+    private(set) var created: [String] = []
+
+    /// - Parameter libraries: Each item's library, by item ID.
+    init(_ libraries: [String: String]) {
+        self.libraries = libraries
+    }
+
+    func item(id: String) async throws -> LibraryItem {
+        lookedUp.append(id)
+        guard let libraryID = libraries[id] else { throw Unknown() }
+        return LibraryItem(id: id, libraryId: libraryID, mediaType: .book)
+    }
+
+    func allPlaylists(libraryID: String) async throws -> [Playlist] {
+        listed.append(libraryID)
+        return []
+    }
+
+    func createPlaylist(name: String, libraryID: String, items: [PlaylistItemReference]) async throws -> Playlist {
+        created.append(libraryID)
+        return Playlist(
+            id: "pl_new", libraryId: libraryID, name: name,
+            items: items.map { PlaylistItem(libraryItemId: $0.libraryItemID, episodeId: $0.episodeID) })
+    }
+
+    func addToPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist { throw Unused() }
+    func removeFromPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist { throw Unused() }
+    func removeFromPlaylist(id: String, item: PlaylistItemReference) async throws -> Playlist { throw Unused() }
+    func reorderPlaylist(id: String, items: [PlaylistItemReference]) async throws -> Playlist { throw Unused() }
+    func deletePlaylist(id: String) async throws { throw Unused() }
+}
+
 /// Home's downloaded shelves and its disconnected state (#76): which shelves show online and
 /// offline, the message and Retry when nothing is downloaded, and the app's live downloads
 /// feeding the shelf.
@@ -241,6 +282,43 @@ private struct EmptyLibraryService: LibraryService {
             ids(HomePresentation.downloadedSections(of: model, libraryKind: nil, isConnected: false)) == ["local-books"]
         )
         #expect(reads.count == 2)
+    }
+
+    @Test func aDownloadedBookFromAnotherLibraryUsesItsOwnLibrarysPlaylists() async throws {
+        // Library A is selected; the downloaded book is in library B.
+        let services = ItemLibraries(["li_Book": "lib_B"])
+        let downloads = HomePresentation.downloadedSections(
+            of: await shelf([item("Book")]), libraryKind: .book, isConnected: true)
+        let section = try #require(downloads.first)
+        #expect(HomePresentation.isDownloaded(section))
+        guard case .item(let book) = try #require(section.entries.first) else {
+            Issue.record("The downloaded shelf shows an item")
+            return
+        }
+
+        let libraryID = try await HomePresentation.playlistLibraryID(for: book, in: section, items: services)
+        #expect(libraryID == "lib_B")
+        // As `ItemCardPlaylists` opens the sheet: the item's library, else the scene's.
+        let model = try #require(
+            ItemCardActions.addToPlaylistModel(for: book, libraryID: libraryID ?? "lib_A", playlists: services))
+        #expect(model.libraryID == "lib_B")
+        await model.load()
+        let created = await model.create(name: "Road trip")
+        #expect(created)
+        #expect(await services.listed == ["lib_B"])
+        #expect(await services.created == ["lib_B"])
+
+        // The server's shelves are the selected library's: no lookup, so the scene's library.
+        let onServer = try #require(server.first)
+        #expect(!HomePresentation.isDownloaded(onServer))
+        #expect(try await HomePresentation.playlistLibraryID(for: book, in: onServer, items: services) == nil)
+        #expect(await services.lookedUp == ["li_Book"])
+
+        // A downloaded item whose library can't be read fails, rather than using library A's playlists.
+        let unknown = ItemSummary(id: "li_gone", itemID: "li_gone", kind: .book, title: "Gone")
+        await #expect(throws: ItemLibraries.Unknown.self) {
+            try await HomePresentation.playlistLibraryID(for: unknown, in: section, items: services)
+        }
     }
 
     @Test func homeWaitsForTheDownloadsBeforeSayingThereAreNone() {
