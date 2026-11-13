@@ -89,6 +89,17 @@
         }
       }
     },
+    "IntentJumpBackTitle" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Jump Back"
+          }
+        }
+      }
+    },
     "IntentJumpDescription" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -173,6 +184,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Speed"
+          }
+        }
+      }
+    },
+    "IntentPlaying" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Playing"
           }
         }
       }

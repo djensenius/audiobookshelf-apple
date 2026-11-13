@@ -165,6 +165,21 @@ private func context(_ server: UUID) -> SessionContext {
                 .appending(path: "Library/Application Support/Widgets/continue-listening.json"))
     }
 
+    /// The play/pause control shows the snapshot's play flag, and paused without a snapshot.
+    @Test func thePlayPauseControlShowsTheSnapshotsPlayFlag() throws {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        #expect(!WidgetSnapshot.isPlaying(at: nil))
+        #expect(!WidgetSnapshot.isPlaying(at: file))
+
+        try snapshot(playing: true).write(to: file)
+        #expect(WidgetSnapshot.isPlaying(at: file))
+        try snapshot(playing: false).write(to: file)
+        #expect(!WidgetSnapshot.isPlaying(at: file))
+
+        try Data("not a snapshot".utf8).write(to: file)
+        #expect(!WidgetSnapshot.isPlaying(at: file))
+    }
+
     @Test func deepLinkOpensTheItemOnItsServer() throws {
         var podcast = snapshot(item: "li/1+a&b%")
         podcast.episodeID = "ep 1+2"

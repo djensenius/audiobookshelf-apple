@@ -115,6 +115,18 @@ private final class RecordedPlays {
         #expect(!String(notes.characters).contains("tracker"))
     }
 
+    @Test func showNotesLinkTimesWithinTheEpisode() throws {
+        let html = #"<p>News 12:34, Q&amp;A 1:02:03, <a href="https://example.com">at 0:10</a>, late 2:00:00</p>"#
+        let notes = try #require(EpisodeDetailPresentation.showNotes(html: html, duration: 3_800))
+        let links = notes.runs.compactMap { run in run.link.map { (String(notes[run.range].characters), $0) } }
+        #expect(links.map(\.0) == ["12:34", "1:02:03", "at 0:10"])
+        #expect(
+            links.map(\.1) == [
+                ShowNotesTimestamps.url(seconds: 754), ShowNotesTimestamps.url(seconds: 3_723),
+                URL(string: "https://example.com"),
+            ])
+    }
+
     @Test(arguments: [nil, "", "   ", "<p> </p><br>", "<img src=\"https://x.example/a.png\">"])
     func blankShowNotesShowNothing(html: String?) {
         #expect(EpisodeDetailPresentation.showNotes(html: html) == nil)
@@ -167,6 +179,21 @@ private final class RecordedPlays {
         #expect(plays.starts.map(\.episodeID) == ["pe_1", "pe_2", "pe_3"])
         // Play Again on the finished `pe_3` starts at 0; the others resume (`nil`).
         #expect(plays.starts.map(\.startTime) == [nil, nil, 0])
+    }
+
+    @Test func aShowNotesTimePlaysThisEpisodeFromThatTime() async {
+        let plays = RecordedPlays()
+        let play = PlayItemAction { itemID, episodeID, startTime in
+            plays.starts.append((itemID, episodeID, startTime))
+        }
+        // Even the finished `pe_3`, which Play would start over, plays from the time.
+        for episodeID in ["pe_1", "pe_3"] {
+            let model = await loadedModel(episodeID: episodeID)
+            #expect(await EpisodeDetailPresentation.startPlayback(of: model, with: play, from: 754) == nil)
+        }
+        #expect(plays.starts.map(\.itemID) == [podcast.id, podcast.id])
+        #expect(plays.starts.map(\.episodeID) == ["pe_1", "pe_3"])
+        #expect(plays.starts.map(\.startTime) == [754, 754])
     }
 
     @Test func aFailedStartIsReportedButACancelledOneIsnt() async {

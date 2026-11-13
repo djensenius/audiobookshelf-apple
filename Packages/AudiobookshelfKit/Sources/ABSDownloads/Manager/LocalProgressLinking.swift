@@ -5,8 +5,8 @@ import Foundation
 /// (`LocalProgressStore.pruneSynced()` only deletes rows without a download).
 ///
 /// ``DownloadManager`` calls it when a download completes and when downloaded media is deleted.
-/// Its implementation over `LocalProgressStore.setLocalLibraryItemID(_:for:)`, and the seeding of
-/// local progress, arrive with #74 (decision Q4). Errors are logged; they never undo the download
+/// ``LocalProgressStoreLinker`` implements it over `LocalProgressStore`; seeding local progress
+/// comes with local playback (#74, decision Q4). Errors are logged; they never undo the download
 /// or the deletion.
 ///
 /// The manager makes these calls for one library item one at a time, holding the item, and
