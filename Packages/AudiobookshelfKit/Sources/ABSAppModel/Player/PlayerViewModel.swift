@@ -383,6 +383,18 @@ public final class PlayerViewModel {
         playback.stop(reason: .user)
     }
 
+    /// "Stream anyway" for ``PlayerErrorMessage/streamingNeedsConfirmation``: plays what the
+    /// streaming policy blocked (an item, or the queue's next one) on the metered network. Does
+    /// nothing for any other failure, and never overrides "never".
+    public func confirmMeteredStreaming() async {
+        await playback.confirmMeteredStreaming()
+    }
+
+    /// "Cancel" for ``PlayerErrorMessage/streamingNeedsConfirmation``: clears it without playing.
+    public func declineMeteredStreaming() {
+        playback.declineMeteredStreaming()
+    }
+
     // MARK: Private
 
     /// Fractions this close are the same scrub position: rounding noise, under a millisecond for

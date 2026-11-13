@@ -734,6 +734,15 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         }
     }
 
+    /// #376: the alert's "Stream anyway" and "Cancel" go to the playback.
+    @Test func meteredStreamingConfirmationGoesToThePlayback() async throws {
+        try await withPlayer { model, playback, _, _ in
+            await model.confirmMeteredStreaming()
+            model.declineMeteredStreaming()
+            #expect(playback.calls == [.confirmMeteredStreaming, .declineMeteredStreaming])
+        }
+    }
+
     // MARK: Retained text
 
     @Test func textIsKeptWhenTheSessionDrops() async throws {

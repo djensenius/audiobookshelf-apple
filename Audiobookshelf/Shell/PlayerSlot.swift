@@ -13,6 +13,10 @@ protocol PlayerSlotState: AnyObject, Observable {
     var title: String { get }
     /// The failure to show, with or without a session; `nil` when there is none.
     var errorMessageKey: PlayerErrorMessage? { get }
+    /// "Stream anyway" for a `.streamingNeedsConfirmation` failure.
+    func confirmMeteredStreaming() async
+    /// "Cancel" for a `.streamingNeedsConfirmation` failure.
+    func declineMeteredStreaming()
 }
 
 extension PlayerViewModel: PlayerSlotState {}
@@ -28,6 +32,14 @@ final class PlaceholderPlayerState: PlayerSlotState {
         self.hasSession = hasSession
         self.title = title
         self.errorMessageKey = errorMessageKey
+    }
+
+    func confirmMeteredStreaming() async {
+        errorMessageKey = nil
+    }
+
+    func declineMeteredStreaming() {
+        errorMessageKey = nil
     }
 }
 
@@ -52,7 +64,8 @@ final class PlaceholderPlayerState: PlayerSlotState {
 /// A playback failure (`errorMessageKey`) shows in an alert, with or without a session, and only
 /// in the active scene, so other windows don't repeat it. On iOS the full player shows it while
 /// it covers the scene. Each scene shows a failure until it's dismissed there, and again only
-/// after the player has had none (or a different one).
+/// after the player has had none (or a different one). A failure that needs the user's consent to
+/// stream on a metered network offers "Stream anyway" and "Cancel" instead of OK.
 struct PlayerSlot: ViewModifier {
     @Bindable var router: Router
     let player: any PlayerSlotState
@@ -116,6 +129,12 @@ struct PlayerSlot: ViewModifier {
         }
     }
 
+    /// Whether the alert for `error` asks to stream anyway: only for a confirmation ("ask"), never
+    /// for "never".
+    nonisolated static func offersStreaming(for error: PlayerErrorMessage) -> Bool {
+        error == .streamingNeedsConfirmation
+    }
+
     /// The failure this scene shows, while it's the active one.
     private var shownError: PlayerErrorMessage? {
         guard scenePhase == .active, appearsActive else { return nil }
@@ -140,10 +159,23 @@ struct PlayerSlot: ViewModifier {
                 get: { error != nil },
                 set: { if !$0 { dismissedError = player.errorMessageKey } }),
             presenting: error
-        ) { _ in
-            Button(role: .cancel) {
-            } label: {
-                Text(verbatim: L10n.string("ButtonOk"))
+        ) { error in
+            if Self.offersStreaming(for: error) {
+                Button {
+                    Task { await player.confirmMeteredStreaming() }
+                } label: {
+                    Text(verbatim: L10n.string("ButtonStreamAnyway"))
+                }
+                Button(role: .cancel) {
+                    player.declineMeteredStreaming()
+                } label: {
+                    Text(verbatim: L10n.string("ButtonCancel"))
+                }
+            } else {
+                Button(role: .cancel) {
+                } label: {
+                    Text(verbatim: L10n.string("ButtonOk"))
+                }
             }
         }
     }
