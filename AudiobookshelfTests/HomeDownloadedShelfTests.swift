@@ -523,7 +523,9 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
         func verify() async {
             await HomeRefreshSchedule.updateAfterVerification(
                 of: model, store: store, isConnected: { true }, pollInterval: .milliseconds(5),
-                retry: { await model.refresh() }, refreshed: { false })
+                retry: {
+                    await model.refresh(); return false
+                }, refreshed: { false })
         }
 
         if firstLoad == .held {
@@ -579,7 +581,9 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
         let verification = Task.immediate { @MainActor in
             await HomeRefreshSchedule.updateAfterVerification(
                 of: model, store: store, isConnected: { true }, pollInterval: .milliseconds(5),
-                retry: { await model.refresh() }, refreshed: { false })
+                retry: {
+                    await model.refresh(); return false
+                }, refreshed: { false })
         }
         service.answerShelves(succeeds: true)
         await load.value
@@ -618,7 +622,9 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
         let verification = Task.immediate { @MainActor in
             await HomeRefreshSchedule.updateAfterVerification(
                 of: model, store: store, isConnected: { true }, pollInterval: .milliseconds(5),
-                retry: { await model.refresh() },
+                retry: {
+                    await model.refresh(); return false
+                },
                 refreshed: {
                     await HomeRefreshSchedule.updateLibrariesAfterShelves(
                         of: store, shelvesError: model.error, for: .loadTrigger, isConnected: { true },
@@ -645,6 +651,47 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
 
     @Test func aListTheShelvesRetrysCompletionRetriedIsntRetriedAgain() async throws {
         #expect(try await librariesRequestsAfterAShelvesRetry(listFailedBefore: true) == 3)
+    }
+
+    /// The shelves had failed and the libraries list is in flight without an earlier error when
+    /// the ping confirms the server: the retry of the shelves, checking the list as Home's update
+    /// does, skips it, so the verification waits for the list and retries its failure once.
+    @Test func aListInFlightThatFailsAfterAFailedShelvesRetryIsRetriedOnce() async throws {
+        let service = ScriptedLibraries([.held, .succeeds], shelves: [.fails, .succeeds], separateShelfAnswers: true)
+        let suiteName = "HomeDownloadedShelfTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = LibraryStore(settings: AppSettings(defaults: defaults))
+        store.attach(client: service, connectionKey: LibraryConnectionKey(connectionID: connectionID, userID: "u"))
+        let model = HomeModel(store: store, libraryID: "lib")
+        await model.load()
+        #expect(model.error != nil)
+        let list = Task { await store.refresh() }
+        while !store.isLoading { await Task.yield() }
+
+        // Runs until it waits, so it decides while the list is in flight.
+        let verification = Task.immediate { @MainActor in
+            await HomeRefreshSchedule.updateAfterVerification(
+                of: model, store: store, isConnected: { true }, pollInterval: .milliseconds(5),
+                retry: {
+                    await model.refresh()
+                    return await HomeRefreshSchedule.updateLibrariesAfterShelves(
+                        of: store, shelvesError: model.error, for: .loadTrigger, isConnected: { true },
+                        pollInterval: .milliseconds(5))
+                },
+                refreshed: { false })
+        }
+        // The verification retries the shelves, then waits for the list still in flight.
+        while !model.hasLoaded { await Task.yield() }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(store.isLoading)
+        service.answer(succeeds: false)
+        await list.value
+        await verification.value
+        #expect(model.hasLoaded && model.error == nil)
+        #expect(store.error == nil && !store.isLoading)
+        #expect(await service.shelvesRequests == 2)
+        #expect(await service.requests == 2)
     }
 
     /// A verification Home left before its recovery finished stays pending, so Home recovers

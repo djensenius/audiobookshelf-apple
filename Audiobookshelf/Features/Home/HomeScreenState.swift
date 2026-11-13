@@ -360,7 +360,8 @@ struct HomeRefreshSchedule {
     /// (``ConnectionBannerModel/verifiedRevision`` bumped) after the banner assumed it online, so
     /// a request Home made in between may have failed (#570).
     enum VerificationRequest: Equatable {
-        /// Retry the failed shelves now, as the load trigger does after an error.
+        /// Retry the failed shelves now, as the load trigger does after an error; then the
+        /// libraries list as ``libraries`` does, unless that retry handled it.
         case shelves
         /// Wait for the shelves load or refresh in flight, and retry it once if it fails; then
         /// the libraries list as ``libraries`` does, unless that retry's completion handled it.
@@ -398,37 +399,36 @@ struct HomeRefreshSchedule {
     ///
     /// - Parameters:
     ///   - isConnected: Whether the server can be used now (no connection banner).
-    ///   - retry: Retries the failed shelves (Home's update for the load trigger).
+    ///   - retry: Retries the failed shelves (Home's update for the load trigger); returns
+    ///     whether it handled the libraries list, as `refreshed` does.
     ///   - refreshed: Called after the shelves were retried behind a request in flight, so Home
     ///     records the completion and checks the libraries list as after its own requests;
     ///     returns whether it handled the list (``updateLibrariesAfterShelves(of:shelvesError:for:isConnected:pollInterval:)``).
     @MainActor
     static func updateAfterVerification(
         of model: HomeModel, store: LibraryStore, isConnected: () -> Bool,
-        pollInterval: Duration = .milliseconds(100), retry: () async -> Void, refreshed: () async -> Bool
+        pollInterval: Duration = .milliseconds(100), retry: () async -> Bool, refreshed: () async -> Bool
     ) async {
         let request = verificationRequest(
             libraryID: model.libraryID, isLoading: model.isLoading, hasError: model.error != nil,
             librariesFailed: store.error != nil, librariesLoading: store.isLoading, isConnected: isConnected())
+        // Whether Home's update or completion after a shelves retry checked the libraries list.
+        let listHandled: Bool
         switch request {
         case nil:
             return
         case .shelves:
-            await retry()
+            listHandled = await retry()
         case .shelvesAfterInFlight:
-            // Home's completion after a shelves retry may check the libraries list itself.
-            var listHandled = false
-            if await updateShelvesAfterInFlight(
+            let retried = await updateShelvesAfterInFlight(
                 of: model, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
-            {
-                listHandled = await refreshed()
-            }
-            // Otherwise the list may have failed meanwhile, or still be in flight.
-            if !listHandled, !Task.isCancelled {
-                await updateLibraries(
-                    of: store, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
-            }
+            listHandled = retried ? await refreshed() : false
         case .libraries:
+            listHandled = false
+        }
+        // Otherwise the list may have failed meanwhile, or still be in flight: every path ends
+        // here, so none skips it.
+        if !listHandled, !Task.isCancelled {
             await updateLibraries(of: store, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
         }
     }

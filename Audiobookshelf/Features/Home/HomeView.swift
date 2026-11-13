@@ -144,14 +144,18 @@ private struct HomeScreen: View {
     /// nothing without the server. Without a library, the libraries list instead, which selects
     /// one once loaded. With one, the list too after it failed or the server refused the shelves,
     /// so a library that is gone is replaced with the initial one (#569).
-    private func update(_ trigger: HomeRefreshSchedule.Trigger) async {
+    ///
+    /// - Returns: Whether it handled the libraries list: reloaded it, or waited for the request in
+    ///   flight to retry it.
+    @discardableResult
+    private func update(_ trigger: HomeRefreshSchedule.Trigger) async -> Bool {
         guard let libraryID = model.libraryID else {
             await HomeRefreshSchedule.updateLibraries(
                 of: store, for: trigger, isConnected: { connectionStatus == nil })
-            return
+            return true
         }
         let requested = await updateShelves(of: libraryID, for: trigger)
-        await finishShelves(of: libraryID, for: trigger, recording: requested)
+        return await finishShelves(of: libraryID, for: trigger, recording: requested)
     }
 
     /// After `trigger` requested `libraryID`'s shelves, or didn't (`recording` is `false`):
