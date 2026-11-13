@@ -1330,7 +1330,10 @@ public final class PlaybackCoordinator {
         switch policy.currentStreamingDecision() {
         case .allowed: break
         case .askUser where meteredConsent == key: break
-        case .askUser(let reason): return .failed(.streamingNeedsConfirmation(reason, key: key), generation: generation)
+        case .askUser(let reason):
+            // ``confirmMeteredStreaming()`` plays it again where recovery stopped.
+            blockedPlay = (key, target)
+            return .failed(.streamingNeedsConfirmation(reason, key: key), generation: generation)
         case .denied(let reason): return .failed(.streamingNotAllowed(reason, key: key), generation: generation)
         }
         let attempt = generation + 1
