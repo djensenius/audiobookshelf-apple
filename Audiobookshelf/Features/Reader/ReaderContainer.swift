@@ -167,6 +167,8 @@ struct ReaderContent: View {
         @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     #endif
     @State private var size = CGSize.zero
+    /// The hinge's width while a Duo is spanned across it (``ReaderHingeReader``).
+    @State private var hingeWidth: CGFloat?
 
     var body: some View {
         let readerSettings = settings?.readerSettings ?? ReaderSettings()
@@ -180,6 +182,7 @@ struct ReaderContent: View {
                 } action: {
                     size = $0
                 }
+                .modifier(ReaderHingeReader(hingeWidth: $hingeWidth))
             if model.isChromeVisible {
                 ReaderChrome(model: model, title: title, close: close)
                     .transition(.move(edge: .top).combined(with: .opacity))
@@ -233,9 +236,35 @@ struct ReaderContent: View {
         #if os(iOS)
             ReaderSpreadPolicy.layout(
                 setting: spread, platform: .iOS, sizeClass: horizontalSizeClass == .regular ? .regular : .compact,
-                size: size, hingeWidth: nil)
+                size: size, hingeWidth: hingeWidth)
         #else
             ReaderSpreadPolicy.layout(setting: spread, platform: .macOS, sizeClass: nil, size: size, hingeWidth: nil)
+        #endif
+    }
+}
+
+/// Measures the hinge the reader spans from iOS 27.1: its active `.division` reserved regions
+/// (``ReaderHinge``). Before that and on macOS it measures nothing, so the reader never spreads
+/// around a hinge.
+private struct ReaderHingeReader: ViewModifier {
+    @Binding var hingeWidth: CGFloat?
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+            if #available(iOS 27.1, *) {
+                content
+                    .onGeometryChange(for: CGFloat?.self) { proxy in
+                        ReaderHinge.width(
+                            readerWidth: proxy.size.width,
+                            divisions: proxy.reservedRegions(kind: .division).map { ($0.frame, $0.isActive) })
+                    } action: {
+                        hingeWidth = $0
+                    }
+            } else {
+                content
+            }
+        #else
+            content
         #endif
     }
 }
