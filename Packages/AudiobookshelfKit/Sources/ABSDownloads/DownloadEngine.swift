@@ -845,6 +845,9 @@ public actor DownloadEngine {
             activation = nil
             return false
         }
+        // Resume data no record references: a record went though its blob's delete failed. No
+        // transfer runs without the session, so only a part still stopping can seal meanwhile.
+        vault.deleteBlobs(except: Set(records.flatMap(\.parts).map(\.id)).union(stopping.keys))
         survivorsToStop.formUnion(marked)
         // Their resume data goes before their complete records are finalised, which drops the
         // parts that lead to it; a quiesce under way deletes it itself, once its pauses end.
