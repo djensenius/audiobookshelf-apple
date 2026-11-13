@@ -3,6 +3,7 @@ import ABSCore
 import Foundation
 import SwiftData
 import Testing
+@preconcurrency import ZIPFoundation
 
 @testable import ABSAppModel
 @testable import ABSData
@@ -25,29 +26,74 @@ private enum ReaderTestFailure: Error {
     case notReady
 }
 
+/// A CBZ of `pages` entries (`page1.png` …). The bytes aren't images: opening and turning don't
+/// decode pages.
+private func comicData(pages: Int) throws -> Data {
+    let archive = try Archive(accessMode: .create)
+    for page in 1...pages {
+        let data = Data("page \(page)".utf8)
+        try archive.addEntry(
+            with: "page\(page).png", type: .file, uncompressedSize: Int64(data.count), compressionMethod: .none,
+            provider: { position, size in data.subdata(in: Int(position)..<Int(position) + size) })
+    }
+    return try #require(archive.data)
+}
+
 @MainActor
 @Suite struct ReaderContainerModelTests {
-    let fetcher = FakeEbookFetcher()
+    let fetcher: FakeEbookFetcher
+
+    init(fetcher: FakeEbookFetcher = FakeEbookFetcher()) {
+        self.fetcher = fetcher
+    }
 
     func makeModel(
         _ kind: ReaderKind = .pdf, progress: EbookProgressModel? = nil, server: MediaProgress? = nil
     ) -> ReaderContainerModel {
-        ReaderContainerModel(
-            request: request(ext: kind == .epub ? "epub" : "pdf"), kind: kind,
+        let ext =
+            switch kind {
+            case .epub: "epub"
+            case .comic: "cbz"
+            default: "pdf"
+            }
+        return ReaderContainerModel(
+            request: request(ext: ext), kind: kind,
             loader: EbookFileLoader(directory: readerTemporaryDirectory(), fetcher: fetcher), progress: progress,
             serverProgress: server)
     }
 
     @Test func unsupportedFormatsFetchNothing() async {
-        for (kind, name) in [(ReaderKind.comic, "CBZ"), (.unsupported(.mobi), "MOBI"), (.unsupported(.cbr), "CBR")] {
+        for (kind, name) in [(ReaderKind.unsupported(.mobi), "MOBI"), (.unsupported(.cbr), "CBR")] {
             let model = makeModel(kind)
             await model.load()
             #expect(model.content == .unsupported)
+            #expect(model.display == .unsupported)
             #expect(model.formatName == name)
         }
         #expect(fetcher.calls.value.isEmpty)
         #expect(ReaderContainerModel.opens(.epub))
         #expect(ReaderContainerModel.opens(.pdf))
+        #expect(ReaderContainerModel.opens(.comic))
+    }
+
+    /// Each format's file goes to its own reader: comics to the comic pager, not the refusal.
+    @Test func theFileGoesToItsFormatsReader() async throws {
+        let routes: [(ReaderKind, @Sendable (URL) -> ReaderContainerModel.Display)] = [
+            (.epub, { .epub($0) }), (.pdf, { .pdf($0) }), (.comic, { .comic($0) }),
+        ]
+        for (kind, display) in routes {
+            let model = makeModel(kind)
+            #expect(model.display == .loading)
+            await model.load()
+            guard case .ready(let url) = model.content else { throw ReaderTestFailure.notReady }
+            #expect(model.display == display(url), "\(kind)")
+        }
+        #expect(fetcher.calls.value.count == routes.count)
+
+        fetcher.fails.value = true
+        let failed = makeModel(.comic)
+        await failed.load()
+        #expect(failed.display == .failed)
     }
 
     @Test func theLoadedFileStaysPinnedUntilReleased() async throws {
@@ -162,6 +208,38 @@ private enum ReaderTestFailure: Error {
         let row = try #require(try await harness.row())
         #expect(row.ebookLocation == turn.stored)
         #expect(harness.service.writes.value.map(\.update.ebookLocation) == [turn.stored])
+    }
+
+    /// A comic resumes at the saved page, and its turns are saved through the progress model as the
+    /// 1-based lower page with the web client's `(page - 1) / pageCount` (ADR 0008 §7).
+    @Test func aComicsTurnsAreSavedAsPages() async throws {
+        let harness = try ProgressHarness()
+        let model = ReaderContainerModelTests(fetcher: FakeEbookFetcher(body: try comicData(pages: 5)))
+            .makeModel(.comic, progress: harness.makeProgressModel(kind: .comic), server: nil)
+        harness.service.server.value = serverProgress("2")
+        await model.load()
+        guard case .comic(let url) = model.display else { throw ReaderTestFailure.notReady }
+        #expect(model.resumePoint.location == .page(2))
+
+        let comic = ComicReaderModel(
+            fileURL: url, cacheDirectory: readerTemporaryDirectory(), startLocation: model.resumePoint.location
+        ) { location, progress in
+            model.record(location, progress: progress)
+        }
+        await comic.open()
+        #expect(comic.state == .ready)
+        #expect(comic.currentPage == 2)
+        // Opening at the saved page isn't a turn.
+        await model.flush()
+        #expect(harness.service.writes.value.isEmpty)
+
+        comic.turn(by: 1)
+        await model.flush()
+        let row = try await harness.row()
+        #expect(row?.ebookLocation == "3")
+        #expect(row?.ebookProgress == 0.4)
+        #expect(harness.service.writes.value.map(\.update.ebookLocation) == ["3"])
+        #expect(harness.service.writes.value.map(\.update.ebookProgress) == [0.4])
     }
 
     /// epub.js reports where it rendered the book on opening: the first page of an unread book, or
