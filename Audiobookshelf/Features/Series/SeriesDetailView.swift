@@ -6,21 +6,26 @@ import SwiftUI
 
 /// One series (legacy `pages/bookshelf/series/_id.vue`): its description, Continue Series and its books in the
 /// server's sequence order with their progress. Builds one ``SeriesDetailModel`` per store, account and library,
-/// collapsing sub-series when the `collapseBookSeries` setting is on.
+/// collapsing sub-series when the `collapseBookSeries` setting is on, and a ``SeriesDownloadModel`` when the
+/// account can download (``SeriesDownloadAvailability``).
 struct SeriesDetailView: View {
     let seriesID: String
     @Environment(\.libraryStore) private var store
     @Environment(Router.self) private var router: Router?
     @Environment(AppSettings.self) private var settings: AppSettings?
+    @Environment(\.downloadAccess) private var downloadAccess
+    @Environment(AccountManager.self) private var accounts: AccountManager?
     @State private var host: BrowseModelHost<SeriesDetailModel>?
+    @State private var download: SeriesDownloadModel?
 
     var body: some View {
         let libraryID = router?.libraryID
         let collapse = settings?.collapseBookSeries ?? AppSettings.Default.collapseBookSeries
         let key = BrowseModelKey(store: store, libraryID: libraryID, entityID: seriesID)
+        let permitted = canDownload(key)
         Group {
             if let host, let model = host.model(for: key) {
-                SeriesDetailContent(model: model)
+                SeriesDetailContent(model: model, download: permitted ? download : nil)
             } else {
                 BrowsePlaceholder(libraryID: libraryID, messages: SeriesPresentation.detailMessages)
                     .navigationTitle(Text(verbatim: L10n.string("LabelSeries")))
@@ -32,21 +37,52 @@ struct SeriesDetailView: View {
                     seriesID: seriesID, libraryID: key.libraryID, collapseSeries: collapse, service: services,
                     cache: progress)
             }
+            download = makeDownload(for: key)
             // The setting may have changed while this screen was hidden.
             await host?.model.setCollapseSeries(collapse)
             await host?.model.loadIfNeeded()
         }
+        // Opened offline, the user's permission is unknown until the account reconnects, which
+        // doesn't change the key.
+        .onChange(of: permitted) { download = makeDownload(for: key) }
         .onChange(of: collapse) { _, collapse in
             guard let model = host?.model else { return }
             Task { await model.setCollapseSeries(collapse) }
         }
     }
+
+    /// Whether the signed-in user of `key`'s account may download (`permissions.download`).
+    private func canDownload(_ key: BrowseModelKey?) -> Bool {
+        guard let accounts, let id = key?.connection.connectionID, accounts.activeConnection?.id == id else {
+            return false
+        }
+        return accounts.authorization?.user.permissions.download ?? false
+    }
+
+    /// The current download model while it serves `key`'s account, else a new one; `nil` when Download Series
+    /// isn't available (signed out, no download permission, or no download stack).
+    private func makeDownload(for key: BrowseModelKey?) -> SeriesDownloadModel? {
+        let availability = SeriesDownloadAvailability(
+            connectionID: key?.connection.connectionID, hasDownloads: downloadAccess != nil,
+            canDownload: canDownload(key))
+        guard let connectionID = availability.connectionID, let downloadAccess,
+            let services = store?.makeServices(), services.connectionKey == key?.connection
+        else { return nil }
+        if let download, download.connectionID == connectionID { return download }
+        return SeriesDownloadModel(
+            seriesID: seriesID, connectionID: connectionID, service: services, access: downloadAccess,
+            permitted: { [accounts] in
+                accounts?.activeConnection?.id == connectionID
+                    && accounts?.authorization?.user.permissions.download == true
+            })
+    }
 }
 
 /// The series screen for one model; previews give it a fixture service. Collapse Series shows when the
-/// environment has `AppSettings`, and RSS Feed for admins.
+/// environment has `AppSettings`, RSS Feed for admins, and Download Series with a download model.
 struct SeriesDetailContent: View {
     let model: SeriesDetailModel
+    var download: SeriesDownloadModel?
     @Environment(AppSettings.self) private var settings: AppSettings?
 
     var body: some View {
@@ -82,6 +118,11 @@ struct SeriesDetailContent: View {
             if let settings {
                 ToolbarItem(placement: .primaryAction) {
                     SeriesCollapseToggle(settings: settings)
+                }
+            }
+            if let download {
+                ToolbarItem(placement: .primaryAction) {
+                    SeriesDownloadButton(model: download, libraryID: model.hasLoaded ? model.booksLibraryID : nil)
                 }
             }
         }

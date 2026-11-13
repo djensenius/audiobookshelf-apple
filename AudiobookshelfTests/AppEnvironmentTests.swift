@@ -2,6 +2,7 @@ import ABSAppModel
 import ABSCore
 import ABSData
 import ABSDownloads
+import ABSPlayback
 import ABSUI
 import Foundation
 import Testing
@@ -53,6 +54,9 @@ struct TestDownloads {
             #expect(environment.downloads != nil)
             // The library is the lifecycle's seeder, and stays cleared while signed out.
             #expect(environment.library != nil)
+            #expect(environment.realtime?.bridge.connectionState == .idle)
+            // Socket progress merges through the environment's one writer.
+            #expect(environment.realtime?.bridge.localProgress === environment.localProgress)
             #expect(environment.lifecycle.gate == .launching)
 
             await environment.lifecycle.start()
@@ -104,6 +108,8 @@ struct TestDownloads {
             let stack = try #require(environment.downloads)
             // A removal stops the downloads once its credentials are deleted.
             #expect(environment.accounts?.credentialsRemoved != nil)
+            // A sign-in over a saved session stops and resumes them (#386).
+            #expect(environment.accounts?.credentialsReplaced != nil)
 
             // The launch the environment began; the same task, so this waits for it.
             await stack.lifecycle.launch().value
@@ -152,6 +158,78 @@ struct TestDownloads {
         }
     }
 
+    /// One player for every scene and CarPlay, idle until an account session binds it.
+    @Test func playerIsAnIdleProcessWidePlayerViewModel() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+
+            #expect(environment.player === environment.playback.player)
+            #expect(!environment.player.hasSession)
+            #expect(environment.player.errorMessageKey == nil)
+
+            await environment.lifecycle.start()
+
+            // Signed out: no scope, so nothing to play.
+            #expect(environment.lifecycle.gate == .connect)
+            #expect(environment.playback.participant?.playItem == nil)
+            #expect(!environment.player.hasSession)
+        }
+    }
+
+    /// The data environment's one progress writer, which the participant hands every account's
+    /// scope, so a retired scope's late write can't replace a newer one. It's the same store
+    /// downloads link progress through (ADR 0003: one shared writer).
+    @Test func playbackHoldsOneWriter() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+
+            let writer = try #require(environment.playback.writer)
+            #expect(writer === environment.localProgress)
+            #expect(environment.playback.participant != nil)
+        }
+    }
+
+    /// Each scope's recovery waits on the system's network path, not an always-online one.
+    @Test func playbackScopesWaitOnTheNetworkPath() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+            let request = try scopeRequest(environment)
+
+            let configuration = AppPlayback.configuration(
+                for: request, settings: settings, policy: NetworkPolicy(monitor: NetworkMonitor(), settings: settings),
+                engine: AudioEngine(audioSession: nil))
+
+            #expect(configuration.networkPaths is SystemNetworkPathSource)
+        }
+    }
+
+    /// The audio session's interruption handler gets the scope's coordinator, so an interruption
+    /// also cancels a play the coordinator holds outside the engine (recovery, the initial load).
+    @Test func playbackInterruptionsReachTheScopesCoordinator() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+            let request = try scopeRequest(environment)
+            let interruptions = AudioInterruptionHandler()
+
+            let scope = AppPlayback.makeScope(
+                for: request, settings: settings, policy: NetworkPolicy(monitor: NetworkMonitor(), settings: settings),
+                engine: AudioEngine(audioSession: nil), interruptions: interruptions)
+            defer { scope.retire(reason: .signOut) }
+
+            #expect(interruptions.heldPlayIntent === scope.coordinator)
+        }
+    }
+
+    private func scopeRequest(_ environment: AppEnvironment) throws -> PlaybackScopeRequest {
+        PlaybackScopeRequest(
+            connectionID: UUID(), client: nil, features: nil, deviceIdentifiers: environment.deviceIdentifiers,
+            writer: try #require(environment.localProgress))
+    }
+
     @Test func keepsTheDeviceIdentifierInTheInjectedKeychain() async throws {
         try await withSettings { settings in
             let keychain = ConnectTestKeychain()
@@ -185,6 +263,10 @@ struct TestDownloads {
             #expect(environment.dataStack == nil)
             #expect(environment.accounts == nil)
             #expect(environment.downloads == nil)
+            // The player still exists, idle, with no scope to bind it.
+            #expect(environment.playback.participant == nil)
+            #expect(environment.playback.writer == nil)
+            #expect(!environment.player.hasSession)
 
             await environment.lifecycle.start()
 
@@ -237,9 +319,9 @@ struct TestDownloads {
     }
 
     @Test(arguments: [
-        "ButtonSwitchServer", "HeaderBrowse", "HeaderOpenLinkOnAnotherServer", "LabelMiniPlayerAccessibility",
-        "LabelMiniPlayerHint", "MessageStoreUnavailable", "MessageStoreUnavailableHelp", "MessageSwitchServerForLink",
-        "MessageSwitchServerSignedOut",
+        "ButtonSwitchServer", "HeaderBrowse", "HeaderNowPlaying", "HeaderOpenLinkOnAnotherServer",
+        "LabelMiniPlayerAccessibility", "LabelMiniPlayerHint", "MessageStoreUnavailable", "MessageStoreUnavailableHelp",
+        "MessageSwitchServerForLink", "MessageSwitchServerSignedOut",
     ])
     func shellStringsResolve(key: String) {
         #expect(L10n.string(key) != key)

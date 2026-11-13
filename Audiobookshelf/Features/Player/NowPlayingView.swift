@@ -9,7 +9,7 @@ import SwiftUI
 /// presents one ``PlayerSheet`` at a time, per window.
 ///
 /// iOS presents it as a full-screen cover on every size (ADR 0004); ``PlayerSlot`` closes it
-/// when playback closes.
+/// when playback closes. On macOS it's the ``NowPlayingWindow``, which closes itself.
 ///
 /// From iOS 27.1 it follows the display (#84, ``PlayerLayout``): a split with the details on a
 /// regular display, the controls on the bottom half in laptop pose, and the transport in the
@@ -257,7 +257,9 @@ private struct NowPlayingTitles: View {
     }
 }
 
-/// The scrubber, redrawn on every playback tick. Swipe up and down jump by the skip intervals.
+/// The scrubber, redrawn on every playback tick, with the whole item's ``PlayerTotalTrack`` above it
+/// while it shows a chapter and the total track is on. Swipe up and down jump by the skip
+/// intervals. While the player is locked it has no thumb and ignores drags and swipes.
 ///
 /// The view model is shared by every window, so each scrubber scrubs as its own
 /// ``PlayerViewModel/ScrubOwner``: a drag in another window can't move or end this one's scrub.
@@ -268,29 +270,38 @@ private struct NowPlayingScrubber: View {
     @State private var owner = PlayerViewModel.ScrubOwner()
 
     var body: some View {
-        PlayerScrubber(
-            progress: model.progress, elapsed: model.elapsed, remaining: model.remainingAtRate,
-            onScrub: { model.scrub(to: $0, owner: owner) },
-            onScrubEnd: {
-                // Finish now, so disappearing before the seek task runs can't cancel it.
-                guard let seek = model.finishScrub(owner: owner) else { return }
-                Task { await model.commitScrub(seek) }
-            },
-            onIncrement: { Task { await model.jumpForward() } },
-            onDecrement: { Task { await model.jumpBackward() } }
-        )
+        let times = model.trackTimes
+        VStack(spacing: 16) {
+            if let total = model.totalTrackTimes {
+                PlayerTotalTrack(progress: total.progress, elapsed: total.elapsed, remaining: total.remaining)
+            }
+            PlayerScrubber(
+                progress: times.progress, elapsed: times.elapsed, remaining: times.remaining,
+                onScrub: { model.scrub(to: $0, owner: owner) },
+                onScrubEnd: {
+                    // Finish now, so disappearing before the seek task runs can't cancel it.
+                    guard let seek = model.finishScrub(owner: owner) else { return }
+                    Task { await model.commitScrub(seek) }
+                },
+                onIncrement: { Task { await model.jumpForward() } },
+                onDecrement: { Task { await model.jumpBackward() } },
+                allowsScrubbing: model.displayOptions.allowsScrubbing
+            )
+        }
         .onDisappear { model.cancelScrub(owner: owner) }
     }
 }
 
-/// The transport controls. Their own view: the next-chapter state reads the playback time.
+/// The transport controls. Their own view: the next-chapter state reads the playback time. While
+/// the player is locked only play/pause shows.
 private struct NowPlayingTransport: View {
     let model: PlayerViewModel
     @Environment(AppSettings.self) private var settings: AppSettings?
 
     var body: some View {
         TransportControls(
-            style: .full, showsPause: model.showsPause, isBuffering: model.isBuffering,
+            style: model.displayOptions.showsSkipControls ? .full : .playPauseOnly, showsPause: model.showsPause,
+            isBuffering: model.isBuffering,
             jumpBackwardSeconds: model.jumpBackwardSeconds, jumpForwardSeconds: model.jumpForwardSeconds,
             hasPreviousChapter: model.hasPreviousChapter, hasNextChapter: model.hasNextChapter,
             haptic: settings?.hapticFeedback ?? .off

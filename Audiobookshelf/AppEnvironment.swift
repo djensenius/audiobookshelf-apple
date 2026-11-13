@@ -34,18 +34,24 @@ final class AppEnvironment {
     let dataStack: DataStack?
     let accounts: AccountManager?
     /// The one writer of local listening progress (`LocalProgressStore` must be shared), or `nil`
-    /// when the store couldn't be opened. Downloads link their progress rows in it (#74).
+    /// when the store couldn't be opened. Downloads link their progress rows in it (#74), and every
+    /// playback scope writes through it (#183).
     let localProgress: LocalProgressStore?
     let lifecycle: SessionLifecycle
     /// The stable device ID for playback sessions (ADR 0007), kept in the same Keychain as the
     /// accounts. It doesn't need the store, so it exists even when ``dataStack`` is `nil`.
     let deviceIdentifiers: any DeviceIdentifying
-    let player: any PlayerSlotState
+    /// The one player every scene and CarPlay share: ``playback``'s, idle between sessions.
+    let player: PlayerViewModel
+    /// Each signed-in account's playback scope and the player's playback (#183).
+    let playback: AppPlayback
     /// The download stack, or `nil` when the store couldn't be opened. Its lifecycle is
     /// launched here, so a launch without a window (CarPlay, a background wake) has an engine.
     let downloads: AppDownloads?
     /// The shared library and its session participant (#181), or `nil` without ``accounts``.
     let library: LibraryParticipant?
+    /// The realtime socket (#59), or `nil` without ``library`` or when left out.
+    let realtime: AppRealtime?
     /// The cover image pipeline and its session participant (#182).
     let images: ImageServices
     /// Writes the Continue Listening widget's snapshot (#89).
@@ -58,13 +64,14 @@ final class AppEnvironment {
     ///     tests pass a temporary directory, and `nil` leaves out the download stack.
     ///   - makeDownloadSession: The download engine's session; tests pass a non-background one.
     ///   - covers: Where the cover pipeline fetches and caches covers.
+    ///   - realtime: Whether sessions open the realtime socket; a fixture launch has no server for it.
     init(
         settings: AppSettings = AppSettings(), storeLocation: DataStack.Location = .appGroup,
         keychain: any KeychainStoring = KeychainStore(),
         sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() },
         downloadsRoot: URL? = .applicationSupportDirectory,
         makeDownloadSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession(),
-        covers: CoverSource = .app
+        covers: CoverSource = .app, realtime: Bool = true
     ) {
         let dataStack: DataStack?
         let accounts: AccountManager?
@@ -98,6 +105,10 @@ final class AppEnvironment {
                 manager.credentialsExpired = { [weak downloadsLifecycle = downloads.lifecycle] in
                     downloadsLifecycle?.connectionExpired($0)
                 }
+                // A sign-in over a saved session stops the downloads using the old one, then resumes them.
+                manager.credentialsReplaced = { [weak downloadsLifecycle = downloads.lifecycle] in
+                    downloadsLifecycle?.credentialsReplaced($0)
+                }
             }
         } catch {
             let reason = Log.redact(String(describing: error))
@@ -112,12 +123,25 @@ final class AppEnvironment {
         self.accounts = accounts
         self.localProgress = localProgress
         self.lifecycle = lifecycle
-        self.deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
-        // Replaced by the playback coordinator's view model with the player UI (#56).
-        self.player = PlaceholderPlayerState()
+        let deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
+        self.deviceIdentifiers = deviceIdentifiers
+        let playback = AppPlayback.make(
+            writer: localProgress, accounts: accounts, lifecycle: lifecycle, settings: settings,
+            deviceIdentifiers: deviceIdentifiers)
+        self.playback = playback
+        self.player = playback.player
         self.downloads = downloads
         downloads?.lifecycle.launch()
         self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
+
+        // Realtime (#59), after playback: the socket stops before the playback scope retires.
+        if realtime, let accounts, let library {
+            self.realtime = AppRealtime.make(
+                library: library, accounts: accounts, playback: playback, localProgress: localProgress,
+                lifecycle: lifecycle)
+        } else {
+            self.realtime = nil
+        }
 
         // Images (#182).
         let images = ImageServices(
@@ -129,6 +153,8 @@ final class AppEnvironment {
         let widgetSnapshots = Self.makeWidgetSnapshotWriter(
             accounts: accounts, lifecycle: lifecycle, storeLocation: storeLocation)
         lifecycle.register(widgetSnapshots, stage: .connect)
+        // The app's one player, across every account's session: its item and play state.
+        widgetSnapshots.follow(playback.player)
         self.widgetSnapshots = widgetSnapshots
     }
 }

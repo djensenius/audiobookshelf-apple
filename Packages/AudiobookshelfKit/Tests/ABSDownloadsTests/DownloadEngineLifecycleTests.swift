@@ -580,6 +580,8 @@ import Testing
 
         let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
         #expect(survivor.state != .running)
+        // Its listing cancelled the survivor, so the next launch has nothing to cancel.
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
         let part = try #require(try await harness.store.part(id: partID))
         #expect(part.taskIdentifier == nil)
         #expect(!part.hasResumeData)
@@ -690,6 +692,497 @@ import Testing
         never.open()
     }
 
+    /// A relaunch before any session was created still cancels the transfer that survived it:
+    /// the quiesce is kept on disk until a session's listing has cancelled its survivors.
+    @Test func aRelaunchAfterAQuiesceWithoutASessionStillCancelsSurvivors() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        _ = try await harness.store.updatePart(partID: partID, hasResumeData: true)
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        let signedOut = harness.makeEngine(readRecords: { _ in throw TestError() })
+        #expect(await signedOut.quiesce(connectionID: harness.connectionID) == false)
+        #expect(harness.sessions.withLock { $0.isEmpty })
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        // iOS ends the app before a session exists; the next launch finds the old transfer.
+        let base = harness.base
+        let relaunched = harness.makeEngine(
+            registry: DownloadEngineRegistry(),
+            prepare: { stub in
+                var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+                request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+                stub.leaveTask(request, description: partID.uuidString)
+            })
+        #expect(await relaunched.activate())
+
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        try #require(survivor.state != .running)
+        // The part starts again with the new credentials.
+        await harness.waitForRequests(2)
+        #expect(harness.requests.map(\.authorization) == ["Bearer previous", "Bearer token-1"])
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(!FileManager.default.fileExists(atPath: blob))
+        #expect(!harness.fileExists("li_1/1.mp3"))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        never.open()
+    }
+
+    /// A quiesce that couldn't read the downloads couldn't delete their resume data either: the
+    /// next launch's session deletes it, and the marker stays until it has.
+    @Test func aRelaunchDeletesTheResumeDataAQuiesceCouldNotRead() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        _ = try await harness.store.updatePart(partID: partID, hasResumeData: true)
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        let signedOut = harness.makeEngine(readRecords: { _ in throw TestError() })
+        #expect(await signedOut.quiesce(connectionID: harness.connectionID) == false)
+        #expect(FileManager.default.fileExists(atPath: blob))
+
+        let relaunched = harness.makeEngine(registry: DownloadEngineRegistry())
+        #expect(await relaunched.activate())
+
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(!FileManager.default.fileExists(atPath: blob))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+    }
+
+    /// Markers that can't be read aren't taken for none: the session isn't created, so no
+    /// survivor is adopted, until a later activation can read them.
+    @Test func unreadableMarkersHoldTheSessionBack() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        let markers = harness.locations.survivorsToStopRoot.path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: markers)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: markers) }
+        let base = harness.base
+        let engine = harness.makeEngine(prepare: { stub in
+            var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+            request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+            stub.leaveTask(request, description: partID.uuidString)
+        })
+
+        #expect(await engine.activate() == false)
+        #expect(harness.sessions.withLock { $0.isEmpty })
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: markers)
+        #expect(await engine.activate())
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        #expect(survivor.state != .running)
+        never.open()
+    }
+
+    /// A quiesce with a session removes its marker once the resume data is deleted, so later
+    /// transfers aren't taken for survivors after a relaunch. One that can't be removed is kept
+    /// and removed by the next launch's session.
+    @Test func aMarkerThatCouldNotBeRemovedIsRemovedByTheNextLaunch() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        try await harness.addRecord(parts: [UUID()], state: .paused, partState: .queued)
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        let markers = harness.locations.survivorsToStopRoot.path(percentEncoded: false)
+        try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        // The marker can't be removed (or written again) from a read-only directory.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: markers)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: markers) }
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: markers)
+        #expect(await harness.makeEngine(registry: DownloadEngineRegistry()).activate())
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+    }
+
+    /// A resume-data flag that couldn't be cleared leaves the quiesce unfinished and its marker
+    /// in place, so a later one clears it.
+    @Test func aFlagThatCouldNotBeClearedKeepsTheMarker() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        _ = try await harness.store.updatePart(partID: partID, hasResumeData: true)
+        let fails = Mutex(true)
+        let engine = harness.makeEngine(beforeClearingResumeFlag: { _ in
+            if fails.withLock({ $0 }) {
+                fails.withLock { $0 = false }
+                throw TestError()
+            }
+        })
+        #expect(await engine.activate())
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == true)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+    }
+
+    /// An activation leaves the marker of a connection whose quiesce is still pausing, which may
+    /// seal more resume data; the quiesce removes it once it has deleted that.
+    @Test func anActivationLeavesTheMarkerOfAQuiesceUnderWay() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        try await harness.addRecord(parts: [UUID()], state: .paused, partState: .queued)
+        let engine = harness.makeEngine()
+        let (entered, enteredContinuation) = AsyncStream.makeStream(of: Void.self)
+        let (release, releaseContinuation) = AsyncStream.makeStream(of: Void.self)
+        let quiescing = Task {
+            await engine.quiesce(connectionID: harness.connectionID) {
+                enteredContinuation.yield()
+                for await _ in release {}
+            }
+        }
+        for await _ in entered { break }
+
+        #expect(await engine.activate())
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        releaseContinuation.finish()
+        #expect(await quiescing.value)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+    }
+
+    /// A quiesce that begins while an activation deletes a marked connection's resume data
+    /// keeps the marker: the activation checks again before removing it.
+    @Test func aQuiesceThatBeginsDuringAnActivationsCleanupKeepsTheMarker() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        _ = try await harness.store.updatePart(partID: partID, hasResumeData: true)
+        try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        let (release, releaseContinuation) = AsyncStream.makeStream(of: Void.self)
+        let quiescing = Mutex<Task<Bool, Never>?>(nil)
+        let engine = Mutex<DownloadEngine?>(nil)
+        let connectionID = harness.connectionID
+        engine.withLock {
+            $0 = harness.makeEngine(beforeClearingResumeFlag: { _ in
+                let (entered, enteredContinuation) = AsyncStream.makeStream(of: Void.self)
+                let engine = try #require(engine.withLock { $0 })
+                quiescing.withLock {
+                    $0 = Task {
+                        await engine.quiesce(connectionID: connectionID) {
+                            enteredContinuation.yield()
+                            for await _ in release {}
+                        }
+                    }
+                }
+                for await _ in entered { break }
+            })
+        }
+        let activating = try #require(engine.withLock { $0 })
+
+        #expect(await activating.activate())
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        releaseContinuation.finish()
+        #expect(await quiescing.withLock { $0 }?.value == true)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+    }
+
+    /// A marked connection's resume data is deleted before its complete records are finalised,
+    /// which drops the parts that lead to it; when it can't be, the records and marker stay.
+    @Test func aMarkedConnectionsCompleteRecordsWaitForItsResumeData() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .downloading, partState: .completed)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        let blob = harness.vault.fileURL(partID: partID)
+        let folder = blob.deletingLastPathComponent().path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder) }
+
+        #expect(await harness.makeEngine().activate())
+        #expect(try await harness.store.record(id: record.id) != nil)
+        #expect(FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder)
+        let relaunched = harness.makeEngine(registry: DownloadEngineRegistry())
+        #expect(await relaunched.activate())
+        #expect(await relaunched.nextRecordComplete() != nil)
+        #expect(try await harness.store.record(id: record.id) == nil)
+        #expect(!FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+    }
+
+    /// A recreated session that deletes the resume data an earlier activation couldn't releases
+    /// that connection's complete records, as it removes the marker.
+    @Test func aRecreatedSessionReleasesTheRecordsItsCleanupHeld() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .downloading, partState: .completed)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        let blob = harness.vault.fileURL(partID: partID)
+        let folder = blob.deletingLastPathComponent().path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder) }
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        #expect(try await harness.store.record(id: record.id) != nil)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder)
+        await engine.delegate.post(.sessionInvalidated)
+
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(try await harness.store.record(id: record.id) == nil)
+        #expect(!FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+    }
+
+    /// The last part of a held connection's record completing doesn't finalise it either, which
+    /// would drop the completed part that leads to the resume data still there. Whether an
+    /// activation or a quiesce couldn't delete that data, a quiesce that later does finalises it.
+    @Test(arguments: [false, true])
+    func aHeldConnectionsRecordIsFinalisedOnlyOnceItsCleanupSucceeds(heldByQuiesce: Bool) async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let (completedID, partID) = (UUID(), UUID())
+        let record = try await harness.addRecord(parts: [completedID, partID], state: .paused)
+        _ = try await harness.store.completePart(partID: completedID, finalBytes: 11)
+        try harness.vault.seal(Data("resume".utf8), partID: completedID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: completedID).path(percentEncoded: false)
+        let folder = harness.vault.fileURL(partID: completedID).deletingLastPathComponent().path(percentEncoded: false)
+        let engine = harness.makeEngine()
+        if heldByQuiesce {
+            #expect(await engine.activate())
+        } else {
+            try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder) }
+        if heldByQuiesce {
+            #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        } else {
+            #expect(await engine.activate())
+        }
+
+        try await engine.resume(recordID: record.id)
+        #expect(
+            await engine.next {
+                if case .partCompleted = $0 { true } else { false }
+            } != nil)
+        await engine.processPendingEvents()
+        #expect(try await harness.store.record(id: record.id)?.isComplete == true)
+        #expect(FileManager.default.fileExists(atPath: blob))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder)
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        #expect(!FileManager.default.fileExists(atPath: blob))
+        #expect(try await harness.store.record(id: record.id) == nil)
+        let item = try await harness.localItems.item(serverConnectionID: harness.connectionID, libraryItemId: "li_1")
+        #expect(item?.files.map(\.size) == [11, 11])
+    }
+
+    /// A quiesce holds its connection's complete records from before it first suspends, so an
+    /// activation while it pauses doesn't finalise one before the quiesce has deleted the
+    /// resume data its parts lead to; the quiesce finalises it then.
+    @Test func aQuiesceHoldsItsConnectionsCompleteRecordsThroughAnActivation() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .downloading, partState: .completed)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        let engine = harness.makeEngine()
+        let (entered, enteredContinuation) = AsyncStream.makeStream(of: Void.self)
+        let (release, releaseContinuation) = AsyncStream.makeStream(of: Void.self)
+        let quiescing = Task {
+            await engine.quiesce(connectionID: harness.connectionID) {
+                enteredContinuation.yield()
+                for await _ in release {}
+            }
+        }
+        for await _ in entered { break }
+
+        #expect(await engine.activate())
+        #expect(try await harness.store.record(id: record.id) != nil)
+
+        releaseContinuation.finish()
+        #expect(await quiescing.value)
+        #expect(!FileManager.default.fileExists(atPath: blob))
+        #expect(try await harness.store.record(id: record.id) == nil)
+    }
+
+    /// A quiesce that ends while another of the same connection is under way leaves the marker:
+    /// the other may still seal resume data and fail to delete it, and a relaunch needs the
+    /// marker to delete it then.
+    @Test func anOverlappingQuiesceKeepsTheMarkerUntilTheLastOneDeletesTheResumeData() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        let (entered, enteredContinuation) = AsyncStream.makeStream(of: Void.self)
+        let (release, releaseContinuation) = AsyncStream.makeStream(of: Void.self)
+        let pausing = Task {
+            await engine.quiesce(connectionID: harness.connectionID) {
+                enteredContinuation.yield()
+                for await _ in release {}
+            }
+        }
+        for await _ in entered { break }
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        // The pause still under way seals resume data that can't be deleted.
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: partID)
+        let folder = blob.deletingLastPathComponent().path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder) }
+        releaseContinuation.finish()
+        #expect(await pausing.value == false)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder)
+        #expect(await harness.makeEngine(registry: DownloadEngineRegistry()).activate())
+        #expect(!FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+    }
+
+    /// A quiesce that begins while an earlier one of the same connection finalises the records
+    /// it released is the last one under way: it clears the marker and releases the hold, so
+    /// the record the earlier one is finalising isn't held and no stale marker is left.
+    @Test func aQuiesceDuringAnEarlierOnesFinalisationClearsTheMarker() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let (upserted, upsertedContinuation) = AsyncStream.makeStream(of: Void.self)
+        let (release, releaseContinuation) = AsyncStream.makeStream(of: Void.self)
+        let engine = harness.makeEngine(afterUpsertingLocalItem: { _ in
+            upsertedContinuation.yield()
+            for await _ in release {}
+        })
+        #expect(await engine.activate())
+        // The activation's own finalisation is done first, so only the quiesce's reaches the hook.
+        await engine.waitForRestart()
+        let record = try await harness.addRecord(parts: [UUID()], state: .downloading, partState: .completed)
+        let first = Task { await engine.quiesce(connectionID: harness.connectionID) }
+        for await _ in upserted { break }
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        releaseContinuation.finish()
+        #expect(await first.value)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        #expect(try await harness.store.record(id: record.id) == nil)
+    }
+
+    /// After the session is lost, a pause can still be producing its transfer's resume data when
+    /// a quiesce without a session returns and a later activation retries the cleanup. The
+    /// activation waits for that pause, so it deletes what the pause seals before it clears the
+    /// marker.
+    @Test func aCleanupWaitsForAPauseStillSealingResumeData() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .downloading)
+        let readsFail = Mutex(false)
+        let (cancelling, cancelStarted) = AsyncStream.makeStream(of: Void.self)
+        let releaseCancel = StubGate()
+        let (listed, listedContinuation) = AsyncStream.makeStream(of: Void.self)
+        let engine = harness.makeEngine(
+            readRecords: { store in
+                if readsFail.withLock({ $0 }) { throw TestError() }
+                return try await store.allRecords()
+            },
+            cancel: { task in
+                cancelStarted.yield()
+                await withCheckedContinuation { continuation in releaseCancel.run { continuation.resume() } }
+                task.cancel()
+                return Data("resume".utf8)
+            },
+            listing: { listedContinuation.yield() })
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+        for await _ in listed { break }
+        let pausing = Task { try await engine.pause(recordID: record.id) }
+        for await _ in cancelling { break }
+
+        // The session is lost and can't be created again, so the quiesce has no session.
+        readsFail.withLock { $0 = true }
+        await engine.delegate.post(.sessionInvalidated)
+        await engine.processPendingEvents()
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        readsFail.withLock { $0 = false }
+
+        // The activation lists its session only once its cleanup is done; give it the time it
+        // would take to get there without waiting for the pause.
+        let activating = Task { await engine.activate() }
+        let listedEarly = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in listed { return true }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: .milliseconds(500))
+                return false
+            }
+            defer { group.cancelAll() }
+            return await group.next() ?? false
+        }
+        #expect(!listedEarly)
+        releaseCancel.open()
+        #expect(try await pausing.value)
+        #expect(await activating.value)
+
+        #expect(
+            !FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path(percentEncoded: false)))
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        never.open()
+    }
+
+    /// A quiesce that begins while a finalisation writes the local item holds that record too, so
+    /// resume data the quiesce can't delete keeps the part that leads to it, and a relaunch,
+    /// which the marker sends to it, deletes it before finalising the record.
+    @Test func aFinalisationUnderWayWhenAQuiesceBeginsLeavesTheRecordToItsCleanup() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .downloading, partState: .completed)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: partID)
+        let folder = blob.deletingLastPathComponent().path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder) }
+        let (upserted, upsertedContinuation) = AsyncStream.makeStream(of: Void.self)
+        let (release, releaseContinuation) = AsyncStream.makeStream(of: Void.self)
+        let engine = harness.makeEngine(afterUpsertingLocalItem: { _ in
+            upsertedContinuation.yield()
+            for await _ in release {}
+        })
+        let activating = Task { await engine.activate() }
+        for await _ in upserted { break }
+        let (paused, pausedContinuation) = AsyncStream.makeStream(of: Void.self)
+        let quiescing = Task {
+            await engine.quiesce(connectionID: harness.connectionID) { pausedContinuation.yield() }
+        }
+        for await _ in paused { break }
+
+        releaseContinuation.finish()
+        #expect(await activating.value)
+        #expect(await quiescing.value == false)
+        #expect(try await harness.store.record(id: record.id) != nil)
+        #expect(FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder)
+        #expect(await harness.makeEngine(registry: DownloadEngineRegistry()).activate())
+        #expect(!FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(try await harness.store.record(id: record.id) == nil)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+    }
+
     /// Resume data that couldn't be deleted, because the downloads couldn't be read, leaves the
     /// quiesce unfinished, so it's tried again.
     @Test func quiesceThatCouldNotDeleteTheResumeDataReportsItDidNotFinish() async throws {
@@ -765,6 +1258,8 @@ import Testing
         #expect(try await harness.store.part(id: partID)?.state == .queued)
         let tasks = await harness.session?.session.allTasks ?? []
         #expect(tasks.allSatisfy { $0.state != .running })
+        // Its resume data couldn't be deleted without the downloads, so the next session retries.
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
         never.open()
     }
 

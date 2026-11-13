@@ -18,8 +18,10 @@ struct RouteDestination: View {
         switch route {
         case .item(let id):
             ItemDetailView(itemID: id)
+                .publishesHandoff(itemID: id)
         case .episode(let itemID, let episodeID):
             EpisodeDetailView(itemID: itemID, episodeID: episodeID)
+                .publishesHandoff(itemID: itemID, episodeID: episodeID)
         case .series(let id):
             SeriesDetailView(seriesID: id)
         case .author(let id):

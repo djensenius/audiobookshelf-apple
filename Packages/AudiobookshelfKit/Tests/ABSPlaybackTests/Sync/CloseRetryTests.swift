@@ -169,8 +169,11 @@ struct CloseRetryTests {
     }
 
     /// #195 acceptance 2: once a newer session of the same media is current, the old session's
-    /// close is never resent, and the server keeps the newer session's position. Another item's
-    /// session doesn't hold it back (its resend then meets the retired session's 404).
+    /// close is never resent, and the server keeps the newer session's position. Its stored
+    /// record, at what was acknowledged, shows it never counted, so the newer session takes its
+    /// 5 s for its next report (#383). Another item's session doesn't hold it back: its resend
+    /// then meets the retired session's 404, and the same record says the same, so its 5 s wait
+    /// for the media's next session.
     @Test(arguments: [true, false])
     func aNewerSessionOfTheSameMediaSkipsTheResend(sameItem: Bool) async throws {
         let f = try CloseRetryFixture()
@@ -188,6 +191,9 @@ struct CloseRetryTests {
         // Without the newer session, the drain PATCHed session 1's own position.
         #expect(try await f.serverTime() == (sameItem ? newer : 20))
         #expect(try await f.queued().isEmpty)
+        #expect(f.s.service.log.filter { $0 == "records a" }.count == 1)
+        #expect(f.s.syncer.closeQueue.carried.map(\.seconds) == (sameItem ? [] : [5]))
+        #expect(try await f.listened("session-1") == 15)
     }
 
     /// A resend's attempt time is saved before it reaches the server, as the coordinator's
@@ -254,9 +260,10 @@ struct CloseRetryTests {
 
     /// Saving the attempt suspends, so admission's checks run again before the resend: an
     /// account that ended meanwhile keeps the close, and a newer session of the same media
-    /// removes it. Marking the item not finished or discarding its progress changes the row in
-    /// the store without queuing a position: the close is kept unsent, and the next drain finds
-    /// its position gone and removes it, still unsent.
+    /// settles it unsent. Marking the item not finished or discarding its progress changes the
+    /// row in the store without queuing a position: the close is kept unsent, and the next drain
+    /// finds its position gone and settles it, still unsent: its stored record carries its 5 s
+    /// (#383).
     @Test(arguments: [nil, "quiesce", "newer session", "mark not finished", "discard"])
     func aChangeWhileSavingTheAttemptSkipsTheResend(change: String?) async throws {
         let f = try CloseRetryFixture()
@@ -296,6 +303,7 @@ struct CloseRetryTests {
         #expect(try await f.queued().isEmpty)
         #expect(try await f.s.store.progress(for: f.key)?.currentTime == (change == "discard" ? nil : 0))
         #expect(try await f.listened("session-1") == 15)
+        #expect(f.s.syncer.closeQueue.carried.map(\.seconds) == [5])
     }
 
     /// A captured close whose settlement couldn't be saved (here, removing it once the

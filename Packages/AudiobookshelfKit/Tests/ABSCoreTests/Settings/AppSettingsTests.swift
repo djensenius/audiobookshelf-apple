@@ -77,6 +77,9 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
             #expect(settings.streamingUsingCellular == .always)
             #expect(settings.playbackRate == 1.0)
             #expect(settings.chapterTrack == true)
+            #expect(settings.totalTrack == true)
+            #expect(settings.scaleElapsedTimeBySpeed == true)
+            #expect(settings.lockPlayer == false)
             #expect(settings.collapseBookSeries == false)
             #expect(settings.lastLibraryIDs.isEmpty)
             // Defaults are not written back.
@@ -236,6 +239,9 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
             settings.streamingUsingCellular = .ask
             settings.playbackRate = 1.75
             settings.chapterTrack = false
+            settings.totalTrack = false
+            settings.scaleElapsedTimeBySpeed = false
+            settings.lockPlayer = true
             settings.collapseBookSeries = true
             settings.setLastLibraryID("lib-1", serverID: "server-a", userID: "user-1")
 
@@ -263,6 +269,9 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
             #expect(reloaded.streamingUsingCellular == .ask)
             #expect(reloaded.playbackRate == 1.75)
             #expect(reloaded.chapterTrack == false)
+            #expect(reloaded.totalTrack == false)
+            #expect(reloaded.scaleElapsedTimeBySpeed == false)
+            #expect(reloaded.lockPlayer == true)
             #expect(reloaded.collapseBookSeries == true)
             #expect(reloaded.lastLibraryID(serverID: "server-a", userID: "user-1") == "lib-1")
 
@@ -274,7 +283,11 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
             #expect(defaults.object(forKey: AppSettings.Key.playbackRate.rawValue) as? Double == 1.75)
             #expect(defaults.object(forKey: AppSettings.Key.chapterTrack.rawValue) as? Bool == false)
             #expect(defaults.object(forKey: AppSettings.Key.collapseBookSeries.rawValue) as? Bool == true)
+            #expect(defaults.object(forKey: AppSettings.Key.lockPlayer.rawValue) as? Bool == true)
             #expect(AppSettings.snapshot(from: defaults).collapseBookSeries == true)
+            #expect(AppSettings.snapshot(from: defaults).totalTrack == false)
+            #expect(AppSettings.snapshot(from: defaults).scaleElapsedTimeBySpeed == false)
+            #expect(AppSettings.snapshot(from: defaults).lockPlayer == true)
         }
     }
 

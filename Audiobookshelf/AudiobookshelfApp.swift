@@ -10,6 +10,8 @@ struct AudiobookshelfApp: App {
     /// Shared by every scene and CarPlay.
     private let environment = AppEnvironment.shared
     private var settings: AppSettings { environment.settings }
+    /// The Downloads tab's services, built once.
+    private let downloads = AppEnvironment.shared.makeDownloadsServices()
     @Environment(\.scenePhase) private var scenePhase
     /// Readers open an ebook's downloaded copy when there is one.
     private let downloadedEbookFile = AppEnvironment.shared.dataStack.map {
@@ -21,24 +23,31 @@ struct AudiobookshelfApp: App {
         AccountDownloadCredentials { try await accounts.downloadAccess(for: $0, read: $1) }
     }
 
+    init() {
+        // Here rather than in `AppEnvironment`, so the environments tests build don't replace it.
+        environment.playback.registerIntents(settings: settings, lifecycle: environment.lifecycle)
+    }
+
     var body: some Scene {
         // Every window; Open in New Window opens one at a screen (``WindowRoute``).
         WindowGroup(for: WindowRoute.self) { $windowRoute in
             RootView(
                 lifecycle: environment.lifecycle, player: environment.player, accounts: environment.accounts,
                 library: environment.library,
-                imagePipeline: environment.images.pipeline
+                imagePipeline: environment.images.pipeline, playback: environment.playback.participant
             )
+            .environment(\.downloads, downloads)
             .environment(settings)
             .environment(\.windowRoute, $windowRoute)
             .environment(\.downloadedEbookFile, downloadedEbookFile)
             .environment(\.ebookCredentials, ebookCredentials)
+            .environment(\.downloadAccess, environment.downloads?.access)
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {
             SearchCommands()
             RefreshCommands()
-            PlaybackCommands(player: environment.player)
+            PlaybackCommands(player: environment.player, participant: environment.playback.participant)
             GoCommands()
         }
         // The system relaunches the app for finished background downloads; this waits until
@@ -79,6 +88,18 @@ struct AudiobookshelfApp: App {
                     .modifier(AppThemeModifier(settings: settings))
             }
             .windowResizability(.contentMinSize)
+
+            // The full player; only ``PlayerSlot`` opens it, with a session.
+            Window(Text(verbatim: L10n.string("HeaderNowPlaying")), id: NowPlayingWindow.id) {
+                NowPlayingWindow(player: environment.player)
+                    .environment(settings)
+                    .environment(\.imagePipeline, environment.images.pipeline)
+                    .environment(\.libraryStore, environment.library?.store)
+                    .modifier(PlaybackEnvironment(participant: environment.playback.participant))
+                    .modifier(AppThemeModifier(settings: settings))
+            }
+            .restorationBehavior(.disabled)
+            .defaultLaunchBehavior(.suppressed)
         #endif
     }
 }

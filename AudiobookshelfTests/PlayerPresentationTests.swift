@@ -47,4 +47,56 @@ import Testing
         #expect(!PlayerSlot.presentsWithoutSession(isPresented: false, hasSession: false))
         #expect(!PlayerSlot.presentsWithoutSession(isPresented: false, hasSession: true))
     }
+
+    /// On macOS turning the full player on opens the Now Playing window, but only with a session.
+    @Test func theMacWindowOpensOnlyWithASession() {
+        #expect(PlayerSlot.opensNowPlayingWindow(isPresented: true, hasSession: true))
+        #expect(!PlayerSlot.opensNowPlayingWindow(isPresented: true, hasSession: false))
+        #expect(!PlayerSlot.opensNowPlayingWindow(isPresented: false, hasSession: true))
+        #expect(!PlayerSlot.opensNowPlayingWindow(isPresented: false, hasSession: false))
+    }
+
+    @Test(arguments: [
+        PlayerErrorMessage.streamingNeedsConfirmation, .streamingNotAllowed, .sessionStartFailed,
+        .streamUnavailable, .streamingInterrupted, .streamRejected, .playbackFailed,
+    ])
+    func everyPlayerErrorHasAResolvableMessage(_ error: PlayerErrorMessage) {
+        let key = PlayerSlot.messageKey(for: error)
+        #expect(L10n.string(key) != key)
+    }
+
+    /// #376: only "ask" offers to stream anyway; "never" and other failures show OK.
+    @Test(arguments: [
+        PlayerErrorMessage.streamingNeedsConfirmation, .streamingNotAllowed, .sessionStartFailed,
+        .streamUnavailable, .streamingInterrupted, .streamRejected, .playbackFailed,
+    ])
+    func onlyAConfirmationOffersToStream(_ error: PlayerErrorMessage) {
+        #expect(PlayerErrorAction(error) == (error == .streamingNeedsConfirmation ? .streamAnyway : nil))
+        #expect(L10n.string(PlayerErrorAction.streamAnyway.titleKey) != PlayerErrorAction.streamAnyway.titleKey)
+    }
+
+    /// A scene shows a failure until it's dismissed there, and a different failure after that.
+    @Test func anErrorShowsUntilItsSceneDismissesIt() {
+        #expect(PlayerSlot.shownError(current: .playbackFailed, dismissed: nil) == .playbackFailed)
+        #expect(PlayerSlot.shownError(current: .playbackFailed, dismissed: .playbackFailed) == nil)
+        #expect(PlayerSlot.shownError(current: .streamRejected, dismissed: .playbackFailed) == .streamRejected)
+        #expect(PlayerSlot.shownError(current: nil, dismissed: nil) == nil)
+    }
+
+    /// A different failure resets the dismissal: A, dismissed, then B shows, and A again after it.
+    @Test func aDifferentErrorResetsTheDismissal() {
+        var current: PlayerErrorMessage? = .playbackFailed
+        var dismissed: PlayerErrorMessage?
+        func change(to error: PlayerErrorMessage) {
+            current = error
+            dismissed = PlayerSlot.dismissed(afterChangeTo: error, dismissed: dismissed)
+        }
+        #expect(PlayerSlot.shownError(current: current, dismissed: dismissed) == .playbackFailed)
+        dismissed = current
+        #expect(PlayerSlot.shownError(current: current, dismissed: dismissed) == nil)
+        change(to: .streamRejected)
+        #expect(PlayerSlot.shownError(current: current, dismissed: dismissed) == .streamRejected)
+        change(to: .playbackFailed)
+        #expect(PlayerSlot.shownError(current: current, dismissed: dismissed) == .playbackFailed)
+    }
 }

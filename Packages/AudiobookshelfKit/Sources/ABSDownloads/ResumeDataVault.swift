@@ -99,6 +99,34 @@ public struct ResumeDataVault: Sendable {
         return true
     }
 
+    /// Deletes every blob whose part isn't in `kept`: those left when a record went although its
+    /// blob's delete failed (#515). A failure is logged and the blob kept for the next sweep; a
+    /// file that isn't named `<part id>.bin` is left alone.
+    ///
+    /// - Returns: `false` when the folder couldn't be listed or a blob couldn't be deleted.
+    @discardableResult
+    public func deleteBlobs(except kept: Set<UUID>) -> Bool {
+        let names: [String]
+        do {
+            names = try FileManager.default.contentsOfDirectory(atPath: directory.path(percentEncoded: false))
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            return true
+        } catch {
+            Log.downloads.error(
+                "Couldn't list resume data to sweep: \(Log.redact(String(describing: error)), privacy: .public)")
+            return false
+        }
+        var deleted = true
+        for name in names where name.hasSuffix(".bin") {
+            guard let partID = UUID(uuidString: String(name.dropLast(4))), !kept.contains(partID) else { continue }
+            if !delete(partID: partID) {
+                Log.downloads.error("Couldn't delete resume data no download uses; the next activation tries again")
+                deleted = false
+            }
+        }
+        return deleted
+    }
+
     private static func additionalData(_ partID: UUID, _ credentialTag: Data) -> Data {
         Data(partID.uuidString.utf8) + credentialTag
     }

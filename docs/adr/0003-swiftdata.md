@@ -171,7 +171,7 @@ General rules:
 | `DownloadPart` | `id: UUID` | `record: DownloadRecord?` (inverse), `kind` (`audio`/`ebook`/`cover`), `serverPath` (API path, no host, no token), `filename`, `mimeType`, `serverIno: String?`, `trackIndex: Int?`, `episodeId: String?`, `expectedBytes: Int64`, `bytesWritten: Int64`, `destinationRelativePath`, `state` (`queued`/`running`/`completed`/`failed`), `taskIdentifier: Int?`, `hasResumeData: Bool` (flag only; the sealed blob lives outside the store), `retryCount: Int`, `lastError: String?`, `lastErrorCode: String?` (a `DownloadFailureCode` raw value, for a localised message) | `#Unique([\.id])`; `#Index([\.taskIdentifier], [\.state])` |
 | `PendingLocalSession` | `id: String` (client-generated UUID string, sent as the session id) | `serverConnectionID: UUID`, `userId`, `libraryItemId`, `episodeId: String?`, `mediaType`, `displayTitle`, `displayAuthor: String?`, `duration`, `playMethod: Int` (3 = local), `startTime` (media position when the session began), `startedAt`, `updatedAt`, `timeListening`, `currentTime`, `isActive: Bool`, `uploadAttempts: Int`, `lastUploadError: String?`, `lastUploadFailureAt: Date?`, `missingUploadResults: Int` (default 0) | `#Unique([\.id])`; `#Index([\.serverConnectionID, \.isActive])` |
 | `PlaybackHistoryEvent` | `id: UUID` | `serverConnectionID: UUID?`, `mediaKey`, `libraryItemId`, `episodeId: String?`, `mediaDisplayTitle`, `name` (`Play`/`Pause`/`Stop`/`Seek`/`Save`/`Finished`/`Sync`), `type` (`Playback`/`Sync`), `details: String?`, `currentTime: Double?`, `serverSyncAttempted: Bool`, `serverSyncSuccess: Bool?`, `serverSyncMessage: String?`, `timestamp: Date` | `#Unique([\.id])`; `#Index([\.mediaKey, \.timestamp])` |
-| `PendingSessionClose` | `serverConnectionID: UUID`, `sessionID: String` (the server's session id) | `libraryItemId`, `episodeId: String?`, `currentTime`, `timeListened` (listening no acknowledged report carried), `duration`, `positionEditedAt: Date?` (the audio edit time the close's position committed with), `capturedAt`, `lastAttemptAt: Date?` (the latest attempt that may have reached the server), `attempts: Int` | `#Unique([\.serverConnectionID, \.sessionID])`; `#Index([\.serverConnectionID, \.capturedAt])` |
+| `PendingSessionClose` | `serverConnectionID: UUID`, `sessionID: String` (the server's session id) | `libraryItemId`, `episodeId: String?`, `currentTime`, `timeListened` (listening no acknowledged report carried), `duration`, `positionEditedAt: Date?` (the audio edit time the close's position committed with), `capturedAt`, `lastAttemptAt: Date?` (the latest attempt that may have reached the server), `attempts: Int`, `ackedTotal: Double` (the session's listening time acknowledged before the close, for a 404's lookup), `inFlightTotal: Double` (a `/sync` still out at the close, for the same lookup), `failedLookups: Int` | `#Unique([\.serverConnectionID, \.sessionID])`; `#Index([\.serverConnectionID, \.capturedAt])` |
 
 Model notes:
 
@@ -557,8 +557,11 @@ Model notes:
   this device's next `/play`, a server restart, or the server's nightly sweep of
   sessions with no update for 36 hours ends it. It is not a long-lived credential
   under the Keychain-only rule. The row is deleted once its close settles
-  (acknowledged, rejected for good, or skipped by admission), and keeping it lets the
-  device end the session sooner, never later.
+  (acknowledged, rejected for good, skipped by admission, or answered 404 and
+  reconciled). Once its session must have ended, 72 hours after capture
+  (`closeSessionLifetime`), the next drain that reaches the server settles it by
+  lookup without resending it, so it outlives the session only by up to six failed
+  lookups. Keeping it lets the device end the session sooner, never later.
 - **Downloaded files live in the app container, not the App Group.** Widgets never
   read downloaded media files; they get covers through the image cache
   ([ADR 0005](0005-images.md), #89 (P5-11b)).

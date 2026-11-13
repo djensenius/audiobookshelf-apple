@@ -91,6 +91,11 @@ final class FakeProgressServer: ProgressSyncService, EbookProgressService {
     /// No playback sessions: none is ever open.
     func openSession(id: String) async throws -> PlaybackSession { throw APIError.notFound }
 
+    /// No playback sessions: none was ever stored.
+    func listeningSessions(itemID: String, episodeID: String?) async throws -> ListeningSessionsPage {
+        throw APIError.notFound
+    }
+
     func closeSession(id: String, report: PlaybackSyncReport?) async throws {}
 
     func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws {

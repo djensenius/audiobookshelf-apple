@@ -108,7 +108,12 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
     }
 
     public func sessionStatus(id: String) async -> PlaybackSessionStatus {
-        await .checking { try await openSession(id: id) }
+        await sessionCheck(id: id).status
+    }
+
+    public func sessionCheck(id: String) async -> PlaybackSessionCheck {
+        guard let client = try? client() else { return PlaybackSessionCheck(status: .unknown) }
+        return await .lookUp(id: id, on: client)
     }
 
     // MARK: ProgressSyncService
@@ -130,5 +135,10 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
     public func openSession(id: String) async throws -> PlaybackSession {
         try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
             .openSession(id: id)
+    }
+
+    public func listeningSessions(itemID: String, episodeID: String?) async throws -> ListeningSessionsPage {
+        try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
+            .listeningSessions(itemID: itemID, episodeID: episodeID)
     }
 }
