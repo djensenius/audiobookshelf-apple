@@ -419,6 +419,40 @@ class RunnerTests(unittest.TestCase):
                          [["create", name, PHONE_TYPE, runtime("27.2")["identifier"]],
                           ["shutdown", name], ["delete", name]])
 
+    def test_delete_run_simulators_reports_a_cancellation_after_finishing(self):
+        names = {CREATED[0]: "abs-ci-55-1-123-1", CREATED[1]: "abs-ci-55-1-123-2"}
+        self.allDevices = {"devices": {"r": [{"udid": udid, "name": name} for udid, name in names.items()]}}
+        (self.root / "created.json").write_text(json.dumps([{"name": names[u], "udid": u} for u in CREATED]))
+        self.env.update(GITHUB_RUN_ID="55", GITHUB_RUN_ATTEMPT="1")
+        # A real SIGTERM to the runner during the first (successful) shutdown.
+        self.faults = {"cancelDuringShutdown": True}
+        result = self.run_case(expected=143, args=["--delete-run-simulators"])
+        self.assertIn("interrupted by signal 15", result.stderr)
+        self.assertEqual([args for args in self.simctl() if args[0] != "list"],
+                         [["shutdown", CREATED[0]], ["delete", CREATED[0]],
+                          ["shutdown", CREATED[1]], ["delete", CREATED[1]]])
+        # The signal also wins over a failed delete, after every deletion is attempted.
+        module = RUNNER["delete_run_simulators"].__globals__
+        listing = json.dumps(self.allDevices)
+        for delete_fails in (False, True):
+            with self.subTest(delete_fails=delete_fails):
+                calls = []
+
+                def fake_protected(args, timeout=120):
+                    calls.append(args[2:4])
+                    if args[2] == "delete":
+                        signals = [signal.SIGTERM] if args[3] == CREATED[0] else []
+                        return (None, "boom", signals) if delete_fails else ("", None, signals)
+                    return "", None, []
+
+                with mock.patch.dict(module, protected=fake_protected,
+                                     command=mock.Mock(return_value=listing)):
+                    with self.assertRaises(RUNNER["InterruptedRunner"]) as failure:
+                        RUNNER["delete_run_simulators"]({"GITHUB_RUN_ID": "55", "GITHUB_RUN_ATTEMPT": "1"})
+                self.assertEqual(failure.exception.signum, signal.SIGTERM)
+                self.assertEqual(calls, [["shutdown", CREATED[0]], ["delete", CREATED[0]],
+                                         ["shutdown", CREATED[1]], ["delete", CREATED[1]]])
+
     def test_create_timeout_still_deletes_by_name_without_changing_the_outcome(self):
         module = RUNNER["with_ephemeral_simulator"].__globals__
         selected = {"udid": FIRST, "deviceTypeIdentifier": PHONE_TYPE,

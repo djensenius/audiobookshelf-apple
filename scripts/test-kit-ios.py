@@ -373,7 +373,14 @@ def delete_run_simulators(environ):
         if device["name"].startswith(prefix) and re.fullmatch(UDID, device["udid"])
     )
     print(f"{len(owned)} simulator(s) named {prefix}*", flush=True)
-    deleted = [delete_simulator(udid)[0] for udid in owned]
+    deleted, pending = [], []
+    for udid in owned:
+        ok, signals = delete_simulator(udid)
+        deleted.append(ok)
+        pending += signals
+    # Finish every deletion first; then a cancellation wins over success or a failed delete.
+    if pending:
+        raise InterruptedRunner(pending[0])
     if not all(deleted):
         raise ValueError(f"Couldn't delete every {prefix}* simulator")
 
