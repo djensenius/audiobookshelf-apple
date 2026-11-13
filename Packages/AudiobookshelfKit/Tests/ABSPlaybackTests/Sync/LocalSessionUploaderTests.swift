@@ -170,6 +170,31 @@ struct LocalSessionUploaderTests {
         #expect(kept.uploadAttempts == 0 && kept.lastUploadError == nil)
     }
 
+    /// A declined cross-origin redirect isn't the server's answer, from `local-all` or `/local`:
+    /// the pass ends without retrying, and every session stays pending and uncounted.
+    @Test(arguments: [false, true]) func aRefusedRedirectKeepsEverySession(fromFallback: Bool) async throws {
+        let first = try await save(minute: 0)
+        let second = try await save(minute: 1)
+        let refused = APIError.redirectRefused(status: 307)
+        let service = StubUploadService(
+            all: { _, _ in
+                if fromFallback { throw APIError.notFound }
+                throw refused
+            },
+            one: { _, _ in throw refused })
+
+        let report = await uploader(service).sync()
+
+        #expect(service.batches.count == 1)
+        #expect(service.singles == (fromFallback ? [first.id] : []))
+        #expect(sleeps.delays.isEmpty)
+        #expect(!report.isComplete && report.results.isEmpty && report.deleted.isEmpty)
+        for session in [first, second] {
+            let kept = try #require(try await store.session(id: session.id))
+            #expect(kept.uploadAttempts == 0 && kept.lastUploadError == nil)
+        }
+    }
+
     @Test func aRetriedFallbackResumesAfterTheLastAnsweredSession() async throws {
         let first = try await save(minute: 0)
         let second = try await save(minute: 1)
