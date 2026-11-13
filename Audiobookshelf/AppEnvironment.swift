@@ -37,6 +37,11 @@ final class AppEnvironment {
     /// when the store couldn't be opened. Downloads link their progress rows in it (#74), and every
     /// playback scope writes through it (#183).
     let localProgress: LocalProgressStore?
+    /// The one writer of playback history (ADR 0003), or `nil` when the store couldn't be opened.
+    /// Every playback scope records through it (#184).
+    let playbackHistory: PlaybackHistoryStore?
+    /// Prunes ``playbackHistory`` past its retention, once per launch (#184); `nil` without it.
+    let historyPruning: Task<Void, Never>?
     let lifecycle: SessionLifecycle
     /// The stable device ID for playback sessions (ADR 0007), kept in the same Keychain as the
     /// accounts. It doesn't need the store, so it exists even when ``dataStack`` is `nil`.
@@ -76,6 +81,7 @@ final class AppEnvironment {
         let dataStack: DataStack?
         let accounts: AccountManager?
         let localProgress: LocalProgressStore?
+        let playbackHistory: PlaybackHistoryStore?
         let lifecycle: SessionLifecycle
         var downloads: AppDownloads?
         do {
@@ -94,6 +100,7 @@ final class AppEnvironment {
             dataStack = stack
             accounts = manager
             localProgress = progress
+            playbackHistory = PlaybackHistoryStore(modelContainer: stack.container)
             lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: manager))
             if let downloads {
                 lifecycle.register(downloads.lifecycle, stage: .connect)
@@ -116,23 +123,29 @@ final class AppEnvironment {
             dataStack = nil
             accounts = nil
             localProgress = nil
+            playbackHistory = nil
             lifecycle = SessionLifecycle(storeUnavailable: error)
         }
         self.settings = settings
         self.dataStack = dataStack
         self.accounts = accounts
         self.localProgress = localProgress
+        self.playbackHistory = playbackHistory
+        historyPruning = playbackHistory.map(Self.pruneHistory)
         self.lifecycle = lifecycle
         let deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
         self.deviceIdentifiers = deviceIdentifiers
+        // Before playback, whose progress reaches the library's cache.
+        let library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
+        self.library = library
         let playback = AppPlayback.make(
             writer: localProgress, accounts: accounts, lifecycle: lifecycle, settings: settings,
-            deviceIdentifiers: deviceIdentifiers)
+            deviceIdentifiers: deviceIdentifiers, library: library,
+            history: playbackHistory.map { PlaybackHistoryRecorder(store: $0) })
         self.playback = playback
         self.player = playback.player
         self.downloads = downloads
         downloads?.lifecycle.launch()
-        self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
 
         // Realtime (#59), after playback: the socket stops before the playback scope retires.
         if realtime, let accounts, let library {
@@ -156,6 +169,20 @@ final class AppEnvironment {
         // The app's one player, across every account's session: its item and play state.
         widgetSnapshots.follow(playback.player)
         self.widgetSnapshots = widgetSnapshots
+    }
+
+    /// Deletes the history events past ``PlaybackHistoryStore/retention`` (ADR 0003), off the main
+    /// actor; history is best effort, so a failure is only logged.
+    static func pruneHistory(_ store: PlaybackHistoryStore) -> Task<Void, Never> {
+        Task.detached(priority: .utility) {
+            do {
+                let pruned = try await store.pruneExpired()
+                Log.data.info("Pruned \(pruned, privacy: .public) expired playback history events")
+            } catch {
+                Log.data.error(
+                    "Couldn't prune playback history: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 }
 

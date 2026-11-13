@@ -121,7 +121,8 @@ private final class Removals {
                 writer: LocalProgressStore(modelContainer: try DataStack(location: .inMemory).container))
             let monitor = NetworkMonitor()
             let scope = AppPlayback.makeScope(
-                for: request, settings: settings, policy: NetworkPolicy(monitor: monitor, settings: settings))
+                for: request, settings: settings, policy: NetworkPolicy(monitor: monitor, settings: settings),
+                history: nil)
             defer { scope.retire(reason: .signOut) }
 
             #expect(scope.queue?.serverConnectionID == a)
