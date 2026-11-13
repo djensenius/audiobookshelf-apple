@@ -1,7 +1,11 @@
 import ABSCore
 import ABSData
+import ABSDownloads
+import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
+import UniformTypeIdentifiers
 
 @testable import ABSAppModel
 
@@ -105,5 +109,57 @@ import Testing
         #expect(ids(model.sections(for: nil)) == ["local-books", "local-podcasts"])
         #expect(model.sections(for: .book).first?.entries.map(\.id) == ["li_New", "li_Old"])
         #expect(ids(model.sections(for: .podcast)) == ["local-podcasts"])
+    }
+
+    /// A downloaded card's cover key finds the item's cover file through the pipeline's downloaded
+    /// lookup with nothing cached and no network (ADR 0005, "Offline covers"). Its version
+    /// matches the file's, so the file is fresh for the key and online it isn't fetched again.
+    @Test func aDownloadedCardsCoverLoadsFromItsFileOffline() async throws {
+        let root = URL.temporaryDirectory.appending(path: "DownloadedShelfCovers-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let locations = DownloadLocations(root: root)
+        let container = try DataStack(location: .inMemory).container
+        let connection = try await ServerConnectionStore(modelContainer: container).upsertLogin(
+            address: try #require(ServerAddress("https://abs.example.com")), userId: "usr_1", username: "user",
+            authMethod: .local, serverVersion: nil)
+        let store = LocalItemStore(modelContainer: container)
+        let parts = [("cover.jpg", DownloadPartKind.cover), ("a.mp3", .audio)].map { filename, kind in
+            DownloadPartDTO(
+                kind: kind, serverPath: "/api/items/li_1/file", filename: filename,
+                mimeType: "application/octet-stream", destinationRelativePath: "li_1/\(filename)", state: .completed)
+        }
+        _ = try await store.upsertFromDownload(
+            DownloadRecordDTO(
+                key: MediaKey(serverConnectionID: connection.id, libraryItemId: "li_1"), mediaType: .book,
+                title: "The Book", relativeDirectory: "li_1",
+                media: LocalMediaSnapshot(metadata: .init(title: "The Book")), parts: parts),
+            coverUpdatedAt: Date(timeIntervalSince1970: 1_700_000_000.123))
+        try writeJPEG(to: try locations.fileURL(forRelativePath: "li_1/cover.jpg"))
+        let item = try #require(try await store.item(serverConnectionID: connection.id, libraryItemId: "li_1"))
+        let key = try #require(ItemSummary(localItem: item).cover).key(serverID: connection.id, bucket: .small)
+        let pipeline = ImagePipeline(
+            limits: .iPhone, fileStore: CoverFileStore(directory: root.appending(path: "Images"), limit: 1 << 20),
+            downloadedCovers: LocalDownloadedCovers(store: store, locations: locations), isOnline: { false })
+
+        let image = try await pipeline.cgImage(for: key, size: CGSize(width: 32, height: 48))
+        #expect(image.width > 0 && image.height > 0)
+        // Only a downloaded cover at least as new as the key is stored for it.
+        let stored = try await pipeline.ensureCoverFile(for: key)
+        #expect(FileManager.default.fileExists(atPath: stored.path(percentEncoded: false)))
+    }
+
+    private func writeJPEG(to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let space = try #require(CGColorSpace(name: CGColorSpace.sRGB))
+        let context = try #require(
+            CGContext(
+                data: nil, width: 64, height: 96, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: 64, height: 96))
+        let destination = try #require(
+            CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, try #require(context.makeImage()), nil)
+        #expect(CGImageDestinationFinalize(destination))
     }
 }
