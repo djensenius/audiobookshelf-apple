@@ -5,7 +5,9 @@ Covers scripts/set-version.sh on a copy of Audiobookshelf.xcodeproj in a scratch
 repository (only MARKETING_VERSION changes, invalid versions change nothing, a second
 run is a no-op) and the What to Test notes that ci_scripts/ci_post_xcodebuild.sh writes
 from CHANGELOG.md (the topmost section with entries, the commit fallback, the archive
-gate and the 4,000-character limit). Nothing outside the scratch directories is touched.
+gate and the 4,000-character limit), and the release tag check in
+ci_scripts/ci_post_clone.sh (a v<x.y.z> CI_TAG must match every MARKETING_VERSION;
+other tags are ignored). Nothing outside the scratch directories is touched.
 """
 
 import os
@@ -21,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SET_VERSION = ROOT / "scripts/set-version.sh"
 FORMATTER = ROOT / "scripts/xcprojformatter.sh"
 POST_XCODEBUILD = ROOT / "ci_scripts/ci_post_xcodebuild.sh"
+POST_CLONE = ROOT / "ci_scripts/ci_post_clone.sh"
 PROJECT = ROOT / "Audiobookshelf.xcodeproj"
 TIMEOUT = 120
 MAX_NOTES_BYTES = 4000
@@ -331,6 +334,153 @@ Fixed
                 result = self.post_xcodebuild(**overrides)
                 self.assertIn("Skipping What to Test notes", result.stdout)
                 self.assertFalse((self.repo / "TestFlight").exists())
+
+
+class ReleaseTagTests(unittest.TestCase):
+    """ci_post_clone.sh fails a tag build whose v<x.y.z> tag doesn't match MARKETING_VERSION."""
+
+    VERSION = "1.2.3"
+
+    def setUp(self):
+        self.repo = Path(tempfile.mkdtemp(prefix="release-tag-tests."))
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        project = self.repo / "Audiobookshelf.xcodeproj"
+        project.mkdir()
+        self.file = project / "project.xcproj"
+        text, count = re.subn(
+            r'("MARKETING_VERSION(?:\[[^\]]*\])*": )"[^"]*"',
+            rf'\1"{self.VERSION}"',
+            (PROJECT / "project.xcproj").read_text(),
+        )
+        self.assertGreaterEqual(count, 3)
+        self.file.write_text(text)
+        git(self.repo, "init", "--quiet")
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "--quiet", "-m", "baseline")
+        # A stub xcodebuild, so the tests need no Xcode and show whether the script got past
+        # the check.
+        self.bin = self.repo / ".bin"
+        self.bin.mkdir()
+        self.xcodebuild_log = self.repo / ".xcodebuild.log"
+        stub = self.bin / "xcodebuild"
+        stub.write_text(f'#!/bin/sh\necho "$@" >> "{self.xcodebuild_log}"\necho "Xcode 27.2"\n')
+        stub.chmod(0o755)
+
+    def post_clone(self, tag):
+        env = {key: value for key, value in os.environ.items() if not key.startswith(("CI_", "ABS_"))}
+        env.update(PATH=f"{self.bin}:{env.get('PATH', '/usr/bin:/bin')}", CI_PRIMARY_REPOSITORY_PATH=str(self.repo))
+        if tag is not None:
+            env["CI_TAG"] = tag
+        return run(["/bin/sh", str(POST_CLONE)], cwd=self.repo, env=env)
+
+    def assert_passes(self, tag):
+        result = self.post_clone(tag)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.xcodebuild_log.exists(), "the build goes on")
+        return result
+
+    def assert_fails(self, tag, message):
+        result = self.post_clone(tag)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn(message, result.stderr)
+        self.assertFalse(self.xcodebuild_log.exists(), "the check fails before anything else runs")
+        return result
+
+    def test_a_branch_build_is_not_checked(self):
+        for tag in (None, ""):
+            with self.subTest(tag=tag):
+                result = self.assert_passes(tag)
+                self.assertNotIn("MARKETING_VERSION", result.stdout + result.stderr)
+
+    def test_a_matching_tag_passes(self):
+        result = self.assert_passes(f"v{self.VERSION}")
+        self.assertIn(f"Release tag v{self.VERSION} matches MARKETING_VERSION {self.VERSION}", result.stdout)
+
+    def test_a_mismatched_tag_fails(self):
+        for tag in ("v1.2.4", "v1.3.3", "v2.2.3", "v0.0.0"):
+            with self.subTest(tag=tag):
+                result = self.assert_fails(tag, f"release tag {tag} doesn't match MARKETING_VERSION ({self.VERSION})")
+                self.assertIn(f"mise run release:version {tag[1:]}", result.stderr)
+
+    def test_tags_that_are_not_release_tags_are_ignored(self):
+        for tag in ("nightly", "release-1.2.4", "1.2.4", "v", "vNext", "V1.2.4"):
+            with self.subTest(tag=tag):
+                self.xcodebuild_log.unlink(missing_ok=True)
+                result = self.assert_passes(tag)
+                self.assertIn(f"CI_TAG {tag} is not a release tag", result.stdout)
+
+    def test_malformed_version_tags_fail(self):
+        for tag in (
+            "v1.2", "v1.2.3.4", "v01.2.3", "v1.02.3", "v1.2.03", "v1.2.3-beta", "v0.9.1-beta",
+            "v1.2.3+4", "v1.2.3 ", "v1.2.3\n", "v1..3", "v1234567890.0.0", f"v{self.VERSION}\nv{self.VERSION}",
+        ):
+            with self.subTest(tag=tag):
+                self.assert_fails(tag, "is not v<MAJOR.MINOR.PATCH>")
+
+    def test_every_setting_must_match_including_conditional_ones(self):
+        text = self.file.read_text()
+        anchor = '    "MACOSX_DEPLOYMENT_TARGET": "27.0",\n'
+        self.assertIn(anchor, text)
+        self.file.write_text(text.replace(anchor, anchor + '    "MARKETING_VERSION[config=Debug]": "1.2.4",\n'))
+        self.assert_fails(f"v{self.VERSION}", "doesn't match MARKETING_VERSION (1.2.3 1.2.4)")
+
+    def add_setting(self, line):
+        text = self.file.read_text()
+        anchor = '    "MACOSX_DEPLOYMENT_TARGET": "27.0",\n'
+        self.assertIn(anchor, text)
+        self.file.write_text(text.replace(anchor, anchor + line, 1))
+
+    def test_an_array_override_that_differs_fails(self):
+        for line in (
+            '    "MARKETING_VERSION[config=Release]": ["1.2.4"],\n',
+            '    "MARKETING_VERSION[config=Release]": [ "1.2.4", ],\n',
+            '    "MARKETING_VERSION[sdk=macosx*]": [\n      "1.2.4",\n    ],\n',
+        ):
+            with self.subTest(line=line):
+                self.setUp()
+                self.add_setting(line)
+                self.assert_fails(f"v{self.VERSION}", "doesn't match MARKETING_VERSION (1.2.3 1.2.4)")
+
+    def test_a_matching_one_string_array_passes(self):
+        for line in (
+            f'    "MARKETING_VERSION[config=Release]": ["{self.VERSION}"],\n',
+            f'    "MARKETING_VERSION[sdk=macosx*]": [\n      "{self.VERSION}",\n    ],\n',
+        ):
+            with self.subTest(line=line):
+                self.setUp()
+                self.add_setting(line)
+                self.assert_passes(f"v{self.VERSION}")
+
+    def test_an_unsupported_value_fails(self):
+        for line in (
+            f'    "MARKETING_VERSION[config=Release]": ["{self.VERSION}", "1.2.4"],\n',
+            f'    "MARKETING_VERSION[config=Release]": ["{self.VERSION}", "{self.VERSION}"],\n',
+            '    "MARKETING_VERSION[config=Release]": [],\n',
+            '    "MARKETING_VERSION[config=Release]": 1.2,\n',
+            '    "MARKETING_VERSION[config=Release]": "",\n',
+            '    "MARKETING_VERSION[config=Release]": "1.2.\\u0033",\n',
+            '    "MARKETING_VERSION[config=Release]": { "value": "1.2.3" },\n',
+        ):
+            with self.subTest(line=line):
+                self.setUp()
+                self.add_setting(line)
+                self.assert_fails(
+                    f"v{self.VERSION}", 'unsupported MARKETING_VERSION value for "MARKETING_VERSION[config=Release]"')
+
+    def test_a_project_without_marketing_version_fails(self):
+        self.file.write_text(re.sub(r'\n\s*"MARKETING_VERSION": "[^"]*",', "", self.file.read_text()))
+        self.assert_fails(f"v{self.VERSION}", "no MARKETING_VERSION setting")
+
+    def test_a_missing_project_fails(self):
+        self.file.unlink()
+        self.assert_fails(f"v{self.VERSION}", "not found")
+
+    def test_the_repository_project_is_read(self):
+        # The real project, unpinned: the check reads its canonical layout.
+        versions = set(re.findall(r'"MARKETING_VERSION(?:\[[^\]]*\])*": "([^"]*)"', (PROJECT / "project.xcproj").read_text()))
+        self.assertEqual(len(versions), 1, versions)
+        shutil.copy2(PROJECT / "project.xcproj", self.file)
+        self.assert_passes(f"v{versions.pop()}")
 
 
 if __name__ == "__main__":

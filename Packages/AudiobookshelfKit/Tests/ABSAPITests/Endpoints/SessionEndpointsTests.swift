@@ -187,6 +187,29 @@ private func localSession(
         #expect(sentSessions.allSatisfy { $0["mediaPlayer"] as? String == "AVPlayer" })
     }
 
+    /// A 307 or 308 to another origin isn't followed: the sessions aren't re-posted there, and its
+    /// reply can't be taken for the server acknowledging them, which would delete them.
+    @Test(arguments: [307, 308]) func localUploadsRefuseCrossOriginRedirects(status: Int) async throws {
+        let other = StubServer { _ in
+            .json(#"{"results":[{"id":"\#(localSessionID)","success":true,"progressSynced":true}]}"#)
+        }
+        let origin = StubServer { _ in .redirect(to: "https://\(other.host)/api/session/local-all", status: status) }
+        let payload = try LocalPlaybackSessionPayload(session: localSession(), deviceInfo: deviceInfo)
+        let one = SessionEndpoints.syncLocal(payload)
+        let all = SessionEndpoints.syncLocalAll(
+            try LocalPlaybackSessionBatch(sessions: [payload], deviceInfo: deviceInfo))
+        #expect(one.followsRedirects && one.staysOnOrigin && all.followsRedirects && all.staysOnOrigin)
+
+        await #expect(throws: APIError.redirectRefused(status: status)) {
+            try await makeClient(origin).send(all)
+        }
+        await #expect(throws: APIError.redirectRefused(status: status)) {
+            try await makeClient(origin).send(one)
+        }
+        #expect(other.requests.isEmpty)
+        #expect(origin.requests.count == 2)
+    }
+
     @Test func decodesMultiTrackSession() throws {
         let session = try decodeMultiTrackSession()
         #expect(session.playMethod == .directPlay)
