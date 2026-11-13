@@ -119,7 +119,7 @@ actor ConnectionCredentials: TokenProvider {
     /// Keychain, so a sign-out can keep a session that a newer call stored.
     private var sessionOperation = 0
     /// The refresh running for each pair, from whichever client started it.
-    private var refreshes: [AuthTokens: (id: Int, task: Task<Void, any Error>)] = [:]
+    private var refreshes: [AuthTokens: (id: Int, task: Task<Bool, any Error>)] = [:]
     private var nextRefreshID = 0
     /// Test hook: called whenever a refresh waits for one another client started, and whenever an
     /// expiry waits for a refresh of the rejected pair.
@@ -261,7 +261,10 @@ actor ConnectionCredentials: TokenProvider {
         return await expireSession(ifCurrent: rejected)
     }
 
-    func refreshTokens(_ tokens: AuthTokens, using refresh: @escaping @Sendable () async throws -> Void) async throws {
+    @discardableResult
+    func refreshTokens(_ tokens: AuthTokens, using refresh: @escaping @Sendable () async throws -> Void) async throws
+        -> Bool
+    {
         if let running = refreshes[tokens] {
             refreshJoinObserver?()
             return try await running.task.value
@@ -273,11 +276,12 @@ actor ConnectionCredentials: TokenProvider {
             defer { if refreshes[tokens]?.id == id { refreshes[tokens] = nil } }
             // Another sign-in or refresh replaced the pair while this waited for the actor: its
             // refresh token may have rotated, so don't send it. The caller reads the stored pair.
-            if let stored = try? load().session, stored.tokens != tokens { return }
+            if let stored = try? load().session, stored.tokens != tokens { return false }
             try await refresh()
+            return true
         }
         refreshes[tokens] = (id, task)
-        try await task.value
+        return try await task.value
     }
 
     // MARK: - Private

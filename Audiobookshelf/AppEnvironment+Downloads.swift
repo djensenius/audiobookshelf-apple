@@ -41,7 +41,8 @@ struct AppDownloads {
         let engine = DownloadEngine(
             store: store, localItems: localItems,
             credentials: AccountDownloadCredentials { try await accounts.downloadAccess(for: $0, read: $1) },
-            vault: ResumeDataVault(directory: locations.resumeDataRoot), locations: locations,
+            vault: ResumeDataVault(directory: locations.resumeDataRoot),
+            sweepsOrphanedResumeData: dataStack.resolvedLocation == .appGroup, locations: locations,
             networkAccess: networkAccess.provider, makeSession: makeSession)
         let manager = DownloadManager(
             store: store, localItems: localItems, engine: engine, locations: locations,

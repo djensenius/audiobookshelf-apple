@@ -1284,8 +1284,10 @@ public final class PlaybackCoordinator {
                 }
             },
             checkSession: { [weak self, sessions] in
-                guard let id = self?.session?.id, self?.phase == .loaded else { return .unknown }
-                return await sessions.sessionStatus(id: id)
+                guard let id = self?.session?.id, self?.phase == .loaded else {
+                    return PlaybackSessionCheck(status: .unknown)
+                }
+                return await sessions.sessionCheck(id: id)
             },
             giveUp: { [weak self] error in
                 guard let self else { return }
