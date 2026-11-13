@@ -87,6 +87,35 @@ struct PlaybackRecoveryNetworkTests {
         #expect(coordinator.error == nil)
     }
 
+    /// The path drops again during the lookup after it returned (no refresh): the attempt waits
+    /// for it, then runs after another lookup.
+    @Test func connectivityLostDuringTheLookupHoldsTheAttempt() async {
+        h.recoverySleep.isManual = true
+        setSession(.alive)
+        await playAt600()
+        let seeks = engine.seeks.count
+        paths.isOnline = false
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { h.recoverySleep.waitingCount == 1 }
+
+        let lookup = Gate()
+        service.state.withLock { $0.sessionGate = lookup }
+        paths.isOnline = true
+        await settle { lookups == ["A-1"] && h.recoverySleep.waitingCount == 0 }
+        paths.isOnline = false
+        lookup.open()
+        await settle { h.recoverySleep.waitingCount == 1 }
+        await drain()
+        #expect(engine.seeks.count == seeks)
+        #expect(service.starts == ["A"])
+
+        paths.isOnline = true
+        await settle { engine.isPlaybackRequested }
+        #expect(lookups == ["A-1", "A-1"])
+        #expect(Array(engine.seeks.dropFirst(seeks)) == [600])
+        #expect(coordinator.error == nil)
+    }
+
     @Test func fiveMinutesOfflineSurfacesTheError() async {
         h.recoverySleep.isManual = true
         await playAt600()
@@ -277,6 +306,43 @@ struct PlaybackRecoveryNetworkTests {
         #expect(lookups == ["A-1"])
         #expect(service.state.withLock { $0.refreshes } == 1)
         #expect(h.recoverySleep.waitingCount == 0)
+    }
+
+    /// The path drops again during the lookup after it returned: no rebuild until it is back, and
+    /// then only after another lookup.
+    @Test func connectivityLostDuringThePostRefreshLookupHoldsTheRebuild() async {
+        h.recoverySleep.isManual = true
+        setSession(.gone)
+        await playAt600()
+        let refresh = Gate()
+        service.state.withLock { $0.refreshGate = refresh }
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 401))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        h.recoverySleep.fireOldest()
+        await settle { service.state.withLock { $0.refreshes } == 1 }
+        paths.isOnline = false
+        refresh.open()
+        await settle { h.recoverySleep.waitingCount == 1 }
+
+        let lookup = Gate()
+        service.state.withLock { $0.sessionGate = lookup }
+        paths.isOnline = true
+        await settle { lookups == ["A-1"] && h.recoverySleep.waitingCount == 0 }
+        paths.isOnline = false
+        lookup.open()
+        await settle { h.recoverySleep.waitingCount == 1 }
+        await drain()
+
+        // Offline again: no `/play`, only a new wait.
+        #expect(service.starts == ["A"])
+        #expect(h.recoverySleep.durations.suffix(2) == [.seconds(300), .seconds(300)])
+
+        paths.isOnline = true
+        await settle { service.starts.count == 2 && engine.isPlaybackRequested }
+        #expect(lookups == ["A-1", "A-1"])
+        #expect(service.state.withLock { $0.refreshes } == 1)
+        #expect(engine.loads.last?.time == 600)
+        #expect(coordinator.error == nil)
     }
 
     // MARK: - A user seek during recovery

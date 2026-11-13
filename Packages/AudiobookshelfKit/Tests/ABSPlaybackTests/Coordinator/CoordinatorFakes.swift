@@ -276,6 +276,8 @@ final class StubSessionService: PlaybackSessionService {
         /// What `GET /api/session/{id}` answers, and the ids looked up.
         var sessionStatus = PlaybackSessionStatus.unknown
         var sessionLookups: [String] = []
+        /// Holds the next lookup before it answers.
+        var sessionGate: Gate?
     }
 
     let serverConnectionID: UUID
@@ -294,10 +296,14 @@ final class StubSessionService: PlaybackSessionService {
     var takenOver: [String] { state.withLock { $0.takenOver } }
 
     func sessionStatus(id: String) async -> PlaybackSessionStatus {
-        state.withLock {
+        let gate = state.withLock {
             $0.sessionLookups.append(id)
-            return $0.sessionStatus
+            let gate = $0.sessionGate
+            $0.sessionGate = nil
+            return gate
         }
+        await gate?.wait()
+        return state.withLock { $0.sessionStatus }
     }
 
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
