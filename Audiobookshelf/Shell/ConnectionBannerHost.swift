@@ -22,6 +22,9 @@ final class ConnectionBannerSession {
 
     let model: ConnectionBannerModel
     private let monitor: NetworkMonitor
+    /// Bumped by each ``run()``, so only the latest run stops the monitor: a restarted task's new
+    /// run reuses the monitor while the cancelled one is still unwinding. Readable by tests.
+    private(set) var runGeneration: UInt64 = 0
 
     /// Pings `store`'s client while the store serves the account it serves now, and follows
     /// `monitor`'s paths (the device's, unless a test passes its own source).
@@ -37,11 +40,14 @@ final class ConnectionBannerSession {
         self.monitor = monitor
     }
 
-    /// Follows the network and checks the server until the calling task is cancelled.
+    /// Follows the network and checks the server until the calling task is cancelled. A run that
+    /// ends after a newer one began leaves the monitor running for that one.
     func run() async {
+        runGeneration &+= 1
+        let generation = runGeneration
         monitor.start()
         await model.run()
-        monitor.stop()
+        if generation == runGeneration { monitor.stop() }
     }
 
     /// `GET /ping` through the store's current client, so a reconnect's new client is used. Once
@@ -71,9 +77,11 @@ enum ConnectionBannerPresentation {
 }
 
 /// Shows the shell's ``ConnectionBanner`` above its content while the network or the server is
-/// unavailable, and runs the banner's checks while the shell is on screen.
+/// unavailable, and runs the banner's checks while the shell is on screen. With Reduce Motion
+/// on, the banner appears and goes without sliding or resizing the shell.
 struct ConnectionBannerHost: ViewModifier {
     @Environment(\.connectionBanner) private var session
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func body(content: Content) -> some View {
         let status = session.flatMap { ConnectionBannerPresentation.status(for: $0.model.state) }
@@ -84,7 +92,7 @@ struct ConnectionBannerHost: ViewModifier {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
-            .animation(.default, value: status)
+            .animation(reduceMotion ? nil : .default, value: status)
             .task(id: session.map(ObjectIdentifier.init)) {
                 await session?.run()
             }

@@ -122,6 +122,28 @@ private let account = LibraryConnectionKey(connectionID: UUID(), userID: "user-1
         }
     }
 
+    /// A restarted shell task's new run reuses the monitor while the cancelled run unwinds: the
+    /// old run's end leaves it running, and only the latest run's end stops it.
+    @Test func anOutgoingRunLeavesTheMonitorToTheNewOne() async throws {
+        try await withStore(client: NoLibraries()) { store in
+            let monitor = NetworkMonitor(source: OnePath(path: NetworkPath(isOnline: true, interface: .wifi)))
+            let session = ConnectionBannerSession(store: store, monitor: monitor)
+            let outgoing = Task { await session.run() }
+            while session.runGeneration < 1 { await Task.yield() }
+            let incoming = Task { await session.run() }
+            while session.runGeneration < 2 { await Task.yield() }
+            #expect(monitor.isRunning)
+
+            outgoing.cancel()
+            await outgoing.value
+            #expect(monitor.isRunning)
+
+            incoming.cancel()
+            await incoming.value
+            #expect(!monitor.isRunning)
+        }
+    }
+
     /// The signed-in shell gives its screens its banner session; signed out there is none.
     @Test func shellInjectsItsBannerSession() async throws {
         try await withStore(client: NoLibraries()) { store in
