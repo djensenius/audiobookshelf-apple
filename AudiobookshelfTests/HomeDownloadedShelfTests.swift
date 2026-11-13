@@ -202,6 +202,38 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
         #expect(request(.userRefresh, hasError: false) == .refresh)
     }
 
+    /// The libraries list failed before a library was selected, and the server stopped answering:
+    /// Home says it's disconnected, and its Retry checks the server. When the server answers again,
+    /// the load trigger reloads the list at once, so the shell selects a library and Home loads
+    /// its shelves, rather than Home showing the libraries' failure until another Retry. A list
+    /// that loaded or is loading isn't requested again, and nothing is without the server.
+    @Test func reconnectingWithoutALibraryReloadsTheFailedLibrariesAtOnce() {
+        let unreachableState = HomeScreenState.resolve(
+            Inputs(librariesLoaded: false, librariesFailed: true, libraryID: nil, connection: unreachable))
+        #expect(unreachableState == .disconnected(unreachable))
+        #expect(
+            HomeScreenState.resolve(Inputs(librariesLoaded: false, librariesFailed: true, libraryID: nil))
+                == .librariesFailed)
+
+        func refreshes(
+            _ trigger: HomeRefreshSchedule.Trigger, failed: Bool = true, loading: Bool = false, connected: Bool = true
+        ) -> Bool {
+            HomeRefreshSchedule.refreshesLibraries(
+                for: trigger, librariesFailed: failed, librariesLoading: loading, isConnected: connected)
+        }
+        #expect(refreshes(.loadTrigger))
+        #expect(!refreshes(.loadTrigger, failed: false))
+        #expect(!refreshes(.loadTrigger, loading: true))
+        #expect(!refreshes(.sceneActivation))
+        // Pull to refresh, the Refresh command and Retry reload the list whenever none is selected.
+        #expect(refreshes(.userRefresh))
+        #expect(refreshes(.userRefresh, failed: false))
+        #expect(refreshes(.userRefresh, failed: false, loading: true))
+        for trigger in HomeRefreshSchedule.Trigger.allCases {
+            #expect(!refreshes(trigger, connected: false), "\(trigger)")
+        }
+    }
+
     /// Losing the connection runs Home's load trigger again: no trigger, not even pull to refresh,
     /// loads or refreshes the shelves without the server, whether they're loaded, stale or failed.
     @Test func offlineNoTriggerLoadsOrRefreshesTheShelves() {

@@ -170,6 +170,28 @@ struct HomeRefreshSchedule {
         return request(libraryID: libraryID, hasLoaded: hasLoaded, now: now, force: force)
     }
 
+    /// Whether `trigger` reloads the libraries list while no library is selected, so the shell
+    /// selects one and Home loads its shelves. Always on the user's refresh, as before. On the load
+    /// trigger only after the list failed and while it isn't loading: when the server answers
+    /// again (the disconnected state's Retry, or the banner's own check), the list loads at once
+    /// instead of Home showing the libraries' failure and waiting for another Retry. Not on scene
+    /// activation, and never without the server.
+    ///
+    /// - Parameters:
+    ///   - librariesFailed: The store's last libraries request failed.
+    ///   - librariesLoading: The store is loading the libraries.
+    ///   - isConnected: The server can be used (no connection banner).
+    static func refreshesLibraries(
+        for trigger: Trigger, librariesFailed: Bool, librariesLoading: Bool, isConnected: Bool
+    ) -> Bool {
+        guard isConnected else { return false }
+        return switch trigger {
+        case .loadTrigger: librariesFailed && !librariesLoading
+        case .sceneActivation: false
+        case .userRefresh: true
+        }
+    }
+
     /// The model's state when a request it made finished.
     struct ModelState {
         var libraryID: String?

@@ -97,8 +97,8 @@ private struct HomeScreen: View {
         // With the client, the online revision and the connection too: a reconnect, whether it
         // attaches a client after an offline start without one or keeps the offline session's,
         // or the server answering again, loads again even when the library is unchanged, and
-        // retries a failed load or refresh even while the shelves are fresh. Losing the
-        // connection runs it too, and makes no request.
+        // retries a failed load or refresh even while the shelves are fresh, or, with no library
+        // yet, a failed libraries list. Losing the connection runs it too, and makes no request.
         .task(
             id: HomeLoadTrigger(
                 libraryID: libraryID, connection: store.connectedKey, onlineRevision: store.onlineRevision,
@@ -124,9 +124,19 @@ private struct HomeScreen: View {
     }
 
     /// Loads the shelves, or reloads them, as ``HomeRefreshSchedule`` decides for `trigger`:
-    /// nothing without the server.
+    /// nothing without the server. Without a library, the libraries list instead, which selects
+    /// one once loaded.
     private func update(_ trigger: HomeRefreshSchedule.Trigger) async {
-        guard let libraryID = model.libraryID,
+        guard let libraryID = model.libraryID else {
+            if HomeRefreshSchedule.refreshesLibraries(
+                for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
+                isConnected: connectionStatus == nil)
+            {
+                await store.refresh()
+            }
+            return
+        }
+        guard
             let request = schedule.request(
                 for: trigger, libraryID: libraryID, hasLoaded: model.hasLoaded, hasError: model.error != nil,
                 isConnected: connectionStatus == nil, now: .now)
@@ -150,8 +160,6 @@ private struct HomeScreen: View {
         downloaded?.retry()
         if let connectionBanner, connectionStatus != nil {
             connectionBanner.model.retry()
-        } else if model.libraryID == nil {
-            await store.refresh()
         } else {
             await update(.userRefresh)
         }
