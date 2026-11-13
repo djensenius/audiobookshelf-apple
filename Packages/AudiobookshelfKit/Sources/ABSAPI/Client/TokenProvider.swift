@@ -40,7 +40,13 @@ public protocol TokenProvider: Sendable {
     /// and share its outcome: the server rotates the refresh token, so it would reject a second
     /// refresh of the pair, which would end the session the first one renewed. The default runs
     /// `refresh`.
+    ///
+    /// Returns whether a refresh of `tokens` completed: this `refresh`, or another client's that
+    /// this call waited for. `false` when none ran, for example because a sign-in had already
+    /// replaced the pair. The default returns `true` once `refresh` returns.
+    @discardableResult
     func refreshTokens(_ tokens: AuthTokens, using refresh: @escaping @Sendable () async throws -> Void) async throws
+        -> Bool
 
     /// ``expireSession(ifCurrent:)`` for a 401 to a request that used `rejected` after a refresh
     /// produced it (not for the refresh endpoint itself rejecting its refresh token, which runs
@@ -55,9 +61,11 @@ extension TokenProvider {
         await expireSession(ifCurrent: rejected)
     }
 
+    @discardableResult
     public func refreshTokens(
         _ tokens: AuthTokens, using refresh: @escaping @Sendable () async throws -> Void
-    ) async throws {
+    ) async throws -> Bool {
         try await refresh()
+        return true
     }
 }

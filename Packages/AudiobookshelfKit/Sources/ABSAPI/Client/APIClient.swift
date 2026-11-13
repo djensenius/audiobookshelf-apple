@@ -86,7 +86,8 @@ public actor APIClient {
 
     private struct RefreshFlight {
         let id: Int
-        let task: Task<Void, any Error>
+        /// Whether a refresh of the pair completed (see ``TokenProvider/refreshTokens(_:using:)``).
+        let task: Task<Bool, any Error>
     }
 
     /// Tokens to retry with, and whether a refresh of the rejected pair produced them (rather
@@ -94,6 +95,9 @@ public actor APIClient {
     private struct RefreshOutcome {
         let tokens: AuthTokens
         let didRefresh: Bool
+        /// A refresh of the rejected pair completed while this request waited, though it may not
+        /// be in this client's lineage (`didRefresh`): another client of the provider ran it.
+        var waitedForRefresh = false
     }
 
     /// - Parameter sessionConfiguration: Tests pass a configuration with stub protocol classes.
@@ -148,6 +152,28 @@ public actor APIClient {
 
     /// Sends `endpoint` and returns the decoded value with its HTTP response.
     public func response<Response>(for endpoint: Endpoint<Response>) async throws -> APIResponse<Response> {
+        var refreshed = false
+        return try await response(for: endpoint, refreshed: &refreshed)
+    }
+
+    /// Sends `endpoint` as ``send(_:)`` does, and reports whether this request's own 401 was
+    /// answered by refreshing the tokens it was rejected with (a refresh it started, or one of
+    /// those tokens it joined), whether the request then succeeded or failed. A refresh another
+    /// request made for its own 401 isn't this request's.
+    public func sendTrackingRefresh<Response>(_ endpoint: Endpoint<Response>) async -> RefreshTrackedResult<Response> {
+        var refreshed = false
+        do {
+            let value = try await response(for: endpoint, refreshed: &refreshed).value
+            return RefreshTrackedResult(result: .success(value), didRefresh: refreshed)
+        } catch {
+            return RefreshTrackedResult(result: .failure(error), didRefresh: refreshed)
+        }
+    }
+
+    /// - Parameter refreshed: Set once a refresh answers this request's 401.
+    private func response<Response>(
+        for endpoint: Endpoint<Response>, refreshed: inout Bool
+    ) async throws -> APIResponse<Response> {
         let request = try makeRequest(for: endpoint)
         let followsRedirects = endpoint.followsRedirects
         let staysOnOrigin = endpoint.staysOnOrigin
@@ -213,7 +239,12 @@ public actor APIClient {
                 guard sendsLeft > 0 else { return try handle(reply.data, reply.http, for: endpoint) }
                 let outcome = try await refreshedTokens(
                     replacing: tokens, readAt: tokensGeneration, sentAt: sendGeneration)
-                if outcome.didRefresh { refreshedPair = outcome.tokens }
+                if outcome.didRefresh {
+                    refreshedPair = outcome.tokens
+                }
+                // Also a refresh another client of the provider ran for this pair, which this
+                // client's lineage doesn't record (so it doesn't make `refreshedPair`).
+                if outcome.didRefresh || outcome.waitedForRefresh { refreshed = true }
                 next = outcome.tokens
             }
             guard sendsLeft > 0 else { return try handle(reply.data, reply.http, for: endpoint) }
@@ -398,8 +429,9 @@ public actor APIClient {
         while true {
             if let flight = refreshFlights[rejected] {
                 refreshJoinObserver?()
-                try await flight.task.value
-                return try await currentOutcome(after: rejected, since: sent, sentAt: sendGeneration)
+                let completed = try await flight.task.value
+                return try await currentOutcome(
+                    after: rejected, since: sent, sentAt: sendGeneration, waitedForRefresh: completed)
             }
             guard let current = await tokenProvider.tokens() else { throw APIError.sessionExpired }
             // A refresh may have started during the read above.
@@ -414,8 +446,9 @@ public actor APIClient {
             }
             if let flight = refreshFlights[current] {
                 refreshJoinObserver?()
-                try await flight.task.value
-                return try await currentOutcome(after: rejected, since: sent, sentAt: sendGeneration)
+                let completed = try await flight.task.value
+                return try await currentOutcome(
+                    after: rejected, since: sent, sentAt: sendGeneration, waitedForRefresh: completed)
             }
 
             nextFlightID += 1
@@ -425,11 +458,12 @@ public actor APIClient {
                 // once it has completed (for example while this request reads the new tokens).
                 // Only this flight's entry is removed, never a newer flight for the same pair.
                 defer { if refreshFlights[current]?.id == id { refreshFlights[current] = nil } }
-                try await tokenProvider.refreshTokens(current) { try await self.refresh(current) }
+                return try await tokenProvider.refreshTokens(current) { try await self.refresh(current) }
             }
             refreshFlights[current] = RefreshFlight(id: id, task: task)
-            try await task.value
-            return try await currentOutcome(after: rejected, since: sent, sentAt: sendGeneration)
+            let completed = try await task.value
+            return try await currentOutcome(
+                after: rejected, since: sent, sentAt: sendGeneration, waitedForRefresh: completed)
         }
     }
 
@@ -440,10 +474,12 @@ public actor APIClient {
 
     /// The provider's current pair after a refresh of `rejected` finished.
     private func currentOutcome(
-        after rejected: AuthTokens, since sent: Int, sentAt sendGeneration: Int
+        after rejected: AuthTokens, since sent: Int, sentAt sendGeneration: Int, waitedForRefresh: Bool
     ) async throws -> RefreshOutcome {
         guard let current = await tokenProvider.tokens() else { throw APIError.sessionExpired }
-        return outcome(current, after: rejected, since: sent, sentAt: sendGeneration)
+        var result = outcome(current, after: rejected, since: sent, sentAt: sendGeneration)
+        result.waitedForRefresh = waitedForRefresh
+        return result
     }
 
     /// `current` counts as refreshed only if it descends from `rejected` through one or more

@@ -4,7 +4,7 @@ import SwiftUI
 
 /// The full player's bottom toolbar: chapters, bookmarks, the sleep timer and more (the legacy
 /// player's top bar and menu). Each slot lives in its sheet's file and sets `sheet` to present it;
-/// More is a disabled placeholder.
+/// More is the ``PlayerOptionsMenu``.
 ///
 /// While the player is split, its details pane shows chapters and bookmarks, so the bar leaves
 /// them out (ADR 0004: sheets only when not split).
@@ -28,15 +28,7 @@ struct PlayerActionsBar: ToolbarContent {
                 BookmarksSlot(model: model, sheet: $sheet)
             }
             SleepTimerSlot(model: model, sheet: $sheet)
-            Button {
-            } label: {
-                Label {
-                    Text(verbatim: L10n.string("LabelMore"))
-                } icon: {
-                    Image(systemName: "ellipsis.circle")
-                }
-            }
-            .disabled(true)
+            PlayerOptionsMenu(model: model)
         }
     }
 }

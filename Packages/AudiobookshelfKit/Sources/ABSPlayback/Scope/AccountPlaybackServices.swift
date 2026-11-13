@@ -130,7 +130,12 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
     }
 
     public func sessionStatus(id: String) async -> PlaybackSessionStatus {
-        await .checking { try await openSession(id: id) }
+        await sessionCheck(id: id).status
+    }
+
+    public func sessionCheck(id: String) async -> PlaybackSessionCheck {
+        guard let client = try? client() else { return PlaybackSessionCheck(status: .unknown) }
+        return await .lookUp(id: id, on: client)
     }
 
     // MARK: ProgressSyncService

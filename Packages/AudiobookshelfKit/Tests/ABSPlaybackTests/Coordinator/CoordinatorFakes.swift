@@ -275,6 +275,8 @@ final class StubSessionService: PlaybackSessionService {
         var takenOver: [String] = []
         /// What `GET /api/session/{id}` answers, and the ids looked up.
         var sessionStatus = PlaybackSessionStatus.unknown
+        /// Whether the lookup's request refreshed the access token.
+        var sessionRefreshesToken = false
         var sessionLookups: [String] = []
         /// Holds the next lookup before it answers.
         var sessionGate: Gate?
@@ -304,6 +306,11 @@ final class StubSessionService: PlaybackSessionService {
         }
         await gate?.wait()
         return state.withLock { $0.sessionStatus }
+    }
+
+    func sessionCheck(id: String) async -> PlaybackSessionCheck {
+        let status = await sessionStatus(id: id)
+        return PlaybackSessionCheck(status: status, refreshedToken: state.withLock { $0.sessionRefreshesToken })
     }
 
     func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
