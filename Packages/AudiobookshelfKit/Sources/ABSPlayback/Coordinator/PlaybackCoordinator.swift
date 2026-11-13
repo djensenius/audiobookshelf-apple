@@ -1257,7 +1257,7 @@ public final class PlaybackCoordinator {
         guard generation == attempt, policyCheck == ended.playRequest, pendingPlayKey == nil,
             phase == .unloaded, mediaKey == next.key, error == nil,
             nextItemProvider?.isStillNext(next.key) == false
-        else { return await holdUntilAudioPlays(generation: generation) }
+        else { return await holdUntilAudioPlays(generation: attempt) }
         generation += 1
         mediaKey = key
         restoredRecord = lastPlayedStore.load().flatMap { $0.key == key ? $0 : nil }

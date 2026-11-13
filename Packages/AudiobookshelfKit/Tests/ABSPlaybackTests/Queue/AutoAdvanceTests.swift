@@ -478,6 +478,28 @@ struct AutoAdvanceTests {
         #expect(a.activity.begun.count == 1)
         #expect(a.activity.active == 0)
     }
+
+    /// Another play takes over while the next item's load is suspended and loads before that
+    /// start returns: the superseded advance ends its activity rather than wait on the
+    /// replacement, which buffers on an interrupted seek here (#554).
+    @Test func supersededAdvanceEndsActivityOnTakeover() async {
+        a.enqueue("B")
+        await a.play("A")
+        let gate = Gate()
+        a.h.engine.loadGates = [gate]
+        a.h.engine.finish()
+        await yieldUntil { a.h.engine.loads.count == 2 && coordinator.mediaKey == a.key("B") }
+
+        a.h.engine.interruptedLoads = 1
+        await coordinator.play(itemID: "C")
+        #expect(coordinator.mediaKey == a.key("C"))
+        #expect(a.h.engine.state == .buffering)
+        gate.open()
+
+        await yieldUntil { a.activity.active == 0 }
+        #expect(a.activity.begun.count == 1)
+        #expect(a.h.engine.state == .buffering)
+    }
 }
 
 extension PlaybackCoordinatorError {

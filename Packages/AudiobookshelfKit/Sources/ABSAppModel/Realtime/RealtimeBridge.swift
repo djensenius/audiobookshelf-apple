@@ -367,9 +367,8 @@ public final class RealtimeBridge: SessionParticipant {
         {
             return
         }
-        let supersedes = Self.supersedes(incoming, cached)
-        merge(incoming, kind: supersedes ? ProgressChangeKind(from: cached, to: incoming) : .updated)
-        if supersedes { progress.apply(incoming) }
+        merge(incoming)
+        if Self.supersedes(incoming, cached) { progress.apply(incoming) }
         if isOpen, let snapshot, let onRemoteProgress, Self.offersJump(update, to: snapshot, cached: cached) {
             onRemoteProgress(update)
         }
@@ -377,10 +376,11 @@ public final class RealtimeBridge: SessionParticipant {
 
     /// Merges dated `progress` into ``localProgress`` as a `.socket` value, after the merges before
     /// it. A merge still waiting when the session ends is dropped. Once merged, the media is
-    /// reported to ``ProgressCache/onChange`` again as a `kind` change, so the auto-advance
-    /// prepares again from the merged local progress: the cache's own report came before the
-    /// merge (#160).
-    private func merge(_ progress: MediaProgress, kind: ProgressChangeKind) {
+    /// reported to ``ProgressCache/onChange`` again, so the auto-advance prepares again from the
+    /// merged local progress: the cache's own report came before the merge (#160). Only as
+    /// `.updated`: the cache's report already carried any reset, and replaying it after the
+    /// merge could undo what happened meanwhile, such as the episode ending here again (#554).
+    private func merge(_ progress: MediaProgress) {
         guard let store = localProgress, let identity, let lastUpdate = progress.lastUpdate else { return }
         let key = MediaKey(
             serverConnectionID: identity.connectionID, libraryItemId: progress.libraryItemId,
@@ -404,7 +404,8 @@ public final class RealtimeBridge: SessionParticipant {
             do {
                 try await store.applyServerProgress([key: server], capturedAt: capturedAt, source: .socket)
                 guard generation == self.generation else { return }
-                cache.reportSettled(progress.libraryItemId, episodeID: progress.episodeId, kind: kind, token: session)
+                cache.reportSettled(
+                    progress.libraryItemId, episodeID: progress.episodeId, kind: .updated, token: session)
             } catch {
                 Log.realtime.error(
                     "Couldn't merge socket progress: \(Self.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"
