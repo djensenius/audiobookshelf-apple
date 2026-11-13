@@ -283,4 +283,63 @@ private let restored = LastPlayedRecord(
             #expect(playback.calls.isEmpty)
         }
     }
+
+    // MARK: Play item
+
+    private static let account = FakePlaybackControl.serverID
+    private static let episodeKey = MediaKey(serverConnectionID: account, libraryItemId: "li_pod", episodeId: "ep_1")
+
+    /// A play action that records its calls and, like the app's, requests playback on `playback`.
+    private static func recordingPlay(
+        _ playback: FakePlaybackControl, starts: Bool = true, calls: Locked<[String]>
+    ) -> PlayItemAction {
+        PlayItemAction { itemID, episodeID, startTime in
+            calls.value.append("\(itemID) \(episodeID ?? "-") \(startTime.map { "\($0)" } ?? "-")")
+            playback.isPlaybackRequested = starts
+        }
+    }
+
+    @Test func playPlaysTheItemFromItsSavedProgress() async throws {
+        try await withPerformer { performer, playback, _ in
+            let calls = Locked<[String]>([])
+            try await performer.play(
+                Self.episodeKey, activeConnectionID: Self.account,
+                playItem: Self.recordingPlay(playback, calls: calls))
+            #expect(calls.value == ["li_pod ep_1 -"])
+        }
+    }
+
+    @Test func playOfAnotherAccountsItemFails() async throws {
+        try await withPerformer { performer, playback, _ in
+            let calls = Locked<[String]>([])
+            let play = Self.recordingPlay(playback, calls: calls)
+            await #expect(throws: PlaybackIntentFailure.itemUnavailable) {
+                try await performer.play(Self.episodeKey, activeConnectionID: UUID(), playItem: play)
+            }
+            await #expect(throws: PlaybackIntentFailure.itemUnavailable) {
+                try await performer.play(Self.episodeKey, activeConnectionID: nil, playItem: play)
+            }
+            #expect(calls.value.isEmpty)
+        }
+    }
+
+    @Test func playWithoutASessionFails() async throws {
+        try await withPerformer { performer, _, _ in
+            await #expect(throws: PlaybackIntentFailure.itemUnavailable) {
+                try await performer.play(Self.episodeKey, activeConnectionID: Self.account, playItem: nil)
+            }
+        }
+    }
+
+    @Test func playThatDoesNotStartFails() async throws {
+        try await withPerformer { performer, playback, _ in
+            let calls = Locked<[String]>([])
+            await #expect(throws: PlaybackIntentFailure.playbackFailed) {
+                try await performer.play(
+                    Self.episodeKey, activeConnectionID: Self.account,
+                    playItem: Self.recordingPlay(playback, starts: false, calls: calls))
+            }
+            #expect(calls.value == ["li_pod ep_1 -"])
+        }
+    }
 }
