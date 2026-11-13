@@ -117,10 +117,10 @@ private struct HomeScreen: View {
             guard verifications.needsRecovery(revision) else { return }
             await HomeRefreshSchedule.updateAfterVerification(
                 of: model, store: store, isConnected: { connectionStatus == nil },
-                retry: { await update(.loadTrigger) },
+                retry: { await update(.loadTrigger, listSince: $0) },
                 refreshed: {
                     guard let libraryID = model.libraryID else { return false }
-                    return await finishShelves(of: libraryID, for: .loadTrigger)
+                    return await finishShelves(of: libraryID, for: .loadTrigger, listSince: $0)
                 })
             verifications.finish(revision, isCancelled: Task.isCancelled)
         }
@@ -145,26 +145,29 @@ private struct HomeScreen: View {
     /// one once loaded. With one, the list too after it failed or the server refused the shelves,
     /// so a library that is gone is replaced with the initial one (#569).
     ///
+    /// - Parameter listSince: The libraries ``LibraryStore/refreshCount`` a verification saw, so
+    ///   the list isn't retried again behind a newer request (`nil` for now).
     /// - Returns: Whether it handled the libraries list: reloaded it, or waited for the request in
     ///   flight to retry it.
     @discardableResult
-    private func update(_ trigger: HomeRefreshSchedule.Trigger) async -> Bool {
+    private func update(_ trigger: HomeRefreshSchedule.Trigger, listSince: Int? = nil) async -> Bool {
         guard let libraryID = model.libraryID else {
             await HomeRefreshSchedule.updateLibraries(
-                of: store, for: trigger, isConnected: { connectionStatus == nil })
+                of: store, for: trigger, isConnected: { connectionStatus == nil }, since: listSince)
             return true
         }
         let requested = await updateShelves(of: libraryID, for: trigger)
-        return await finishShelves(of: libraryID, for: trigger, recording: requested)
+        return await finishShelves(of: libraryID, for: trigger, recording: requested, listSince: listSince)
     }
 
     /// After `trigger` requested `libraryID`'s shelves, or didn't (`recording` is `false`):
     /// records a completed request, then reloads the libraries list if it may be out of date.
     ///
+    /// - Parameter listSince: As for ``update(_:listSince:)``.
     /// - Returns: Whether it reloaded the list, or waited for the request in flight to retry it.
     @discardableResult
     private func finishShelves(
-        of libraryID: String, for trigger: HomeRefreshSchedule.Trigger, recording: Bool = true
+        of libraryID: String, for trigger: HomeRefreshSchedule.Trigger, recording: Bool = true, listSince: Int? = nil
     ) async -> Bool {
         if recording {
             schedule.recordCompletion(
@@ -175,7 +178,8 @@ private struct HomeScreen: View {
                 isCancelled: Task.isCancelled, at: .now)
         }
         return await HomeRefreshSchedule.updateLibrariesAfterShelves(
-            of: store, shelvesError: model.error, for: trigger, isConnected: { connectionStatus == nil })
+            of: store, shelvesError: model.error, for: trigger, isConnected: { connectionStatus == nil },
+            since: listSince)
     }
 
     /// Loads or reloads `libraryID`'s shelves for `trigger`.

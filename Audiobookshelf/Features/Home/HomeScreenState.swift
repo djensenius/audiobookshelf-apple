@@ -295,19 +295,21 @@ struct HomeRefreshSchedule {
     /// decides for `trigger`, after the selected library's shelves ended with `shelvesError`.
     /// Nothing once the trigger's task is cancelled: the trigger changed and runs again.
     ///
-    /// - Parameter isConnected: Whether the server can be used now (no connection banner).
+    /// - Parameters:
+    ///   - isConnected: Whether the server can be used now (no connection banner).
+    ///   - refreshCount: As for ``updateLibraries(of:for:isConnected:pollInterval:since:)``.
     /// - Returns: Whether it reloaded the list, or waited for the request in flight to retry it.
     @MainActor
     @discardableResult
     static func updateLibrariesAfterShelves(
         of store: LibraryStore, shelvesError: (any Error)?, for trigger: Trigger, isConnected: () -> Bool,
-        pollInterval: Duration = .milliseconds(100)
+        pollInterval: Duration = .milliseconds(100), since refreshCount: Int? = nil
     ) async -> Bool {
         guard !Task.isCancelled else { return false }
         let request = librariesRequestAfterShelves(
             for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
             shelvesRefused: refusesLibrary(shelvesError), isConnected: isConnected())
-        await reload(store, as: request, isConnected: isConnected, pollInterval: pollInterval)
+        await reload(store, as: request, isConnected: isConnected, pollInterval: pollInterval, since: refreshCount)
         return request != nil
     }
 
@@ -414,11 +416,15 @@ struct HomeRefreshSchedule {
     ///     whether it handled the libraries list, as `refreshed` does.
     ///   - refreshed: Called after the shelves were retried behind a request in flight, so Home
     ///     records the completion and checks the libraries list as after its own requests;
-    ///     returns whether it handled the list (``updateLibrariesAfterShelves(of:shelvesError:for:isConnected:pollInterval:)``).
+    ///     returns whether it handled the list (``updateLibrariesAfterShelves(of:shelvesError:for:isConnected:pollInterval:since:)``).
+    ///
+    /// Both take the store's ``LibraryStore/refreshCount`` when the verification decided, for
+    /// their check of the list (`since`), so a list retry Home's completion started meanwhile
+    /// isn't retried again.
     @MainActor
     static func updateAfterVerification(
         of model: HomeModel, store: LibraryStore, isConnected: () -> Bool,
-        pollInterval: Duration = .milliseconds(100), retry: () async -> Bool, refreshed: () async -> Bool
+        pollInterval: Duration = .milliseconds(100), retry: (Int) async -> Bool, refreshed: (Int) async -> Bool
     ) async {
         // The list as the verification saw it: a request started after this one is a retry it
         // leaves the recovery to.
@@ -432,11 +438,11 @@ struct HomeRefreshSchedule {
         case nil:
             return
         case .shelves:
-            listHandled = await retry()
+            listHandled = await retry(listRefreshCount)
         case .shelvesAfterInFlight:
             let retried = await updateShelvesAfterInFlight(
                 of: model, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
-            listHandled = retried ? await refreshed() : false
+            listHandled = retried ? await refreshed(listRefreshCount) : false
         case .libraries:
             listHandled = false
         }
