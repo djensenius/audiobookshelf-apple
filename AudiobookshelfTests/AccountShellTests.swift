@@ -768,6 +768,29 @@ private final class Recorder: SessionParticipant {
         #expect(participant.playItem == nil && participant.bookmarks == nil)
     }
 
+    /// The Playback menu reads the current session's bookmarks, so Create Bookmark (⌘B) can enable
+    /// once they load, and follows a switch and sign-out.
+    @Test func thePlaybackMenuFollowsTheSessionsBookmarks() async throws {
+        let environment = try makeEnvironment()
+        let participant = try #require(environment.playback.participant)
+        let (a, _, hosts) = try await twoServers(environment, recorder: Recorder())
+        defer { cleanUp(hosts) }
+        let commands = PlaybackCommands(player: environment.player, participant: participant)
+        let storeB = try #require(participant.bookmarks)
+        #expect(commands.model.bookmarks === storeB)
+
+        let switched = try await #require(
+            AccountActions(lifecycle: environment.lifecycle).switchAccount(to: a.connectionID)
+        ).value
+        #expect(switched.succeeded)
+        let storeA = try #require(participant.bookmarks)
+        #expect(storeA !== storeB)
+        #expect(commands.model.bookmarks === storeA)
+
+        _ = await environment.lifecycle.signOut()
+        #expect(commands.model.bookmarks == nil)
+    }
+
     #if os(macOS)
         /// The Now Playing window rebuilds its player for each session, so a switch discards a
         /// pending bookmark edit even if the window never saw the session end.

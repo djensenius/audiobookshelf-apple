@@ -9,8 +9,8 @@ import SwiftUI
 /// ``PlaybackCommandsModel`` has the rules.
 ///
 /// The commands act on the app's one player, not the focused scene's, so they work from any window.
-/// They need a ``PlayerViewModel``: until #183 builds one, and passes the account's sleep timer and
-/// bookmarks, `player` is the placeholder and every item is disabled.
+/// The account's sleep timer and bookmarks come from the playback participant (#183), read in
+/// ``body`` so the menu follows each session's; between sessions those items are disabled.
 ///
 /// Space has no modifier, so a focused text field takes it first and types a space; the menu gets
 /// it only when the focused view doesn't handle it. ⌘ shortcuts go to the menu first, so while an
@@ -21,20 +21,22 @@ import SwiftUI
 struct PlaybackCommands: Commands {
     /// The app's player.
     let player: any PlayerSlotState
-    /// The player's sleep timer; `nil` until #183 installs one.
-    var sleepTimer: SleepTimer?
-    /// The signed-in account's bookmarks; `nil` until #183 passes them.
-    var bookmarks: BookmarkStore?
+    /// The signed-in account's playback: its sleep timer and bookmarks. `nil` without a data stack.
+    var participant: PlaybackSessionParticipant?
     /// The focused window's alert, for a command that fails.
     @FocusedValue(PlaybackCommandAlert.self) private var alert: PlaybackCommandAlert?
 
     var body: some Commands {
         CommandMenu(Text(verbatim: L10n.string("HeaderPlayback"))) {
-            PlaybackMenu(
-                model: PlaybackCommandsModel(
-                    player: player as? PlayerViewModel, sleepTimer: sleepTimer, bookmarks: bookmarks),
-                alert: alert)
+            PlaybackMenu(model: model, alert: alert)
         }
+    }
+
+    /// The menu's rules over the current session's sleep timer and bookmarks.
+    var model: PlaybackCommandsModel {
+        PlaybackCommandsModel(
+            player: player as? PlayerViewModel, sleepTimer: participant?.sleepTimer,
+            bookmarks: participant?.bookmarks)
     }
 }
 

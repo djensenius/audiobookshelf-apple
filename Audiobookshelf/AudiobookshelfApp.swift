@@ -31,7 +31,7 @@ struct AudiobookshelfApp: App {
         .commands {
             SearchCommands()
             RefreshCommands()
-            PlaybackCommands(player: environment.player)
+            PlaybackCommands(player: environment.player, participant: environment.playback.participant)
             GoCommands()
         }
         // The system relaunches the app for finished background downloads; this waits until
