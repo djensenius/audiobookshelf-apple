@@ -50,8 +50,6 @@ private struct HomeScreen: View {
     let store: LibraryStore
     @State private var model: HomeModel
     @State private var schedule = HomeRefreshSchedule()
-    /// Built once, so the cards don't all re-render on every body.
-    @State private var progressReader: ItemProgressReader
     /// The key of the message for the last failed action, kept while the alert is dismissed.
     @State private var failureKey: String?
     @State private var showsFailure = false
@@ -63,11 +61,6 @@ private struct HomeScreen: View {
     init(store: LibraryStore) {
         self.store = store
         _model = State(initialValue: HomeModel(store: store))
-        let progress = store.progress
-        _progressReader = State(
-            initialValue: ItemProgressReader { itemID, episodeID in
-                progress.progress(libraryItemID: itemID, episodeID: episodeID).map(ItemProgress.init)
-            })
     }
 
     var body: some View {
@@ -79,8 +72,6 @@ private struct HomeScreen: View {
             state: state, sections: sections, context: ItemCardActions.actionContext(canPlay: playItem != nil),
             open: { navigate(to: $0) }, perform: { perform($0, on: $1) }, retry: { Task { await refresh() } }
         )
-        // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
-        .environment(\.itemProgressReader, progressReader)
         .refreshable { await refresh() }
         // With the client and the online revision too: a reconnect, whether it attaches a client
         // after an offline start without one or keeps the offline session's, loads again even

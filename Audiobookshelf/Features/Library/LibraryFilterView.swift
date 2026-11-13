@@ -30,14 +30,12 @@ struct LibraryFilterView: View {
         }
         let topRoute = router.flatMap { $0[path: $0.selectedTab].last }
         Group {
-            if let host, let model {
+            if let model {
                 LibraryContent(
                     model: model,
                     placement: LibraryFilterPresentation.placement(kind: kind, value: value, topRoute: topRoute),
                     messages: LibraryFilterPresentation.messages(for: model)
                 )
-                // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
-                .environment(\.itemProgressReader, host.progressReader)
             } else {
                 // Until the library's type is known, the placeholder waits for (or retries) the libraries.
                 BrowsePlaceholder(

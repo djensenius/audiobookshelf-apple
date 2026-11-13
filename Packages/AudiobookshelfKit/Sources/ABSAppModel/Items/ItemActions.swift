@@ -90,7 +90,8 @@ extension APIClient: ProgressWriting {
 /// - Optimistic ordering is tracked separately from server timestamps. A full progress seed
 ///   requested after a successful action reconciles its authoritative row, even with clock skew.
 /// - The per-key queue belongs to this instance: inject one instance per account and share it
-///   between screens (#181), or actions from two instances on the same key can interleave.
+///   between screens and windows (``LibraryStore/itemActions(for:)``, which the app shell
+///   injects), or actions from two instances on the same key can interleave.
 /// - After the server accepted marking finished or not finished, or discarding, and the change
 ///   was committed, `localSync` (``ItemActionLocalSync``) updates the local playback database,
 ///   still in the key's queue, so the syncer's pending values can't undo the change. It isn't
@@ -108,6 +109,8 @@ public final class ProgressItemActions: ItemActionPerforming {
     private let now: @Sendable () -> Date
     private let sessionToken: ProgressCache.SessionToken
     private var tails: [String: Tail] = [:]
+    /// A predecessor's actions still pending per key; see ``continueQueue(of:)``.
+    private var inheritedTails: [String: Task<Result<Void, any Error>, Never>] = [:]
     private var tickets = 0
 
     public init(
@@ -119,6 +122,19 @@ public final class ProgressItemActions: ItemActionPerforming {
         self.localSync = localSync
         self.now = now
         self.sessionToken = cache.sessionToken()
+    }
+
+    /// Whether the progress session the actions were built in is still the cache's: `false`
+    /// after a ``ProgressCache/clear()`` (sign-out, account switch, or a failed switch's restart).
+    var isCurrentSession: Bool { cache.isCurrent(sessionToken) }
+
+    /// Orders this instance's actions after `predecessor`'s still pending ones on the same key,
+    /// so a write from the session it replaces can't land after a newer one. A stale instance
+    /// queues nothing new (``enqueue(_:operation:)`` rejects it), so its tails are final.
+    func continueQueue(of predecessor: ProgressItemActions) {
+        // The predecessor's own tail on a key already chained on what it inherited for the key;
+        // keys it never acted on keep the inherited tail, across any number of restarts.
+        inheritedTails = predecessor.inheritedTails.merging(predecessor.tails.mapValues(\.task)) { $1 }
     }
 
     public func markFinished(_ target: ItemActionTarget) async throws {
@@ -205,7 +221,8 @@ public final class ProgressItemActions: ItemActionPerforming {
         let actionSession = cache.sessionToken()
         guard actionSession == sessionToken else { throw CancellationError() }
         let key = target.key
-        let previous = tails[key]?.task
+        // Later actions on the key chain on the first one, which waited for the predecessor's.
+        let previous = tails[key]?.task ?? inheritedTails.removeValue(forKey: key)
         tickets += 1
         let ticket = tickets
         let task = Task<Result<Void, any Error>, Never> { @MainActor in
