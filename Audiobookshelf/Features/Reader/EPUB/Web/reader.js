@@ -30,6 +30,18 @@
   // How long the table of contents may take once the book is open; it comes from the archive
   // already in memory, so only a missing navigation document takes this long.
   const NAVIGATION_TIMEOUT_MS = 10000
+  // The largest table of contents posted, in UTF-8 bytes of its JSON. Swift drops a message over
+  // 4 MiB (EPUBBridgeEvent.maxMessageBytes), and its JSON can be up to twice this (`/` becomes
+  // `\/`); a larger one is reported as failing, so the contents sheet doesn't wait for good.
+  const MAX_TOC_BYTES = 2 * 1024 * 1024
+  // It's counted as the entries are made, so a crafted one is refused before it's built: each
+  // UTF-16 unit as up to 3 UTF-8 bytes, plus an entry's keys and punctuation. More entries than
+  // this are refused too; the sheet lists at most 5,000 (EPUBTableOfContents.maxEntries).
+  const TOC_ENTRY_OVERHEAD_BYTES = 48
+  const MAX_TOC_ENTRIES = 10000
+  // Each level is two levels of JSON, and Swift's JSONSerialization can't hold much past 500; the
+  // sheet indents at most 5 (EPUBTableOfContents.maxLevel).
+  const MAX_TOC_DEPTH = 64
   // The fonts the reader can override the book's with (ReaderSettings.FontFamily's raw values).
   const FONT_FAMILIES = ['serif', 'sans-serif']
   // Where a section's own inline font is kept, since epub.js clears it with the reader's override.
@@ -111,14 +123,26 @@
     return hrefs
   }
 
-  function tocItems(items, navPath, directory, spine) {
+  // The table of contents as the bridge posts it, charging each entry to `budget` (`bytes` and
+  // `entries` left); throws once it's spent, or `items` are nested over MAX_TOC_DEPTH (`depth` is
+  // theirs, from 0), before the rest is made.
+  function tocItems(items, navPath, directory, spine, budget, depth) {
+    if (depth >= MAX_TOC_DEPTH && items && items.length) throw new Error('The table of contents is nested too deeply')
     return (items || []).map(function (item) {
-      return {
+      const href = String(item.href || '').trim()
+      const entry = {
         id: String(item.id || ''),
         label: String(item.label || '').trim(),
-        href: packageHref(String(item.href || ''), navPath, directory, spine),
-        subitems: tocItems(item.subitems, navPath, directory, spine)
+        // An unlinked heading (a group of chapters) stays unlinked: resolved, it'd be the
+        // navigation document itself.
+        href: href ? packageHref(href, navPath, directory, spine) : '',
+        subitems: []
       }
+      budget.entries -= 1
+      budget.bytes -= 3 * (entry.id.length + entry.label.length + entry.href.length) + TOC_ENTRY_OVERHEAD_BYTES
+      if (budget.entries < 0 || budget.bytes < 0) throw new Error('The table of contents is too large')
+      entry.subitems = tocItems(item.subitems, navPath, directory, spine, budget, depth + 1)
+      return entry
     })
   }
 
@@ -672,8 +696,16 @@
         const packaging = opened.packaging || {}
         const navPath = packaging.navPath || packaging.ncxPath
         const directory = opened.path && opened.path.directory
-        const items = tocItems(navigation && navigation.toc, navPath, directory, spineHrefs(opened, directory))
-        if (isCurrent()) post({ type: 'toc', items: items })
+        const limit = Number(window.absReaderTOCMaxBytes) || MAX_TOC_BYTES
+        const budget = { bytes: limit, entries: Number(window.absReaderTOCMaxEntries) || MAX_TOC_ENTRIES }
+        const spine = spineHrefs(opened, directory)
+        const event = { type: 'toc', items: tocItems(navigation && navigation.toc, navPath, directory, spine, budget, 0) }
+        // Within the budget, so this is small; it catches what the estimate doesn't (a control
+        // character is escaped to six bytes).
+        if (new TextEncoder().encode(JSON.stringify(event)).length > limit) {
+          throw new Error('The table of contents is too large')
+        }
+        if (isCurrent()) post(event)
       })
       .catch(function (error) {
         if (isCurrent()) postError('toc', error)
