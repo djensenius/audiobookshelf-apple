@@ -137,6 +137,7 @@ struct PlaybackEnvironment: ViewModifier {
 
     func body(content: Content) -> some View {
         content
+            .environment(\.queueActions, participant?.queue)
             .environment(\.playItem, participant?.playItem)
             .environment(\.bookmarkStore, participant?.bookmarks)
             .environment(\.sleepTimer, participant?.sleepTimer)

@@ -10,7 +10,8 @@ import SwiftUI
 /// Play and the finished toggle are also in a context menu and the VoiceOver actions of the
 /// link, with Add to playlist, as ``PodcastEpisodeActions/available(for:progress:context:isGone:)`` offers them; when
 /// the podcast is gone from the server only the link, which opens the episode, still works.
-/// Remove from Server follows them when the screen offers it (`remove`).
+/// Play Next and Add to Queue (``QueueActionButtons``) follow them while the episode can be
+/// played, then Remove from Server when the screen offers it (`remove`).
 /// VoiceOver reads the start of the summary, with the rest under More Content.
 struct PodcastEpisodeRow: View {
     let model: PodcastDetailModel
@@ -57,6 +58,8 @@ struct PodcastEpisodeRow: View {
             )
             .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
             .itemActions(actions, perform: perform) {
+                // Queued only where it can be played, as Play is offered.
+                QueueActionButtons(item: context.canPlay && !isGone ? model.detail.item : nil, episode: episode)
                 if let remove {
                     Button(role: .destructive, action: remove) {
                         Label(L10n.string("ButtonRemoveFromServer"), systemImage: "trash")

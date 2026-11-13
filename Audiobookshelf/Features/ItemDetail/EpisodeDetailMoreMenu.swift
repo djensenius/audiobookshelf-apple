@@ -19,6 +19,7 @@ extension View {
 /// the book screen's titles, confirmations and failure messages and remembers a 404. Share links
 /// to the podcast in the web client, so it needs the server's address. Add to playlist opens
 /// ``AddToPlaylistSheet`` for the episode, so it needs the account's playlist writes (`playlists`).
+/// Play Next and Add to Queue (``QueueActionButtons``) follow while the episode isn't gone.
 private struct EpisodeDetailMoreMenu: ViewModifier {
     let model: EpisodeDetailModel
     let serverURL: URL?
@@ -34,6 +35,9 @@ private struct EpisodeDetailMoreMenu: ViewModifier {
                     model.menuActions(canEditPlaylists: canEditPlaylists, canShare: canShare, isGone: isGone)
                 } entry: { action in
                     entry(action)
+                } extra: { isGone in
+                    QueueActionButtons(
+                        item: isGone || model.episode == nil ? nil : model.detail.item, episode: model.episode)
                 }
             )
             .addToPlaylistSheet($addToPlaylist)
