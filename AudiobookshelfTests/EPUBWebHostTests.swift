@@ -854,6 +854,22 @@ private final class ReaderPage {
         #expect(try await page.evaluate("window.tocSerialized") == (oversized == .escaped ? "1" : "0"))
     }
 
+    /// A table of contents nested deeper than the bridge can carry is reported as failing rather
+    /// than posted, so the contents sheet doesn't wait for it for good.
+    @Test(.timeLimit(.minutes(1))) func aDeeplyNestedTableOfContentsIsReported() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        var item: [String: Any] = ["id": "deep", "label": "Deep", "href": "c1.xhtml"]
+        for _ in 0..<70 { item = ["id": "level", "label": "Level", "href": "c1.xhtml", "subitems": [item]] }
+        try await page.fakeEPUBJS(toc: [item])
+
+        try await page.open("tiny")
+        let error = try await page.next("error")
+
+        #expect(error["phase"] as? String == "toc")
+        #expect(error["message"] as? String == "The table of contents is nested too deeply")
+        #expect(page.last("toc") == nil)
+    }
+
     /// epub.js's `displayerror` doesn't say whose display failed, so a display queued behind one
     /// that fails still runs, rather than failing with it.
     @Test(.timeLimit(.minutes(1))) func aFailedDisplayDoesNotFailTheNextOne() async throws {

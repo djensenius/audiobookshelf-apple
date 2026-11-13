@@ -11,6 +11,7 @@ struct EPUBContentsSheet: View {
     let onSelect: (EPUBContentsEntry) -> Void
     @Environment(\.dismiss) private var dismiss
     @ScaledMetric(relativeTo: .body) private var indent = 16
+    @State private var autoScroll = EPUBContentsScroll()
 
     var body: some View {
         NavigationStack {
@@ -74,10 +75,14 @@ struct EPUBContentsSheet: View {
                 .accessibilityAddTraits(isCurrent ? [.isHeader, .isSelected] : .isHeader)
                 .accessibilityHeading(Self.heading(entry.level))
             }
-            .onAppear {
-                if let currentEntryID { proxy.scrollTo(currentEntryID, anchor: .center) }
-            }
+            .onAppear { scroll(proxy, to: currentEntryID) }
+            // The book's first location can come after its contents.
+            .onChange(of: currentEntryID) { _, id in scroll(proxy, to: id) }
         }
+    }
+
+    private func scroll(_ proxy: ScrollViewProxy, to id: Int?) {
+        if let target = autoScroll.target(for: id) { proxy.scrollTo(target, anchor: .center) }
     }
 
     static func heading(_ level: Int) -> AccessibilityHeadingLevel {

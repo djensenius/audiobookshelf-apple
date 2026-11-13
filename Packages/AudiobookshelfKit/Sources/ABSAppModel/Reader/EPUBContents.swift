@@ -101,3 +101,19 @@ public final class EPUBContentsModel {
         return .display(target: entry.href)
     }
 }
+
+/// When the contents sheet scrolls to the current entry: the first time there is one once it's
+/// shown, whether then or later (the book's first location can come after its contents), but not
+/// again as the reader moves on while someone browses the list.
+public struct EPUBContentsScroll: Sendable, Equatable {
+    private var hasScrolled = false
+
+    public init() {}
+
+    /// The entry to scroll to now that the current one is `id`, if any.
+    public mutating func target(for id: Int?) -> Int? {
+        guard !hasScrolled, let id else { return nil }
+        hasScrolled = true
+        return id
+    }
+}

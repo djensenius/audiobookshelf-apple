@@ -104,3 +104,21 @@ import Testing
         #expect(model.currentEntryID == 1)
     }
 }
+
+struct EPUBContentsScrollTests {
+    /// The book's first location can come after the sheet is shown: the list scrolls to it then.
+    @Test func aLateFirstLocationIsScrolledTo() {
+        var scroll = EPUBContentsScroll()
+        #expect(scroll.target(for: nil) == nil)
+        #expect(scroll.target(for: 3) == 3)
+    }
+
+    /// Once it has scrolled, the reader moving on doesn't pull the list away from someone browsing.
+    @Test func itScrollsOnlyOnce() {
+        var scroll = EPUBContentsScroll()
+        #expect(scroll.target(for: 2) == 2)
+        #expect(scroll.target(for: 4) == nil)
+        #expect(scroll.target(for: nil) == nil)
+        #expect(scroll.target(for: 5) == nil)
+    }
+}

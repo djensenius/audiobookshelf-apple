@@ -186,6 +186,30 @@ import WebKit
             #expect(session.pendingDestination == nil)
         }
 
+        /// A `toc` message JSON can't hold (nested too deeply) reaches the session as the contents
+        /// failing, so the sheet says there are none rather than loading for good.
+        @Test func aTOCTheBridgeCannotCarryEndsTheSheetsLoading() async throws {
+            let request = EbookFileRequest(
+                connectionID: UUID(), itemID: "book", fileIno: "1", fileExtension: "epub", version: "1")
+            let loader = EbookFileLoader(
+                directory: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString),
+                fetcher: NoEbookFetcher())
+            let model = ReaderContainerModel(
+                request: request, kind: .epub, loader: loader, progress: nil, serverProgress: nil)
+            let session = EPUBReaderSession(
+                model: model, fileURL: URL(filePath: "/nonexistent/book.epub"),
+                payload: ReaderSettingsPayload(settings: ReaderSettings(), resolvedAppearance: .light, layout: .single))
+            let handler = EPUBMessageHandler { session.controller.onEvent($0) }
+            var item: [String: Any] = ["id": "deep", "label": "Deep", "href": "c1.xhtml"]
+            for _ in 0..<300 { item = ["id": "level", "label": "Level", "href": "c1.xhtml", "subitems": [item]] }
+            let body: [String: Any] = ["type": "toc", "items": [item]]
+            #expect(EPUBMessageHandler.json(from: body) == nil)
+
+            handler.receive(body)
+
+            #expect(session.contents.contents == EPUBTableOfContents([]))
+        }
+
         /// A reader that goes away (dismissed, or replaced on an account switch) closes its page,
         /// so a command the page could never finish off screen doesn't keep it alive.
         @Test func goingAwayClosesThePage() async throws {
