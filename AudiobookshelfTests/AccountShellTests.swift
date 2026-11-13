@@ -230,6 +230,21 @@ private final class Recorder: SessionParticipant {
         #expect(adapter.client != nil && adapter.client === restored.client)
     }
 
+    @Test func adapterResolvesAHandoffAccountToItsConnection() async throws {
+        let environment = try makeEnvironment()
+        let accounts = try #require(environment.accounts)
+        let host = Self.host("handoff-")
+        defer { cleanUp([host]) }
+        let identity = try await signIn(accounts, to: host)
+        let adapter = AccountSessionAdapter(accounts: accounts)
+        let active = try #require(accounts.activeConnection)
+
+        let account = try #require(HandoffAccount(connection: active))
+        #expect(await adapter.connectionID(for: account) == identity.connectionID)
+        let stranger = try #require(HandoffAccount(serverAddress: active.address, userID: "usr_someone_else"))
+        #expect(await adapter.connectionID(for: stranger) == nil)
+    }
+
     // MARK: Account tab and server list
 
     @Test func signingOutEndsTheSessionThroughTheLifecycle() async throws {
