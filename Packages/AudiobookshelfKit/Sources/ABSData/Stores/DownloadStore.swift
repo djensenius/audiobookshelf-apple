@@ -224,7 +224,9 @@ import SwiftData
     /// saved with the state.
     /// `taskIdentifier` is set as given (`nil` clears it) and cleared from any other part that
     /// still has it, as task identifiers restart with each session. `error` becomes `lastError`
-    /// (`nil` clears it); `hasResumeData` is kept when `nil`.
+    /// (`nil` clears it), and `errorCode` (a `DownloadFailureCode` raw value) becomes
+    /// `lastErrorCode` in the same write (`nil` clears it), so a stored failure never lacks the
+    /// code it was saved with. `hasResumeData` is kept when `nil`.
     ///
     /// - Returns: `false` when the part doesn't exist or the change was refused.
     /// - Throws: ``StoreError/completionNeedsFinalBytes`` when `state` is `.completed`.
@@ -234,6 +236,7 @@ import SwiftData
         partID: UUID,
         taskIdentifier: Int?,
         error: String? = nil,
+        errorCode: String? = nil,
         hasResumeData: Bool? = nil,
         retryCount: Int? = nil,
         requeue: Bool = false,
@@ -256,6 +259,7 @@ import SwiftData
             part.state = state.rawValue
             part.taskIdentifier = taskIdentifier
             part.lastError = error
+            part.lastErrorCode = errorCode
             if let hasResumeData { part.hasResumeData = hasResumeData }
             part.record?.updatedAt = now
             return true
@@ -299,6 +303,7 @@ import SwiftData
             part.state = DownloadPartState.running.rawValue
             part.taskIdentifier = nil
             part.lastError = nil
+            part.lastErrorCode = nil
             record.updatedAt = now
             return start
         }
@@ -322,6 +327,7 @@ import SwiftData
             part.state = DownloadPartState.queued.rawValue
             part.taskIdentifier = nil
             part.lastError = nil
+            part.lastErrorCode = nil
             part.record?.updatedAt = now
             return true
         }
@@ -366,6 +372,7 @@ import SwiftData
             if part.expectedBytes <= 0 { part.expectedBytes = finalBytes }
             part.taskIdentifier = nil
             part.lastError = nil
+            part.lastErrorCode = nil
             part.hasResumeData = false
             part.record?.updatedAt = now
             return true
