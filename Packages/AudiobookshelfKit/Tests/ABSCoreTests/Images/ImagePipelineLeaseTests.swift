@@ -70,6 +70,10 @@ import Testing
         if cancels {
             queued.queued.cancel()
             await #expect(throws: CancellationError.self) { try await queued.queued.value }
+            // The caller's error can come before the decode stops, so the lease must be released
+            // while `"a"` still blocks `"b"`: only a cancelled decode lets it go this early.
+            try await waitUntilUnleased(queued.file, in: queued.store)
+            #expect(await queued.pipeline.memoryWaiterCount > 0)
         }
         queued.held.removeAll()
         try await queued.blocker.value
