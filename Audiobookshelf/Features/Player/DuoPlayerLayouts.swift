@@ -192,6 +192,7 @@
                 ChaptersSlot(model: model, sheet: $sheet)
                 BookmarksSlot(model: model, sheet: $sheet)
                 SleepTimerSlot(model: model, sheet: $sheet)
+                QueueSlot(sheet: $sheet)
                 PlayerOptionsMenu(model: model)
             }
         }

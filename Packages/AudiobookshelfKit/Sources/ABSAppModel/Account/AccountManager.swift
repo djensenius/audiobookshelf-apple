@@ -606,6 +606,7 @@ public final class AccountManager {
             // Keyed like `LibraryConnectionKey`. Not if the store kept the connection listed:
             // removing it again retries.
             settings?.removeAccountData(serverID: id.uuidString, userID: connection.userId)
+            connectionRemoved?(id)
         } catch {
             // The session's already deleted here, so nothing could end it on the server later.
             storeError = error
@@ -672,6 +673,12 @@ public final class AccountManager {
     /// the sign-in is then superseded: the transfers under way and the resume data still carry the
     /// old credentials, so the app stops them and discards it there, then resumes the downloads.
     @ObservationIgnored public var credentialsReplaced: (@MainActor (UUID) -> Void)?
+
+    /// Called by ``remove(_:)`` once the store has removed the connection, after
+    /// ``credentialsRemoved``: the app deletes the connection's other saved data there, such as
+    /// its play queue. Not called when the Keychain delete or the store's removal fails, so a
+    /// connection that stays listed keeps its data; removing it again retries.
+    @ObservationIgnored public var connectionRemoved: (@MainActor (UUID) -> Void)?
 
     /// Clients for download credentials of saved connections that aren't active, so a
     /// connection's download parts share one client, with the credentials' generation they were
