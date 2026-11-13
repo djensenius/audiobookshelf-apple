@@ -221,6 +221,10 @@ public actor DownloadEngine {
     /// Incremented synchronously when a resume begins, before its first store await. One `Int`
     /// per record that was ever resumed, kept until the engine goes away.
     private var resumeGenerations: [UUID: Int] = [:]
+    /// Records whose latest resume is an automatic one (``resume(recordID:unlessQuiescedSince:)``
+    /// with a generation), which starts nothing between a ``deactivate()`` and the next
+    /// ``activate()``; a failure's replay of it keeps that restriction.
+    private var guardedResumes: Set<UUID> = []
     /// A part gets one stale-failure replay per user resume; a replay's own failure stays final.
     /// One `Int` per part that was ever replayed, kept until the engine goes away.
     private var replayedResumeGenerationByPart: [UUID: Int] = [:]
@@ -594,6 +598,11 @@ public actor DownloadEngine {
 
     private func performResume(_ recordID: UUID, unlessQuiescedSince generation: Int?) async throws -> Bool {
         resumeGenerations[recordID, default: 0] += 1
+        if generation != nil {
+            guardedResumes.insert(recordID)
+        } else {
+            guardedResumes.remove(recordID)
+        }
         resumingRecords.insert(recordID)
         defer { resumingRecords.remove(recordID) }
         guard try await store.setState(.queued, forRecord: recordID),
@@ -900,9 +909,23 @@ public actor DownloadEngine {
             }
             await reattach(download, partID: partID, activationOwnsSession: true)
         }
+        // The files their rejected survivors may have moved stop counting before the marker goes,
+        // so a relaunch before the parts are queued again below doesn't complete them from one.
+        // A connection whose transfer marker can't be removed keeps its marker.
+        var unended: Set<UUID> = []
+        for part in records.flatMap(\.parts)
+        where part.state == .running && tasks[part.id] == nil && launching[part.id] == nil
+            && !settling.contains(part.id) && !markedTransfers.contains(part.id)
+        {
+            guard let connectionID = contexts[part.id]?.connectionID, survivorsToStop.contains(connectionID) else {
+                continue
+            }
+            if !locations.clearTransferMarker(partID: part.id) { unended.insert(connectionID) }
+        }
         // Their survivors are cancelled and their resume data deleted, unless a quiesce began
         // meanwhile, which may seal more and clears the marker itself.
-        for connectionID in discarded where !hasQuiesced(connectionID: connectionID, since: generation) {
+        for connectionID in discarded.subtracting(unended)
+        where !hasQuiesced(connectionID: connectionID, since: generation) {
             clearSurvivorsToStop(connectionID)
         }
         // A part left running without a transfer: either its transfer moved the file, but iOS
@@ -1911,9 +1934,12 @@ public actor DownloadEngine {
             if let beforeReplayStart { await beforeReplayStart(partID) }
             // The replay carries the user's reset for the part it skipped: its budget was
             // persisted as used up by this failure, after any reset the start made.
+            // A replay of an automatic resume starts nothing while the app is in the background,
+            // as that resume wouldn't: the next activation starts the parts it leaves.
             await start(
                 partIDs: replayParts, resumingRecordID: nil, resettingBudgetOf: [partID],
-                activationOwnsSession: activationOwnsSession)
+                activationOwnsSession: activationOwnsSession,
+                onlyWhileActive: resumeNeedsReplay && guardedResumes.contains(context.recordID))
         }
         endFailingForGood(partID, recordID: context.recordID)
         if let afterPermanentFailure { await afterPermanentFailure(partID) }

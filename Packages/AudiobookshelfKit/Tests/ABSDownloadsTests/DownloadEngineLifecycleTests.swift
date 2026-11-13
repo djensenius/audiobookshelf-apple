@@ -2769,6 +2769,62 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
+    /// The file a rejected survivor moved stays rejected across a relaunch that comes before
+    /// its part's requeue is saved: its transfer marker is removed before the connection's
+    /// marker, so the next engine downloads the part again rather than completing it.
+    @Test func survivorFileStaysRejectedWhenTheRequeueIsLost() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let file = harness.fileURL("li_1/1.mp3")
+        try FileManager.default.createDirectory(at: harness.fileURL("li_1"), withIntermediateDirectories: true)
+        try Data("audio-bytes".utf8).write(to: file)
+        try harness.locations.markTransferStart(partID: partID)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date.now.addingTimeInterval(60)], ofItemAtPath: file.path(percentEncoded: false))
+        try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        let engine = harness.makeEngine()
+        // Attaching lists the survivors and clears the marker without restarting the part.
+        #expect(await engine.attachSurvivingTransfers())
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        // As if the process ended before the requeue was saved.
+        _ = try await harness.store.setPartState(.running, partID: partID, taskIdentifier: nil)
+
+        let relaunched = harness.makeEngine(registry: DownloadEngineRegistry())
+        #expect(await relaunched.activate())
+
+        #expect(await relaunched.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 1)
+    }
+
+    /// A failure's replay of an automatic resume that began after a deactivate, while the
+    /// failure was settling, starts nothing either: the next activation starts the part.
+    @Test func replayOfAGuardedResumeWaitsForTheNextActivation() async throws {
+        let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(404, body: Data()) : .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let seams = FailureSeams()
+        seams.hold(partID)
+        let engine = harness.makeEngine(
+            beforeStoppingSiblings: seams.beforeStoppingSiblings, afterPermanentFailure: seams.afterPermanentFailure)
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        await engine.start(partIDs: [partID])
+        _ = await seams.nextHeld()
+        await engine.deactivate()
+
+        let generation = await engine.quiesceGeneration()
+        #expect(try await engine.resume(recordID: record.id, unlessQuiescedSince: generation))
+        seams.release()
+        _ = await seams.nextSettled()
+
+        #expect(harness.requests.count == 1)
+        #expect(try await harness.store.record(id: record.id)?.state == .queued)
+        #expect(await engine.activate())
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 2)
+    }
+
     /// An automatic resume (a cellular-policy restart's) after a deactivate only queues the
     /// record: background starts aren't reliable, so the next activation starts it.
     @Test func guardedResumeInTheBackgroundWaitsForTheNextActivation() async throws {
