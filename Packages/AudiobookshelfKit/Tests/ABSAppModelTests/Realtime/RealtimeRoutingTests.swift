@@ -182,3 +182,112 @@ struct RealtimeRoutingTests {
         }
     }
 }
+
+/// Socket progress through the routed bridge into ``LocalProgressStore`` (#529): the store's
+/// `.socket` rules hold through the wiring, and the cache is updated first.
+@MainActor
+@Suite(.timeLimit(.minutes(1)))
+struct RealtimeLocalProgressTests {
+    /// 1,800,000,000 s, in the socket's milliseconds.
+    private static let t0Millis = 1_800_000_000_000
+    private static func date(_ millis: Int) -> Date { Date(timeIntervalSince1970: Double(millis) / 1000) }
+
+    private let key = MediaKey(serverConnectionID: identityA.connectionID, libraryItemId: "book")
+
+    /// A store with a row for ``key`` at `currentTime`, its server baseline from `t0Millis`.
+    private func storeWithRow(currentTime: Double = 50) async throws -> LocalProgressStore {
+        let store = LocalProgressStore(modelContainer: try DataStack(location: .inMemory).container)
+        try await store.recordEdit(
+            ProgressEdit(audio: .init(currentTime: currentTime, duration: 1000, progress: currentTime / 1000)),
+            for: key,
+            serverProgress: ProgressBaseline(
+                currentTime: 10, progress: 0.01, duration: 1000, isFinished: false,
+                lastUpdate: Self.date(Self.t0Millis)))
+        // Acknowledged, so the row is clean and only server values move it.
+        let patch = try #require(try await store.beginSend(for: key))
+        try await store.completeSend(patch, serverLastUpdate: Self.date(Self.t0Millis + 1_000))
+        return store
+    }
+
+    @Test func socketProgressReachesTheStoreAfterTheCacheInEventOrder() async throws {
+        try await withLibrarySettings { settings in
+            let local = try await storeWithRow()
+            let routed = RoutedBridge(settings: settings, localProgress: local)
+            let socket = try await routed.start()
+
+            await routed.send(progressUpdate("book", currentTime: 300, lastUpdate: Self.t0Millis + 5_000), on: socket)
+            // The cache takes it as the event is handled; the store's merge follows.
+            #expect(routed.store.progress.progress(libraryItemID: "book")?.currentTime == 300)
+            await routed.send(progressUpdate("book", currentTime: 200, lastUpdate: Self.t0Millis + 4_000), on: socket)
+            await routed.bridge.mergeTask?.value
+
+            // Both keep the newer value: the older event, merged after it, changes neither.
+            #expect(routed.store.progress.progress(libraryItemID: "book")?.currentTime == 300)
+            let row = try #require(try await local.progress(for: key))
+            #expect(row.currentTime == 300)
+            #expect(row.serverBaseline?.lastUpdate == Self.date(Self.t0Millis + 5_000))
+            #expect(row.dirtyGroups.isEmpty)
+        }
+    }
+
+    /// The PATCH's 200 carries no server time, so a socket value received after it may have been
+    /// emitted before the PATCH was applied; through the wiring it still can't roll the
+    /// acknowledged position back, whatever its `lastUpdate`.
+    @Test(arguments: [0, 500, -1_000])
+    func staleEventBeforeAnAcknowledgedPatchDoesNotRollBack(_ offsetMillis: Int) async throws {
+        try await withLibrarySettings { settings in
+            let local = LocalProgressStore(modelContainer: try DataStack(location: .inMemory).container)
+            try await local.recordEdit(
+                ProgressEdit(audio: .init(currentTime: 200, duration: 1000, progress: 0.2)), for: key,
+                serverProgress: ProgressBaseline(
+                    currentTime: 10, progress: 0.01, duration: 1000, isFinished: false,
+                    lastUpdate: Self.date(Self.t0Millis)))
+            let patch = try #require(try await local.beginSend(for: key))
+            try await local.completeSend(patch, serverLastUpdate: nil)
+            let routed = RoutedBridge(settings: settings, localProgress: local)
+            let socket = try await routed.start()
+
+            await routed.send(
+                progressUpdate("book", currentTime: 100, lastUpdate: Self.t0Millis + offsetMillis), on: socket)
+            await routed.bridge.mergeTask?.value
+
+            let row = try #require(try await local.progress(for: key))
+            #expect(row.currentTime == 200)
+            #expect(row.dirtyGroups.isEmpty)
+            // The cache shows the server's newest value, which it had none of.
+            #expect(routed.store.progress.progress(libraryItemID: "book")?.currentTime == 100)
+        }
+    }
+
+    @Test func undatedProgressIsDropped() async throws {
+        try await withLibrarySettings { settings in
+            let local = try await storeWithRow()
+            let routed = RoutedBridge(settings: settings, localProgress: local)
+            let socket = try await routed.start()
+
+            await routed.send(progressUpdate("book", currentTime: 900, lastUpdate: nil), on: socket)
+
+            #expect(routed.bridge.mergeTask == nil)
+            #expect(routed.store.progress.progress(libraryItemID: "book") == nil)
+            #expect(try await local.progress(for: key)?.currentTime == 50)
+        }
+    }
+
+    @Test func anotherConnectionsProgressLeavesTheRowAlone() async throws {
+        try await withLibrarySettings { settings in
+            let local = try await storeWithRow()
+            let routed = RoutedBridge(settings: settings, localProgress: local)
+            _ = try await routed.start(identityA)
+            await routed.bridge.sessionWillEnd(.switch)
+            let socket = try await routed.start(identityB)
+
+            await routed.send(progressUpdate("book", currentTime: 900, lastUpdate: Self.t0Millis + 5_000), on: socket)
+            await routed.bridge.mergeTask?.value
+
+            // Merged under B's connection, which has no row for the item; A's row is untouched.
+            #expect(try await local.progress(for: key)?.currentTime == 50)
+            let other = MediaKey(serverConnectionID: identityB.connectionID, libraryItemId: "book")
+            #expect(try await local.progress(for: other) == nil)
+        }
+    }
+}
