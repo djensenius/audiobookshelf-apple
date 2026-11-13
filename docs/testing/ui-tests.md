@@ -41,13 +41,39 @@ personalized shelves, one page of items, the expanded *Pride and Prejudice*
 a 404, logged to the `api` category as `Fixture server: no fixture for <method> <path>`, so a
 missing fixture shows up in Console or the test's log.
 
+## Playback
+
+*Pride and Prejudice* plays. Its `POST /api/items/li_pride/play` returns
+`fixture-play-li_pride.json`, a direct-play session of one 60-second track in two chapters. Each
+`/play` replaces the file's `fixture-session-id` with a new ID, as a real server opens a new
+session; `GET /api/session/:id` returns the same session under the ID asked for, and every
+session's `/sync` and `/close` answer `{}`. Other items have no session fixture, so their Play
+fails with the 404 above.
+
+AVPlayer loads tracks outside the app's URL sessions, so `FixtureURLProtocol` can't serve them.
+Instead a fixture launch gives every playback scope a track URL override
+(`PlaybackScope.Configuration.trackURLOverride`, set from `AppPlayback.fixtureTrackURL` in
+`Audiobookshelf/AppEnvironment+Fixtures.swift`): `FixtureServer.trackURL(_:bundle:)` turns a
+fixture session's `/public/session/:id/track/:index` into the bundled `fixture-silence.m4a`, a
+minute of mono AAC silence (6 KB), and leaves every other URL alone. A normal launch, and every
+Release build, has no override.
+
+To regenerate the audio, write a silent WAV (for example with Python's `wave` module: mono,
+8 kHz, 16-bit, 60 seconds of zeros) and convert it:
+
+```sh
+afconvert -f m4af -d aac -b 16000 -c 1 silence.wav Audiobookshelf/Fixtures/Resources/fixture-silence.m4a
+```
+
+If its length changes, change the session's `duration`, track and chapters to match.
+
 The metadata is public-domain LibriVox material, matching `SampleLibrary` (library
 `lib_sample`, the same item IDs and titles); narrators are "LibriVox Volunteers". To add an
 endpoint, add a route in `FixtureServer.resource(method:path:)` and a `fixture-*` file; the file
 names must be unique, because the synchronized folder copies resources flat into the app.
 
-Release builds compile `FixtureServer` out (`#if DEBUG`) and leave the files out
-(`EXCLUDED_SOURCE_FILE_NAMES[config=Release]` is `fixture-*` on the app target).
+Release builds compile `FixtureServer` out (`#if DEBUG`) and leave the files out, the audio
+included (`EXCLUDED_SOURCE_FILE_NAMES[config=Release]` is `fixture-*` on the app target).
 
 ## Writing a test
 
@@ -56,5 +82,5 @@ language. The connect flow has `connect.address`, `connect.submit`, `connect.use
 `connect.password` and `connect.signIn`; Home is `home.screen`. Add an identifier where a test
 needs one; don't change visible strings for a test.
 
-Not covered yet (#46): a CI job, playback fixtures and stream URLs, screenshots (#109) and
+Not covered yet (#46): a CI job, HLS and podcast playback fixtures, screenshots (#109) and
 accessibility audits (#106).

@@ -53,9 +53,8 @@ final class ImageStubProtocol: URLProtocol {
         var status = 200
         var body = Data()
         var mimeType = "image/png"
-        /// Delivery waits for this gate (then `delay`).
+        /// Delivery waits for this gate.
         var gate: Gate?
-        var delay: Duration?
         /// Sends the body in chunks of this size, `chunkDelay` apart, stopping if cancelled.
         var chunkSize: Int?
         var chunkDelay = Duration.milliseconds(20)
@@ -106,7 +105,8 @@ final class ImageStubProtocol: URLProtocol {
         }
     }
 
-    private static func update(_ host: String, _ change: (inout Route) -> Void) {
+    /// Changes `host`'s route, for example to fail later requests.
+    static func update(_ host: String, _ change: (inout Route) -> Void) {
         let ready = state.withLock { state -> [CheckedContinuation<Void, Never>] in
             guard var route = state.routes[host] else { return [] }
             change(&route)
@@ -143,7 +143,6 @@ final class ImageStubProtocol: URLProtocol {
         let box = UncheckedProtocol(value: self)
         Task {
             await route.gate?.wait()
-            if let delay = route.delay { try? await Task.sleep(for: delay) }
             await box.value.deliver(route, url: url, host: host)
         }
     }
@@ -241,14 +240,16 @@ struct FakeDownloadedCovers: DownloadedCoverLookup {
 }
 
 enum TestImages {
-    /// An opaque two-colour image encoded as `type`, with 8-bit, 16-bit or float samples.
+    /// An opaque two-colour image encoded as `type`, with 8-bit, 16-bit or float samples in
+    /// `space` (sRGB by default).
     static func data(
-        width: Int, height: Int, type: UTType = .png, bitsPerComponent: Int = 8, isFloat: Bool = false
+        width: Int, height: Int, type: UTType = .png, bitsPerComponent: Int = 8, isFloat: Bool = false,
+        space: CFString = CGColorSpace.sRGB
     ) -> Data {
         let alpha = CGImageAlphaInfo.noneSkipLast.rawValue
         let context = CGContext(
             data: nil, width: width, height: height, bitsPerComponent: bitsPerComponent, bytesPerRow: 0,
-            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            space: CGColorSpace(name: space)!,
             bitmapInfo: isFloat
                 ? alpha | CGBitmapInfo.floatComponents.rawValue | CGBitmapInfo.byteOrder32Little.rawValue : alpha)!
         context.setFillColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1)
@@ -264,11 +265,14 @@ enum TestImages {
 
     static func file(
         width: Int, height: Int, type: UTType = .png, bitsPerComponent: Int = 8, isFloat: Bool = false,
-        in directory: URL
+        space: CFString = CGColorSpace.sRGB, in directory: URL
     ) throws -> URL {
         let url = directory.appending(path: "\(UUID().uuidString).\(type.preferredFilenameExtension ?? "img")")
-        try data(width: width, height: height, type: type, bitsPerComponent: bitsPerComponent, isFloat: isFloat)
-            .write(to: url)
+        try data(
+            width: width, height: height, type: type, bitsPerComponent: bitsPerComponent, isFloat: isFloat,
+            space: space
+        )
+        .write(to: url)
         return url
     }
 
@@ -310,9 +314,9 @@ struct PipelineHarness {
         ImageKey(serverID: serverID, kind: .itemCover, entityID: id, updatedAt: updatedAt, externalURL: url)
     }
 
-    static func pngRoute(width: Int = 600, height: Int = 960, gate: Gate? = nil, delay: Duration? = nil) -> String {
+    static func pngRoute(width: Int = 600, height: Int = 960, gate: Gate? = nil) -> String {
         ImageStubProtocol.register(
-            .init(body: TestImages.data(width: width, height: height), mimeType: "image/png", gate: gate, delay: delay))
+            .init(body: TestImages.data(width: width, height: height), mimeType: "image/png", gate: gate))
     }
 }
 

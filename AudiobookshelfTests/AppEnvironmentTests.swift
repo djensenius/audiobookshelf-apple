@@ -5,7 +5,9 @@ import ABSDownloads
 import ABSPlayback
 import ABSUI
 import Foundation
+import ImageIO
 import Testing
+import UniformTypeIdentifiers
 
 @testable import Audiobookshelf
 
@@ -131,11 +133,94 @@ struct TestDownloads {
             #expect(environment.accounts != nil)
             #expect(environment.downloads == nil)
             #expect(environment.accounts?.credentialsRemoved == nil)
+            // A committed removal still deletes the saved play queue (PlaybackQueueWiringTests).
+            #expect(environment.accounts?.connectionRemoved != nil)
 
             await environment.lifecycle.start()
 
             #expect(environment.lifecycle.gate == .connect)
         }
+    }
+
+    /// The cover pipeline reads downloaded items' covers through the download stack, and has no
+    /// downloaded covers without one (#143).
+    @Test func imagesReadDownloadedCoversOnlyWithADownloadStack() async throws {
+        try await withSettings { settings in
+            let withDownloads = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(),
+                downloadsRoot: downloads.root, makeDownloadSession: downloads.makeSession)
+            #expect(withDownloads.images.downloadedCovers is LocalDownloadedCovers)
+
+            let without = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+            #expect(without.images.downloadedCovers == nil)
+        }
+    }
+
+    /// A downloaded item's cover loads from its file in the downloads root, offline, through the
+    /// environment's shared pipeline, and isn't copied into the cover cache.
+    @Test func aDownloadedItemsCoverLoadsOfflineFromItsFile() async throws {
+        let covers = FileManager.default.temporaryDirectory.appending(
+            path: "AppEnvironmentTests-Covers-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: covers) }
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(),
+                downloadsRoot: downloads.root, makeDownloadSession: downloads.makeSession,
+                covers: CoverSource(directory: covers, isOnline: { false }))
+            let stack = try #require(environment.downloads)
+            await stack.lifecycle.launch().value
+            let container = try #require(environment.dataStack).container
+            let connection = try await ServerConnectionStore(modelContainer: container).upsertLogin(
+                address: try #require(ServerAddress("https://abs.example.com")), userId: "usr_1", username: "user",
+                authMethod: .local, serverVersion: nil)
+            let coverUpdatedAt = Date(timeIntervalSince1970: 1_700_000_000)
+            _ = try await stack.localItems.upsertFromDownload(
+                DownloadRecordDTO(
+                    key: MediaKey(serverConnectionID: connection.id, libraryItemId: "li_1"), mediaType: .book,
+                    title: "The Book", relativeDirectory: "li_1",
+                    media: LocalMediaSnapshot(metadata: .init(title: "The Book")),
+                    parts: [
+                        DownloadPartDTO(
+                            kind: .cover, serverPath: "/api/items/li_1/cover", filename: "cover.jpg",
+                            mimeType: "image/jpeg", destinationRelativePath: "li_1/cover.jpg", state: .completed),
+                        DownloadPartDTO(
+                            kind: .audio, serverPath: "/api/items/li_1/file", filename: "part1.mp3",
+                            mimeType: "audio/mpeg", destinationRelativePath: "li_1/part1.mp3", state: .completed),
+                    ]),
+                coverUpdatedAt: coverUpdatedAt)
+            let file = try DownloadLocations(root: downloads.root).fileURL(forRelativePath: "li_1/cover.jpg")
+            try Self.writeJPEG(width: 120, height: 180, to: file)
+
+            let key = ImageKey(
+                serverID: connection.id, kind: .itemCover, entityID: "li_1",
+                updatedAt: LocalDownloadedCovers.version(of: coverUpdatedAt))
+            let image = try await environment.images.pipeline.image(
+                for: key, pixelBox: PixelBox(width: 512, height: 832))
+
+            #expect(image.pixelWidth == 120)
+            #expect(image.pixelHeight == 180)
+            let cached =
+                FileManager.default.enumerator(at: covers, includingPropertiesForKeys: nil)?
+                .compactMap { $0 as? URL }.filter { !$0.hasDirectoryPath } ?? []
+            #expect(cached.isEmpty)
+        }
+    }
+
+    /// A solid JPEG of the given size at `url`, creating its folder.
+    private static func writeJPEG(width: Int, height: Int, to url: URL) throws {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let context = try #require(
+            CGContext(
+                data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(red: 0.2, green: 0.4, blue: 0.8, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = try #require(context.makeImage())
+        let destination = try #require(
+            CGImageDestinationCreateWithURL(url as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        #expect(CGImageDestinationFinalize(destination))
     }
 
     /// A store other than the App Group one may not list the connections whose covers share the

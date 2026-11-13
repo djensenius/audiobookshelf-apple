@@ -79,7 +79,7 @@ struct PlayerDisplayInfo: Sendable, Hashable {
 
     /// Like `NowPlayingBridge`, no cover without a `coverPath`. An absolute `http(s)` path is
     /// loaded from that URL, as ``CoverRef`` does for list items.
-    private static func coverKey(key: MediaKey, path: String?, updatedAt: Int?) -> ImageKey? {
+    static func coverKey(key: MediaKey, path: String?, updatedAt: Int?) -> ImageKey? {
         guard let path, !path.isEmpty else { return nil }
         var external: URL?
         if let url = URL(string: path), let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" {

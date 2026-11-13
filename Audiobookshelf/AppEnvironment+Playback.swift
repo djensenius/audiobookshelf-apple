@@ -77,6 +77,7 @@ struct AppPlayback {
                 Self.makeScope(for: $0, settings: settings, policy: policy, mediaLeases: mediaLeases, history: history)
             })
         lifecycle.register(participant, stage: .progressSource)
+        removesQueues(of: accounts, from: queueStore(settings: settings))
         return AppPlayback(
             current: current, player: player, writer: writer, participant: participant, mediaLeases: mediaLeases,
             history: history)
@@ -94,8 +95,9 @@ struct AppPlayback {
 
     /// One account session's scope, over an engine of its own. The connection's last-played record
     /// and queue are kept in the settings' defaults, under keys of their own.
-    private static func makeScope(
-        for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy, mediaLeases: MediaLeases,
+    static func makeScope(
+        for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
+        mediaLeases: MediaLeases? = nil,
         history: (any PlaybackHistoryRecording)?
     ) -> PlaybackScope {
         #if os(iOS)
@@ -119,7 +121,7 @@ struct AppPlayback {
     /// the scope owns it.
     static func makeScope(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
-        engine: any AudioEngineProtocol, interruptions: AudioInterruptionHandler?, mediaLeases: MediaLeases,
+        engine: any AudioEngineProtocol, interruptions: AudioInterruptionHandler?, mediaLeases: MediaLeases? = nil,
         history: (any PlaybackHistoryRecording)? = nil
     ) -> PlaybackScope {
         let scopeConfiguration = Self.configuration(
@@ -138,25 +140,28 @@ struct AppPlayback {
 
     /// The scope's configuration. Recovery waits on the system's network path; without one it
     /// would treat the device as always online. Its coordinator shares `mediaLeases` with the
-    /// item actions, and the syncer records `history`.
+    /// item actions (``make(writer:accounts:lifecycle:settings:deviceIdentifiers:library:history:current:mediaLeases:)``
+    /// always passes them; `nil` holds nothing), and the syncer records `history`.
     static func configuration(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
-        engine: any AudioEngineProtocol, mediaLeases: MediaLeases, history: (any PlaybackHistoryRecording)? = nil
+        engine: any AudioEngineProtocol, mediaLeases: MediaLeases? = nil,
+        history: (any PlaybackHistoryRecording)? = nil
     ) -> PlaybackScope.Configuration {
         var configuration = PlaybackScope.Configuration(
             connectionID: request.connectionID, client: request.client, features: request.features,
             deviceIdentifiers: request.deviceIdentifiers, writer: request.writer, settings: settings,
             policy: policy, engine: engine, tickInterval: tickInterval,
             lastPlayed: { PlaybackScope.lastPlayedStore(for: $0, defaults: settings.defaults) },
-            queueStore: UserDefaultsPlaybackQueueStore(defaults: settings.defaults))
+            queueStore: queueStore(settings: settings))
         configuration.networkPaths = SystemNetworkPathSource()
         configuration.mediaLeases = mediaLeases
         configuration.history = history
+        configuration.trackURLOverride = fixtureTrackURL
         return configuration
     }
 }
 
-/// Sets `\.playItem`, `\.bookmarkStore` and `\.sleepTimer` from the running account session's
+/// Sets `\.playItem`, `\.bookmarkStore`, `\.sleepTimer` and `\.playbackQueue` from the running account session's
 /// playback, each `nil` between sessions; the sleep timer is `nil` until the scope has one (#185).
 /// A view modifier, so it follows the participant as each session starts and ends. The signed-in
 /// shell passes the participant only while it serves the shell's account
@@ -169,5 +174,6 @@ struct PlaybackEnvironment: ViewModifier {
             .environment(\.playItem, participant?.playItem)
             .environment(\.bookmarkStore, participant?.bookmarks)
             .environment(\.sleepTimer, participant?.sleepTimer)
+            .environment(\.playbackQueue, participant?.queue)
     }
 }
