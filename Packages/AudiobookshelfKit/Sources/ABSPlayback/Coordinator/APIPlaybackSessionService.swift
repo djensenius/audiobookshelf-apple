@@ -106,6 +106,10 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
     }
 
     public func sessionStatus(id: String) async -> PlaybackSessionStatus {
-        await .checking { try await client.send(SessionEndpoints.openSession(id: id)) }
+        await sessionCheck(id: id).status
+    }
+
+    public func sessionCheck(id: String) async -> PlaybackSessionCheck {
+        await .lookUp(id: id, on: client)
     }
 }
