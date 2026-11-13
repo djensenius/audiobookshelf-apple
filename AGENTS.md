@@ -113,6 +113,11 @@ Set `IOS_SIMULATOR_ID=<udid>` to select a specific compatible available iPhone;
 an invalid or empty override fails without fallback. No iPhone Duo is required.
 It borrows the device without creating, erasing, deleting or shutting down any
 simulator, disables parallel test workers, and limits builds to two jobs.
+In CI (`CI=true`) or with `ABS_EPHEMERAL_SIMULATOR=1`, unless `IOS_SIMULATOR_ID`
+is set, it instead creates its own `abs-ci-<run>-<attempt>-<pid>-<try>` simulator of
+the selected device type and runtime, and always shuts it down and deletes it. It
+retries once, on a fresh simulator, only when xcodebuild fails with a known
+simulator infrastructure error (`ABS_EPHEMERAL_SIMULATOR=0` opts out).
 Separate worktrees do not isolate CoreSimulator; coordinate simulator use locally.
 Each run retains its own derived data, fresh `Tests.xcresult`, and extracted JSON
 under `.build/kit-ios/run.*`, including on failure. The gate requires all four
