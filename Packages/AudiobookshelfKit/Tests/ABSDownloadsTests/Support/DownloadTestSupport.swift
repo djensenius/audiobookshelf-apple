@@ -341,7 +341,8 @@ final class DownloadHarness: Sendable {
         preflight: any DownloadRedirectPreflighting = StubPreflight(),
         hasForegroundSession: Bool = false,
         sweepsOrphanedResumeData: Bool = true,
-        prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
+        prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in },
+        prepareForeground: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadEngine {
         let stubFactory = sessionFactory(prepare: prepare)
         var factory = stubFactory
@@ -353,7 +354,8 @@ final class DownloadHarness: Sendable {
             sweepsOrphanedResumeData: sweepsOrphanedResumeData, locations: locations,
             retryPolicy: retryPolicy, networkAccess: { NetworkAccess(policy: .always) }, clock: clock ?? self.clock,
             now: { .now }, random: { 0.5 }, makeSession: factory,
-            makeForegroundSession: hasForegroundSession ? sessionFactory(isForeground: true) : nil,
+            makeForegroundSession: hasForegroundSession
+                ? sessionFactory(isForeground: true, prepare: prepareForeground) : nil,
             registry: registry ?? self.registry, readRecords: readRecords ?? { try await $0.allRecords() },
             readRecord: readRecord ?? { try await $0.record(id: $1) },
             cancelKeepingResumeData: cancel ?? { await $0.cancelByProducingResumeData() },

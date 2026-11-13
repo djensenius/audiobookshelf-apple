@@ -186,7 +186,8 @@ public actor DownloadEngine {
     private let launchContinued: (@Sendable (UUID) async -> Void)?
     /// After a launch created its task, before it saves the part as running.
     private let beforeSavingRunning: (@Sendable (UUID) async -> Void)?
-    /// Before a launch that may only start while active writes its part back as queued.
+    /// Before a launch writes its part back as queued: one that may only start while active,
+    /// or one stopped while it saved the part as running.
     private let beforeRequeueingInactive: (@Sendable (UUID) async -> Void)?
     /// Internal so tests can post events.
     let delegate = DownloadSessionDelegate()
@@ -1451,12 +1452,19 @@ public actor DownloadEngine {
                 return
             }
             // Stopped (by a pause, or a deactivation stopping foreground transfers) while the
-            // part was saved as running: that save may have landed after the stop's, so the part
-            // is queued again, unless another launch or a completion has it, for a later start
-            // or activation to pick up.
-            if tasks[partID] == nil, launching[partID] == nil, contexts[partID] != nil, !settling.contains(partID) {
-                await persistIdle(partID) { _ = try await $0.queuePart(partID: partID, expecting: [.running]) }
+            // part was saved as running: that save may have landed after the stop's, so once the
+            // stop is done the part is queued again with the resume-data flag the stop left,
+            // unless another launch or a completion has it. An activation that read the part as
+            // running meanwhile skipped it, so it starts now if the app is active.
+            await stopping[partID]?.value
+            if let beforeRequeueingInactive { await beforeRequeueingInactive(partID) }
+            guard tasks[partID] == nil, launching[partID] == nil, contexts[partID] != nil, !settling.contains(partID)
+            else { return }
+            let hasResumeData = contexts[partID]?.hasResumeData
+            await persistIdle(partID) {
+                try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
             }
+            if restartsQueuedParts { await launch(partID, onlyWhileActive: true) }
             return
         }
         // The resume data now lives in the task.

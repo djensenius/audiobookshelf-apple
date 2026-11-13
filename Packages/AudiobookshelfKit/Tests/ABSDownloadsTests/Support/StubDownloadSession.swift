@@ -236,6 +236,12 @@ final class StubDownloadSession: DownloadSession {
         return session.downloadTask(with: request)
     }
 
+    /// The request a resume repeats, for a session that hasn't made one itself (a relaunched
+    /// engine's).
+    func remember(_ request: URLRequest) {
+        state.withLock { $0.lastRequest = request }
+    }
+
     func downloadTask(withResumeData resumeData: Data) -> URLSessionDownloadTask {
         let request = state.withLock { state in
             state.resumed.append(resumeData)

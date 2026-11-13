@@ -182,6 +182,92 @@ import Testing
         #expect(harness.requests.count == 1)
     }
 
+    /// The same for a launch continuing from resume data: the stop seals it again, and the part
+    /// is queued with its resume data still flagged, so a relaunched engine continues it rather
+    /// than downloading the file again.
+    @Test func aForegroundResumeStoppedWhileSavingKeepsItsResumeData() async throws {
+        let harness = try await DownloadHarness(customHeaders: Self.headers) {
+            $0.stubCount == 1 ? .failure(resumeData: Self.resumeData) : .status(200)
+        }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID])
+        let current = Mutex<(engine: DownloadEngine?, deactivates: Bool)>((nil, false))
+        let engine = harness.makeEngine(
+            retryPolicy: RetryPolicy(baseDelay: .zero, maxDelay: .zero, maxRetries: 0),
+            cancel: { task in
+                task.cancel()
+                return Self.resumeData
+            },
+            beforeSavingRunning: { _ in
+                let (engine, deactivates) = current.withLock { state in
+                    defer { state.deactivates = false }
+                    return (state.engine, state.deactivates)
+                }
+                if deactivates { await engine?.deactivate() }
+            }, hasForegroundSession: true)
+        current.withLock { $0.engine = engine }
+        // The first transfer fails, leaving resume data.
+        await engine.start(partIDs: [partID])
+        #expect(await engine.nextPermanentFailure() != nil)
+        try #require(try await harness.store.part(id: partID)?.hasResumeData == true)
+        try await harness.store.setState(.queued, forRecord: record.id)
+        current.withLock { $0.deactivates = true }
+
+        await engine.start(partIDs: [partID])
+
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .queued)
+        #expect(part.hasResumeData)
+        #expect(harness.requests.count == 1)
+        let request = try #require(harness.requests.first)
+        let relaunched = harness.makeEngine(
+            registry: DownloadEngineRegistry(), hasForegroundSession: true, prepareForeground: { $0.remember(request) })
+        #expect(await relaunched.activate())
+        #expect(await relaunched.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 2)
+        #expect(harness.foregroundSessions.withLock { $0.last?.resumedData } == [Self.resumeData])
+    }
+
+    /// Reactivated after the stopped launch's late save but before it queues the part again:
+    /// the activation skipped the part as running, so the launch starts it once it is queued.
+    @Test func reactivationWhileAStoppedForegroundLaunchRequeuesStartsThePart() async throws {
+        let gate = StubGate()
+        // Held until the part is checked, so the transfer can't complete before the read.
+        let harness = try await DownloadHarness(customHeaders: Self.headers) { _ in .status(200, gate: gate) }
+        let partID = UUID()
+        // One-shot hooks: the launch that follows passes the same seams.
+        let current = Mutex<(engine: DownloadEngine?, deactivates: Bool, activates: Bool)>((nil, true, true))
+        let engine = harness.makeEngine(
+            beforeSavingRunning: { _ in
+                let (engine, deactivates) = current.withLock { state in
+                    defer { state.deactivates = false }
+                    return (state.engine, state.deactivates)
+                }
+                if deactivates { await engine?.deactivate() }
+            },
+            beforeRequeueingInactive: { _ in
+                let (engine, activates) = current.withLock { state in
+                    defer { state.activates = false }
+                    return (state.engine, state.activates)
+                }
+                guard activates, let engine else { return }
+                #expect(await engine.activate())
+                await engine.waitForRestart()
+            }, hasForegroundSession: true)
+        current.withLock { $0.engine = engine }
+        // Activated before the record exists, so only this start launches the part.
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        try await harness.addRecord(parts: [partID])
+
+        await engine.start(partIDs: [partID])
+
+        try #require(try await harness.store.part(id: partID)?.state == .running)
+        gate.open()
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 1)
+    }
+
     /// Backgrounded after a foreground transfer finished but before the engine handled its
     /// completion: the finished task isn't stopped, so its moved file completes the part rather
     /// than the part being queued to download again.
