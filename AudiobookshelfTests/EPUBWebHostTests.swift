@@ -943,6 +943,87 @@ private final class ReaderPage {
         #expect(rewritten.filter(\.isEmpty).count == 5 - rewrittenSheets)
     }
 
+    /// Opens a book with an image `a.png` and the style `sheets` (paths in `OEBPS`, listed in this
+    /// order), reading the sheet at `slow` out of the archive last, and returns, for each sheet: its
+    /// rewritten blob URL, its rewritten text, the first blob URL in that text, and that blob's text.
+    private func rewrittenSheets(
+        _ sheets: [(path: String, text: String)], slow: String = ""
+    ) async throws -> [String: [String]] {
+        let manifest =
+            #"<item id="a" href="a.png" media-type="image/png"/>"#
+            + sheets.enumerated().map { #"<item id="s\#($0)" href="\#($1.path)" media-type="text/css"/>"# }.joined()
+        let extra =
+            [TinyEPUB.Entry(name: "OEBPS/a.png", body: Data(count: 16))]
+            + sheets.map { TinyEPUB.Entry(name: "OEBPS/\($0.path)", body: Data($0.text.utf8)) }
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(extra: extra, manifest: manifest) })
+        _ = try await page.controller.webView.evaluateJavaScript(
+            """
+            const ePub = window.ePub
+            window.ePub = function (data, options) {
+              const book = (window.testBook = ePub(data, options))
+              const getText = book.archive.getText
+              book.archive.getText = function (url) {
+                const text = getText.apply(this, arguments)
+                if (!text || !url.endsWith(\(String(reflecting: "/OEBPS/" + slow)))) return text
+                return text.then((css) => new Promise((resolve) => setTimeout(() => resolve(css), 300)))
+              }
+              return book
+            }
+            const create = URL.createObjectURL
+            window.testBlobs = {}
+            URL.createObjectURL = function (blob) { const url = create(blob); window.testBlobs[url] = blob; return url }
+            1
+            """)
+        let opening = Task { try await page.open("sheets") }
+        defer { opening.cancel() }
+        while try await page.evaluate("window.testBook !== undefined") != "true" {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let result = try await page.controller.webView.callAsyncJavaScript(
+            """
+            await window.testBook.opened
+            const resources = window.testBook.resources
+            const result = {}
+            for (const sheet of sheets) {
+              const url = resources.replacementUrls[resources.urls.indexOf(sheet)]
+              const text = await window.testBlobs[url].text()
+              const linked = (text.match(/blob:[^'")\\s;]+/) || [''])[0]
+              result[sheet] = [url, text, linked, window.testBlobs[linked] ? await window.testBlobs[linked].text() : '']
+            }
+            return result
+            """, arguments: ["sheets": sheets.map(\.path)], contentWorld: .page)
+        return try #require(result as? [String: [String]])
+    }
+
+    /// A style sheet importing another gets the imported sheet rewritten, not its original, whose
+    /// relative URLs wouldn't resolve from a blob, though epub.js rewrites them all at once and the
+    /// imported one is read last.
+    @Test(.timeLimit(.minutes(1))) func anImportedStyleSheetIsRewrittenFirst() async throws {
+        let sheets = try await rewrittenSheets(
+            [
+                ("style.css", #"@import "fonts/inner.css";"#),
+                ("fonts/inner.css", "body { background: url(../a.png) }"),
+            ], slow: "fonts/inner.css")
+
+        let outer = try #require(sheets["style.css"])
+        let inner = try #require(sheets["fonts/inner.css"])
+        #expect(outer[2] == inner[0])
+        #expect(outer[3].contains("url(blob:"))
+        #expect(!outer[3].contains("../a.png"))
+    }
+
+    /// Style sheets importing each other still open; the one closing the cycle gets the other's
+    /// original.
+    @Test(.timeLimit(.minutes(1))) func styleSheetsImportingEachOtherOpen() async throws {
+        let sheets = try await rewrittenSheets([("a.css", #"@import "b.css";"#), ("b.css", #"@import "a.css";"#)])
+
+        let a = try #require(sheets["a.css"])
+        let b = try #require(sheets["b.css"])
+        #expect(a[2] == b[0])
+        #expect(b[3] == #"@import "b.css";"#)
+    }
+
     /// A relocation is posted whenever any of its fields changes, not only its start.
     @Test(.timeLimit(.minutes(1))) func aRelocationWithANewEndIsPosted() async throws {
         let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
