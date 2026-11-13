@@ -877,6 +877,34 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(try harness.session(firstID) == nil && harness.session(secondID) != nil)
     }
 
+    @Test func expiryOfAnotherConnectionBumpsTheCredentialsRevision() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let first = FakeServer()
+        _ = try await signIn(manager, to: first)
+        let firstClient = try #require(manager.client)
+        _ = try await signIn(manager, to: FakeServer(userId: "usr-2"))
+        first.revokeSession()
+        let connections = manager.connections
+        let before = manager.credentialsRevision
+
+        await #expect(throws: APIError.sessionExpired) { try await firstClient.send(AuthEndpoints.authorize()) }
+        // The list didn't change, so only the revision tells a view to read the sessions again.
+        #expect(manager.connections == connections)
+        #expect(manager.credentialsRevision > before)
+    }
+
+    @Test func signInAndLogoutBumpTheCredentialsRevision() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let before = manager.credentialsRevision
+        _ = try await signIn(manager, to: FakeServer())
+        let signedIn = manager.credentialsRevision
+        #expect(signedIn > before)
+        _ = await manager.logout()
+        #expect(manager.credentialsRevision > signedIn)
+    }
+
     @Test func refreshFromBeforeSigningInAgainIsDropped() async throws {
         let harness = try Harness()
         let manager = harness.makeManager()
