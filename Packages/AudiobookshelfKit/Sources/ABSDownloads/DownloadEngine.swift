@@ -620,7 +620,9 @@ public actor DownloadEngine {
     /// Deletes the resume data of every part of `connectionID`'s downloads, for sign-out,
     /// removal or a credential change (ADR 0003). Their next start is a fresh request. Only the
     /// parts' resume-data flags are written, so a part that failed or started since the
-    /// downloads were read keeps its state.
+    /// downloads were read keeps its state. A stop of one of those parts still under way, such
+    /// as a pause whose transfer is producing its resume data, is waited for first, so what it
+    /// seals is deleted too.
     ///
     /// - Returns: `false` when the downloads couldn't be read (deleting nothing), a blob couldn't
     ///   be deleted (a flagged part stays flagged), or a flag couldn't be cleared.
@@ -633,6 +635,10 @@ public actor DownloadEngine {
             logError("Couldn't read downloads; not deleting a server's resume data", error)
             return false
         }
+        // Only a stop with a live transfer seals, and the connection's transfers are stopped or
+        // refused by now, so no stop that begins after this one can seal.
+        let pendingStops = records.flatMap(\.parts).compactMap { stopping[$0.id] }
+        for stop in pendingStops { await stop.value }
         var deleted = true
         // Every part, flagged or not: a pause whose seal failed, and whose previous blob couldn't
         // be deleted, leaves one unflagged, and a completion whose delete failed one completed.

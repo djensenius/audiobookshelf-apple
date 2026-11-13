@@ -1078,6 +1078,71 @@ import Testing
         #expect(try await harness.store.record(id: record.id) == nil)
     }
 
+    /// After the session is lost, a pause can still be producing its transfer's resume data when
+    /// a quiesce without a session returns and a later activation retries the cleanup. The
+    /// activation waits for that pause, so it deletes what the pause seals before it clears the
+    /// marker.
+    @Test func aCleanupWaitsForAPauseStillSealingResumeData() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .downloading)
+        let readsFail = Mutex(false)
+        let (cancelling, cancelStarted) = AsyncStream.makeStream(of: Void.self)
+        let releaseCancel = StubGate()
+        let (listed, listedContinuation) = AsyncStream.makeStream(of: Void.self)
+        let engine = harness.makeEngine(
+            readRecords: { store in
+                if readsFail.withLock({ $0 }) { throw TestError() }
+                return try await store.allRecords()
+            },
+            cancel: { task in
+                cancelStarted.yield()
+                await withCheckedContinuation { continuation in releaseCancel.run { continuation.resume() } }
+                task.cancel()
+                return Data("resume".utf8)
+            },
+            listing: { listedContinuation.yield() })
+        #expect(await engine.activate())
+        await harness.waitForRequests(1)
+        for await _ in listed { break }
+        let pausing = Task { try await engine.pause(recordID: record.id) }
+        for await _ in cancelling { break }
+
+        // The session is lost and can't be created again, so the quiesce has no session.
+        readsFail.withLock { $0 = true }
+        await engine.delegate.post(.sessionInvalidated)
+        await engine.processPendingEvents()
+        #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        readsFail.withLock { $0 = false }
+
+        // The activation lists its session only once its cleanup is done; give it the time it
+        // would take to get there without waiting for the pause.
+        let activating = Task { await engine.activate() }
+        let listedEarly = await withTaskGroup(of: Bool.self) { group in
+            group.addTask {
+                for await _ in listed { return true }
+                return false
+            }
+            group.addTask {
+                try? await Task.sleep(for: .milliseconds(500))
+                return false
+            }
+            defer { group.cancelAll() }
+            return await group.next() ?? false
+        }
+        #expect(!listedEarly)
+        releaseCancel.open()
+        #expect(try await pausing.value)
+        #expect(await activating.value)
+
+        #expect(
+            !FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: partID).path(percentEncoded: false)))
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        never.open()
+    }
+
     /// A quiesce that begins while a finalisation writes the local item holds that record too, so
     /// resume data the quiesce can't delete keeps the part that leads to it, and a relaunch,
     /// which the marker sends to it, deletes it before finalising the record.
