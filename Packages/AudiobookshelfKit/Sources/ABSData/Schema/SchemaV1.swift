@@ -376,6 +376,9 @@ public enum SchemaV1: VersionedSchema {
         public var hasResumeData: Bool
         public var retryCount: Int
         public var lastError: String?
+        /// The failure's stable code (a `DownloadFailureCode` raw value in ABSDownloads), for a
+        /// localised message; `nil` while there's none. Cleared whenever ``lastError`` is.
+        public var lastErrorCode: String?
 
         public init(
             id: UUID = UUID(),
@@ -393,7 +396,8 @@ public enum SchemaV1: VersionedSchema {
             taskIdentifier: Int? = nil,
             hasResumeData: Bool = false,
             retryCount: Int = 0,
-            lastError: String? = nil
+            lastError: String? = nil,
+            lastErrorCode: String? = nil
         ) {
             self.id = id
             self.kind = kind.rawValue
@@ -411,6 +415,7 @@ public enum SchemaV1: VersionedSchema {
             self.hasResumeData = hasResumeData
             self.retryCount = retryCount
             self.lastError = lastError
+            self.lastErrorCode = lastErrorCode
         }
 
         public var kindValue: DownloadPartKind? { DownloadPartKind(rawValue: kind) }
