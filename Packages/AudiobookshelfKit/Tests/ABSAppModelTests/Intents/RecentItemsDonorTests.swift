@@ -25,21 +25,33 @@ private final class FakeRecentItemsIndex: RecentItemsIndexing {
     private(set) var indexed: [PlayableEntityRecord] = []
     /// The kinds of write that throw (each is still recorded).
     var failing: Set<Kind> = []
+    /// For each identifier, how many deletions of it still succeed before they throw.
+    var deletionsBeforeFailing: [String: Int] = [:]
+    /// The identifiers in the index now.
+    private(set) var searchable: Set<String> = []
 
     func index(_ record: PlayableEntityRecord) async throws {
         writes.append(.index(record.id))
         if failing.contains(.index) { throw Failure() }
         indexed.append(record)
+        searchable.insert(record.id)
     }
 
     func delete(identifiers: [String]) async throws {
         writes.append(.delete(identifiers))
         if failing.contains(.delete) { throw Failure() }
+        for identifier in identifiers {
+            guard let left = deletionsBeforeFailing[identifier] else { continue }
+            if left == 0 { throw Failure() }
+            deletionsBeforeFailing[identifier] = left - 1
+        }
+        searchable.subtract(identifiers)
     }
 
     func deleteDomain(of connectionID: UUID) async throws {
         writes.append(.deleteDomain(connectionID))
         if failing.contains(.deleteDomain) { throw Failure() }
+        searchable = searchable.filter { !$0.hasPrefix(connectionID.uuidString) }
     }
 
     func clearWrites() {
@@ -378,6 +390,50 @@ private func context(_ server: UUID) -> SessionContext {
 
         #expect(donor.pendingEvictions(of: serverA) == [record("li_2").id])
         #expect(donor.indexedIdentifiers(of: serverA).first == record("li_1").id)
+    }
+
+    @Test func aRetryAfterSigningInAgainKeepsTheNewItems() async {
+        let donor = await makeDonor()
+        donor.donate(record("li_old"))
+        index.failing = [.deleteDomain, .delete]
+        await donor.sessionWillEnd(.signOut)
+
+        // Signed in again: its retry fails too, then it plays something new.
+        await donor.sessionDidStart(context(serverA))
+        donor.donate(record("li_new"))
+        await donor.settle()
+        index.failing = []
+        await donor.sessionWillEnd(.switch)
+        await donor.sessionDidStart(context(serverB))
+        await donor.settle()
+
+        #expect(index.searchable == [record("li_new").id])
+        #expect(donor.indexedIdentifiers(of: serverA) == [record("li_new").id])
+        #expect(donor.pendingDomainDeletions.isEmpty && donor.pendingEvictions(of: serverA).isEmpty)
+    }
+
+    @Test func anOlderEvictionsSuccessDoesntForgetANewerOne() async {
+        let donor = await makeDonor()
+        for number in 1...RecentItemsDonor.limit { donor.donate(record("li_\(number)")) }
+        await donor.settle()
+        // Its first deletion succeeds, its second fails.
+        index.deletionsBeforeFailing = [record("li_1").id: 1]
+
+        // Evicted, played again, and evicted again, all before the first deletion runs.
+        donor.donate(record("li_new"))
+        donor.donate(record("li_1"))
+        for number in 1...RecentItemsDonor.limit { donor.donate(record("li_more_\(number)")) }
+        await donor.settle()
+
+        #expect(index.searchable.contains(record("li_1").id))
+        #expect(donor.pendingEvictions(of: serverA).contains(record("li_1").id))
+
+        index.deletionsBeforeFailing = [:]
+        let relaunched = await makeDonor(running: nil)
+        await relaunched.settle()
+
+        #expect(!index.searchable.contains(record("li_1").id))
+        #expect(relaunched.pendingEvictions(of: serverA).isEmpty)
     }
 
     // MARK: Accounts

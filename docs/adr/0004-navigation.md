@@ -341,7 +341,7 @@ IDs follow the URL rules. A present but invalid `item` or `episode` rejects the 
 
 - `RecentItemsDonor` (#87) indexes each account's 20 most recently played items, associated with their `BookEntity` or `PodcastEpisodeEntity`. Each item's domain is its account's connection ID. Its identifier is its `MediaKey`, so playing it again updates it.
 - An account's items are deleted when it signs out, is removed (or just its credentials are), or its credentials expire, and when a switch to it or the launch's restore of it ends signed out. A switch to another account keeps them.
-- A deletion that fails, of an account's domain or of items past the limit, stays pending in `UserDefaults` and is retried at launch and when a session starts.
+- A deletion that fails, of an account's domain or of items past the limit, stays pending in `UserDefaults` and is retried at launch and when a session starts. Once the account signs in again, its pending domain deletion becomes a deletion of just the identifiers it was for, so a retry keeps what it donates since. Each pending eviction carries a token, so an older deletion's completion can't clear a newer eviction of the same item.
 - An item is donated once it actually plays, not when play is only requested.
 - A tapped result reaches `RootView.onContinueUserActivity(CSSearchableItemActionType)`. `DeepLink(spotlightIdentifier:)` turns it into an item or episode link with `server=` set to the item's own connection, so a result from another signed-in account asks before switching. The connection ID is local, but so is the Spotlight index.
 

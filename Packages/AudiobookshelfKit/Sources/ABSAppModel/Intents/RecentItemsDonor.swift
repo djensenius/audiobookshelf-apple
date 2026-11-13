@@ -19,7 +19,10 @@ import Observation
 ///   item on its own account, asking to switch first (``DeepLink/init(spotlightIdentifier:)``).
 /// - A deletion that fails stays pending in `defaults`, with the identifiers it was for, until it
 ///   succeeds: the donor retries it when it's made (at launch) and when a session starts, so a
-///   signed-out account's items, or those past the limit, don't stay searchable.
+///   signed-out account's items, or those past the limit, don't stay searchable. When the
+///   account's session starts again, its pending domain deletion becomes a deletion of just those
+///   identifiers, so a later retry can't delete what it donates since. Each pending eviction
+///   carries a token, so an older deletion's completion can't clear a newer eviction of the item.
 ///
 /// Index writes run one at a time, in order, so a deletion can't overtake the donation before it.
 @MainActor
@@ -31,7 +34,8 @@ public final class RecentItemsDonor: SessionParticipant {
     /// The `defaults` key of each account's pending domain deletion, with the identifiers it was
     /// asked for: ``removeItems(of:)`` moves them here until the deletion succeeds.
     public static let pendingDomainsKey = "spotlight.pendingDomainDeletions"
-    /// The `defaults` key of each account's identifiers past the limit that aren't deleted yet.
+    /// The `defaults` key of each account's identifiers past the limit that aren't deleted yet,
+    /// each with the token of its latest eviction.
     public static let pendingEvictionsKey = "spotlight.pendingEvictions"
 
     public let index: any RecentItemsIndexing
@@ -47,6 +51,10 @@ public final class RecentItemsDonor: SessionParticipant {
     private var following: Task<Void, Never>?
     private var removals: Task<Void, Never>?
     private var rejectedSwitches: Task<Void, Never>?
+    /// Counts each connection's domain deletions this run: only the latest one's completion
+    /// changes its pending entry, and a session start that converts it (``sessionDidStart(_:)``)
+    /// makes earlier ones change nothing.
+    private var domainRequests: [UUID: Int] = [:]
 
     public init(index: any RecentItemsIndexing, defaults: UserDefaults) {
         self.index = index
@@ -71,23 +79,26 @@ public final class RecentItemsDonor: SessionParticipant {
         identifiers.insert(record.id, at: 0)
         let dropped = Array(identifiers.dropFirst(Self.limit))
         // Played again: it stays, though an earlier eviction (queued before this) deletes it first.
-        update(Self.pendingEvictionsKey, of: connectionID) { $0.removeAll { $0 == record.id } }
+        var evictions = pendingEvictionTokens(of: connectionID)
+        evictions[record.id] = nil
         // Tracked as pending until deleted, so a failure can't leave them past the limit, untracked.
-        update(Self.pendingEvictionsKey, of: connectionID) { $0.append(contentsOf: dropped) }
+        let evicted = Self.tokens(for: dropped)
+        evictions.merge(evicted) { $1 }
+        setPendingEvictionTokens(evictions, of: connectionID)
         setIndexedIdentifiers(Array(identifiers.prefix(Self.limit)), of: connectionID)
         enqueue { index in
             // Evicts whether or not indexing succeeds.
             await Self.attempt { try await index.index(record) }
         }
-        if !dropped.isEmpty { evict(dropped, of: connectionID) }
+        if !evicted.isEmpty { evict(evicted, of: connectionID) }
     }
 
     /// Deletes `connectionID`'s items from Spotlight, and forgets them once that succeeds. Until
     /// then the deletion stays pending, with the identifiers it was asked for.
     public func removeItems(of connectionID: UUID) {
-        let identifiers = indexedIdentifiers(of: connectionID) + pending(Self.pendingEvictionsKey, of: connectionID)
+        let identifiers = indexedIdentifiers(of: connectionID) + pendingEvictions(of: connectionID)
         update(Self.pendingDomainsKey, of: connectionID) { $0.append(contentsOf: identifiers) }
-        update(Self.pendingEvictionsKey, of: connectionID) { $0 = [] }
+        setPendingEvictionTokens([:], of: connectionID)
         setIndexedIdentifiers([], of: connectionID)
         if lastDonated?.key.serverConnectionID == connectionID { lastDonated = nil }
         deleteDomain(of: connectionID, identifiers: identifiers)
@@ -98,9 +109,9 @@ public final class RecentItemsDonor: SessionParticipant {
         Set(pendingEntries(Self.pendingDomainsKey).keys.compactMap(UUID.init(uuidString:)))
     }
 
-    /// The identifiers past `connectionID`'s limit that aren't deleted yet.
+    /// The identifiers past `connectionID`'s limit that aren't deleted yet, sorted.
     public func pendingEvictions(of connectionID: UUID) -> [String] {
-        pending(Self.pendingEvictionsKey, of: connectionID)
+        pendingEvictionTokens(of: connectionID).keys.sorted()
     }
 
     /// The identifiers indexed for `connectionID`, most recently played first.
@@ -207,6 +218,19 @@ public final class RecentItemsDonor: SessionParticipant {
         connectionID = context.identity.connectionID
         runningSessionExpired = false
         lastDonated = nil
+        // Signed in again with its domain's deletion pending: from now on, delete just the
+        // identifiers it was for, so a retry can't delete what this session donates. A deletion
+        // queued before this still runs before those donations.
+        let started = context.identity.connectionID
+        if let identifiers = pendingEntries(Self.pendingDomainsKey)[started.uuidString] {
+            domainRequests[started, default: 0] += 1
+            var all = pendingEntries(Self.pendingDomainsKey)
+            all[started.uuidString] = nil
+            defaults.set(all, forKey: Self.pendingDomainsKey)
+            var evictions = pendingEvictionTokens(of: started)
+            evictions.merge(Self.tokens(for: identifiers)) { $1 }
+            setPendingEvictionTokens(evictions, of: started)
+        }
         retryPendingDeletions()
     }
 
@@ -235,20 +259,32 @@ public final class RecentItemsDonor: SessionParticipant {
         defaults.dictionary(forKey: key) as? [String: [String]] ?? [:]
     }
 
-    private func pending(_ key: String, of connectionID: UUID) -> [String] {
-        pendingEntries(key)[connectionID.uuidString] ?? []
-    }
-
-    /// Changes `connectionID`'s pending identifiers under `key`, deduplicated. A pending domain
-    /// deletion is kept even with no identifiers; an eviction is dropped once it has none.
+    /// Changes `connectionID`'s pending domain deletion's identifiers, deduplicated. It stays
+    /// pending even with none.
     private func update(_ key: String, of connectionID: UUID, _ change: (inout [String]) -> Void) {
         var all = pendingEntries(key)
         var identifiers = all[connectionID.uuidString] ?? []
         change(&identifiers)
         var seen = Set<String>()
-        identifiers = identifiers.filter { seen.insert($0).inserted }
-        all[connectionID.uuidString] = identifiers.isEmpty && key == Self.pendingEvictionsKey ? nil : identifiers
+        all[connectionID.uuidString] = identifiers.filter { seen.insert($0).inserted }
         defaults.set(all, forKey: key)
+    }
+
+    /// `connectionID`'s pending evictions: each identifier with its latest eviction's token.
+    private func pendingEvictionTokens(of connectionID: UUID) -> [String: String] {
+        let all = defaults.dictionary(forKey: Self.pendingEvictionsKey) as? [String: [String: String]]
+        return all?[connectionID.uuidString] ?? [:]
+    }
+
+    private func setPendingEvictionTokens(_ evictions: [String: String], of connectionID: UUID) {
+        var all = defaults.dictionary(forKey: Self.pendingEvictionsKey) as? [String: [String: String]] ?? [:]
+        all[connectionID.uuidString] = evictions.isEmpty ? nil : evictions
+        defaults.set(all, forKey: Self.pendingEvictionsKey)
+    }
+
+    /// A new eviction token for each identifier.
+    private static func tokens(for identifiers: [String]) -> [String: String] {
+        Dictionary(identifiers.map { ($0, UUID().uuidString) }) { $1 }
     }
 
     /// Queues every pending deletion again, as at launch.
@@ -257,36 +293,39 @@ public final class RecentItemsDonor: SessionParticipant {
             guard let connectionID = UUID(uuidString: connection) else { continue }
             deleteDomain(of: connectionID, identifiers: identifiers)
         }
-        for (connection, identifiers) in pendingEntries(Self.pendingEvictionsKey) {
-            guard let connectionID = UUID(uuidString: connection), !identifiers.isEmpty else { continue }
-            evict(identifiers, of: connectionID)
+        let evictions = defaults.dictionary(forKey: Self.pendingEvictionsKey) as? [String: [String: String]] ?? [:]
+        for (connection, tokens) in evictions {
+            guard let connectionID = UUID(uuidString: connection), !tokens.isEmpty else { continue }
+            evict(tokens, of: connectionID)
         }
     }
 
-    /// Deletes `connectionID`'s domain, then forgets the pending deletion of `identifiers`; if it
-    /// fails, they stay pending.
+    /// Deletes `connectionID`'s domain. If no later deletion of it, or session start, came since,
+    /// its completion forgets the pending deletion, or if it failed keeps `identifiers` pending.
     private func deleteDomain(of connectionID: UUID, identifiers: [String]) {
+        domainRequests[connectionID, default: 0] += 1
+        let request = domainRequests[connectionID]
         enqueue { [weak self] index in
             let deleted = await Self.attempt { try await index.deleteDomain(of: connectionID) }
-            guard let self else { return }
+            guard let self, self.domainRequests[connectionID] == request else { return }
             if deleted {
                 var all = self.pendingEntries(Self.pendingDomainsKey)
-                let left = (all[connectionID.uuidString] ?? []).filter { !identifiers.contains($0) }
-                // Another removal queued meanwhile, with other identifiers, keeps its own entry.
-                all[connectionID.uuidString] = left.isEmpty ? nil : left
+                all[connectionID.uuidString] = nil
                 self.defaults.set(all, forKey: Self.pendingDomainsKey)
             } else {
-                // Kept pending, even if a removal queued before this one succeeded and cleared it.
                 self.update(Self.pendingDomainsKey, of: connectionID) { $0.append(contentsOf: identifiers) }
             }
         }
     }
 
-    /// Deletes `identifiers`, past `connectionID`'s limit, then forgets their pending eviction.
-    private func evict(_ identifiers: [String], of connectionID: UUID) {
+    /// Deletes the identifiers of `evictions`, past `connectionID`'s limit, then forgets each one's
+    /// pending eviction unless a newer eviction of it (another token) replaced it meanwhile.
+    private func evict(_ evictions: [String: String], of connectionID: UUID) {
+        let identifiers = evictions.keys.sorted()
         enqueue { [weak self] index in
             guard await Self.attempt({ try await index.delete(identifiers: identifiers) }), let self else { return }
-            self.update(Self.pendingEvictionsKey, of: connectionID) { $0.removeAll { identifiers.contains($0) } }
+            let pending = self.pendingEvictionTokens(of: connectionID).filter { evictions[$0.key] != $0.value }
+            self.setPendingEvictionTokens(pending, of: connectionID)
         }
     }
 
