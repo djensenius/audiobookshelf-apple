@@ -171,7 +171,7 @@ private struct LocalItemHeader: View {
                     }
                     Text(
                         verbatim: L10n.string(
-                            "LabelLocalTotalSize", ByteCountFormatting.string(fromBytes: detail.totalBytes))
+                            "LabelDownloadedTotalSize", ByteCountFormatting.string(fromBytes: detail.totalBytes))
                     )
                     .font(.caption)
                     .foregroundStyle(ABSColor.mutedForeground)

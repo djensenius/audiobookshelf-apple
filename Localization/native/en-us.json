@@ -84,6 +84,7 @@
     "one": "{0} track",
     "other": "{0} tracks"
   },
+  "LabelDownloadedTotalSize": "Total size: {0}",
   "LabelDownloadsAvailable": "{0} available",
   "LabelDownloadsUsed": "{0} downloaded",
   "LabelGroupItemCount": "{0} items",
@@ -118,7 +119,6 @@
   "LabelLibrarySortAscending": "Ascending",
   "LabelLibrarySortDescending": "Descending",
   "LabelLibraryViewOptions": "View Options",
-  "LabelLocalTotalSize": "Total size: {0}",
   "LabelLogCategory": "Category",
   "LabelLogLevelDebug": "Debug",
   "LabelLogLevelError": "Error",
