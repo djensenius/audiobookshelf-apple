@@ -5,8 +5,9 @@ import Observation
 /// The reader container's state for one ebook file (#101, ADR 0008): which reader opens it, the
 /// file on disk, where it opens, and whether the chrome shows.
 ///
-/// - **Formats.** EPUB and PDF open; CBZ waits for the comic reader (#105), and CBR, MOBI and
-///   AZW3 aren't opened in v1 (ADR 0008 §4): both show the unsupported state.
+/// - **Formats.** EPUB, PDF and CBZ open, each in its own reader (``display``); CBR, MOBI and AZW3
+///   aren't opened in v1 (ADR 0008 §4 and §5) and show the unsupported state. A `.cbz` that is
+///   really a RAR archive is found by the comic reader, which shows the same state.
 /// - **Progress.** With an ``EbookProgressModel``, the reader resumes from it and every page turn
 ///   goes through it (local first, then the debounced sync); ``flush()`` sends at once, for
 ///   closing and backgrounding. Without one (until the account's progress store and syncer are
@@ -26,6 +27,17 @@ public final class ReaderContainerModel {
         case unsupported
         /// The file couldn't be fetched.
         case failed
+    }
+
+    /// What the container shows: ``content`` routed to the reader for ``kind`` once the file is
+    /// on disk.
+    public enum Display: Sendable, Equatable {
+        case loading
+        case failed
+        case unsupported
+        case epub(URL)
+        case pdf(URL)
+        case comic(URL)
     }
 
     public let request: EbookFileRequest
@@ -65,15 +77,30 @@ public final class ReaderContainerModel {
         self.serverProgress = serverProgress
     }
 
-    /// Whether the container has a reader for `kind`: EPUB and PDF.
+    /// Whether the container has a reader for `kind`: EPUB, PDF and comics (CBZ).
     public static func opens(_ kind: ReaderKind) -> Bool {
         switch kind {
-        case .epub, .pdf: true
-        case .comic, .unsupported: false
+        case .epub, .pdf, .comic: true
+        case .unsupported: false
         }
     }
 
-    /// The format's name for the unsupported state, such as `CBZ` or `MOBI`.
+    public var display: Display {
+        switch content {
+        case .loading: .loading
+        case .failed: .failed
+        case .unsupported: .unsupported
+        case .ready(let url):
+            switch kind {
+            case .epub: .epub(url)
+            case .pdf: .pdf(url)
+            case .comic: .comic(url)
+            case .unsupported: .unsupported
+            }
+        }
+    }
+
+    /// The format's name for the unsupported state, such as `CBR` or `MOBI`.
     public var formatName: String {
         switch kind {
         case .epub: "EPUB"

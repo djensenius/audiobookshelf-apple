@@ -63,16 +63,39 @@ import Testing
     func everyPlayerErrorHasAResolvableMessage(_ error: PlayerErrorMessage) {
         let key = PlayerSlot.messageKey(for: error)
         #expect(L10n.string(key) != key)
+        // Every button of its alert has a label, and the alert one way to leave playback as it is.
+        for action in error.actions {
+            let label = PlayerSlot.labelKey(for: action)
+            #expect(L10n.string(label) != label)
+        }
+        #expect(error.actions.contains { PlayerSlot.role(for: $0) == .cancel })
     }
 
-    /// #376: only "ask" offers to stream anyway; "never" and other failures show OK.
+    /// The interrupted-stream alert's buttons: Retry, then Cancel (the cancel role).
+    @Test func anInterruptedStreamsAlertOffersRetryThenCancel() {
+        let actions = PlayerErrorMessage.streamingInterrupted.actions
+        #expect(actions.map(PlayerSlot.labelKey(for:)) == ["ButtonRetry", "ButtonCancel"])
+        #expect(actions.map(PlayerSlot.role(for:)) == [nil, .cancel])
+        #expect(PlayerErrorMessage.playbackFailed.actions.map(PlayerSlot.labelKey(for:)) == ["ButtonOk"])
+    }
+
+    @Test func theWaitingForNetworkLineIsLocalized() {
+        let key = MiniPlayerView.waitingForNetworkKey
+        #expect(L10n.string(key) != key)
+    }
+
+    /// #376: only "ask" offers to stream anyway ("Stream", then Cancel); "never" and other
+    /// failures don't.
     @Test(arguments: [
         PlayerErrorMessage.streamingNeedsConfirmation, .streamingNotAllowed, .sessionStartFailed,
         .streamUnavailable, .streamingInterrupted, .streamRejected, .playbackFailed,
     ])
     func onlyAConfirmationOffersToStream(_ error: PlayerErrorMessage) {
-        #expect(PlayerErrorAction(error) == (error == .streamingNeedsConfirmation ? .streamAnyway : nil))
-        #expect(L10n.string(PlayerErrorAction.streamAnyway.titleKey) != PlayerErrorAction.streamAnyway.titleKey)
+        #expect(error.actions.contains(.streamAnyway) == (error == .streamingNeedsConfirmation))
+        if error == .streamingNeedsConfirmation {
+            #expect(error.actions.map(PlayerSlot.labelKey(for:)) == ["ButtonStream", "ButtonCancel"])
+            #expect(error.actions.map(PlayerSlot.role(for:)) == [nil, .cancel])
+        }
     }
 
     /// A scene shows a failure until it's dismissed there, and a different failure after that.

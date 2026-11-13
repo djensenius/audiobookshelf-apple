@@ -37,7 +37,7 @@ enum ReaderCaches {
 }
 
 /// The reader for one ebook file (#101, ADR 0008, legacy `Reader.vue`): EPUB in the epub.js web
-/// host, PDF in PDFKit, and the unsupported state for other formats. A tap shows or hides the
+/// host, PDF in PDFKit, CBZ in the comic pager, and the unsupported state for other formats. A tap shows or hides the
 /// chrome (close, title and the reader settings). Full screen on iPhone and iPad, a window on Mac.
 ///
 /// It needs the scene's library store serving the presentation's connection, for the account's
@@ -181,7 +181,7 @@ struct ReaderContent: View {
 
     @ViewBuilder
     private func reader(settings: ReaderSettings, theme: ReaderTheme, layout: ReaderSpreadLayout) -> some View {
-        switch model.content {
+        switch model.display {
         case .loading:
             LoadingView()
         case .failed:
@@ -190,18 +190,23 @@ struct ReaderContent: View {
             }
         case .unsupported:
             ReaderUnsupportedView(model: model, serverURL: serverURL)
-        case .ready(let url):
-            switch model.kind {
-            case .pdf:
-                PDFReaderHost(model: model, url: url, isSpread: layout.isTwoUp, theme: theme)
-            case .epub:
-                EPUBReaderView(
-                    model: model, fileURL: url,
-                    payload: ReaderSettingsPayload(
-                        settings: settings, resolvedAppearance: colorScheme == .dark ? .dark : .light,
-                        layout: layout))
-            case .comic, .unsupported:
-                ReaderUnsupportedView(model: model, serverURL: serverURL)
+        case .pdf(let url):
+            PDFReaderHost(model: model, url: url, isSpread: layout.isTwoUp, theme: theme)
+        case .epub(let url):
+            EPUBReaderView(
+                model: model, fileURL: url,
+                payload: ReaderSettingsPayload(
+                    settings: settings, resolvedAppearance: colorScheme == .dark ? .dark : .light,
+                    layout: layout))
+        case .comic(let url):
+            ComicReaderView(
+                fileURL: url, startLocation: model.resumePoint.location, layout: layout,
+                background: theme.chromeBackground,
+                webURL: serverURL.map { ItemDetailModel.webURL(serverURL: $0, itemID: model.request.itemID) },
+                preferencesKey: "\(model.request.connectionID.uuidString)|\(model.request.itemID)",
+                showsControls: model.isChromeVisible, onTap: model.toggleChrome
+            ) { location, progress in
+                model.record(location, progress: progress)
             }
         }
     }
@@ -260,8 +265,8 @@ private struct ReaderCloseButton: View {
     }
 }
 
-/// A format the app doesn't open: CBZ until the comic reader (#105), and CBR, MOBI and AZW3 in v1
-/// (ADR 0008 §4). The web client reads it.
+/// A format the app doesn't open: CBR, MOBI and AZW3 in v1 (ADR 0008 §4 and §5). The web client
+/// reads it.
 private struct ReaderUnsupportedView: View {
     let model: ReaderContainerModel
     let serverURL: URL?

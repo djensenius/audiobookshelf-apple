@@ -13,10 +13,11 @@ protocol PlayerSlotState: AnyObject, Observable {
     var title: String { get }
     /// The failure to show, with or without a session; `nil` when there is none.
     var errorMessageKey: PlayerErrorMessage? { get }
-    /// "Stream" for a `.streamingNeedsConfirmation` failure.
-    func confirmMeteredStreaming() async
-    /// "Cancel" for a `.streamingNeedsConfirmation` failure.
-    func declineMeteredStreaming()
+    /// The current failure's occurrence (with `errorMessageKey`'s message), which its alert passes
+    /// back to `respond(to:with:)`.
+    var failure: PlayerFailure? { get }
+    /// Handles a button of the alert for `message` (its ``PlayerErrorMessage/actions``).
+    func respond(to failure: PlayerFailure, with action: PlayerErrorAction) async
 }
 
 extension PlayerViewModel: PlayerSlotState {}
@@ -34,33 +35,9 @@ final class PlaceholderPlayerState: PlayerSlotState {
         self.errorMessageKey = errorMessageKey
     }
 
-    func confirmMeteredStreaming() async {
-        errorMessageKey = nil
-    }
+    var failure: PlayerFailure? { errorMessageKey.map { PlayerFailure(message: $0, occurrence: 0) } }
 
-    func declineMeteredStreaming() {
-        errorMessageKey = nil
-    }
-}
-
-/// What a playback failure's alert offers besides dismissing it; a failure without one shows OK
-/// alone, and one with it shows the action and Cancel.
-enum PlayerErrorAction: Equatable {
-    /// "Stream", for a confirmation ("ask"), never for "never".
-    case streamAnyway
-
-    init?(_ error: PlayerErrorMessage) {
-        switch error {
-        case .streamingNeedsConfirmation: self = .streamAnyway
-        default: return nil
-        }
-    }
-
-    var titleKey: String {
-        switch self {
-        case .streamAnyway: "ButtonStream"
-        }
-    }
+    func respond(to failure: PlayerFailure, with action: PlayerErrorAction) async {}
 }
 
 /// Places the player around the tab shell (ADR 0004). Whether the full player and the queue
@@ -85,8 +62,8 @@ enum PlayerErrorAction: Equatable {
 /// in the active scene, so other windows don't repeat it (``PlayerErrorAlertOwner``). The queue
 /// inspector and, on iOS, the full player show it while they're on screen, the one on top
 /// instead of the content. Each scene shows a failure until it's dismissed there, and again only
-/// after the player has had none (or a different one). A failure with a ``PlayerErrorAction``
-/// offers it and Cancel instead of OK.
+/// after the player has had none (or a different one). Its buttons are the failure's
+/// ``PlayerErrorMessage/actions``, which ``PlayerSlotState/respond(to:with:)`` handles.
 struct PlayerSlot: ViewModifier {
     @Bindable var router: Router
     let player: any PlayerSlotState
@@ -141,6 +118,24 @@ struct PlayerSlot: ViewModifier {
         case .streamUnavailable: "MessagePlaybackStreamUnavailable"
         case .streamingInterrupted: "MessagePlaybackStreamingInterrupted"
         case .streamRejected: "MessagePlaybackStreamRejected"
+        }
+    }
+
+    /// The string key of an alert button's label.
+    nonisolated static func labelKey(for action: PlayerErrorAction) -> String {
+        switch action {
+        case .dismiss: "ButtonOk"
+        case .retry: "ButtonRetry"
+        case .streamAnyway: "ButtonStream"
+        case .cancel: "ButtonCancel"
+        }
+    }
+
+    /// An alert button's role: the one that leaves playback as it is, or stops it, is the cancel.
+    nonisolated static func role(for action: PlayerErrorAction) -> ButtonRole? {
+        switch action {
+        case .dismiss, .cancel: .cancel
+        case .retry, .streamAnyway: nil
         }
     }
 

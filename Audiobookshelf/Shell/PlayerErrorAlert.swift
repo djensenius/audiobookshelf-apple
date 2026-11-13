@@ -94,8 +94,8 @@ private struct PlayerErrorAlertLayer: ViewModifier {
     }
 }
 
-/// The alert itself, on the base or a layer. A failure with a ``PlayerErrorAction`` offers it and
-/// Cancel instead of OK.
+/// The alert itself, on the base or a layer. Its buttons are the failure's
+/// ``PlayerErrorMessage/actions``, which ``PlayerSlotState/respond(to:with:)`` handles.
 private struct PlayerErrorAlertPresenter: ViewModifier {
     let player: any PlayerSlotState
     let owner: PlayerErrorAlertOwner
@@ -110,40 +110,22 @@ private struct PlayerErrorAlertPresenter: ViewModifier {
             ? owner.shownError(
                 current: player.errorMessageKey, in: layer, isActive: scenePhase == .active && appearsActive)
             : nil
+        // The occurrence it shows, so its buttons can't act on a later failure with the same message.
+        let failure = error.flatMap { _ in player.failure }
         content.alert(
-            Text(verbatim: error.map { L10n.string(PlayerSlot.messageKey(for: $0)) } ?? ""),
+            Text(verbatim: failure.map { L10n.string(PlayerSlot.messageKey(for: $0.message)) } ?? ""),
             isPresented: Binding(
-                get: { error != nil },
+                get: { failure != nil },
                 set: { if !$0 { owner.dismissedError = player.errorMessageKey } }),
-            presenting: error
-        ) { error in
-            let action = PlayerErrorAction(error)
-            if let action {
-                Button {
-                    perform(action)
+            presenting: failure
+        ) { failure in
+            ForEach(failure.message.actions, id: \.self) { action in
+                Button(role: PlayerSlot.role(for: action)) {
+                    Task { await player.respond(to: failure, with: action) }
                 } label: {
-                    Text(verbatim: L10n.string(action.titleKey))
+                    Text(verbatim: L10n.string(PlayerSlot.labelKey(for: action)))
                 }
             }
-            Button(role: .cancel) {
-                dismiss(action)
-            } label: {
-                Text(verbatim: L10n.string(action == nil ? "ButtonOk" : "ButtonCancel"))
-            }
-        }
-    }
-
-    private func perform(_ action: PlayerErrorAction) {
-        switch action {
-        case .streamAnyway: Task { await player.confirmMeteredStreaming() }
-        }
-    }
-
-    /// The alert's cancel (or OK) button, after `action` was offered.
-    private func dismiss(_ action: PlayerErrorAction?) {
-        switch action {
-        case .streamAnyway: player.declineMeteredStreaming()
-        case nil: break
         }
     }
 }
