@@ -106,6 +106,35 @@ struct TogglePlaybackIntent: AudioPlaybackIntent {
     }
 }
 
+/// Plays when `value` is `true` and pauses when it's `false`: the play/pause control's action
+/// (#89), which `ControlWidgetToggle` sets to the state it should end in.
+struct SetPlayingIntent: SetValueIntent, AudioPlaybackIntent {
+    static let title = LocalizedStringResource("IntentTogglePlaybackTitle", table: "AppIntents")
+    static let description = IntentDescription(
+        LocalizedStringResource("IntentTogglePlaybackDescription", table: "AppIntents"))
+    static let isDiscoverable = false
+
+    @Parameter(title: LocalizedStringResource("IntentPlaying", table: "AppIntents"))
+    var value: Bool
+
+    init() {}
+
+    init(playing: Bool) {
+        value = playing
+    }
+
+    @MainActor
+    func perform() async throws -> some IntentResult {
+        let handler = try PlaybackIntentRouter.requireHandler()
+        if value {
+            try await handler.resume()
+        } else {
+            try await handler.pause()
+        }
+        return .result()
+    }
+}
+
 /// Which way ``JumpIntent`` jumps.
 enum JumpDirection: String, AppEnum {
     case forward, backward
