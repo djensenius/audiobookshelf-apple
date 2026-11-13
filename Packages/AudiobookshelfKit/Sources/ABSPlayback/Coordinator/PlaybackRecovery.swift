@@ -173,8 +173,9 @@ final class PlaybackRecovery {
         guard let host else { return }
         if isRunning, var episode, generation == attemptGeneration || episode.generation == generation {
             // The attempt in flight, or the backoff before it, failed: its run reads the cause before
-            // the attempt or when the attempt returns.
-            episode.cause = .failure(failure)
+            // the attempt or when the attempt returns. A stall during a stream reset's run stays the
+            // reset's, so a playing tick doesn't end its re-seek.
+            if failure != .stalled || episode.cause != .streamReset { episode.cause = .failure(failure) }
             episode.failedDuringAttempt = true
             self.episode = episode
             return

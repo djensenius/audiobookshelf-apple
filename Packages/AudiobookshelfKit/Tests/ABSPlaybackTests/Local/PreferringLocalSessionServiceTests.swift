@@ -44,6 +44,18 @@ struct PreferringLocalSessionServiceTests {
         #expect(remote.calls.isEmpty)
     }
 
+    /// The direct-play to HLS fallback after a decode or format error: only the server transcodes.
+    @Test func aForcedTranscodeOfADownloadedBookStreams() async throws {
+        items.add(.book())
+        files.addAll(for: .book())
+        let service = service()
+
+        let session = try await service.startSession(itemID: "book", episodeID: nil, forceTranscode: true)
+
+        #expect(session.id == "remote-book")
+        #expect(remote.calls == ["start book transcode"])
+    }
+
     @Test func playsADownloadedEpisodeOnlyForThatEpisode() async throws {
         items.add(.podcast())
         files.addAll(for: .podcast())
