@@ -282,6 +282,50 @@ struct CloseRetryTests {
         #expect(try await f.s.store.progress(for: f.key)?.isFinished == true)
     }
 
+    /// #557: admission itself holds a close while the row's finished edit is unsent, so the
+    /// order doesn't rest on the drain's hold alone. The close pass runs with no PATCH sent, as a
+    /// drain's does after the row's position PATCH failed with a 5xx, but without that drain's
+    /// hold: the close isn't sent and the server stays finished. A later drain sends both
+    /// PATCHes, then the close, and the item stays finished there and locally. Negative control:
+    /// without the finished edit, the same pass sends the close.
+    @Test(arguments: [true, false])
+    func aResendWaitsForAnUnsentFinishedEditWithoutTheDrainsHold(markedFinished: Bool) async throws {
+        let f = try CloseRetryFixture()
+        try await f.stopSessionOne(.unapplied)
+        #expect(try await f.serverTime() == 15)
+        if markedFinished {
+            try await f.model.update(f.client, itemID: "a", episodeID: nil, .finished(true))
+            try await f.s.store.recordEdit(ProgressEdit(isFinished: true), for: f.key, now: f.s.h.clock.now + 1)
+        }
+        f.s.h.clock.advance(by: f.s.syncer.reconcileDelay)
+        let patches = f.s.service.patches.count
+
+        #expect(await f.s.syncer.retryRetainedCloses(holding: []))
+
+        #expect(f.s.service.patches.count == patches)
+        let server = try #require(try await f.model.fetchProgress(f.client, itemID: "a", episodeID: nil))
+        guard markedFinished else {
+            #expect(f.verdicts == [.send])
+            #expect(f.s.service.closes.map(\.id) == ["session-1"])
+            #expect(server.currentTime == 20 && !server.isFinished)
+            return
+        }
+        #expect(f.verdicts == [.skip(.finishedUnsent)])
+        #expect(f.s.service.closes.isEmpty)
+        #expect(server.isFinished && server.currentTime == 15)
+        #expect(try await f.queued().map(\.sessionID) == ["session-1"])
+
+        await f.drainWhenDue()
+
+        #expect(f.verdicts == [.skip(.finishedUnsent), .send])
+        #expect(f.s.service.patches.dropFirst(patches).map(\.update.isFinished) == [nil, true])
+        #expect(f.s.service.closes.map(\.id) == ["session-1"])
+        #expect(try await f.queued().isEmpty)
+        let closed = try await f.mergeServerProgress()
+        #expect(closed.isFinished && closed.currentTime == 20)
+        #expect(try await f.s.store.progress(for: f.key)?.isFinished == true)
+    }
+
     /// A resend's attempt time is saved before it reaches the server, as the coordinator's
     /// attempt is, so a relaunch while it is out waits for it. One that never reached the server
     /// (no connection to the host) keeps the previous attempt's time.

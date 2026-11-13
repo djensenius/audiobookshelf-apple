@@ -25,7 +25,9 @@ public protocol ItemActionLocalSync: Sendable {
 /// - Mark as not finished resets the row's position to 0 with `isFinished` false, so an old
 ///   near-the-end position can't finish the item again; also only on an existing row.
 /// - Discard deletes the row (legacy `removeLocalMediaProgress`), so its dirty values can't
-///   create the progress again.
+///   create the progress again, and the media's local sessions waiting for upload
+///   (``LocalProgressStore/deleteSessions(for:)``), whose positions the server would take as
+///   new progress (#566).
 ///
 /// Each action first supersedes the media's playback positions reserved so far
 /// (``LocalProgressStore/supersedePlaybackPositions(for:)``), row or not, so a closed session's
@@ -73,6 +75,7 @@ public struct LocalProgressItemActionSync: ItemActionLocalSync {
         let key = key(for: target)
         await supersede(key)
         try await store.deleteProgress(for: key)
+        try await store.deleteSessions(for: key)
     }
 
     /// Supersedes the media's reserved playback positions and its last-played record.

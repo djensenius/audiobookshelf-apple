@@ -22,6 +22,10 @@ enum DeferredReportAdmission: Equatable, Sendable {
         /// The stored close is no longer the one the drain read: a capture settled it meanwhile,
         /// perhaps a retired playback scope's over the same store. What it saved stands.
         case closeChanged
+        /// The row's finished group is still unsent (a mark as finished whose PATCH hasn't been
+        /// acknowledged). The close's position would un-finish the item on the server before
+        /// that PATCH, so it waits for a later drain (#557).
+        case finishedUnsent
     }
 
     case send
@@ -43,7 +47,13 @@ extension ProgressSyncer {
     ///    so the ADR 0003 merge decides; a failed lookup (offline included) skips;
     /// 4. the stored audio is no longer the report's own position: skip;
     /// 5. a reply the merge didn't take (step 3) decided nothing: skip;
-    /// 6. otherwise send.
+    /// 6. the row's finished group is dirty: skip until a drain sends it (#557);
+    /// 7. otherwise send.
+    ///
+    /// Step 6 covers finished only. A dirty audio group passing step 4 holds the report's own
+    /// position, so the close sets what that PATCH would. A pending finished edit is different:
+    /// the server un-finishes an item when a close moves its position, ignoring dates, so a
+    /// close sent before the finished PATCH would undo it.
     ///
     /// Steps 1 and 2, that no position was queued since the lookup and that the store didn't
     /// change the row since (a reset or discard, say), are checked again after each suspension
@@ -77,8 +87,10 @@ extension ProgressSyncer {
         if let reason = deferredReportSkip(sessionID: sessionID, key: key, since: mark) { return .skip(reason) }
         guard let editedAt else { return .skip(.positionSuperseded) }
         let isLatest: Bool
+        let finishedUnsent: Bool
         do {
             isLatest = try await store.isLatestPlaybackPosition(currentTime: currentTime, editedAt: editedAt, for: key)
+            finishedUnsent = try await store.progress(for: key)?.finishedDirty == true
         } catch {
             logger.error("Reading a deferred report's position failed: \(Self.caseName(error), privacy: .public)")
             return .skip(.lookupFailed)
@@ -89,7 +101,8 @@ extension ProgressSyncer {
         guard isLatest else { return .skip(.positionSuperseded) }
         // A reply that wasn't merged (another item's, undated, or older than the stored server
         // progress) decided nothing: never send blind.
-        return merged ? .send : .skip(.lookupFailed)
+        guard merged else { return .skip(.lookupFailed) }
+        return finishedUnsent ? .skip(.finishedUnsent) : .send
     }
 
     /// Steps 1 and 2 of the rule, a position queued since `mark`, and a stored change to the row

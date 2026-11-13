@@ -120,6 +120,23 @@ struct DeferredReportAdmissionTests {
         #expect(f.s.service.closes.isEmpty)
     }
 
+    /// An unsent finished edit skips, though the stored position is the report's own: the close
+    /// would un-finish the item before the finished PATCH (#557). The report's own dirty
+    /// position alone sends (the control), as the close sets what its PATCH would.
+    @Test(arguments: [false, true])
+    func anUnsentFinishedEditSkips(markedFinished: Bool) async throws {
+        let (f, close) = try await Self.retained()
+        #expect(try await f.s.store.progress(for: f.key)?.audioDirty == true)
+        if markedFinished {
+            try await f.s.store.recordEdit(ProgressEdit(isFinished: true), for: f.key, now: f.s.h.clock.now + 1)
+        }
+        let mark = f.s.service.log.count
+
+        #expect(await Self.admit(f, close) == (markedFinished ? .skip(.finishedUnsent) : .send))
+        #expect(Self.requests(f, since: mark) == ["get a"])
+        #expect(f.s.service.closes.isEmpty)
+    }
+
     /// A reply the merge doesn't take decides nothing, so it skips like a failed lookup: one
     /// without a date, another item's, or one older than the server progress already stored.
     /// The model's own reply sends.
