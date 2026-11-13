@@ -9,7 +9,7 @@ import SwiftUI
 /// presents one ``PlayerSheet`` at a time, per window.
 ///
 /// iOS presents it as a full-screen cover on every size (ADR 0004); ``PlayerSlot`` closes it
-/// when playback closes.
+/// when playback closes. On macOS it's the ``NowPlayingWindow``, which closes itself.
 ///
 /// From iOS 27.1 it follows the display (#84, ``PlayerLayout``): a split with the details on a
 /// regular display, the controls on the bottom half in laptop pose, and the transport in the

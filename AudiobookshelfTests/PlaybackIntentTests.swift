@@ -80,6 +80,20 @@ import Testing
         }
     }
 
+    /// An intent can launch the app with no scene to start the lifecycle, so the player is still
+    /// unbound: each command waits for the handler's `ready`, which restores the saved item.
+    @Test func commandsWaitUntilTheAppIsReady() async throws {
+        let current = CurrentPlayback()
+        let restored = playback
+        restored.pause()
+        PlaybackIntentRouter.handler = PlaybackIntentHandler(
+            playback: current, settings: settings, ready: { current.bind(restored) })
+        defer { PlaybackIntentRouter.handler = nil }
+        // Unbound, `current` is idle and resuming would throw `nothingToResume`.
+        _ = try await ResumeListeningIntent().perform()
+        #expect(restored.isPlaybackRequested)
+    }
+
     /// The play/pause control sets the state to end in: its value, not a toggle, so a second tap
     /// on a stale control can't undo the first.
     @Test func setPlayingPlaysOrPausesByItsValue() async throws {

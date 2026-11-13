@@ -53,8 +53,6 @@ extension AppEnvironment {
                 writer?.connectionExpired($0)
             }
         }
-        // TODO(#56): call `writer.follow(_:)` with the app's `PlayerViewModel` once the player UI
-        // composes it; `player` is still a placeholder, so nothing writes a snapshot yet.
         return writer
     }
 }
