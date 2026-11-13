@@ -32,7 +32,14 @@ public final class ProgressCache {
     @MainActor
     @Observable
     final class Entry {
-        var value: MediaProgress?
+        var value: MediaProgress? {
+            didSet {
+                guard oldValue != value, let changed = value ?? oldValue else { return }
+                owner?.valueDidChange(changed)
+            }
+        }
+        /// The cache to tell of value changes (``ProgressCache/onChange``).
+        @ObservationIgnored weak var owner: ProgressCache?
         /// The cache ``ProgressCache/revision`` of the last update that stored a value here or
         /// ``ProgressCache/remove(libraryItemID:episodeID:)``, or 0.
         @ObservationIgnored var revision = 0
@@ -77,6 +84,13 @@ public final class ProgressCache {
 
     /// Increases with every stored update and every ``remove(libraryItemID:episodeID:)``.
     public private(set) var revision = 0
+
+    /// Called after an entry's progress is stored, replaced or removed, however it changed (an
+    /// apply, a seed, an optimistic action or its rollback), with its item and episode; not for
+    /// ``clear()``, which ends the account's session. The app forwards it to playback's
+    /// auto-advance, which prepares the next item again when it concerns it (#160).
+    public var onChange: (@MainActor (_ libraryItemID: String, _ episodeID: String?) -> Void)?
+    private var isClearing = false
 
     public init() {}
 
@@ -322,6 +336,8 @@ public final class ProgressCache {
     /// had no progress) see the next ``apply(_:)`` or ``seed(_:token:)`` for it. Seed requests
     /// started before it are dropped when they respond.
     public func clear() {
+        isClearing = true
+        defer { isClearing = false }
         generation += 1
         appliedSeedRequest = 0
         optimisticCommitSerial = 0
@@ -346,8 +362,14 @@ public final class ProgressCache {
     private func entry(for key: String) -> Entry {
         if let entry = entries[key] { return entry }
         let entry = Entry()
+        entry.owner = self
         entries[key] = entry
         return entry
+    }
+
+    fileprivate func valueDidChange(_ progress: MediaProgress) {
+        guard !isClearing else { return }
+        onChange?(progress.libraryItemId, progress.episodeId)
     }
 
     /// Whether `candidate` may replace `existing`: it is at least as recent. Equal timestamps

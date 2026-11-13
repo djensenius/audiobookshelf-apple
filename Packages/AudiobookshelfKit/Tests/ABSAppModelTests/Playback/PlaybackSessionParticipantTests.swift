@@ -61,6 +61,12 @@ private final class FakeScope: PlaybackScopeHandle {
         log.record("\(name).saveLocally")
     }
 
+    private(set) var progressChanges: [MediaKey] = []
+
+    func progressDidChange(for key: MediaKey) {
+        progressChanges.append(key)
+    }
+
     func retire(reason: PlaybackStopReason) {
         retiredReason = reason
         control.stop(reason: reason)
@@ -289,6 +295,32 @@ private struct Harness {
         #expect(scope.reconnects.first?.client === client)
         #expect(scope.reconnects.first?.features == serverFeatures)
         #expect(harness.current.current === scope.control)
+    }
+
+    /// Library progress reaches the running scope as progress on its own account (#160), and
+    /// nothing reaches a retired one.
+    @Test func progressChangesReachTheRunningScope() async throws {
+        let harness = try Harness()
+        try await harness.started()
+        let scopeA = try #require(harness.scopes.last)
+
+        harness.participant.progressDidChange(libraryItemID: "P", episodeID: "e2")
+        #expect(
+            scopeA.progressChanges == [
+                MediaKey(serverConnectionID: identityA.connectionID, libraryItemId: "P", episodeId: "e2")
+            ])
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        #expect(await eventually { harness.log.entries.contains("b.restore") })
+        let scopeB = try #require(harness.scopes.last)
+        harness.participant.progressDidChange(libraryItemID: "book", episodeID: nil)
+        #expect(scopeA.progressChanges.count == 1)
+        #expect(scopeB.progressChanges == [MediaKey(serverConnectionID: identityB.connectionID, libraryItemId: "book")])
+
+        await harness.lifecycle.signOut()
+        #expect(await eventually { harness.log.entries.contains("b.finished") })
+        harness.participant.progressDidChange(libraryItemID: "book", episodeID: nil)
+        #expect(scopeB.progressChanges.count == 1)
     }
 
     @Test func flushSavesLocallyOnlyWhileRunning() async throws {

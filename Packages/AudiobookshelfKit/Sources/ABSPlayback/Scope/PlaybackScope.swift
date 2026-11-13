@@ -39,6 +39,9 @@ extension NowPlayingBridge: NowPlayingHandle {
 ///   an edit, and the connection's next scope loads what it saved.
 /// - **Reconnect.** ``reconnect(client:features:)`` swaps the client and features behind the
 ///   coordinator (``AccountPlaybackServices``); the scope and its playback carry on.
+/// - **Auto-advance freshness (#160).** The advancer prepares the next item again after a
+///   reconnect, on each change of the configured network path, and on
+///   ``progressDidChange(for:)``, until the scope retires.
 /// - **Sleep timer.** The configured ``sleepTimer`` (#185) is attached to the coordinator, which
 ///   asks it before playback starts and tells it of item changes and seeks, until the scope
 ///   retires, which detaches and cancels it. The release detaches it again, as a backstop.
@@ -135,6 +138,8 @@ public final class PlaybackScope {
     private(set) var isReleased = false
     /// A user play's system-primary claim, waiting for playback to become active.
     private var pendingPrimaryClaim: Task<Void, Never>?
+    /// Tells the advancer of network path changes until retirement.
+    private var pathFollower: Task<Void, Never>?
 
     /// The `UserDefaults` key of a connection's last-played record.
     public static func lastPlayedKey(for connectionID: UUID) -> String {
@@ -174,16 +179,17 @@ public final class PlaybackScope {
             fetchFinished: { try await services.client().send(UserEndpoints.me()) })
         return PlaybackScope(
             coordinator: coordinator, syncer: syncer, services: services, nowPlaying: makeNowPlaying(coordinator),
-            queue: queue, episodes: episodes, sleepTimer: sleepTimer)
+            queue: queue, episodes: episodes, sleepTimer: sleepTimer, networkPaths: configuration.networkPaths)
     }
 
     /// Test seam: a scope over a coordinator and a syncer already attached to it, an advancer
-    /// over `queue`, when one is given, attached to the coordinator, and `sleepTimer`, detached
-    /// when the scope retires, and again when it's released.
+    /// over `queue`, when one is given, attached to the coordinator and told of each change of
+    /// `networkPaths` after its first path, and `sleepTimer`, detached when the scope retires,
+    /// and again when it's released.
     init(
         coordinator: PlaybackCoordinator, syncer: ProgressSyncer, services: AccountPlaybackServices?,
         nowPlaying: any NowPlayingHandle, queue: PlaybackQueue? = nil, episodes: (any PodcastEpisodeSource)? = nil,
-        sleepTimer: SleepTimerAttachment? = nil
+        sleepTimer: SleepTimerAttachment? = nil, networkPaths: (any NetworkPathSource)? = nil
     ) {
         self.coordinator = coordinator
         self.syncer = syncer
@@ -192,6 +198,15 @@ public final class PlaybackScope {
         sleepTimerAttachment = sleepTimer
         advancer = queue.map { PlaybackQueueAdvancer(queue: $0, episodes: episodes) }
         advancer?.attach(to: coordinator)
+        if let advancer, let networkPaths {
+            pathFollower = Task { [weak advancer] in
+                var last: NetworkPath?
+                for await path in networkPaths.paths() {
+                    if let last, last != path { advancer?.connectionDidChange() }
+                    last = path
+                }
+            }
+        }
         observer = coordinator.addObserver { [weak self] event in
             guard case .failed(.sessionStartFailed(.sessionExpired)) = event else { return }
             self?.sessionRejected()
@@ -303,9 +318,20 @@ public final class PlaybackScope {
         edit(queue)
     }
 
-    /// Swaps the account's client and features after a reconnect, without rebuilding anything.
+    /// Swaps the account's client and features after a reconnect, without rebuilding anything,
+    /// and prepares the next item again through them.
     public func reconnect(client: APIClient?, features: ServerFeatures?) {
         services?.update(client: client, features: features)
+        guard !isRetired else { return }
+        advancer?.connectionDidChange()
+    }
+
+    /// Progress changed for `key` (a seed, the socket, or an action on another screen): the
+    /// advancer prepares again when it is the next item or an episode of the playing podcast.
+    /// Nothing after retirement.
+    public func progressDidChange(for key: MediaKey) {
+        guard !isRetired else { return }
+        advancer?.progressDidChange(for: key)
     }
 
     /// Saves the loaded item as the last-played record. Local only.
@@ -331,6 +357,8 @@ public final class PlaybackScope {
         // Detached before the stop, so nothing it triggers can advance or change the queue, and
         // the sleep timer can't act on the stopped coordinator during the close wait.
         isRetired = true
+        pathFollower?.cancel()
+        pathFollower = nil
         advancer?.detach(from: coordinator)
         advancer?.queue.retire()
         sleepTimerAttachment?.detach()

@@ -72,6 +72,13 @@ struct AppPlayback {
             ready: { [weak lifecycle] in await lifecycle?.start() })
     }
 
+    /// Tells the running scope's auto-advance of each change to the library's progress (seeds,
+    /// the socket, actions on other screens), so a finish elsewhere changes what plays next
+    /// (#160). The cache and the participant both serve the active account.
+    func follow(_ progress: ProgressCache) {
+        progress.onChange = { [weak participant] in participant?.progressDidChange(libraryItemID: $0, episodeID: $1) }
+    }
+
     /// One account session's scope, over an engine of its own. The connection's last-played record
     /// and queue are kept in the settings' defaults, under keys of their own.
     private static func makeScope(
@@ -111,15 +118,16 @@ struct AppPlayback {
     }
 
     /// The scope's configuration. Recovery waits on the system's network path; without one it
-    /// would treat the device as always online.
+    /// would treat the device as always online. The same path tells the auto-advance to prepare
+    /// the next item again, which it starts under `backgroundActivity` (#160).
     static func configuration(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
-        engine: any AudioEngineProtocol
+        engine: any AudioEngineProtocol, backgroundActivity: any BackgroundActivity = makeBackgroundActivity()
     ) -> PlaybackScope.Configuration {
         var configuration = PlaybackScope.Configuration(
             connectionID: request.connectionID, client: request.client, features: request.features,
             deviceIdentifiers: request.deviceIdentifiers, writer: request.writer, settings: settings,
-            policy: policy, engine: engine, tickInterval: tickInterval,
+            policy: policy, engine: engine, tickInterval: tickInterval, backgroundActivity: backgroundActivity,
             lastPlayed: { PlaybackScope.lastPlayedStore(for: $0, defaults: settings.defaults) },
             queueStore: UserDefaultsPlaybackQueueStore(defaults: settings.defaults))
         configuration.networkPaths = SystemNetworkPathSource()

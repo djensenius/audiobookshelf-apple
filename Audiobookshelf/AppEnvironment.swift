@@ -126,6 +126,7 @@ final class AppEnvironment {
         self.downloads = downloads
         downloads?.lifecycle.launch()
         self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
+        if let library { playback.follow(library.store.progress) }
 
         // Images (#182).
         let images = ImageServices(
