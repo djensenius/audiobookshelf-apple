@@ -273,7 +273,7 @@ private final class Reported {
 }
 
 /// A PDF drawn in code, so no binary fixture is committed.
-private func pdfData(pages: Int) -> Data {
+func pdfData(pages: Int) -> Data {
     let data = NSMutableData()
     var box = CGRect(x: 0, y: 0, width: 200, height: 300)
     guard let consumer = CGDataConsumer(data: data as CFMutableData),
