@@ -2860,7 +2860,9 @@ import Testing
     /// An activation while a guarded launch writes its part back as queued (deactivated during
     /// its credentials) skips the part, as the launch still holds it: the launch then starts it.
     @Test(.timeLimit(.minutes(1))) func reactivationWhileAGuardedLaunchRequeuesStartsThePart() async throws {
-        let harness = try await DownloadHarness { _ in .status(200) }
+        let gate = StubGate()
+        // Held until the part is checked, so the transfer can't complete before the read.
+        let harness = try await DownloadHarness { _ in .status(200, gate: gate) }
         let partID = UUID()
         let record = try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
         let current = Mutex<DownloadEngine?>(nil)
@@ -2889,6 +2891,7 @@ import Testing
         harness.credentials.hook.withLock { $0 = nil }
 
         try #require(try await harness.store.part(id: partID)?.state == .running)
+        gate.open()
         #expect(await engine.nextRecordComplete() != nil)
         #expect(harness.requests.count == 1)
     }
@@ -2899,7 +2902,9 @@ import Testing
     @Test(.timeLimit(.minutes(1))) func reactivationWhileAGuardedLaunchRequeuesItsTaskStartsThePart()
         async throws
     {
-        let harness = try await DownloadHarness { _ in .status(200) }
+        let gate = StubGate()
+        // Held until the part is checked, so the transfer can't complete before the read.
+        let harness = try await DownloadHarness { _ in .status(200, gate: gate) }
         let partID = UUID()
         let record = try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
         let current = Mutex<(engine: DownloadEngine?, deactivates: Bool)>((nil, false))
@@ -2925,6 +2930,7 @@ import Testing
         #expect(try await engine.resume(recordID: record.id, unlessQuiescedSince: generation))
 
         try #require(try await harness.store.part(id: partID)?.state == .running)
+        gate.open()
         #expect(await engine.nextRecordComplete() != nil)
         #expect(harness.requests.count == 1)
     }
