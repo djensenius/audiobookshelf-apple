@@ -258,6 +258,7 @@
   "MessageHistoryLoadFailed": "Couldn't load the history.",
   "MessageHomeLoadFailed": "Couldn't load your shelves.",
   "MessageHomeRefreshFailed": "Couldn't refresh your shelves. Showing the last ones loaded.",
+  "MessageItemActionItemInPlayer": "Close the player to change the progress of the item that's playing.",
   "MessageItemDetailDiscardProgressFailed": "Couldn't discard your progress.",
   "MessageItemDetailEbookNowPrimary": "{0} is now the primary ebook.",
   "MessageItemDetailEbookNowSupplementary": "{0} is now a supplementary ebook.",

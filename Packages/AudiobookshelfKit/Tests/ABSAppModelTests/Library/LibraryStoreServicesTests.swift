@@ -343,6 +343,37 @@ private let forwardings: [StoreServiceForwarding] = [
         }
     }
 
+    /// The shared actions are built with the account's local sync, and ask whether that account's
+    /// item is in the player.
+    @Test func sharedItemActionsUseTheAccountsHooks() async throws {
+        try await withLibrarySettings { settings in
+            let syncs = Locked<[UUID]>([])
+            let asked = Locked<[String]>([])
+            let store = LibraryStore(
+                settings: settings,
+                itemActionLocalSync: { key in
+                    syncs.value.append(key.connectionID)
+                    return NoLocalSync()
+                },
+                itemInPlayer: { key, target in
+                    asked.value.append("\(key.userID):\(target.libraryItemID)")
+                    return target.libraryItemID == "playing"
+                })
+            let writes = Locked<[String]>([])
+            await store.connect(client: WritingClient(name: "a", writes: writes), connectionKey: serverA)
+            let shared = try #require(store.itemActions(for: serverA))
+            #expect(shared.localSync is NoLocalSync)
+            #expect(syncs.value == [serverA.connectionID])
+
+            await #expect(throws: ItemActionError.itemInPlayer) {
+                try await shared.markFinished(ItemActionTarget(libraryItemID: "playing"))
+            }
+            try await shared.markFinished(ItemActionTarget(libraryItemID: "li"))
+            #expect(asked.value == ["\(serverA.userID):playing", "\(serverA.userID):li"])
+            #expect(writes.value == ["a:li"])
+        }
+    }
+
     /// A failed switch clears the store and restarts the same account's session: the windows'
     /// actions then act through a fresh instance, not the dead session's stale token.
     @Test func aRestartedSessionGetsFreshItemActions() async throws {
@@ -476,4 +507,11 @@ private let forwardings: [StoreServiceForwarding] = [
             #expect(writes.value == ["b:x", "a1:x", "a2:x"])
         }
     }
+}
+
+/// A local sync that does nothing.
+private struct NoLocalSync: ItemActionLocalSync {
+    func didMarkFinished(_ target: ItemActionTarget) async throws {}
+    func didMarkNotFinished(_ target: ItemActionTarget) async throws {}
+    func didDiscard(_ target: ItemActionTarget) async throws {}
 }

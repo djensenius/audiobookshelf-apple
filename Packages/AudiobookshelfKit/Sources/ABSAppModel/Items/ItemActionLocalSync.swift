@@ -29,8 +29,9 @@ public protocol ItemActionLocalSync: Sendable {
 /// Each action reads and writes the row in separate store calls; a playback write in between
 /// may be overwritten or follow the edit, which a playing session repeats anyway.
 public struct LocalProgressItemActionSync: ItemActionLocalSync {
-    private let store: LocalProgressStore
-    private let connectionID: UUID
+    /// The writer it edits: the one the account's `ProgressSyncer` writes through.
+    public let store: LocalProgressStore
+    public let connectionID: UUID
 
     public init(store: LocalProgressStore, connectionID: UUID) {
         self.store = store

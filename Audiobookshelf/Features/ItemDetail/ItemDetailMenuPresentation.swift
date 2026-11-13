@@ -76,6 +76,8 @@ enum ItemDetailMenuPresentation {
                 return nil
             } catch is CancellationError {
                 return nil
+            } catch ItemActionError.itemInPlayer {
+                return ItemCardActions.itemInPlayerMessageKey
             } catch {
                 return "MessageItemDetailDiscardProgressFailed"
             }

@@ -124,7 +124,9 @@ final class AppEnvironment {
         self.player = playback.player
         self.downloads = downloads
         downloads?.lifecycle.launch()
-        self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
+        self.library = accounts.map {
+            Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle, playback: playback)
+        }
 
         // Images (#182).
         let images = ImageServices(

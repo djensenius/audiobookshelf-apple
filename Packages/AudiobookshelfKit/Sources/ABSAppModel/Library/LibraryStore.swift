@@ -65,13 +65,29 @@ public final class LibraryStore {
     /// Each account's latest shared item actions; see ``itemActions(for:)``. Kept after the
     /// account's session ends, so its next session continues its pending queue.
     @ObservationIgnored private var sharedItemActions: [LibraryConnectionKey: ProgressItemActions] = [:]
+    /// The local sync of each account's shared item actions; see ``init(settings:itemActionLocalSync:itemInPlayer:)``.
+    @ObservationIgnored private let itemActionLocalSync: @MainActor (LibraryConnectionKey) -> (any ItemActionLocalSync)?
+    /// Whether an account's item or episode is in the player; see ``init(settings:itemActionLocalSync:itemInPlayer:)``.
+    @ObservationIgnored private let itemInPlayer: @MainActor (LibraryConnectionKey, ItemActionTarget) -> Bool
     /// Told of each view preferences save (``observeViewPreferences(connectionKey:owner:_:)``).
     @ObservationIgnored private var viewPreferencesObservers: [ViewPreferencesObserver] = []
     /// Told of each socket change (``observeLibraryChanges(connectionKey:owner:_:)``).
     @ObservationIgnored private var libraryChangeObservers: [LibraryChangeObserver] = []
 
-    public init(settings: AppSettings) {
+    /// - Parameters:
+    ///   - itemActionLocalSync: The ``ItemActionLocalSync`` an account's shared
+    ///     ``itemActions(for:)`` update the local playback database with; `nil` (the default) for
+    ///     none.
+    ///   - itemInPlayer: Whether the account's item or episode is in the player, so its progress
+    ///     actions are refused (``ProgressItemActions``); the default says none is.
+    public init(
+        settings: AppSettings,
+        itemActionLocalSync: @escaping @MainActor (LibraryConnectionKey) -> (any ItemActionLocalSync)? = { _ in nil },
+        itemInPlayer: @escaping @MainActor (LibraryConnectionKey, ItemActionTarget) -> Bool = { _, _ in false }
+    ) {
         self.settings = settings
+        self.itemActionLocalSync = itemActionLocalSync
+        self.itemInPlayer = itemInPlayer
     }
 
     // MARK: Lifecycle
@@ -267,11 +283,13 @@ public final class LibraryStore {
     ///
     /// Its per-item queue keeps actions on the same item in order only within one instance, so
     /// screens and windows share the session's ``itemActions(for:)`` instead of building their own.
+    /// They refuse the progress actions on the account's item in the player (`itemInPlayer`).
     public func makeItemActions(localSync: (any ItemActionLocalSync)? = nil) -> ProgressItemActions? {
         guard let connectionKey else { return nil }
+        let itemInPlayer = itemInPlayer
         return ProgressItemActions(
             cache: progress, writer: LibraryStoreServices(store: self, connectionKey: connectionKey),
-            localSync: localSync)
+            localSync: localSync, isInPlayer: { itemInPlayer(connectionKey, $0) })
     }
 
     /// The one ``ProgressItemActions`` of the account session `connectionKey`, shared by every
@@ -279,12 +297,13 @@ public final class LibraryStore {
     /// once its progress session ended (a ``clear()``, so also a switch or a failed switch's
     /// restart), so a restarted session never acts through the previous one's stale token; an
     /// ordinary reconnect keeps it. A replacement continues the per-item queue of the same
-    /// account's previous actions only: another account's progress is independent.
+    /// account's previous actions only: another account's progress is independent. Each is built
+    /// with the account's `itemActionLocalSync`.
     public func itemActions(for connectionKey: LibraryConnectionKey) -> ProgressItemActions? {
         guard self.connectionKey == connectionKey else { return nil }
         let previous = sharedItemActions[connectionKey]
         if let previous, previous.isCurrentSession { return previous }
-        let actions = makeItemActions()
+        let actions = makeItemActions(localSync: itemActionLocalSync(connectionKey))
         // A write of the account's ended session may still be in flight: the new actions run after it.
         if let previous { actions?.continueQueue(of: previous) }
         sharedItemActions[connectionKey] = actions

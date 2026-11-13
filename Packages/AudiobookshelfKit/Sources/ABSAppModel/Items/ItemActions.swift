@@ -46,6 +46,14 @@ public struct NoOpItemActions: ItemActionPerforming {
     public func discardProgress(_ target: ItemActionTarget) async throws {}
 }
 
+/// Why ``ProgressItemActions`` refused an action.
+public enum ItemActionError: Error, Equatable {
+    /// The item or episode is the player's: its session would write its own position back over the
+    /// change, so marking it finished or not finished, or discarding its progress, waits until the
+    /// player is closed.
+    case itemInPlayer
+}
+
 /// Sends a progress change (`PATCH /api/me/progress/:item[/:episode]`) or deletion
 /// (`DELETE /api/me/progress/:id`); `APIClient` conforms.
 public protocol ProgressWriting: Sendable {
@@ -96,6 +104,12 @@ extension APIClient: ProgressWriting {
 ///   was committed, `localSync` (``ItemActionLocalSync``) updates the local playback database,
 ///   still in the key's queue, so the syncer's pending values can't undo the change. It isn't
 ///   called for a failed or rolled-back action, or for hiding; its errors are logged, not thrown.
+/// - Marking finished or not finished and discarding are refused with
+///   ``ItemActionError/itemInPlayer`` while `isInPlayer` says the item or episode is in the player
+///   (playing, paused, or restored and not loaded yet), checked when the action's turn in the queue
+///   comes and before anything changes: the player's session keeps writing its own position
+///   locally and to the server, so it could undo the change. Closing the player first is the
+///   user's choice; hiding only touches Continue Listening and isn't refused.
 @MainActor
 public final class ProgressItemActions: ItemActionPerforming {
     private struct Tail {
@@ -105,7 +119,9 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     private let cache: ProgressCache
     private let writer: any ProgressWriting
-    private let localSync: (any ItemActionLocalSync)?
+    /// Updates the local playback database after an accepted action; `nil` updates nothing.
+    public let localSync: (any ItemActionLocalSync)?
+    private let isInPlayer: @MainActor (ItemActionTarget) -> Bool
     private let now: @Sendable () -> Date
     private let sessionToken: ProgressCache.SessionToken
     private var tails: [String: Tail] = [:]
@@ -115,11 +131,13 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     public init(
         cache: ProgressCache, writer: any ProgressWriting, localSync: (any ItemActionLocalSync)? = nil,
+        isInPlayer: @escaping @MainActor (ItemActionTarget) -> Bool = { _ in false },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.cache = cache
         self.writer = writer
         self.localSync = localSync
+        self.isInPlayer = isInPlayer
         self.now = now
         self.sessionToken = cache.sessionToken()
     }
@@ -166,6 +184,7 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     public func discardProgress(_ target: ItemActionTarget) async throws {
         try await enqueue(target) { session in
+            try self.checkNotInPlayer(target)
             guard try await self.discard(target, session: session) else { return }
             await self.syncLocally { try await $0.didDiscard(target) }
         }
@@ -197,9 +216,15 @@ public final class ProgressItemActions: ItemActionPerforming {
         optimistic: @escaping @MainActor (MediaProgress?, Date) -> MediaProgress?
     ) async throws {
         try await enqueue(target) { session in
+            // An action with a local part changes the position the player's session writes.
+            if local != nil { try self.checkNotInPlayer(target) }
             try await self.perform(target, update: update, optimistic: optimistic, session: session)
             await self.syncLocally(local)
         }
+    }
+
+    private func checkNotInPlayer(_ target: ItemActionTarget) throws {
+        if isInPlayer(target) { throw ItemActionError.itemInPlayer }
     }
 
     /// Runs `local` on ``localSync``, logging a failure: the server already has the change.

@@ -28,6 +28,26 @@ private struct ScriptedWriter: ProgressWriting {
     }
 }
 
+/// Counts `base`'s accepted writes.
+private struct CountingWriter: ProgressWriting {
+    let base: ScriptedWriter
+    let writes: Locked<Int>
+
+    func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
+        try await base.writeProgress(itemID: itemID, episodeID: episodeID, update: update)
+        writes.value += 1
+    }
+
+    func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        try await base.progressID(itemID: itemID, episodeID: episodeID)
+    }
+
+    func deleteProgress(id: String) async throws {
+        try await base.deleteProgress(id: id)
+        writes.value += 1
+    }
+}
+
 /// Records the hook's calls; throws after recording while `fails` is set.
 private struct RecordingSync: ItemActionLocalSync {
     struct Failure: Error {}
@@ -171,6 +191,34 @@ private func cachedProgress(finished: Bool = false) -> MediaProgress {
         try await actions.discardProgress(target)
         #expect(cache.progress(libraryItemID: "item") == nil)
         #expect(sync.calls.value == ["finished item", "notFinished item", "discard item"])
+    }
+
+    /// The item in the player: marking and discarding are refused before anything changes (its
+    /// session would write its position back), hiding isn't, and once the player moves on they run.
+    @Test func itemInPlayerRefusesProgressActions() async throws {
+        let sync = RecordingSync()
+        let writes = Locked(0)
+        let counting = CountingWriter(base: writer, writes: writes)
+        let inPlayer = Locked<ItemActionTarget?>(target)
+        let actions = ProgressItemActions(
+            cache: cache, writer: counting, localSync: sync, isInPlayer: { inPlayer.value == $0 })
+        cache.apply(cachedProgress())
+
+        await #expect(throws: ItemActionError.itemInPlayer) { try await actions.markFinished(target) }
+        await #expect(throws: ItemActionError.itemInPlayer) { try await actions.markNotFinished(target) }
+        await #expect(throws: ItemActionError.itemInPlayer) { try await actions.discardProgress(target) }
+        #expect(cache.progress(libraryItemID: "item") == cachedProgress())
+        #expect(writes.value == 0)
+        #expect(sync.calls.value.isEmpty)
+
+        try await actions.hideFromContinueListening(target)
+        #expect(writes.value == 1)
+
+        // Another item, or the player closed: the actions run.
+        try await actions.markFinished(ItemActionTarget(libraryItemID: "other"))
+        inPlayer.value = nil
+        try await actions.markFinished(target)
+        #expect(sync.calls.value == ["finished other", "finished item"])
     }
 
     /// The drain sends the old position before finished, so the server ends up finished.

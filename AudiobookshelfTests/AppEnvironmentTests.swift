@@ -183,6 +183,48 @@ struct TestDownloads {
         }
     }
 
+    /// The library store's shared item actions for an account (`\.itemActions` in its shell) sync
+    /// locally through the playback scopes' one writer and the account's connection, and refuse
+    /// the progress actions on the account's item in the player, which the menus then explain.
+    @Test func itemActionsSyncThroughThePlaybackWriterAndSpareThePlayersItem() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+            let store = try #require(environment.library?.store)
+            let account = LibraryConnectionKey(connectionID: UUID(), userID: "user-1")
+            store.attach(client: nil, connectionKey: account)
+
+            let actions = try #require(store.itemActions(for: account))
+            let sync = try #require(actions.localSync as? LocalProgressItemActionSync)
+            #expect(sync.store === environment.playback.writer)
+            #expect(sync.connectionID == account.connectionID)
+
+            let playing = PreviewPlaybackControl()
+            playing.mediaKey = MediaKey(serverConnectionID: account.connectionID, libraryItemId: "li_1")
+            environment.playback.current.bind(playing)
+            defer { environment.playback.current.bind(nil) }
+            let book = ItemSummary(id: "li_1", itemID: "li_1", kind: .book, title: "Book")
+            for kind in [ItemActionKind.markFinished, .markNotFinished] {
+                #expect(
+                    await ItemCardActions.perform(kind, on: book, actions: actions, play: nil)
+                        == ItemCardActions.itemInPlayerMessageKey)
+            }
+            #expect(
+                await ItemDetailMenuPresentation.perform(.discardProgress, on: book, actions: actions)
+                    == ItemCardActions.itemInPlayerMessageKey)
+            await #expect(throws: ItemActionError.itemInPlayer) {
+                try await actions.markFinished(ItemActionTarget(libraryItemID: "li_1"))
+            }
+
+            // Another account's item of the same ID isn't the player's: it gets past the check,
+            // to the missing client.
+            playing.mediaKey = MediaKey(serverConnectionID: UUID(), libraryItemId: "li_1")
+            await #expect(throws: CancellationError.self) {
+                try await actions.markFinished(ItemActionTarget(libraryItemID: "li_1"))
+            }
+        }
+    }
+
     @Test func keepsTheDeviceIdentifierInTheInjectedKeychain() async throws {
         try await withSettings { settings in
             let keychain = ConnectTestKeychain()
