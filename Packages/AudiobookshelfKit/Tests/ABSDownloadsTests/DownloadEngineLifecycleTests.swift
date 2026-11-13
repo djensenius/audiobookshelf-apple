@@ -581,7 +581,7 @@ import Testing
         let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
         #expect(survivor.state != .running)
         // Its listing cancelled the survivor, so the next launch has nothing to cancel.
-        #expect(harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
         let part = try #require(try await harness.store.part(id: partID))
         #expect(part.taskIdentifier == nil)
         #expect(!part.hasResumeData)
@@ -705,7 +705,7 @@ import Testing
         let signedOut = harness.makeEngine(readRecords: { _ in throw TestError() })
         #expect(await signedOut.quiesce(connectionID: harness.connectionID) == false)
         #expect(harness.sessions.withLock { $0.isEmpty })
-        #expect(harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
 
         // iOS ends the app before a session exists; the next launch finds the old transfer.
         let base = harness.base
@@ -726,8 +726,81 @@ import Testing
         #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
         #expect(!FileManager.default.fileExists(atPath: blob))
         #expect(!harness.fileExists("li_1/1.mp3"))
-        #expect(harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
         never.open()
+    }
+
+    /// A quiesce that couldn't read the downloads couldn't delete their resume data either: the
+    /// next launch's session deletes it, and the marker stays until it has.
+    @Test func aRelaunchDeletesTheResumeDataAQuiesceCouldNotRead() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        _ = try await harness.store.updatePart(partID: partID, hasResumeData: true)
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        let signedOut = harness.makeEngine(readRecords: { _ in throw TestError() })
+        #expect(await signedOut.quiesce(connectionID: harness.connectionID) == false)
+        #expect(FileManager.default.fileExists(atPath: blob))
+
+        let relaunched = harness.makeEngine(registry: DownloadEngineRegistry())
+        #expect(await relaunched.activate())
+
+        #expect(try await harness.store.part(id: partID)?.hasResumeData == false)
+        #expect(!FileManager.default.fileExists(atPath: blob))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+    }
+
+    /// Markers that can't be read aren't taken for none: the session isn't created, so no
+    /// survivor is adopted, until a later activation can read them.
+    @Test func unreadableMarkersHoldTheSessionBack() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        let markers = harness.locations.survivorsToStopRoot.path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: markers)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: markers) }
+        let base = harness.base
+        let engine = harness.makeEngine(prepare: { stub in
+            var request = URLRequest(url: URL(string: base + DownloadRequests.filePath(itemID: "li_1", ino: "1"))!)
+            request.setValue("Bearer previous", forHTTPHeaderField: "Authorization")
+            stub.leaveTask(request, description: partID.uuidString)
+        })
+
+        #expect(await engine.activate() == false)
+        #expect(harness.sessions.withLock { $0.isEmpty })
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: markers)
+        #expect(await engine.activate())
+        let survivor = try #require(harness.session?.leftovers.withLock { $0.first })
+        #expect(survivor.state != .running)
+        never.open()
+    }
+
+    /// A quiesce with a session removes its marker once the resume data is deleted, so later
+    /// transfers aren't taken for survivors after a relaunch. One that can't be removed is kept
+    /// and removed by the next launch's session.
+    @Test func aMarkerThatCouldNotBeRemovedIsRemovedByTheNextLaunch() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        try await harness.addRecord(parts: [UUID()], state: .paused, partState: .queued)
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        let markers = harness.locations.survivorsToStopRoot.path(percentEncoded: false)
+        try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        // The marker can't be removed (or written again) from a read-only directory.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: markers)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: markers) }
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: markers)
+        #expect(await harness.makeEngine(registry: DownloadEngineRegistry()).activate())
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
     }
 
     /// Resume data that couldn't be deleted, because the downloads couldn't be read, leaves the
@@ -805,9 +878,8 @@ import Testing
         #expect(try await harness.store.part(id: partID)?.state == .queued)
         let tasks = await harness.session?.session.allTasks ?? []
         #expect(tasks.allSatisfy { $0.state != .running })
-        // The session was listed before the quiesce, which cancelled what it adopted: no marker
-        // is left to cancel this launch's later transfers after a relaunch.
-        #expect(harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        // Its resume data couldn't be deleted without the downloads, so the next session retries.
+        #expect(try harness.locations.connectionsWithSurvivorsToStop() == [harness.connectionID])
         never.open()
     }
 

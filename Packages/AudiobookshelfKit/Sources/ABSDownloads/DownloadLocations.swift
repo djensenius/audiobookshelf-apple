@@ -146,17 +146,35 @@ public struct DownloadLocations: Sendable {
             options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
-    /// Forgets `connectionID`'s marker once a session listing has cancelled its survivors.
-    func clearSurvivorsToStop(connectionID: UUID) {
-        try? FileManager.default.removeItem(at: survivorsToStopMarker(connectionID: connectionID))
+    /// Forgets `connectionID`'s marker once its survivors are cancelled and its resume data is
+    /// deleted. A missing marker counts as removed.
+    ///
+    /// - Throws: if the marker is there but can't be removed.
+    func clearSurvivorsToStop(connectionID: UUID) throws {
+        do {
+            try FileManager.default.removeItem(at: survivorsToStopMarker(connectionID: connectionID))
+        } catch  where Self.isMissingFile(error) {}
     }
 
-    /// The connections with a marker; empty when there are none or the directory can't be read.
-    func connectionsWithSurvivorsToStop() -> Set<UUID> {
-        let names =
-            (try? FileManager.default.contentsOfDirectory(atPath: survivorsToStopRoot.path(percentEncoded: false)))
-            ?? []
+    /// The connections with a marker; empty when there are none.
+    ///
+    /// - Throws: if the directory exists but can't be read, so no marker is taken for absent.
+    func connectionsWithSurvivorsToStop() throws -> Set<UUID> {
+        let names: [String]
+        do {
+            names = try FileManager.default.contentsOfDirectory(atPath: survivorsToStopRoot.path(percentEncoded: false))
+        } catch  where Self.isMissingFile(error) {
+            return []
+        }
         return Set(names.compactMap(UUID.init(uuidString:)))
+    }
+
+    private static func isMissingFile(_ error: any Error) -> Bool {
+        let error = error as NSError
+        return
+            (error.domain == NSCocoaErrorDomain
+            && (error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError))
+            || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOENT))
     }
 
     private func survivorsToStopMarker(connectionID: UUID) -> URL {

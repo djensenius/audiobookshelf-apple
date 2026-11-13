@@ -248,7 +248,8 @@ public actor DownloadEngine {
     /// didn't create) are cancelled, not adopted, and their results dropped, for the rest of the
     /// process; they carry the credentials of before the sign-out. Each is also marked on disk
     /// (``DownloadLocations/markSurvivorsToStop(connectionID:)``) until a session listing has
-    /// cancelled its survivors, so a relaunch before that still cancels them.
+    /// cancelled its survivors and its resume data is deleted, so a relaunch before that still
+    /// does both; each activation reads the markers again before it lists the session's tasks.
     private var survivorsToStop: Set<UUID> = []
     /// The identifiers of the tasks this engine created, so they aren't taken for survivors.
     private var createdTasks: Set<Int> = []
@@ -334,9 +335,6 @@ public actor DownloadEngine {
         self.credentials = credentials
         self.vault = vault
         self.locations = locations
-        // Before the first activation lists the session's tasks: a quiesce of a previous launch
-        // may not have had a session to cancel them in.
-        survivorsToStop = locations.connectionsWithSurvivorsToStop()
         self.retryPolicy = retryPolicy
         self.networkAccess = networkAccess
         self.clock = clock
@@ -679,9 +677,6 @@ public actor DownloadEngine {
             await discardResumeData(connectionID: connectionID)
             return false
         }
-        // The session's listing cancelled its survivors, or adopted them before this call, which
-        // cancelled them above.
-        locations.clearSurvivorsToStop(connectionID: connectionID)
         // Without the records, the transfers the engine knows of are still stopped.
         let records: [DownloadRecordDTO]?
         do {
@@ -701,7 +696,20 @@ public actor DownloadEngine {
         await stop(partIDs: Array(parts), keepingResumeData: false)
         await waitForFailuresForGood(of: connectionID)
         let discarded = await discardResumeData(connectionID: connectionID)
+        // The session's listing cancelled the survivors, or adopted them before this call, which
+        // cancelled them above; the marker stays until the resume data is gone too.
+        if discarded { clearSurvivorsToStop(connectionID) }
         return records != nil && discarded
+    }
+
+    /// Removes `connectionID`'s marker. A failure is logged; the next activation reads the
+    /// markers again and retries it.
+    private func clearSurvivorsToStop(_ connectionID: UUID) {
+        do {
+            try locations.clearSurvivorsToStop(connectionID: connectionID)
+        } catch {
+            logError("Couldn't clear a server's sign-out marker; the next session retries", error)
+        }
     }
 
     /// Cancels `connectionID`'s transfers, launches and retries at once, dropping their resume
@@ -786,21 +794,23 @@ public actor DownloadEngine {
 
     private func performActivation() async -> Bool {
         let records: [DownloadRecordDTO]
+        // The connections a quiesce, maybe of a previous launch, couldn't finish cleaning up.
+        let marked: Set<UUID>
         do {
             records = try await loadRecords()
+            marked = try locations.connectionsWithSurvivorsToStop()
         } catch {
-            logError("Couldn't read downloads; not creating the session", error)
+            logError("Couldn't read downloads or sign-out markers; not creating the session", error)
             activation = nil
             return false
         }
+        survivorsToStop.formUnion(marked)
         await finaliseCompletedRecords()
         let session = makeSession(delegate)
         self.session = session
         isInvalidatingSession = false
         ignoredTasks.removeAll()
         startEventLoop()
-        // Taken before the listing, so a connection quiesced during it keeps its marker.
-        let listedSurvivorsToStop = survivorsToStop
         // A task that finished on the way is left to its completion, which adopts it first.
         for task in await session.allTasks where task.state != .completed {
             if let partID = task.partID, tasks[partID] === task { continue }
@@ -819,7 +829,11 @@ public actor DownloadEngine {
             }
             await reattach(download, partID: partID, activationOwnsSession: true)
         }
-        for connectionID in listedSurvivorsToStop { locations.clearSurvivorsToStop(connectionID: connectionID) }
+        // Their survivors are cancelled; their resume data, which a quiesce without readable
+        // downloads couldn't delete, goes before the marker does.
+        for connectionID in marked {
+            if await discardResumeData(connectionID: connectionID) { clearSurvivorsToStop(connectionID) }
+        }
         // A part left running without a transfer: either its transfer moved the file, but iOS
         // ended the process before the completion was saved, or the app ended before the system
         // kept the transfer. The first completes, but only while the store still has the part
