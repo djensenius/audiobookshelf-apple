@@ -286,7 +286,7 @@ def delete_simulator(device):
 def with_ephemeral_simulator(selected, name, run):
     """Create, boot and run on a new simulator like `selected`, then always delete it."""
     target = None
-    completed = False
+    failure = None
     try:
         target = name  # simctl create may succeed even if its output is lost.
         output, error, pending = protected([
@@ -305,14 +305,16 @@ def with_ephemeral_simulator(selected, name, run):
         print(f"Created ephemeral iPhone simulator {name} ({target}); it will be deleted after the run.",
               flush=True)
         command(["xcrun", "simctl", "bootstatus", target, "-b"], timeout=300)
-        result = run(target, name)
-        completed = True
-        return result
+        return run(target, name)
+    except BaseException as error:
+        failure = error
+        raise
     finally:
         if target is not None:
             _, pending = delete_simulator(target)
-            if completed and pending:
-                raise InterruptedRunner(pending[0])
+            # A cancellation during cleanup wins over any failure, so main() can't retry.
+            if pending and not isinstance(failure, InterruptedRunner):
+                raise InterruptedRunner(pending[0]) from failure
 
 
 def run_tests(scheme, udid, simulator_name=None):

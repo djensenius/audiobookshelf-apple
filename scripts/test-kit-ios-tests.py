@@ -41,7 +41,7 @@ PHONE_TYPE = "com.apple.CoreSimulator.SimDeviceType.iPhone-17"
 PAD_TYPE = "com.apple.CoreSimulator.SimDeviceType.iPad-Pro"
 
 FAKE_CLI = r'''
-import json, os, sys, time
+import json, os, signal, sys, time
 from pathlib import Path
 root = Path(os.environ["CASE_ROOT"])
 args = sys.argv[1:]
@@ -88,6 +88,8 @@ if args[:2] in (["simctl", "bootstatus"], ["simctl", "shutdown"], ["simctl", "de
     # Only ever touch a simulator this run created.
     assert args[2] in [item["udid"] for item in owned] + [item["name"] for item in owned], args
     assert args[3:] == (["-b"] if args[1] == "bootstatus" else []), args
+    if args[1] == "shutdown" and faults.get("cancelDuringShutdown"):
+        os.kill(os.getppid(), signal.SIGTERM)  # The runner, as a cancelled job would see it.
     sys.exit(faults.get(args[1], 0))
 if args == ["simctl", "list", "-j", "devices", "available"]:
     kind = "devices"
@@ -362,6 +364,18 @@ class RunnerTests(unittest.TestCase):
                 self.faults = {"xcodeRuns": [{"code": 65, "output": output}] * 3}
                 self.run_case(expected=65)
                 self.assert_ephemeral_lifecycle(2)
+
+    def test_ci_cancellation_during_cleanup_exits_without_retrying(self):
+        for runs in ([{"code": 65, "output": "failed to bless service hub"}],
+                     [{"code": 65, "output": "** TEST FAILED **"}], []):
+            with self.subTest(runs=runs):
+                self.setUp()
+                self.ci()
+                self.faults = {"xcodeRuns": runs, "cancelDuringShutdown": True}
+                result = self.run_case(expected=143)
+                self.assertIn("interrupted by signal 15", result.stderr)
+                self.assertNotIn("retrying", result.stderr)
+                self.assert_ephemeral_lifecycle(1)
 
     def test_ci_boot_or_create_failure_and_shutdown_failure(self):
         self.ci()
