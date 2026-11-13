@@ -102,6 +102,43 @@ import WebKit
             #expect(second !== first)
         }
 
+        /// The page's table of contents reaches the sheet, decoded, with the section the reader
+        /// shows marked; a page's failure to read it lists nothing rather than loading for good.
+        @Test(arguments: [false, true])
+        func thePagesContentsReachTheSheet(fails: Bool) async throws {
+            let request = EbookFileRequest(
+                connectionID: UUID(), itemID: "book", fileIno: "1", fileExtension: "epub", version: "1")
+            let loader = EbookFileLoader(
+                directory: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString),
+                fetcher: NoEbookFetcher())
+            let model = ReaderContainerModel(
+                request: request, kind: .epub, loader: loader, progress: nil, serverProgress: nil)
+            let session = EPUBReaderSession(
+                model: model, fileURL: URL(filePath: "/nonexistent/book.epub"),
+                payload: ReaderSettingsPayload(settings: ReaderSettings(), resolvedAppearance: .light, layout: .single))
+            func post(_ json: String) { session.controller.onEvent(Data(json.utf8)) }
+
+            post(
+                fails
+                    ? #"{"type":"error","message":"no nav","phase":"toc"}"#
+                    : #"""
+                    {"type":"toc","items":[{"id":"1","label":"One","href":"c1.xhtml",
+                      "subitems":[{"id":"1a","label":"Two","href":"c2.xhtml"}]}]}
+                    """#)
+            for _ in 0..<200 where session.contents.contents == nil { try await Task.sleep(for: .milliseconds(10)) }
+            let contents = try #require(session.contents.contents)
+            #expect(contents.entries.map(\.label) == (fails ? [] : ["One", "Two"]))
+            #expect(contents.entries.map(\.level) == (fails ? [] : [0, 1]))
+
+            post(#"{"type":"relocated","startCfi":"a","endCfi":"b","progress":0.1,"href":"c2.xhtml","atStart":false,"atEnd":false}"#)
+            #expect(session.contents.currentEntryID == (fails ? nil : 1))
+            if let entry = contents.entries.first {
+                session.contents.isPresented = true
+                session.show(entry)
+                #expect(!session.contents.isPresented)
+            }
+        }
+
         /// Lays the view out until `done` holds for its web view, or about two seconds pass.
         private static func waitForWebView(
             in hosting: NSView, until done: (WKWebView?) -> Bool
