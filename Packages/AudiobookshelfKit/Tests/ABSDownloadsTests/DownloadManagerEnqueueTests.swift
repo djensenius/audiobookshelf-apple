@@ -822,7 +822,11 @@ import Testing
         #expect(try await fixture.store.allRecords().isEmpty)
         #expect(await fixture.engine.started.isEmpty)
         #expect(await fixture.engine.resumed.isEmpty)
-        // Nothing was reported, so the next event is the next enqueue's.
+        // The discarded record is reported removed, before the next enqueue's change.
+        guard case .recordRemoved = await events.next(where: { _ in true }) else {
+            Issue.record("The discarded record wasn't reported removed")
+            return
+        }
         let item = LibraryItemFixtures.book()
         _ = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
         let record = try #require(try await fixture.store.record(key: fixture.key(item)))

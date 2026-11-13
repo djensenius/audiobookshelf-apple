@@ -384,11 +384,13 @@ public actor DownloadManager {
     }
 
     /// Deletes a new record nothing started; one that can't be deleted is paused instead, so no
-    /// activation starts it.
+    /// activation starts it. A deleted record is reported removed, because a startup or retry
+    /// snapshot read before the delete may already list it.
     private func discardUnstarted(_ recordID: UUID) async {
         forget(recordID)
         do {
             _ = try await read { try await self.store.deleteRecord(recordID) }
+            reportRemoved(recordID)
         } catch {
             _ = try? await read { try await self.store.setState(.paused, forRecord: recordID) }
         }
