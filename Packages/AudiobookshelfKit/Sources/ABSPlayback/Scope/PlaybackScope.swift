@@ -107,6 +107,9 @@ public final class PlaybackScope {
         /// the app sets `SystemNetworkPathSource()`. `nil` treats it as always satisfied, and leaves
         /// reconnect draining to ``PlaybackScope/syncWithServer(isFirstSync:)``.
         public var networkPaths: (any NetworkPathSource)?
+        /// Records the scope's playback history (``ProgressSyncer``'s `history`); the app sets a
+        /// `PlaybackHistoryRecorder` over its one history store. `nil` records none.
+        public var history: (any PlaybackHistoryRecording)?
 
         public init(
             connectionID: UUID, client: APIClient?, features: ServerFeatures?,
@@ -186,10 +189,11 @@ public final class PlaybackScope {
     }
 
     /// Builds the services, then the coordinator, then the syncer (attached before any play,
-    /// following the configured network path), then the sleep timer, if configured, then the Now
-    /// Playing bridge, which the scope holds strongly, and the queue's advancer, whose podcast
-    /// fallback reads episodes through the services' current client. The local-session uploader
-    /// sends through the services too, so it follows reconnects.
+    /// following the configured network path and recording the configured history), then the
+    /// sleep timer, if configured, then the Now Playing bridge, which the scope holds strongly,
+    /// and the queue's advancer, whose podcast fallback reads episodes through the services'
+    /// current client. The local-session uploader sends through the services too, so it follows
+    /// reconnects.
     public static func make(
         _ configuration: Configuration, makeNowPlaying: (PlaybackCoordinator) -> any NowPlayingHandle
     ) -> PlaybackScope {
@@ -203,7 +207,7 @@ public final class PlaybackScope {
             backgroundActivity: configuration.backgroundActivity, networkPaths: configuration.networkPaths)
         let syncer = ProgressSyncer(
             source: coordinator, service: services, store: configuration.writer,
-            tickInterval: configuration.tickInterval, paths: configuration.networkPaths)
+            tickInterval: configuration.tickInterval, paths: configuration.networkPaths, history: configuration.history)
         let sleepTimer = configuration.makeSleepTimer?(coordinator)
         let queue = PlaybackQueue(serverConnectionID: configuration.connectionID, store: configuration.queueStore)
         let episodes = APIPodcastEpisodeSource(

@@ -229,6 +229,83 @@ struct PlaybackScopeSyncTests {
         await t.s.coordinator.replaceGoneSession(current)
         #expect(t.s.h.service.starts == ["a"])
     }
+
+    // MARK: History
+
+    /// ``PlaybackScope/make(_:makeNowPlaying:)`` hands the configured history to the syncer: a play
+    /// through the scope records its Play event (#158).
+    @Test func aPlayThroughAMadeScopeRecordsItsPlayEvent() async throws {
+        let history = HistorySpy()
+        let connectionID = UUID()
+        let writer = try LocalProgressStore(modelContainer: DataStack(location: .inMemory).container)
+        var configuration = PlaybackScope.Configuration(
+            connectionID: connectionID, client: try BookServerProtocol.client(),
+            features: ServerFeatures(version: ServerVersion(2, 37, 2)), deviceIdentifiers: SyncDevice(),
+            writer: writer, settings: StubPlaybackSettings(), policy: StubStreamingPolicy(),
+            engine: CoordinatorTestEngine(), tickInterval: 0.5, lastPlayed: { _ in InMemoryLastPlayedStore() },
+            queueStore: AdvanceQueueStore())
+        configuration.history = history
+        let scope = PlaybackScope.make(configuration) { _ in RecordingNowPlaying() }
+
+        await scope.play(itemID: "B", episodeID: nil, startTime: 5)
+        #expect(await eventually { scope.coordinator.isPlaying })
+        await scope.syncer.waitForHistory()
+
+        #expect(
+            history.entries(.play).map(\.key) == [MediaKey(serverConnectionID: connectionID, libraryItemId: "B")])
+        scope.retire(reason: .accountSwitch)
+        _ = await scope.finishRetirement()
+    }
+}
+
+/// Answers book `B`'s play with a session, and any other request with an empty 200, on the hosts
+/// of its clients.
+private final class BookServerProtocol: URLProtocol {
+    static let hosts = Mutex<Set<String>>([])
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        guard let host = request.url?.host() else { return false }
+        return hosts.withLock { $0.contains(host) }
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        guard let url = request.url,
+            let response = HTTPURLResponse(
+                url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])
+        else { return }
+        let session = PlaybackSession(
+            id: "sess-B", libraryItemId: "B", mediaType: .book, displayTitle: "Book", duration: 60,
+            audioTracks: [
+                AudioTrack(
+                    index: 1, startOffset: 0, duration: 60, contentUrl: "/api/items/B/file/1", mimeType: "audio/mpeg")
+            ])
+        let isPlay = url.path().hasPrefix("/api/items/B/play")
+        let body = isPlay ? (try? JSONEncoder().encode(session)) : nil
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body ?? Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    /// A client of a host of its own.
+    static func client() throws -> APIClient {
+        let host = "\(UUID().uuidString.lowercased()).book.test"
+        hosts.withLock { _ = $0.insert(host) }
+        let configuration = URLSessionConfiguration.absConnection()
+        configuration.protocolClasses = [BookServerProtocol.self]
+        return APIClient(
+            configuration: try APIClientConfiguration(baseURL: try #require(URL(string: "https://\(host)"))),
+            tokenProvider: BookTokens(), sessionConfiguration: configuration)
+    }
+}
+
+private struct BookTokens: TokenProvider {
+    func tokens() async -> ABSAPI.AuthTokens? { ABSAPI.AuthTokens(accessToken: "a", refreshToken: "r") }
+    func replaceTokens(expected: ABSAPI.AuthTokens, with new: ABSAPI.AuthTokens) async -> Bool { false }
+    func expireSession(ifCurrent rejected: ABSAPI.AuthTokens) async -> Bool { false }
 }
 
 private struct SyncDevice: DeviceIdentifying {
