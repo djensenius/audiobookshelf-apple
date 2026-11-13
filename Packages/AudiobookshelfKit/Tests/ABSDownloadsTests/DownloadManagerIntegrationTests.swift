@@ -212,6 +212,56 @@ import Testing
         never.open()
     }
 
+    /// A new request's guarded resume queues its record, then fails to read it and to pause it
+    /// again, with no quiesce. An activation before the manager deletes the record pauses it
+    /// rather than starting a transfer that would outlive the failed request (#520), and a
+    /// later request for the item starts.
+    @Test func anActivationBeforeAFailedRequestIsDiscardedStartsNothing() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let failsRead = Mutex(false)
+        let engine = harness.makeEngine(readRecord: { store, id in
+            if failsRead.withLock({ $0 }) {
+                failsRead.withLock { $0 = false }
+                // The rollback's write fails too.
+                await store.failNextCommit(with: TestError())
+                throw TestError()
+            }
+            return try await store.record(id: id)
+        })
+        let manager = DownloadManager(
+            store: harness.store, localItems: harness.localItems, engine: ActivatingOnFailedResume(base: engine),
+            locations: harness.locations, capacity: FakeCapacity(), clock: harness.clock)
+        try await manager.start()
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        let item = LibraryItemFixtures.book()
+
+        failsRead.withLock { $0 = true }
+        await #expect(throws: DownloadManagerError.storeFailure) {
+            try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: harness.connectionID,
+                unlessQuiescedSince: await manager.quiesceGeneration())
+        }
+
+        #expect(try await harness.store.allRecords().isEmpty)
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        let tasks = await harness.session?.session.allTasks ?? []
+        #expect(tasks.allSatisfy { $0.state != .running })
+        #expect(harness.requests.isEmpty)
+
+        let result = try await manager.enqueue(
+            item: item, episodeID: nil, connectionID: harness.connectionID,
+            unlessQuiescedSince: await manager.quiesceGeneration())
+        guard case .started = result else {
+            Issue.record("Unexpected \(result)")
+            return
+        }
+        await harness.waitForRequests(1)
+        never.open()
+    }
+
     /// A sign-out's pauses wait on each other for episodes of one podcast (the manager holds the
     /// podcast's item for each), so one whose cancellation hangs would keep the other's transfer
     /// running with the old credentials: the quiesce cancels every transfer before pausing.
@@ -351,5 +401,38 @@ import Testing
         #expect(harness.requests.count == 1)
         #expect(!harness.fileExists(destination))
         #expect(!harness.fileExists(local.relativeDirectory))
+    }
+}
+
+/// The real engine, which runs an activation (and its restart) when a new record's guarded
+/// resume fails, before the manager handles the error.
+private struct ActivatingOnFailedResume: DownloadEngineControlling {
+    let base: DownloadEngine
+
+    var updates: AsyncStream<DownloadUpdate> { base.updates }
+    var progress: AsyncStream<DownloadProgress> { base.progress }
+
+    func start(partIDs: [UUID]) async { await base.start(partIDs: partIDs) }
+    func stop(partIDs: [UUID], keepingResumeData: Bool) async {
+        await base.stop(partIDs: partIDs, keepingResumeData: keepingResumeData)
+    }
+    func attachSurvivingTransfers() async -> Bool { await base.attachSurvivingTransfers() }
+    func pause(recordID: UUID) async throws -> Bool { try await base.pause(recordID: recordID) }
+    func resume(recordID: UUID) async throws -> Bool { try await base.resume(recordID: recordID) }
+    func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool {
+        try await base.resume(recordID: recordID, unlessQuiescedSince: generation)
+    }
+    func resumeNewRecord(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool {
+        do {
+            return try await base.resumeNewRecord(recordID: recordID, unlessQuiescedSince: generation)
+        } catch {
+            _ = await base.activate()
+            await base.waitForRestart()
+            throw error
+        }
+    }
+    func quiesceGeneration() async -> Int { await base.quiesceGeneration() }
+    func hasQuiesced(connectionID: UUID, since generation: Int) async -> Bool {
+        await base.hasQuiesced(connectionID: connectionID, since: generation)
     }
 }

@@ -15,14 +15,57 @@ private struct FixedPathSource: NetworkPathSource {
     }
 }
 
+/// A path source that reports its path only once the test releases it.
+private final class HeldPathSource: NetworkPathSource, Sendable {
+    private let stream: AsyncStream<NetworkPath>
+    private let continuation: AsyncStream<NetworkPath>.Continuation
+
+    init() {
+        (stream, continuation) = AsyncStream.makeStream(of: NetworkPath.self)
+    }
+
+    func paths() -> AsyncStream<NetworkPath> { stream }
+
+    func release(_ path: NetworkPath) {
+        continuation.yield(path)
+    }
+}
+
+/// The running session the controller sees, which tests end or change; it starts as a session of
+/// ``DownloadsControllerTests/connectionID`` whose user may download.
+@MainActor
+private final class FakeSessions {
+    var current: DownloadRequestSession? = DownloadRequestSession(
+        connectionID: DownloadsControllerTests.connectionID, sessionID: 1, canDownload: true)
+    /// Each lookup's connection, in order.
+    private(set) var lookups: [UUID] = []
+    private let looked: AsyncStream<Void>.Continuation
+    /// Yields once per lookup.
+    let lookedUp: AsyncStream<Void>
+
+    init() {
+        (lookedUp, looked) = AsyncStream.makeStream(of: Void.self)
+    }
+
+    func session(for connectionID: UUID) -> DownloadRequestSession? {
+        lookups.append(connectionID)
+        looked.yield()
+        guard let current, current.connectionID == connectionID else { return nil }
+        return current
+    }
+}
+
 /// A hand-driven ``DownloadManaging`` that records its calls.
 private actor FakeDownloadManager: DownloadManaging {
     struct Enqueue: Equatable {
         let itemID: String
         let episodeID: String?
         let connectionID: UUID
+        var generation: Int? = 7
     }
 
+    /// What `quiesceGeneration()` answers.
+    var generation = 7
     private(set) var enqueues: [Enqueue] = []
     /// Calls to `restartActiveTransfers()`, including those that failed.
     private(set) var restarts = 0
@@ -46,10 +89,28 @@ private actor FakeDownloadManager: DownloadManaging {
     }
 
     func enqueue(
-        item: LibraryItem, episodeID: String?, connectionID: UUID, replacingExisting: Bool
+        item: LibraryItem, episodeID: String?, connectionID: UUID, replacingExisting: Bool,
+        unlessQuiescedSince generation: Int?
     ) async throws(DownloadManagerError) -> DownloadManager.EnqueueResult {
-        enqueues.append(Enqueue(itemID: item.id, episodeID: episodeID, connectionID: connectionID))
+        enqueues.append(
+            Enqueue(itemID: item.id, episodeID: episodeID, connectionID: connectionID, generation: generation))
         return try result.get()
+    }
+
+    /// Runs inside each `quiesceGeneration()`, before it answers.
+    private var duringGeneration: (@Sendable () async -> Void)?
+
+    func onGeneration(_ body: @escaping @Sendable () async -> Void) {
+        duringGeneration = body
+    }
+
+    func quiesceGeneration() async -> Int {
+        await duringGeneration?()
+        return generation
+    }
+
+    func setGeneration(_ generation: Int) {
+        self.generation = generation
     }
 
     func failRestarts(_ count: Int) {
@@ -69,6 +130,9 @@ private actor FakeDownloadManager: DownloadManaging {
 @Suite(.timeLimit(.minutes(1)))
 struct DownloadsControllerTests {
     nonisolated static let connectionID = UUID()
+    /// The ticket of a request in ``FakeSessions``' first session, at ``FakeDownloadManager``'s
+    /// generation.
+    nonisolated static let ticket = DownloadRequestTicket(connectionID: connectionID, sessionID: 1, generation: 7)
     nonisolated static let item = LibraryItem(
         id: "li1", libraryId: "lib", mediaType: .book,
         media: .book(Book(id: "book-li1", metadata: BookMetadata(title: "Title"), numTracks: 1)))
@@ -79,19 +143,20 @@ struct DownloadsControllerTests {
     /// A controller over a fresh settings store and a path that is known before the first request.
     private func makeController(
         path: NetworkPath = .wifi, policy: CellularPolicy = .always, treatsExpensiveAsCellular: Bool = false,
-        manager: FakeDownloadManager = FakeDownloadManager(),
+        manager: FakeDownloadManager = FakeDownloadManager(), sessions: FakeSessions = FakeSessions(),
+        source: (any NetworkPathSource)? = nil,
         storedRecords: @escaping @Sendable () async throws -> [DownloadRecordDTO] = { [] }
     ) throws -> (DownloadsController, AppSettings, cleanUp: () -> Void) {
         let suiteName = "ABSAppModelTests.Downloads.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
         let settings = AppSettings(defaults: defaults)
         settings.downloadUsingCellular = policy
-        let monitor = NetworkMonitor(source: FixedPathSource(path: path))
+        let monitor = NetworkMonitor(source: source ?? FixedPathSource(path: path))
         monitor.start()
         let access = DownloadNetworkAccess(defaults: defaults, treatsExpensiveAsCellular: treatsExpensiveAsCellular)
         let controller = DownloadsController(
             manager: manager, monitor: monitor, settings: settings, networkAccess: access,
-            storedRecords: storedRecords, pathTimeout: .seconds(30))
+            storedRecords: storedRecords, sessions: { sessions.session(for: $0) }, pathTimeout: .seconds(30))
         return (controller, settings, { defaults.removePersistentDomain(forName: suiteName) })
     }
 
@@ -142,7 +207,7 @@ struct DownloadsControllerTests {
         let expected: DownloadRequestOutcome =
             switch (testCase.reason, policy) {
             case (nil, _), (_, .always): .started(.started(recordID))
-            case (let reason?, .ask): .needsConfirmation(reason)
+            case (let reason?, .ask): .needsConfirmation(reason, Self.ticket)
             case (let reason?, .never): .denied(reason)
             }
         #expect(outcome == expected)
@@ -158,11 +223,10 @@ struct DownloadsControllerTests {
 
         #expect(
             await controller.request(item: Self.item, episodeID: "ep1", connectionID: Self.connectionID)
-                == .needsConfirmation(.cellular))
+                == .needsConfirmation(.cellular, Self.ticket))
         #expect(await manager.enqueues.isEmpty)
 
-        let outcome = await controller.confirmMeteredDownload(
-            item: Self.item, episodeID: "ep1", connectionID: Self.connectionID)
+        let outcome = await controller.confirmMeteredDownload(item: Self.item, episodeID: "ep1", ticket: Self.ticket)
 
         #expect(outcome == .started(.started(recordID)))
         #expect(
@@ -175,12 +239,12 @@ struct DownloadsControllerTests {
         defer { cleanUp() }
         #expect(
             await controller.request(item: Self.item, episodeID: nil, connectionID: Self.connectionID)
-                == .needsConfirmation(.cellular))
+                == .needsConfirmation(.cellular, Self.ticket))
 
         settings.downloadUsingCellular = .never
 
         #expect(
-            await controller.confirmMeteredDownload(item: Self.item, episodeID: nil, connectionID: Self.connectionID)
+            await controller.confirmMeteredDownload(item: Self.item, episodeID: nil, ticket: Self.ticket)
                 == .denied(.cellular))
         #expect(await manager.enqueues.isEmpty)
     }
@@ -200,6 +264,167 @@ struct DownloadsControllerTests {
         #expect(
             await second.request(item: Self.item, episodeID: nil, connectionID: Self.connectionID)
                 == .failed(.insufficientStorage(required: 10, available: 1)))
+    }
+
+    // MARK: - Session and permission
+
+    @Test func aUserWhoMayNotDownloadIsRejected() async throws {
+        let manager = FakeDownloadManager()
+        let sessions = FakeSessions()
+        sessions.current = DownloadRequestSession(connectionID: Self.connectionID, sessionID: 1, canDownload: false)
+        let (controller, _, cleanUp) = try makeController(manager: manager, sessions: sessions)
+        defer { cleanUp() }
+
+        #expect(!controller.canRequest(connectionID: Self.connectionID))
+        #expect(
+            await controller.request(item: Self.item, episodeID: nil, connectionID: Self.connectionID)
+                == .rejected(.notPermitted))
+        #expect(
+            await controller.confirmMeteredDownload(item: Self.item, episodeID: nil, ticket: Self.ticket)
+                == .rejected(.notPermitted))
+        #expect(await manager.enqueues.isEmpty)
+    }
+
+    @Test func anotherConnectionsRequestIsRejected() async throws {
+        let manager = FakeDownloadManager()
+        let (controller, _, cleanUp) = try makeController(manager: manager)
+        defer { cleanUp() }
+        let other = UUID()
+
+        #expect(controller.canRequest(connectionID: Self.connectionID))
+        #expect(!controller.canRequest(connectionID: other))
+        #expect(
+            await controller.request(item: Self.item, episodeID: nil, connectionID: other) == .rejected(.sessionEnded))
+        #expect(await manager.enqueues.isEmpty)
+    }
+
+    @Test func theGenerationTakenAtTheStartIsPassedToTheManager() async throws {
+        let manager = FakeDownloadManager()
+        await manager.setGeneration(3)
+        let (controller, _, cleanUp) = try makeController(manager: manager)
+        defer { cleanUp() }
+
+        _ = await controller.request(item: Self.item, episodeID: nil, connectionID: Self.connectionID)
+
+        #expect(
+            await manager.enqueues == [
+                .init(itemID: "li1", episodeID: nil, connectionID: Self.connectionID, generation: 3)
+            ])
+    }
+
+    @Test func downloadsStoppedBeforeTheSaveIsASessionEnd() async throws {
+        let manager = FakeDownloadManager(result: .failure(.downloadsStopped(Self.connectionID)))
+        let (controller, _, cleanUp) = try makeController(manager: manager)
+        defer { cleanUp() }
+
+        #expect(
+            await controller.request(item: Self.item, episodeID: nil, connectionID: Self.connectionID)
+                == .rejected(.sessionEnded))
+    }
+
+    struct SessionChange: Sendable, CustomTestStringConvertible {
+        let name: String
+        /// The session after the change; `nil` when none is running.
+        let after: DownloadRequestSession?
+        let outcome: DownloadRequestOutcome?
+
+        var testDescription: String { name }
+    }
+
+    nonisolated static let sessionChanges: [SessionChange] = [
+        SessionChange(name: "signed out", after: nil, outcome: .rejected(.sessionEnded)),
+        SessionChange(
+            name: "switched away and back",
+            after: DownloadRequestSession(connectionID: connectionID, sessionID: 2, canDownload: true),
+            outcome: .rejected(.sessionEnded)),
+        SessionChange(
+            name: "lost the permission",
+            after: DownloadRequestSession(connectionID: connectionID, sessionID: 1, canDownload: false),
+            outcome: .rejected(.notPermitted)),
+        // The control: the same session, still permitted, queues it.
+        SessionChange(
+            name: "unchanged",
+            after: DownloadRequestSession(connectionID: connectionID, sessionID: 1, canDownload: true),
+            outcome: nil),
+    ]
+
+    /// Whatever the path turns out to be: a stale request is dropped rather than prompting.
+    @Test(arguments: sessionChanges, [(NetworkPath.wifi, CellularPolicy.ask), (.cellular, .ask), (.cellular, .never)])
+    func aSessionChangeDuringThePathWaitQueuesNothing(
+        _ change: SessionChange, path: (NetworkPath, CellularPolicy)
+    ) async throws {
+        let recordID = UUID()
+        let manager = FakeDownloadManager(result: .success(.started(recordID)))
+        let sessions = FakeSessions()
+        let source = HeldPathSource()
+        let (controller, _, cleanUp) = try makeController(
+            policy: path.1, manager: manager, sessions: sessions, source: source)
+        defer { cleanUp() }
+        var lookups = sessions.lookedUp.makeAsyncIterator()
+
+        let request = Task {
+            await controller.request(item: Self.item, episodeID: nil, connectionID: Self.connectionID)
+        }
+        // The request took its session, and checked it again once it had the generation; it can't
+        // get past the path wait until the path is released.
+        _ = await lookups.next()
+        _ = await lookups.next()
+        sessions.current = change.after
+        source.release(path.0)
+
+        let unchanged: DownloadRequestOutcome =
+            switch path {
+            case (.cellular, .ask): .needsConfirmation(.cellular, Self.ticket)
+            case (.cellular, _): .denied(.cellular)
+            default: .started(.started(recordID))
+            }
+        #expect(await request.value == (change.outcome ?? unchanged))
+        #expect(await manager.enqueues.count == (change.outcome == nil && path.0 == .wifi ? 1 : 0))
+    }
+
+    @Test func aSessionChangeWhileTheGenerationIsReadIsNotAdopted() async throws {
+        let manager = FakeDownloadManager()
+        let sessions = FakeSessions()
+        // A switch away and back (which doesn't quiesce) while the request awaits the generation.
+        await manager.onGeneration {
+            await MainActor.run {
+                sessions.current = DownloadRequestSession(
+                    connectionID: Self.connectionID, sessionID: 2, canDownload: true)
+            }
+        }
+        let (controller, _, cleanUp) = try makeController(manager: manager, sessions: sessions)
+        defer { cleanUp() }
+
+        #expect(
+            await controller.request(item: Self.item, episodeID: nil, connectionID: Self.connectionID)
+                == .rejected(.sessionEnded))
+        #expect(await manager.enqueues.isEmpty)
+    }
+
+    nonisolated static let endedSessions: [SessionChange] = Array(sessionChanges.prefix(3))
+
+    /// The confirmation belongs to the request that asked for it, not to the session running when
+    /// the user agrees.
+    @Test(arguments: endedSessions)
+    func aConfirmationAfterItsSessionEndedQueuesNothing(_ change: SessionChange) async throws {
+        let manager = FakeDownloadManager()
+        let sessions = FakeSessions()
+        let (controller, _, cleanUp) = try makeController(
+            path: .cellular, policy: .ask, manager: manager, sessions: sessions)
+        defer { cleanUp() }
+        guard
+            case .needsConfirmation(_, let ticket) = await controller.request(
+                item: Self.item, episodeID: nil, connectionID: Self.connectionID)
+        else {
+            Issue.record("Not asked")
+            return
+        }
+
+        sessions.current = change.after
+
+        #expect(
+            await controller.confirmMeteredDownload(item: Self.item, episodeID: nil, ticket: ticket) == change.outcome)
+        #expect(await manager.enqueues.isEmpty)
     }
 
     // MARK: - Policy changes

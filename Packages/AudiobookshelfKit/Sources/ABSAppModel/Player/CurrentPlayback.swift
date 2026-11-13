@@ -90,4 +90,8 @@ public final class CurrentPlayback: PlayerPlaybackControlling {
     public func declineMeteredStreaming() {
         current?.declineMeteredStreaming()
     }
+
+    public func handleStreamReset(sessionID: String) {
+        current?.handleStreamReset(sessionID: sessionID)
+    }
 }

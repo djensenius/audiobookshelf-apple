@@ -104,6 +104,7 @@ final class AppEnvironment {
             lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: manager))
             if let downloads {
                 lifecycle.register(downloads.lifecycle, stage: .connect)
+                lifecycle.register(downloads.sessions, stage: .connect)
                 // A removal stops the downloads once the credentials are deleted, active or not.
                 manager.credentialsRemoved = { [weak downloadsLifecycle = downloads.lifecycle] in
                     await downloadsLifecycle?.connectionRemoved($0)
@@ -158,7 +159,8 @@ final class AppEnvironment {
 
         // Images (#182).
         let images = ImageServices(
-            accounts: accounts, sweepsRemovedConnections: dataStack?.resolvedLocation == .appGroup, covers: covers)
+            accounts: accounts, sweepsRemovedConnections: dataStack?.resolvedLocation == .appGroup, covers: covers,
+            downloadedCovers: downloads?.covers)
         lifecycle.register(images.participant, stage: .connect)
         self.images = images
 

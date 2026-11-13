@@ -338,12 +338,16 @@ public final class AudioEngine: AudioEngineProtocol {
         return item
     }
 
+    /// A local `file:` track loads directly even with a header transport: the transport only
+    /// serves `http(s)`, so it would reject the file (a fixture or downloaded track).
     private func makeAsset(trackIndex: Int, source: AudioEngineSource) -> AVURLAsset {
         let url = source.trackURLs[trackIndex]
         let mimeType = source.mimeType(trackIndex: trackIndex)
         let options = Self.assetOptions(
             prefersPreciseTiming: source.prefersPreciseTiming, mimeType: mimeType, networkAccess: source.networkAccess)
-        guard let transport = source.headerTransport else { return AVURLAsset(url: url, options: options) }
+        guard let transport = source.headerTransport, !url.isFileURL else {
+            return AVURLAsset(url: url, options: options)
+        }
         return transport.makeAsset(url: url, options: options, mimeType: mimeType, networkAccess: source.networkAccess)
     }
 

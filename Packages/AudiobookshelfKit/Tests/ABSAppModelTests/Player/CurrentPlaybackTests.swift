@@ -85,14 +85,17 @@ private func dropSession(of playback: FakePlaybackControl) {
         #expect(await current.jump(by: 10) == 30)
         current.setRate(1.5)
         current.stop(reason: .user)
+        current.handleStreamReset(sessionID: "sess_li_book")
         #expect(
             playback.calls == [
                 .resume(rewindingBy: 5), .pause, .seek(20), .jump(10), .setRate(1.5), .stop(.user),
+                .streamReset(sessionID: "sess_li_book"),
             ])
 
         current.bind(nil)
         current.pause()
-        #expect(playback.calls.count == 6)
+        current.handleStreamReset(sessionID: "sess_li_book")
+        #expect(playback.calls.count == 7)
         #expect(current.phase == .idle)
     }
 

@@ -61,6 +61,7 @@ public struct RealtimePlaybackSnapshot: Sendable, Hashable {
 /// - `author_added`, `author_updated` and `author_removed` go to ``onLibraryChange`` with the
 ///   session's account.
 /// - `rss_feed_open` and `rss_feed_closed` go to ``onRssFeedChange``.
+/// - `stream_reset` goes to ``onStreamReset``, whichever user's stream it names.
 ///
 /// Every progress update other than such an echo is also merged into ``localProgress`` with
 /// ADR 0003's `.socket` source, whether or not the cache took it: the store keeps its own
@@ -87,6 +88,9 @@ public final class RealtimeBridge: SessionParticipant {
     /// An RSS feed was opened or closed on the session's server, for ``RssFeedModel/apply(_:)``.
     /// Nothing arrives after the session ends.
     @ObservationIgnored public var onRssFeedChange: (@MainActor (RssFeedChange) -> Void)?
+    /// The server restarted a stream's transcode. The server sends it to every socket, so the
+    /// receiver matches `streamId` against its own session. Nothing arrives after the session ends.
+    @ObservationIgnored public var onStreamReset: (@MainActor (StreamReset) -> Void)?
     /// Offers a jump to another session's position, as the legacy app did: the player has the
     /// item open and is paused, and the update comes from another playback session (whether or
     /// not the cache took it). It must also not be older than the cached progress (if as old, at
@@ -337,6 +341,8 @@ public final class RealtimeBridge: SessionParticipant {
             deliver(.author(change))
         case .rssFeedChanged(let change):
             onRssFeedChange?(change)
+        case .streamReset(let reset):
+            onStreamReset?(reset)
         }
         didHandle?(event)
     }

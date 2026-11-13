@@ -1330,6 +1330,16 @@ public final class PlaybackCoordinator {
 
     // MARK: Recovery
 
+    /// The server restarted the transcode of session `sessionID` (the realtime `stream_reset`,
+    /// ADR 0007). If that's the loaded, streamed session, recovery re-seeks it to the recovery
+    /// target and restarts the segment-readiness backoff, once per failure episode. Ignored for any
+    /// other session, while nothing is loaded or a load is finishing, and for local playback.
+    public func handleStreamReset(sessionID: String) {
+        guard phase == .loaded, !isFinishingLoad, let session, session.id == sessionID, session.playMethod != .local
+        else { return }
+        recovery.streamReset(generation: generation, wasPlaying: isPlaybackRequested)
+    }
+
     private func makeRecoveryHost() -> PlaybackRecoveryHost {
         PlaybackRecoveryHost(
             // A released coordinator's generation (-1) never matches, so its recovery stops.
