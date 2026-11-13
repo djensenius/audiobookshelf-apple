@@ -27,9 +27,9 @@ struct RemoteProgressOfferHost: ViewModifier {
                 // tapped button's action, so it mustn't dismiss.
                 set: { _ in }),
             presenting: offer
-        ) { _ in
+        ) { offer in
             Button {
-                model?.accept()
+                model?.accept(offer)
             } label: {
                 Text(verbatim: L10n.string("ButtonJumpToLatestPosition"))
             }

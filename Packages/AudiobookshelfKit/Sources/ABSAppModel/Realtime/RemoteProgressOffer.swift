@@ -55,14 +55,27 @@ public final class RemoteProgressOffer {
         track()
     }
 
-    /// Seeks to the offered position if the player still has the media open and paused, and ends
-    /// the offer either way, at once. Returns the seek, if it started one.
+    /// Newer progress from another session that offers no jump, such as one back at the player's
+    /// position: ends the offer for its media.
+    public func supersede(_ update: UserItemProgressUpdate) {
+        guard let pending, pending.key.libraryItemId == update.progress.libraryItemId,
+            pending.key.episodeId == update.progress.episodeId
+        else { return }
+        self.pending = nil
+    }
+
+    /// Accepts `offer`, the one the user was shown. Unless a newer offer replaced it, it ends, and
+    /// the player seeks to its position if it still has the media open and paused when the seek
+    /// runs. Returns the seek, if it started one.
     @discardableResult
-    public func accept() -> Task<Void, Never>? {
-        let offer = shown
+    public func accept(_ offer: Pending) -> Task<Void, Never>? {
+        guard offer == pending else { return nil }
         pending = nil
-        guard let offer else { return nil }
-        return Task { [playback] in await playback.seek(to: offer.position) }
+        guard stillApplies(offer) else { return nil }
+        return Task { [weak self] in
+            guard let self, self.stillApplies(offer) else { return }
+            await self.playback.seek(to: offer.position)
+        }
     }
 
     /// Ends the offer without seeking.

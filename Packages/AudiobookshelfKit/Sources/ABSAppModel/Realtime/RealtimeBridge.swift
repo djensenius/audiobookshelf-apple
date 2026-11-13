@@ -96,6 +96,10 @@ public final class RealtimeBridge: SessionParticipant {
     /// not the cache took it). It must also not be older than the cached progress (if as old, at
     /// its position), and its position must differ from the player's by at least a second.
     @ObservationIgnored public var onRemoteProgress: (@MainActor (UserItemProgressUpdate) -> Void)?
+    /// Another playback session's progress for the item the player has open that offers no jump
+    /// but is newer than the cached progress, as when it comes back to the player's position. It
+    /// ends any jump ``onRemoteProgress`` offered for the item.
+    @ObservationIgnored public var onRemoteProgressSuperseded: (@MainActor (UserItemProgressUpdate) -> Void)?
     /// What the player has open, or `nil` when nothing is.
     @ObservationIgnored public var playbackSnapshot: (@MainActor () -> RealtimePlaybackSnapshot?)?
     /// Where socket progress is merged for media with a local row; `nil` merges nothing.
@@ -368,9 +372,14 @@ public final class RealtimeBridge: SessionParticipant {
             return
         }
         merge(incoming)
-        if Self.supersedes(incoming, cached) { progress.apply(incoming) }
-        if isOpen, let snapshot, let onRemoteProgress, Self.offersJump(update, to: snapshot, cached: cached) {
-            onRemoteProgress(update)
+        let isNewer = Self.supersedes(incoming, cached)
+        if isNewer { progress.apply(incoming) }
+        if isOpen, let snapshot {
+            if Self.offersJump(update, to: snapshot, cached: cached) {
+                onRemoteProgress?(update)
+            } else if isNewer, update.sessionId != snapshot.playbackSessionID {
+                onRemoteProgressSuperseded?(update)
+            }
         }
     }
 

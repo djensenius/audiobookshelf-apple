@@ -15,7 +15,7 @@ extension RealtimeBridge {
     ///   session (``PlaybackCoordinator/handleStreamReset(sessionID:)``).
     /// - `localProgress` takes socket progress for media with a local row (ADR 0003).
     /// - `remoteProgressOffer` takes another session's newer position for the paused item, to
-    ///   offer a jump to it; `nil` offers nothing.
+    ///   offer a jump to it, and newer progress that ends the offer; `nil` offers nothing.
     ///
     /// - Parameter bookmarks: The running session's bookmark store, or `nil` between sessions.
     public func route(
@@ -33,8 +33,10 @@ extension RealtimeBridge {
         self.localProgress = localProgress
         if let remoteProgressOffer {
             onRemoteProgress = { [weak remoteProgressOffer] in remoteProgressOffer?.offer($0) }
+            onRemoteProgressSuperseded = { [weak remoteProgressOffer] in remoteProgressOffer?.supersede($0) }
         } else {
             onRemoteProgress = nil
+            onRemoteProgressSuperseded = nil
         }
     }
 
