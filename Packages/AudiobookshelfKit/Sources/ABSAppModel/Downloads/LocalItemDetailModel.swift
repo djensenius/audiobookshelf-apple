@@ -13,7 +13,8 @@ import Observation
 ///   whenever a download of the same server item completes.
 /// - Deleting the item, or its last episode, sets ``isDeleted``; the view then leaves.
 /// - A failed delete sets ``notice``; the view shows it and clears it.
-/// - ``coverFileURL`` is the downloaded cover, which the view shows itself, so it appears offline
+/// - A failed read after the item was shown keeps it, with ``isStale`` set until a read succeeds.
+/// - ``coverFile`` is the downloaded cover, which the view shows itself, so it appears offline
 ///   even after the image cache dropped it.
 @MainActor
 @Observable
@@ -53,10 +54,27 @@ public final class LocalItemDetailModel {
         item.map { LocalItemDetail(item: $0, account: account) }
     }
 
-    /// The item's downloaded cover file, or `nil` without one.
-    public var coverFileURL: URL? {
-        item?.coverRelativePath.flatMap(services.localFileURL)
+    /// A downloaded cover file and the version it was written at. A replacement download keeps
+    /// the path but changes ``updatedAt``, so the view decodes it again when this changes.
+    public struct CoverFile: Hashable, Sendable {
+        public var url: URL
+        public var updatedAt: Date?
+
+        public init(url: URL, updatedAt: Date?) {
+            self.url = url
+            self.updatedAt = updatedAt
+        }
     }
+
+    /// The item's downloaded cover file, or `nil` without one.
+    public var coverFile: CoverFile? {
+        guard let item, let url = item.coverRelativePath.flatMap(services.localFileURL) else { return nil }
+        return CoverFile(url: url, updatedAt: item.coverUpdatedAt)
+    }
+
+    /// The item is shown as last read, but reading it again failed (after a delete, a store
+    /// update or a pull to refresh), so what's shown may be stale; ``reload()`` retries.
+    public var isStale: Bool { item != nil && loadError != nil }
 
     /// The image in `url`, downsampled so its long side is at most `maxPixelSize`; `nil` if the
     /// file is missing, isn't an image, or fails the shared decoder's source limits

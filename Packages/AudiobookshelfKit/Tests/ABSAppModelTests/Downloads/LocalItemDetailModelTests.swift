@@ -315,6 +315,53 @@ struct LocalItemDetailModelTests {
         #expect(live == 0)
     }
 
+    /// A replacement download keeps the cover's path but changes its version, so the cover file
+    /// the view keys its decode by changes too.
+    @Test func aReplacedCoverChangesTheCoverFile() async throws {
+        let root = URL(filePath: "/downloads", directoryHint: .isDirectory)
+        var item = Self.podcast(episodes: ["e1"])
+        item.coverRelativePath = "items/radio/cover.jpg"
+        item.coverUpdatedAt = Date(timeIntervalSince1970: 1_000)
+        let store = FakeLocalStore(item: item)
+        let (model, cleanUp) = try await makeModel(
+            store: store, itemID: item.id, localFileURL: { root.appending(path: $0) })
+        defer { cleanUp() }
+        let before = try #require(model.coverFile)
+
+        item.coverUpdatedAt = Date(timeIntervalSince1970: 2_000)
+        await store.set(item)
+        await model.reload()
+        let after = try #require(model.coverFile)
+
+        #expect(after.url == before.url)
+        #expect(after != before)
+    }
+
+    /// The episode is deleted but reading the item again fails: the last read stays shown,
+    /// marked stale rather than silently out of date, until a read succeeds.
+    @Test func aFailedReadAfterADeleteKeepsTheDetailMarkedStale() async throws {
+        let item = Self.podcast(episodes: ["e1", "e2"])
+        let store = FakeLocalStore(item: item)
+        let (model, cleanUp) = try await makeModel(store: store, itemID: item.id)
+        defer { cleanUp() }
+        #expect(!model.isStale)
+
+        await store.failReads(true)
+        await model.deleteEpisode(id: "e1")
+
+        #expect(model.detail?.episodes.count == 2)
+        #expect(model.loadError != nil)
+        #expect(model.isStale)
+        #expect(!model.isDeleted)
+
+        await store.failReads(false)
+        await model.reload()
+
+        #expect(!model.isStale)
+        #expect(model.detail?.episodes.map(\.id) == ["e2"])
+        #expect(model.detail?.totalBytes == 10)
+    }
+
     @Test func theCoverIsTheDownloadedFile() async throws {
         let root = URL(filePath: "/downloads", directoryHint: .isDirectory)
         var item = Self.podcast(episodes: ["e1"])
@@ -323,7 +370,7 @@ struct LocalItemDetailModelTests {
             store: FakeLocalStore(item: item), itemID: item.id, localFileURL: { root.appending(path: $0) })
         defer { cleanUp() }
 
-        #expect(model.coverFileURL == root.appending(path: "items/radio/cover.jpg"))
+        #expect(model.coverFile?.url == root.appending(path: "items/radio/cover.jpg"))
     }
 
     @Test func withoutADownloadedCoverThereIsNoFile() async throws {
@@ -332,7 +379,7 @@ struct LocalItemDetailModelTests {
             store: FakeLocalStore(item: item), itemID: item.id, localFileURL: { URL(filePath: "/x/\($0)") })
         defer { cleanUp() }
 
-        #expect(model.coverFileURL == nil)
+        #expect(model.coverFile == nil)
     }
 
     @Test func readsTheCoverImageDownsampled() async throws {

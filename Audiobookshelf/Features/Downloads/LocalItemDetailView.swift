@@ -50,7 +50,10 @@ struct LocalItemDetailView: View {
     private var content: some View {
         if let detail = model.detail {
             List {
-                Section { LocalItemHeader(detail: detail, coverFileURL: model.coverFileURL) }
+                if model.isStale {
+                    Section { staleRow }
+                }
+                Section { LocalItemHeader(detail: detail, coverFile: model.coverFile) }
                 if !detail.tracks.isEmpty {
                     Section {
                         ForEach(detail.tracks) { LocalFileRow(file: $0) }
@@ -103,6 +106,26 @@ struct LocalItemDetailView: View {
                 }
             }
         }
+    }
+
+    /// Shown above the last read when reading the item again failed, so stale rows and totals
+    /// aren't silent (as `DownloadsList` does); Retry reads it again.
+    private var staleRow: some View {
+        HStack(spacing: ABSSpacing.medium) {
+            Label {
+                Text(verbatim: L10n.string("MessageLocalItemLoadFailed"))
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(ABSColor.mutedForeground)
+                    .accessibilityHidden(true)
+            }
+            Spacer(minLength: ABSSpacing.small)
+            Button(L10n.string("ButtonRetry")) {
+                Task { await model.reload() }
+            }
+            .buttonStyle(.borderless)
+        }
+        .font(.footnote)
     }
 
     @ViewBuilder
@@ -158,7 +181,7 @@ private enum PendingLocalDelete {
 /// image cache dropped it, else the cover through the image pipeline.
 private struct LocalItemCover: View {
     let detail: LocalItemDetail
-    let fileURL: URL?
+    let file: LocalItemDetailModel.CoverFile?
     @Environment(\.displayScale) private var displayScale
     @State private var image: CGImage?
 
@@ -184,13 +207,17 @@ private struct LocalItemCover: View {
                 )
             }
         }
-        .task(id: fileURL) {
-            guard let fileURL else {
+        // Keyed by the file's version too: a replacement download reuses the path.
+        .task(id: file) {
+            guard let file else {
                 image = nil
                 return
             }
             let pixels = Int((Self.width * max(shape.aspectRatio, 1) * displayScale).rounded(.up))
-            image = await LocalItemDetailModel.coverImage(at: fileURL, maxPixelSize: pixels)
+            let decoded = await LocalItemDetailModel.coverImage(at: file.url, maxPixelSize: pixels)
+            // A superseded decode mustn't overwrite the newer cover's.
+            guard !Task.isCancelled else { return }
+            image = decoded
         }
     }
 
@@ -200,12 +227,12 @@ private struct LocalItemCover: View {
 /// The cover, title, author, sizes and link status of a downloaded item.
 private struct LocalItemHeader: View {
     let detail: LocalItemDetail
-    let coverFileURL: URL?
+    let coverFile: LocalItemDetailModel.CoverFile?
 
     var body: some View {
         VStack(alignment: .leading, spacing: ABSSpacing.medium) {
             HStack(alignment: .top, spacing: ABSSpacing.medium) {
-                LocalItemCover(detail: detail, fileURL: coverFileURL)
+                LocalItemCover(detail: detail, file: coverFile)
                     .frame(width: 96)
                 VStack(alignment: .leading, spacing: ABSSpacing.xSmall) {
                     Text(verbatim: detail.title)
