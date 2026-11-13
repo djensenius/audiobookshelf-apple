@@ -298,8 +298,11 @@ The legacy app registers the `audiobookshelf` URL scheme (`ios/App/App/Info.plis
 
 **Handoff**
 
-- Item, episode and player screens will publish `.userActivity("org.davidjensenius.Audiobookshelf.item")`, with the payload below. No screen does yet; the first publisher comes with the item and player screens.
-- `.onContinueUserActivity` turns the activity into the same `DeepLink` (`DeepLink.init?(handoff:)`).
+- The item and episode screens publish `.userActivity("org.davidjensenius.Audiobookshelf.item")` with the payload below (`HandoffPublishing`, applied in `RouteDestination`; #504). The player doesn't publish yet (#219).
+  - Only the screen on top of the selected tab's stack publishes, as for ⌘R. On macOS a hidden tab's screens stay appeared, and a covered screen stays in its stack, so neither of those publishes.
+  - The activity names the active account only while it's the account of the shell on screen. During a switch the outgoing shell publishes nothing, because its IDs belong to the outgoing account. With no active connection, or with IDs a receiver would reject, nothing is published either.
+  - The activity is eligible for Handoff only. `isEligibleForSearch` and `isEligibleForPrediction` stay off: Spotlight and Siri suggestions come from App Intents and entities (P5-10 #87), not from browsing history.
+- `RootView.onContinueUserActivity` reads the activity with `HandoffActivity(userInfo:)` and resolves its account (below) before the link joins the links from `onOpenURL`.
 - The activity type is listed in `NSUserActivityTypes` in `Audiobookshelf/Info.plist`, which the system requires before it delivers the activity. `AppEnvironmentTests` checks it.
 - The intents and entities side of Handoff is in P5-10 #87.
 - App Intents and Spotlight, added later, also produce a `DeepLink`.
@@ -325,9 +328,11 @@ IDs follow the URL rules. A present but invalid `item` or `episode` rejects the 
 - `DeepLink.init?(handoff:)` ignores a `server` entry, whatever it holds.
 - `HandoffActivity(userInfo:)` reads the link and the account (`HandoffAccount`). Before `Router.open(_:)`, `HandoffActivity.resolve(using:)` asks the `AccountSessionSource` for the connection signed in to that account (`connectionID(for:)`). `AccountManager` matches its saved connections on the normalized address and the exact user ID, skipping connections that were signed out of or disconnected, and those without a saved session (`hasSession(_:)`): an expiry deletes the tokens but keeps the connection without a sign-out, so a switch to it would fail. The most recently used one left wins. The lookup is `async` because it reads the Keychain. The protocol's default matches nothing.
   - A match gives the link with `serverID` set to that connection. If it's the active connection the router opens it; otherwise the router's `pendingServerSwitch` asks before switching, as for a URL with `server=`.
-  - No match gives `accountNotSignedIn`: nothing opens, and the shell tells the user that account isn't signed in on this device.
+  - No match gives `accountNotSignedIn`: nothing opens, on no account, and the scene shows an alert saying that account isn't signed in on this device (`MessageHandoffAccountNotSignedIn`).
   - Two servers, or two users on one server, resolve to their own connections.
-- Wiring the resolution into `RootView.onContinueUserActivity`, forwarding `connectionID(for:)` from the app's `AccountSessionAdapter`, and publishing the activity from the item, episode and player screens are follow-ups (#219).
+- The app's `AccountSessionAdapter` forwards `connectionID(for:)` to `AccountManager` (#504). The scene resolves through `SessionLifecycle.resolve(_:)`, which asks the same source the lifecycle follows.
+- The lookup is asynchronous, so `SceneLinks` orders the links by arrival. A Handoff activity reserves its place when it arrives (`reserveArrival()`) and is kept with the gate and link epoch from that moment. If another link arrived while it resolved, the newer link wins and the activity's link is dropped. If the session changed meanwhile, the old epoch drops the link, as for any waiting link.
+- Publishing from the player is a follow-up (#219).
 
 ### State restoration
 
@@ -658,7 +663,7 @@ All entries were checked in the Xcode 27.2 iPhoneOS and MacOSX SDK `SwiftUI.swif
   - Add `NSUserActivityTypes` (`org.davidjensenius.Audiobookshelf.item`) to the app's `Info.plist` (done in P3-04d #179).
   - Implement `AppTab`, `Route`, `Router` and `DeepLink` in `ABSAppModel/Navigation/`, including the play-link confirmation rule.
   - Note the legacy-app scheme collision in the onboarding and release notes (the release notes have it in `docs/release.md`).
-- **Handoff account identity** (follow-up issue): add `serverAddress` and `userID` to the payload and resolve them to a local connection before `Router.open(_:)`. See "Handoff".
+- **Handoff account identity** (#219): the payload names the account (#443), the item and episode screens publish it (#504), and the scene resolves it before opening. Publishing from the player remains. See "Handoff".
 - **P5-07 #84**: `DuoArrangement` in ABSUI.
 - The player UI (P2-09 #56), iPad (P5-06 #83), Mac (P5-05 #82) and CarPlay (P5-02 #79, P5-03 #80) issues follow the placements above.
 
