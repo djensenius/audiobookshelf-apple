@@ -155,4 +155,77 @@ private let english = Locale(identifier: "en")
                 == "Discard Progress")
         #expect(L10n.string(ItemDetailMenuPresentation.titleKey(for: .details), locale: english) == "More Info")
     }
+
+    // MARK: - Offline (#76)
+
+    private static let serverActions: [ItemDetailMenuAction] = [
+        .markFinished, .markNotFinished, .discardProgress, .hideFromContinueListening, .addToPlaylist,
+    ]
+
+    @Test func onlineEntriesAreEnabledWithoutReason() {
+        let online = ServerActionAvailability(connection: .online)
+        for action in ItemDetailMenuAction.allCases {
+            #expect(
+                ItemDetailMenuPresentation.entryState(for: action, availability: online)
+                    == .init(isDisabled: false, reasonKey: nil))
+        }
+        // Without a shell (signed out, previews) there's no banner, which counts as online.
+        #expect(ServerActionAvailability(session: nil) == online)
+    }
+
+    @Test func offlineDisablesServerActionsWithReason() {
+        let offline = ServerActionAvailability(connection: .offline(.noNetwork))
+        for action in ItemDetailMenuAction.allCases {
+            let state = ItemDetailMenuPresentation.entryState(for: action, availability: offline)
+            if Self.serverActions.contains(action) {
+                #expect(state == .init(isDisabled: true, reasonKey: "MessageNoNetworkConnection"))
+            } else {
+                #expect(state == .init(isDisabled: false, reasonKey: nil))
+            }
+        }
+        #expect(L10n.string("MessageNoNetworkConnection") != "MessageNoNetworkConnection")
+    }
+
+    @Test func unreachableServerDisablesServerActionsWithReason() {
+        let unreachable = ServerActionAvailability(connection: .serverUnreachable(retryAt: nil))
+        for action in Self.serverActions {
+            #expect(
+                ItemDetailMenuPresentation.entryState(for: action, availability: unreachable)
+                    == .init(isDisabled: true, reasonKey: "MessageAudiobookshelfServerNotConnected"))
+        }
+        for action in [ItemDetailMenuAction.share, .details, .history] {
+            #expect(!ItemDetailMenuPresentation.entryState(for: action, availability: unreachable).isDisabled)
+        }
+        let key = "MessageAudiobookshelfServerNotConnected"
+        #expect(L10n.string(key) != key)
+    }
+
+    @Test func performingDisablesOnlyProgressActionsWithoutReason() {
+        let online = ServerActionAvailability(connection: .online)
+        for action in ItemDetailMenuAction.allCases {
+            let state = ItemDetailMenuPresentation.entryState(for: action, availability: online, isPerforming: true)
+            let isProgress = [.markFinished, .markNotFinished, .discardProgress, .hideFromContinueListening]
+                .contains(action)
+            #expect(state == .init(isDisabled: isProgress, reasonKey: nil))
+        }
+    }
+
+    @Test func unavailableServerSendsNothingAndExplains() async {
+        let actions = RecordingMenuActions()
+        let offline = ServerActionAvailability(connection: .offline(.noNetwork))
+        for action in [
+            ItemDetailMenuAction.markFinished, .markNotFinished, .hideFromContinueListening, .discardProgress,
+        ] {
+            #expect(
+                await ItemDetailMenuPresentation.perform(action, on: book, actions: actions, availability: offline)
+                    == "MessageNoNetworkConnection")
+        }
+        #expect(actions.calls.isEmpty)
+
+        let online = ServerActionAvailability(connection: .online)
+        #expect(
+            await ItemDetailMenuPresentation.perform(.markFinished, on: book, actions: actions, availability: online)
+                == nil)
+        #expect(actions.calls.map(\.0) == ["markFinished"])
+    }
 }
