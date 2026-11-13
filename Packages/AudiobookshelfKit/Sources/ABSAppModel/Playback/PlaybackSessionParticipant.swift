@@ -27,6 +27,13 @@ public protocol PlaybackScopeHandle: AnyObject, Sendable {
     func progressDidChange(for key: MediaKey)
     /// Saves the last-played record; local only.
     func saveLocally()
+    /// Hears where playback is, for the library's progress cache, until ``retire(reason:)``.
+    var onProgress: (@MainActor (PlaybackProgressUpdate) -> Void)? { get set }
+    /// Drains pending progress, then uploads pending local sessions, in the scope's own task; for
+    /// an online session. `isFirstSync` is the first sync after login.
+    func syncWithServer(isFirstSync: Bool)
+    /// Reports and drains progress now; returns when that's done or the caller is cancelled.
+    func flush() async
     /// Stops for good, synchronously, capturing the final position.
     func retire(reason: PlaybackStopReason)
     /// Waits, at most `timeout`, for the retirement's closes, then releases the scope.
@@ -68,15 +75,20 @@ public struct PlaybackScopeRequest: Sendable {
 ///
 /// - **Start** builds the scope, binds ``CurrentPlayback`` to its coordinator, publishes its
 ///   ``queue`` and ``sleepTimer``, restores the account's last-played item, publishes
-///   ``playItem``, and starts the session's own ``bookmarks``.
+///   ``playItem``, and starts the session's own ``bookmarks``. Online, it then syncs the scope
+///   with the server (#184): drains pending progress and uploads pending local sessions, as the
+///   first sync after login.
 /// - **Reconnect** swaps the client and features into the same scope, and reconnects the same
-///   bookmark store; playback carries on.
+///   bookmark store; playback carries on. Online, it syncs the scope with the server again.
+/// - **Progress** the scope hears reaches `progressSink` with the session's context, until the
+///   scope retires.
 /// - **End** retires the scope before its first `await`: playback stops for good and the final
 ///   position is captured, before the next account can begin. It then ends the bookmark store,
 ///   waits, within `closeTimeout`, for the close, and releases the scope. The lifecycle may cancel
 ///   that wait and start the next account while it runs; the old scope stays on its own account's
 ///   services.
-/// - **Flush** saves the last-played record locally; sending progress is the syncer's (#184).
+/// - **Flush** saves the last-played record locally, then has the scope report and drain its
+///   progress; the lifecycle bounds it, on background and before sign-out or a switch.
 @MainActor
 @Observable
 public final class PlaybackSessionParticipant: SessionParticipant {
@@ -114,6 +126,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     @ObservationIgnored private let requestSignOut: @MainActor (SessionContext) -> Void
     @ObservationIgnored private let closeTimeout: Duration
     @ObservationIgnored private let makeBookmarks: @MainActor () -> BookmarkStore
+    @ObservationIgnored private let progressSink: (@MainActor (PlaybackProgressUpdate, SessionContext) -> Void)?
     @ObservationIgnored private let makeScope: MakeScope
 
     /// - Parameters:
@@ -126,6 +139,8 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     ///   - closeTimeout: How long an ending session waits for its close.
     ///   - makeBookmarks: Builds each session's bookmark store; the app passes one whose
     ///     `isOffline` reads the lifecycle's gate.
+    ///   - progressSink: Hears the running scope's progress, with its session's context; the app
+    ///     passes ``LibraryParticipant/applyPlaybackProgress(_:sessionID:)``.
     ///   - makeScope: Builds the scope; the app passes ``PlaybackScope/make(_:makeNowPlaying:)``.
     public init(
         current: CurrentPlayback, writer: LocalProgressStore, deviceIdentifiers: any DeviceIdentifying,
@@ -133,6 +148,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         requestSignOut: @escaping @MainActor (SessionContext) -> Void,
         closeTimeout: Duration = PlaybackCoordinator.closeWaitTimeout,
         makeBookmarks: @escaping @MainActor () -> BookmarkStore = { BookmarkStore() },
+        progressSink: (@MainActor (PlaybackProgressUpdate, SessionContext) -> Void)? = nil,
         makeScope: @escaping MakeScope
     ) {
         self.current = current
@@ -142,6 +158,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         self.requestSignOut = requestSignOut
         self.closeTimeout = closeTimeout
         self.makeBookmarks = makeBookmarks
+        self.progressSink = progressSink
         self.makeScope = makeScope
     }
 
@@ -175,12 +192,19 @@ public final class PlaybackSessionParticipant: SessionParticipant {
             guard let self, let scope, self.scope === scope else { return }
             self.requestSignOut(context)
         }
+        if let progressSink {
+            scope.onProgress = { [weak self, weak scope] update in
+                guard let self, let scope, self.scope === scope else { return }
+                progressSink(update, context)
+            }
+        }
         current.bind(scope.playback)
         queue = PlaybackQueueControl(scope: scope)
         sleepTimer = scope.sleepTimer
         let bookmarks = makeBookmarks()
         self.bookmarks = bookmarks
         scope.start()
+        if Self.isOnline(context) { scope.syncWithServer(isFirstSync: true) }
         playItem = PlayItemAction { [weak scope] itemID, episodeID, startTime in
             await scope?.play(itemID: itemID, episodeID: episodeID, startTime: startTime)
         }
@@ -189,7 +213,13 @@ public final class PlaybackSessionParticipant: SessionParticipant {
 
     public func sessionDidReconnect(_ context: SessionContext) async {
         scope?.reconnect(client: context.client, features: features(context.identity))
+        if Self.isOnline(context) { scope?.syncWithServer(isFirstSync: false) }
         await bookmarks?.sessionDidReconnect(context)
+    }
+
+    /// Whether the session can reach its server.
+    private static func isOnline(_ context: SessionContext) -> Bool {
+        context.client != nil && !context.isOffline
     }
 
     public func sessionWillEnd(_ reason: SessionEndReason) async {
@@ -219,6 +249,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         sleepTimer = nil
         self.bookmarks = nil
         scope.onSessionRejected = nil
+        scope.onProgress = nil
         scope.retire(reason: reason)
         current.bind(nil)
         return EndingScope(scope: scope, sessionID: sessionID, bookmarks: bookmarks)
@@ -246,7 +277,9 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     }
 
     public func flush() async {
-        scope?.saveLocally()
+        guard let scope else { return }
+        scope.saveLocally()
+        await scope.flush()
     }
 
     /// The error's case name, without session IDs.

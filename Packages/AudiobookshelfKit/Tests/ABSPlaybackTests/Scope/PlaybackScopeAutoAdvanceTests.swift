@@ -20,7 +20,7 @@ struct PlaybackScopeAutoAdvanceTests {
         queue.addToEnd(QueueItem(libraryItemID: "B", title: "B"))
         scope = PlaybackScope(
             coordinator: s.coordinator, syncer: s.syncer, services: nil, nowPlaying: RecordingNowPlaying(),
-            queue: queue, networkPaths: paths)
+            queue: queue, paths: paths)
     }
 
     private var policyChecks: Int { s.h.policy.checks }

@@ -26,6 +26,23 @@ extension NowPlayingBridge: NowPlayingHandle {
     }
 }
 
+/// Where local playback has reached, for the library's progress cache (#184).
+public struct PlaybackProgressUpdate: Sendable, Equatable {
+    public var key: MediaKey
+    public var currentTime: Double
+    /// `0` when not known yet.
+    public var duration: Double
+    /// When playback was there.
+    public var date: Date
+
+    public init(key: MediaKey, currentTime: Double, duration: Double, date: Date) {
+        self.key = key
+        self.currentTime = currentTime
+        self.duration = duration
+        self.date = date
+    }
+}
+
 /// Playback for one account session (#183): its services, coordinator, attached progress syncer
 /// and Now Playing bridge, built together and torn down together.
 ///
@@ -49,11 +66,19 @@ extension NowPlayingBridge: NowPlayingHandle {
 ///   stops the coordinator for good and captures the final position.
 ///   ``finishRetirement(timeout:)`` then waits for the close, within a bound, and releases the
 ///   syncer, the bridge and the ``onRelease(_:)`` hooks, whatever the wait's outcome.
-/// - **Transport.** The attached syncer syncs as it always does: pause, seek and periodic ticks
-///   send `/sync`, and a successful sync drains pending progress. It is built with no network
-///   path monitor (`paths: nil`), so nothing drains it on reconnect, and the scope never drains
-///   or flushes it itself; launch, reconnect and background draining are #184's. Switch cleanup
-///   keeps the services usable for the closes the switch allows; release never invalidates them.
+/// - **Transport** (#184). The attached syncer syncs as it always does: pause, seek and periodic
+///   ticks send `/sync`, and a successful sync drains pending progress. It follows the configured
+///   network path, so it drains whenever the device comes back online. ``syncWithServer(isFirstSync:)``
+///   drains it and then uploads the connection's pending local sessions (``LocalSessionUploader``),
+///   at the session's start and on each reconnect, online: the session's, and the network path's,
+///   which the scope follows too, so uploads a failed sync left are retried even when the account
+///   and its client stay the same. ``flush()`` reports and drains for the
+///   lifecycle's bounded flush, on background and before sign-out or a switch. A `/sync` the
+///   server answers with 404 for the loaded session replaces that session at the same position
+///   (``PlaybackCoordinator/replaceGoneSession(_:)``). Switch cleanup keeps the services usable
+///   for the closes the switch allows; release never invalidates them.
+/// - **Library progress.** ``onProgress`` hears where playback is (pauses, seeks, the end, closes,
+///   and ticks at most every ``progressInterval`` of media time), until retirement cuts it off.
 @MainActor
 public final class PlaybackScope {
     /// What ``make(_:makeNowPlaying:)`` builds a scope from.
@@ -83,9 +108,14 @@ public final class PlaybackScope {
         /// `{ SleepTimerAttachment(coordinator: $0, settings: settings) }` with the settings every
         /// scene shares. `nil` leaves the scope without one.
         public var makeSleepTimer: (@MainActor (PlaybackCoordinator) -> SleepTimerAttachment)?
-        /// The network path recovery waits on; the app sets `SystemNetworkPathSource()`. `nil`
-        /// treats it as always satisfied.
+        /// The network path recovery waits on, and the syncer drains on when it comes back online,
+        /// as the scope runs ``PlaybackScope/syncWithServer(isFirstSync:)`` then; the app sets
+        /// `SystemNetworkPathSource()`. `nil` treats it as always satisfied, and leaves reconnect
+        /// syncing to the session's reconnects.
         public var networkPaths: (any NetworkPathSource)?
+        /// Records the scope's playback history (``ProgressSyncer``'s `history`); the app sets a
+        /// `PlaybackHistoryRecorder` over its one history store. `nil` records none.
+        public var history: (any PlaybackHistoryRecording)?
 
         public init(
             connectionID: UUID, client: APIClient?, features: ServerFeatures?,
@@ -122,7 +152,14 @@ public final class PlaybackScope {
     public let services: AccountPlaybackServices?
     /// Called once, the first time the server rejects a session start as expired.
     public var onSessionRejected: (@MainActor () -> Void)?
+    /// Hears where playback is, for the library's progress cache, until ``retire(reason:)``.
+    public var onProgress: (@MainActor (PlaybackProgressUpdate) -> Void)?
+    /// The media time between two ticks ``onProgress`` hears.
+    public static let progressInterval: Double = 10
 
+    /// Uploads the connection's pending local sessions; `nil` only for a scope built without one
+    /// (tests).
+    let uploader: LocalSessionUploader?
     /// Auto-advance over the connection's queue, attached to the coordinator until
     /// ``retire(reason:)``. `nil` only for a scope built without a queue (tests).
     let advancer: PlaybackQueueAdvancer?
@@ -138,8 +175,19 @@ public final class PlaybackScope {
     private(set) var isReleased = false
     /// A user play's system-primary claim, waiting for playback to become active.
     private var pendingPrimaryClaim: Task<Void, Never>?
-    /// Tells the advancer of network path changes until retirement.
-    private var pathFollower: Task<Void, Never>?
+    /// The latest ``syncWithServer(isFirstSync:)``; each waits for the one before it.
+    private var serverSync: Task<Void, Never>?
+    /// The `isFirstSync` of the server sync that waits to start; `nil` when none waits.
+    private var queuedServerSync: Bool?
+    /// Follows the network path, for ``syncWithServer(isFirstSync:)`` on reconnects, until
+    /// ``retire(reason:)``.
+    private(set) var pathTask: Task<Void, Never>?
+    /// Hears each path the scope handled, and whether it asked for a server sync (tests).
+    var pathHandled: (@MainActor (NetworkPath, Bool) -> Void)?
+    /// The last update ``onProgress`` heard, to space out ticks.
+    private var lastProgress: PlaybackProgressUpdate?
+    /// The latest replacement of a session the server no longer has (tests wait for it).
+    private(set) var sessionReplacement: Task<Void, Never>?
 
     /// The `UserDefaults` key of a connection's last-played record.
     public static func lastPlayedKey(for connectionID: UUID) -> String {
@@ -153,10 +201,12 @@ public final class PlaybackScope {
         UserDefaultsLastPlayedStore(defaults: defaults, key: lastPlayedKey(for: connectionID))
     }
 
-    /// Builds the services, then the coordinator, then the syncer (attached before any play),
-    /// then the sleep timer, if configured, then the Now Playing bridge, which the scope holds
-    /// strongly, and the queue's advancer, whose podcast fallback reads episodes through the
-    /// services' current client.
+    /// Builds the services, then the coordinator, then the syncer (attached before any play,
+    /// following the configured network path and recording the configured history), then the
+    /// sleep timer, if configured, then the Now Playing bridge, which the scope holds strongly,
+    /// and the queue's advancer, whose podcast fallback reads episodes through the services'
+    /// current client. The local-session uploader sends through the services too, so it follows
+    /// reconnects.
     public static func make(
         _ configuration: Configuration, makeNowPlaying: (PlaybackCoordinator) -> any NowPlayingHandle
     ) -> PlaybackScope {
@@ -170,48 +220,61 @@ public final class PlaybackScope {
             backgroundActivity: configuration.backgroundActivity, networkPaths: configuration.networkPaths)
         let syncer = ProgressSyncer(
             source: coordinator, service: services, store: configuration.writer,
-            tickInterval: configuration.tickInterval, paths: nil)
+            tickInterval: configuration.tickInterval, paths: configuration.networkPaths, history: configuration.history)
         let sleepTimer = configuration.makeSleepTimer?(coordinator)
         let queue = PlaybackQueue(serverConnectionID: configuration.connectionID, store: configuration.queueStore)
         let episodes = APIPodcastEpisodeSource(
             serverConnectionID: configuration.connectionID, localProgress: configuration.writer,
             fetchItem: { try await services.client().send(ItemEndpoints.item(id: $0)) },
             fetchFinished: { try await services.client().send(UserEndpoints.me()) })
+        let uploader = LocalSessionUploader(
+            serverConnectionID: configuration.connectionID, store: configuration.writer, service: services,
+            deviceIdentifiers: configuration.deviceIdentifiers)
         return PlaybackScope(
             coordinator: coordinator, syncer: syncer, services: services, nowPlaying: makeNowPlaying(coordinator),
-            queue: queue, episodes: episodes, sleepTimer: sleepTimer, networkPaths: configuration.networkPaths)
+            queue: queue, episodes: episodes, sleepTimer: sleepTimer, uploader: uploader,
+            paths: configuration.networkPaths)
     }
 
     /// Test seam: a scope over a coordinator and a syncer already attached to it, an advancer
-    /// over `queue`, when one is given, attached to the coordinator and told of each change of
-    /// `networkPaths` after its first path, and `sleepTimer`, detached when the scope retires,
-    /// and again when it's released.
+    /// over `queue`, when one is given, attached to the coordinator, `sleepTimer`, detached
+    /// when the scope retires, and again when it's released, `uploader`, sending through any
+    /// services, and `paths`, followed for reconnects and, after its first path, to have the
+    /// advancer prepare again on each change.
     init(
         coordinator: PlaybackCoordinator, syncer: ProgressSyncer, services: AccountPlaybackServices?,
         nowPlaying: any NowPlayingHandle, queue: PlaybackQueue? = nil, episodes: (any PodcastEpisodeSource)? = nil,
-        sleepTimer: SleepTimerAttachment? = nil, networkPaths: (any NetworkPathSource)? = nil
+        sleepTimer: SleepTimerAttachment? = nil, uploader: LocalSessionUploader? = nil,
+        paths: (any NetworkPathSource)? = nil
     ) {
         self.coordinator = coordinator
         self.syncer = syncer
         self.services = services
         self.nowPlaying = nowPlaying
+        self.uploader = uploader
         sleepTimerAttachment = sleepTimer
         advancer = queue.map { PlaybackQueueAdvancer(queue: $0, episodes: episodes) }
         advancer?.attach(to: coordinator)
-        if let advancer, let networkPaths {
-            pathFollower = Task { [weak advancer] in
-                var last: NetworkPath?
-                for await path in networkPaths.paths() {
-                    if let last, last != path { advancer?.connectionDidChange() }
-                    last = path
-                }
-            }
-        }
-        observer = coordinator.addObserver { [weak self] event in
-            guard case .failed(.sessionStartFailed(.sessionExpired)) = event else { return }
-            self?.sessionRejected()
+        observer = coordinator.addObserver { [weak self] event in self?.handle(event) }
+        services?.setSessionGoneHandler { [weak self] sessionID in
+            Task { @MainActor [weak self] in self?.sessionGone(sessionID) }
         }
         if let sleepTimer { onRelease { sleepTimer.detach() } }
+        if let paths { watch(paths.paths()) }
+    }
+
+    private func handle(_ event: PlaybackCoordinatorEvent) {
+        switch event {
+        case .failed(.sessionStartFailed(.sessionExpired)): sessionRejected()
+        case .tick(let time): reportProgress(at: time, spaced: true)
+        case .paused(let time), .didSeek(let time): reportProgress(at: time)
+        case .ended: reportProgress(at: coordinator.duration)
+        case .sessionWillClose(let closing) where closing.wasLoaded:
+            report(
+                PlaybackProgressUpdate(
+                    key: closing.key, currentTime: closing.currentTime, duration: closing.duration, date: Date()))
+        default: break
+        }
     }
 
     private func sessionRejected() {
@@ -347,6 +410,109 @@ public final class PlaybackScope {
         coordinator.saveLastPlayed()
     }
 
+    // MARK: Server sync
+
+    /// Drains the syncer's pending progress, then uploads the connection's pending local sessions
+    /// (``LocalSessionUploader``), in a task the scope owns. Call it while the account is online:
+    /// at the session's start with `isFirstSync` (the first sync after login, which also deletes
+    /// acknowledged active sessions, ADR 0003), and after each reconnect. The scope calls it too
+    /// when the network path comes back online. A call while one runs waits for it, and calls
+    /// while one waits join that one, so a flapping path never stacks syncs. Nothing once
+    /// retired, and retirement stops one under way: it starts no request after.
+    public func syncWithServer(isFirstSync: Bool) {
+        guard !isRetired else { return }
+        if let queued = queuedServerSync {
+            queuedServerSync = queued || isFirstSync
+            return
+        }
+        queuedServerSync = isFirstSync
+        let previous = serverSync
+        let (syncer, uploader) = (syncer, uploader)
+        serverSync = Task { [weak self] in
+            await previous?.value
+            guard let isFirstSync = self?.startQueuedServerSync() else { return }
+            await syncer.drainPendingProgress()
+            guard self?.isRetired == false, !Task.isCancelled, let uploader else { return }
+            await uploader.sync(isFirstSync: isFirstSync)
+        }
+    }
+
+    /// Starts the server sync that waited: its `isFirstSync`, or `nil` once retired or cancelled.
+    private func startQueuedServerSync() -> Bool? {
+        let isFirstSync = queuedServerSync ?? false
+        queuedServerSync = nil
+        guard !isRetired, !Task.isCancelled else { return nil }
+        return isFirstSync
+    }
+
+    /// Runs ``syncWithServer(isFirstSync:)`` on each offline-to-online transition, by the
+    /// syncer's rule: not on repeated or initial online paths, but on an online path whose
+    /// `onlineEpoch` grew (the offline one between was dropped). The syncer drains on the same
+    /// transition by itself; this also retries the pending uploads, which the session's
+    /// reconnects miss when the account and its client stay the same. Any change of path after
+    /// the first also has the auto-advance prepare the next item again (#160).
+    private func watch(_ paths: AsyncStream<NetworkPath>) {
+        pathTask = Task { [weak self] in
+            var previous: NetworkPath?
+            for await path in paths {
+                guard let self, !self.isRetired else { return }
+                let reconnected =
+                    previous.map { path.isOnline && (!$0.isOnline || path.onlineEpoch != $0.onlineEpoch) } ?? false
+                let changed = previous.map { $0 != path } ?? false
+                previous = path
+                if reconnected { self.syncWithServer(isFirstSync: false) }
+                if changed { self.advancer?.connectionDidChange() }
+                self.pathHandled?(path, reconnected)
+            }
+        }
+    }
+
+    /// Waits for the latest ``syncWithServer(isFirstSync:)`` (tests).
+    func waitForServerSync() async {
+        await serverSync?.value
+    }
+
+    /// Reports the loaded session now and drains pending progress (``ProgressSyncer/flush()``),
+    /// for the lifecycle's flush on background and before sign-out or a switch. Returns once
+    /// that's done or the caller is cancelled (the lifecycle bounds its flush), whichever comes
+    /// first; the syncer's work carries on either way. Nothing once retired.
+    public func flush() async {
+        guard !isRetired else { return }
+        let done = PlaybackCloseResult<Void>()
+        let syncer = syncer
+        Task {
+            await syncer.flush()
+            done.resolve(.success(()))
+        }
+        _ = try? await done.wait()
+    }
+
+    /// The server no longer has session `sessionID`: replaces it at the same position, unless the
+    /// scope retired or the coordinator moved on (``PlaybackCoordinator/replaceGoneSession(_:)``).
+    func sessionGone(_ sessionID: String) {
+        guard !isRetired, coordinator.session?.id == sessionID else { return }
+        let coordinator = coordinator
+        sessionReplacement = Task { await coordinator.replaceGoneSession(sessionID) }
+    }
+
+    // MARK: Library progress
+
+    /// Tells ``onProgress`` the loaded media is at `time`; when `spaced`, only once the media time
+    /// moved ``progressInterval`` from the last update about the same media.
+    private func reportProgress(at time: Double, spaced: Bool = false) {
+        guard onProgress != nil, let key = coordinator.mediaKey else { return }
+        if spaced, let last = lastProgress, last.key == key, abs(time - last.currentTime) < Self.progressInterval {
+            return
+        }
+        report(PlaybackProgressUpdate(key: key, currentTime: time, duration: coordinator.duration, date: Date()))
+    }
+
+    private func report(_ update: PlaybackProgressUpdate) {
+        guard let onProgress else { return }
+        lastProgress = update
+        onProgress(update)
+    }
+
     /// Adds work to run when the scope is released, after the bridge is invalidated (the sleep
     /// timer's detach, #185, a backstop: retirement already cancelled the timer). Runs at once if
     /// the scope was already released.
@@ -357,16 +523,22 @@ public final class PlaybackScope {
 
     /// Cancels the sleep timer and stops the coordinator for good, synchronously: call it before
     /// the teardown first suspends. It captures the final position; expiry, sign-out and removal
-    /// also drop the client, so nothing reaches the server after. Pass an account-ending reason,
-    /// never `.user`.
+    /// also drop the client, so nothing reaches the server after. It cuts off ``onProgress`` first,
+    /// so the next account's library never hears this one's playback, and stops the server sync,
+    /// the uploader and following the network path. Pass an account-ending reason, never `.user`.
     public func retire(reason: PlaybackStopReason) {
         assert(reason != .user, "A scope retires only for an account-ending reason")
         revokePrimaryClaim()
+        // Cut off before the stop: the next account's library must not hear its close.
+        onProgress = nil
+        serverSync?.cancel()
+        pathTask?.cancel()
+        pathTask = nil
+        services?.setSessionGoneHandler(nil)
+        if let uploader { Task { await uploader.cancel() } }
         // Detached before the stop, so nothing it triggers can advance or change the queue, and
         // the sleep timer can't act on the stopped coordinator during the close wait.
         isRetired = true
-        pathFollower?.cancel()
-        pathFollower = nil
         advancer?.detach(from: coordinator)
         advancer?.queue.retire()
         sleepTimerAttachment?.detach()
@@ -400,8 +572,8 @@ public final class PlaybackScope {
         guard !isReleased else { return }
         isReleased = true
         revokePrimaryClaim()
-        // Only the syncer's hooks on the coordinator are cut here, after the close wait. A library
-        // progress sink (#184) must instead be cut off in `retire(reason:)`: the library's
+        // Only the syncer's hooks on the coordinator are cut here, after the close wait. The
+        // library progress sink (``onProgress``) was cut off in `retire(reason:)`: the library's
         // progress cache has no generation check, and the next account can start before this runs.
         syncer.detach()
         if let observer { coordinator.removeObserver(observer) }
