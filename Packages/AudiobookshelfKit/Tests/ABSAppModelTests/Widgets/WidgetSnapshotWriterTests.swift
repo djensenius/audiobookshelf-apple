@@ -409,6 +409,69 @@ private func context(_ server: UUID) -> SessionContext {
         #expect(!FileManager.default.fileExists(atPath: file.path))
     }
 
+    /// A → B, then A's credentials expire (say, during an A download): A stays saved, signed out,
+    /// so its snapshot is cleared rather than kept until A is removed (#480).
+    @Test func anInactiveAccountsExpiryClearsItsSnapshot() async {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = await writer()
+        writer.update(snapshot())
+        await writer.sessionWillEnd(.switch)
+        await writer.sessionDidStart(context(serverB))
+
+        writer.connectionExpired(serverA)
+
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(reloader.kinds.count == 2)
+    }
+
+    /// Another connection's expiry keeps the snapshot and doesn't reload the widget.
+    @Test func anotherAccountsExpiryKeepsTheSnapshot() async {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let serverC = UUID()
+        let writer = await writer()
+        writer.update(snapshot())
+        await writer.sessionWillEnd(.switch)
+        await writer.sessionDidStart(context(serverB))
+
+        writer.connectionExpired(serverC)
+
+        #expect(onDisk == snapshot())
+        #expect(reloader.kinds.count == 1)
+    }
+
+    /// The running session's expiry is cleared by its end (`.expired`), once, not also when the
+    /// credentials report it.
+    @Test func theRunningSessionsExpiryClearsTheSnapshotOnce() async {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = await writer()
+        writer.update(snapshot())
+
+        writer.connectionExpired(serverA)
+        #expect(onDisk == snapshot())
+        await writer.sessionWillEnd(.expired)
+
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(reloader.kinds.count == 2)
+    }
+
+    /// The running session's credentials expire as a switch away from it begins: the switch
+    /// ends it, which would keep the snapshot, but its account is signed out now. The next
+    /// session's switch keeps the (empty) state without reloading again.
+    @Test func aSwitchAfterTheRunningSessionExpiredClearsTheSnapshot() async {
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let writer = await writer()
+        writer.update(snapshot())
+
+        writer.connectionExpired(serverA)
+        await writer.sessionWillEnd(.switch)
+
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(reloader.kinds.count == 2)
+        await writer.sessionDidStart(context(serverB))
+        await writer.sessionWillEnd(.switch)
+        #expect(reloader.kinds.count == 2)
+    }
+
     @Test func aRestoredSessionAtLaunchKeepsTheSnapshot() async {
         defer { try? FileManager.default.removeItem(at: directory) }
         await writer().update(snapshot())

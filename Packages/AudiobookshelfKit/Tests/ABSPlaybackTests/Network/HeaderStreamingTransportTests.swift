@@ -1,4 +1,5 @@
 import ABSCore
+import ABSTestSupport
 import AVFoundation
 import Foundation
 import Testing
@@ -38,10 +39,11 @@ struct HeaderStreamingTransportTests {
         return request
     }
 
-    /// Waits up to two seconds for `condition`.
+    /// Waits up to two seconds for `condition` (a ``WaitBudget``, so a stall of the process doesn't
+    /// spend it).
     private func eventually(_ condition: () -> Bool) async throws {
-        let deadline = ContinuousClock.now + .seconds(2)
-        while !condition(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        var budget = WaitBudget(.seconds(2))
+        while !condition(), budget.hasTimeLeft() { try await Task.sleep(for: .milliseconds(10)) }
     }
 
     // MARK: - URLs, ranges and content information

@@ -35,17 +35,17 @@ enum EpisodeDetailPresentation {
         return .loading
     }
 
-    /// Plays the episode through `play`, from the server's position, or from the start once
-    /// finished (``EpisodeDetailModel/playStartTime``). Returns what the alert shows when that
-    /// fails, or `nil` once it starts or is cancelled.
+    /// Plays the episode through `play` from `startTime` (a show-notes timestamp), or else from
+    /// the server's position, or from the start once finished (``EpisodeDetailModel/playStartTime``).
+    /// Returns what the alert shows when that fails, or `nil` once it starts or is cancelled.
     @MainActor
-    static func startPlayback(of model: EpisodeDetailModel, with play: PlayItemAction) async
-        -> ItemDetailPlayFailure?
+    static func startPlayback(of model: EpisodeDetailModel, with play: PlayItemAction, from startTime: Double? = nil)
+        async -> ItemDetailPlayFailure?
     {
         let itemID = model.itemID
         let episodeID = model.episodeID
         do {
-            try await play(itemID: itemID, episodeID: episodeID, startTime: model.playStartTime)
+            try await play(itemID: itemID, episodeID: episodeID, startTime: startTime ?? model.playStartTime)
             return nil
         } catch {
             guard let failure = ItemDetailPlayFailure(error: error) else { return nil }
@@ -58,12 +58,14 @@ enum EpisodeDetailPresentation {
 
     /// The show notes as attributed text: ABSUI's ``HTMLText`` subset, so http and https links
     /// are kept, while images, scripts, styles and other links are dropped and nothing is loaded
-    /// from the network. `nil` when there's nothing to show.
-    nonisolated static func showNotes(html: String?) -> AttributedString? {
+    /// from the network. Times such as `12:34` within `duration` link to
+    /// ``ShowNotesTimestamps/url(seconds:)``, which the screen plays from. `nil` when there's
+    /// nothing to show.
+    nonisolated static func showNotes(html: String?, duration: Double? = nil) -> AttributedString? {
         guard let html else { return nil }
         let text = HTMLText.attributedString(from: html)
         guard !String(text.characters).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        return text
+        return ShowNotesTimestamps.link(text, duration: duration)
     }
 
     /// The line under the title: when it was published and how long it is, as legacy showed the

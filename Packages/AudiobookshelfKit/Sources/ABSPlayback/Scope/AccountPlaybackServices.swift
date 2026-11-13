@@ -107,6 +107,10 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
         try await service.refreshStreamAccess(replacing: rejected)
     }
 
+    public func sessionStatus(id: String) async -> PlaybackSessionStatus {
+        await .checking { try await openSession(id: id) }
+    }
+
     // MARK: ProgressSyncService
 
     public func fetchProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
@@ -126,5 +130,10 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
     public func openSession(id: String) async throws -> PlaybackSession {
         try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
             .openSession(id: id)
+    }
+
+    public func listeningSessions(itemID: String, episodeID: String?) async throws -> ListeningSessionsPage {
+        try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
+            .listeningSessions(itemID: itemID, episodeID: episodeID)
     }
 }

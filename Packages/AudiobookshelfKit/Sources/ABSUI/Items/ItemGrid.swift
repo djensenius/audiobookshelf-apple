@@ -28,6 +28,9 @@ public enum ItemGridMetrics {
 /// (so it fits phones, iPad split views and Mac windows) and the Dynamic Type size, with no
 /// per-cell `GeometryReader`.
 ///
+/// From iOS 27.1, a fold running down through the grid (an iPhone Duo in book pose, or lying flat) splits the
+/// columns evenly around it instead (#85, ``ItemGridFoldLayout``), so no card straddles it.
+///
 /// Cells are keyed by `Element.ID`. A sparse, paged list should give each position a stable
 /// ID, such as its index within the query generation.
 public struct ItemGrid<Element: Identifiable, Cell: View>: View {
@@ -35,6 +38,8 @@ public struct ItemGrid<Element: Identifiable, Cell: View>: View {
     private let spacing: CGFloat
     private let cell: (Element) -> Cell
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    /// The fold through the grid, once measured (``ItemGridFoldReader``).
+    @State private var fold: ItemGridFold?
 
     public init(
         elements: [Element], spacing: CGFloat = ABSSpacing.large, @ViewBuilder cell: @escaping (Element) -> Cell
@@ -45,18 +50,62 @@ public struct ItemGrid<Element: Identifiable, Cell: View>: View {
     }
 
     public var body: some View {
-        LazyVGrid(
-            columns: [
-                GridItem(
-                    .adaptive(minimum: ItemGridMetrics.minimumCellWidth(for: dynamicTypeSize)), spacing: spacing,
-                    alignment: .top)
-            ], spacing: spacing
-        ) {
+        let layout = fold.flatMap {
+            ItemGridMetrics.foldLayout($0, dynamicTypeSize: dynamicTypeSize, spacing: spacing)
+        }
+        LazyVGrid(columns: columns(layout), spacing: spacing) {
             ForEach(elements) { element in
                 cell(element)
             }
         }
-        .padding(.horizontal, ABSSpacing.large)
+        .padding(.leading, layout?.leadingInset ?? ABSSpacing.large)
+        .padding(.trailing, layout?.trailingInset ?? ABSSpacing.large)
+        .modifier(ItemGridFoldReader(fold: $fold))
+    }
+
+    /// Fixed columns around a fold, or adaptive ones without.
+    private func columns(_ layout: ItemGridFoldLayout?) -> [GridItem] {
+        guard let layout else {
+            return [
+                GridItem(
+                    .adaptive(minimum: ItemGridMetrics.minimumCellWidth(for: dynamicTypeSize)), spacing: spacing,
+                    alignment: .top)
+            ]
+        }
+        return (0..<layout.columnCount).map {
+            GridItem(.fixed(layout.columnWidth), spacing: layout.spacing(after: $0), alignment: .top)
+        }
+    }
+}
+
+/// Measures the fold an ``ItemGrid`` lies across from iOS 27.1: its `.division` reserved regions, inactive ones
+/// included (``ItemGridFold``). Before that and on macOS it measures nothing, so the grid keeps its adaptive
+/// columns.
+private struct ItemGridFoldReader: ViewModifier {
+    @Binding var fold: ItemGridFold?
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+            if #available(iOS 27.1, *) {
+                content
+                    // The measured width is the offered one, whatever the columns add up to, even when the fixed
+                    // columns of a wider proposal would otherwise hold it wider than a narrower one.
+                    .frame(minWidth: 0, maxWidth: .infinity)
+                    .onGeometryChange(for: ItemGridFold?.self) { proxy in
+                        ItemGridFold(
+                            width: proxy.size.width,
+                            divisions: proxy.reservedRegions(kind: .division, options: .includeInactive).map {
+                                ($0.frame, $0.isActive)
+                            })
+                    } action: {
+                        fold = $0
+                    }
+            } else {
+                content
+            }
+        #else
+            content
+        #endif
     }
 }
 

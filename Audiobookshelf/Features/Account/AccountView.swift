@@ -175,6 +175,25 @@ struct ServersView: View {
     /// Whether each connection has a saved session to switch to (``AccountManager/hasSession(_:)``).
     @State private var hasSession: [UUID: Bool] = [:]
 
+    /// What ``hasSession`` is read again for: the connections, or a saved session stored, deleted
+    /// or found expired without the list changing (an inactive account's expiry).
+    struct SessionsKey: Equatable {
+        let connections: [ServerConnectionDTO]
+        let credentialsRevision: Int
+
+        @MainActor init(_ accounts: AccountManager) {
+            connections = accounts.connections
+            credentialsRevision = accounts.credentialsRevision
+        }
+    }
+
+    /// Whether each of `accounts`' connections has a saved session, for ``hasSession``.
+    static func sessions(of accounts: AccountManager) async -> [UUID: Bool] {
+        var sessions: [UUID: Bool] = [:]
+        for server in accounts.connections { sessions[server.id] = await accounts.hasSession(server.id) }
+        return sessions
+    }
+
     var body: some View {
         let servers = accounts?.connections ?? []
         Form {
@@ -267,11 +286,10 @@ struct ServersView: View {
         .alert(Text(verbatim: L10n.string("MessageRemoveServerFailed")), isPresented: $removeFailed) {
             Button(L10n.string("ButtonOk")) {}
         }
-        .task(id: accounts?.connections) {
+        .task(id: accounts.map(SessionsKey.init)) {
             guard let accounts else { return }
-            var sessions: [UUID: Bool] = [:]
-            for server in accounts.connections { sessions[server.id] = await accounts.hasSession(server.id) }
-            // A newer run, for newer connections, writes its own.
+            let sessions = await Self.sessions(of: accounts)
+            // A newer run, for newer connections or credentials, writes its own.
             guard !Task.isCancelled else { return }
             hasSession = sessions
         }

@@ -556,6 +556,49 @@ import Testing
         #expect(harness.requests.count == 3)
     }
 
+    /// A failure's code (#73) is saved in the engine's own failure write: once a background wake
+    /// ends, after which iOS may suspend and end the process, the stored failure has its code
+    /// without anything else (the manager) having run.
+    @Test func backgroundFailureIsSavedWithItsCodeBeforeTheWakeEnds() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness { _ in .status(404, gate: gate) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine()
+        await engine.start(partIDs: [partID])
+        await harness.waitForRequests(1)
+        await engine.deactivate()
+
+        let wake = Task { await engine.handleBackgroundEvents() }
+        gate.open()
+        await harness.waitForCompletions(1)
+        harness.session?.finishBackgroundEvents()
+        await wake.value
+
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .failed)
+        #expect(part.lastErrorCode == DownloadFailureCode.httpStatus.rawValue)
+    }
+
+    /// A failure that will be retried is saved with its code too, while it waits for the retry.
+    @Test func retriedFailureIsSavedWithItsCode() async throws {
+        let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(503) : .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let clock = FiringClock()
+        let engine = harness.makeEngine(clock: clock)
+
+        await engine.start(partIDs: [partID])
+
+        #expect(await engine.nextFailure(willRetry: true) != nil)
+        let part = try #require(try await harness.store.part(id: partID))
+        #expect(part.state == .failed)
+        #expect(part.lastErrorCode == DownloadFailureCode.transfer.rawValue)
+        _ = await clock.started.first { _ in true }
+        clock.fire()
+        #expect(await engine.nextRecordComplete() != nil)
+    }
+
     /// A completed part queued again downloads again: the file in place is from an earlier
     /// transfer.
     @Test func requeuedCompletedPartDownloadsAgain() async throws {

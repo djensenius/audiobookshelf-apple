@@ -24,6 +24,7 @@ struct AudiobookshelfApp: App {
             .environment(\.downloads, downloads)
             .environment(settings)
             .environment(\.windowRoute, $windowRoute)
+            .environment(\.downloadAccess, environment.downloads?.access)
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {

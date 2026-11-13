@@ -281,3 +281,6 @@ public final class DownloadsController {
         }
     }
 }
+
+// In this file: the protocol's `Sendable` conformance must be declared with the class.
+extension DownloadsController: DownloadRequesting {}

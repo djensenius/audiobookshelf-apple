@@ -6,6 +6,8 @@ import Foundation
 
 /// The download stack (#73), built once by ``AppEnvironment``.
 ///
+/// ``access`` is what screens queue downloads with (`\.downloadAccess`).
+///
 /// ``engine`` is kept here because ``DownloadEngineRegistry`` holds it weakly, for the
 /// `.backgroundTask(.urlSession(...))` handler. ``lifecycle`` is registered as a session
 /// participant, and the app passes it every scene phase.
@@ -19,6 +21,7 @@ struct AppDownloads {
     let janitor: DownloadJanitor
     let controller: DownloadsController
     let lifecycle: DownloadsLifecycle
+    let access: DownloadAccess
 
     /// - Parameters:
     ///   - root: the directory that holds `Downloads/` and `ResumeData/` (``DownloadLocations``);
@@ -26,9 +29,11 @@ struct AppDownloads {
     ///     directory.
     ///   - makeSession: ``DownloadEngine/backgroundSession()`` in the app; tests pass a
     ///     non-background session.
+    ///   - progress: the app's one local progress store (``AppEnvironment/localProgress``),
+    ///     which downloads link their progress rows in.
     static func make(
         dataStack: DataStack, accounts: AccountManager, settings: AppSettings, root: URL,
-        makeSession: @escaping DownloadSessionFactory
+        makeSession: @escaping DownloadSessionFactory, progress: LocalProgressStore
     ) -> AppDownloads {
         let locations = DownloadLocations(root: root)
         let store = DownloadStore(modelContainer: dataStack.container)
@@ -43,7 +48,8 @@ struct AppDownloads {
             networkAccess: networkAccess.provider, makeSession: makeSession)
         let manager = DownloadManager(
             store: store, localItems: localItems, engine: engine, locations: locations,
-            capacity: VolumeStorageCapacity(locations: locations))
+            capacity: VolumeStorageCapacity(locations: locations),
+            progressLinking: LocalProgressStoreLinker(store: progress))
         // Takes the stack, so only the App Group store is swept (ADR 0003).
         let janitor = DownloadJanitor(
             manager: manager, connections: ServerConnectionStore(modelContainer: dataStack.container),
@@ -67,6 +73,8 @@ struct AppDownloads {
             })
         return AppDownloads(
             engine: engine, manager: manager, localItems: localItems, janitor: janitor, controller: controller,
-            lifecycle: lifecycle)
+            lifecycle: lifecycle,
+            access: DownloadAccess(
+                requester: controller, status: StoredDownloadStatus(localItems: localItems, records: store)))
     }
 }
