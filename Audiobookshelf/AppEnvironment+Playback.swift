@@ -97,7 +97,7 @@ struct AppPlayback {
     /// and queue are kept in the settings' defaults, under keys of their own.
     static func makeScope(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
-        mediaLeases: MediaLeases? = nil,
+        mediaLeases: MediaLeases?,
         history: (any PlaybackHistoryRecording)?
     ) -> PlaybackScope {
         #if os(iOS)
@@ -121,7 +121,7 @@ struct AppPlayback {
     /// the scope owns it.
     static func makeScope(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
-        engine: any AudioEngineProtocol, interruptions: AudioInterruptionHandler?, mediaLeases: MediaLeases? = nil,
+        engine: any AudioEngineProtocol, interruptions: AudioInterruptionHandler?, mediaLeases: MediaLeases?,
         history: (any PlaybackHistoryRecording)? = nil
     ) -> PlaybackScope {
         let scopeConfiguration = Self.configuration(
@@ -140,11 +140,11 @@ struct AppPlayback {
 
     /// The scope's configuration. Recovery waits on the system's network path; without one it
     /// would treat the device as always online. Its coordinator shares `mediaLeases` with the
-    /// item actions (``make(writer:accounts:lifecycle:settings:deviceIdentifiers:library:history:current:mediaLeases:)``
-    /// always passes them; `nil` holds nothing), and the syncer records `history`.
+    /// item actions (`nil` holds nothing, so every caller passes it explicitly), and the syncer
+    /// records `history`.
     static func configuration(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
-        engine: any AudioEngineProtocol, mediaLeases: MediaLeases? = nil,
+        engine: any AudioEngineProtocol, mediaLeases: MediaLeases?,
         history: (any PlaybackHistoryRecording)? = nil
     ) -> PlaybackScope.Configuration {
         var configuration = PlaybackScope.Configuration(

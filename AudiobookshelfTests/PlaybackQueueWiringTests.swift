@@ -122,7 +122,7 @@ private final class Removals {
             let monitor = NetworkMonitor()
             let scope = AppPlayback.makeScope(
                 for: request, settings: settings, policy: NetworkPolicy(monitor: monitor, settings: settings),
-                history: nil)
+                mediaLeases: nil, history: nil)
             defer { scope.retire(reason: .signOut) }
 
             #expect(scope.queue?.serverConnectionID == a)
