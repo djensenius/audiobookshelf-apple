@@ -35,7 +35,8 @@ struct AudiobookshelfApp: App {
             RootView(
                 lifecycle: environment.lifecycle, player: environment.player, accounts: environment.accounts,
                 library: environment.library,
-                imagePipeline: environment.images.pipeline, playback: environment.playback.participant
+                imagePipeline: environment.images.pipeline, playback: environment.playback.participant,
+                playbackHistory: environment.playbackHistory
             )
             .environment(\.downloads, downloads)
             .environment(settings)
