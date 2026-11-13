@@ -60,16 +60,17 @@ final class StubEpisodeSource: PodcastEpisodeSource {
     }
 
     /// Episodes `ids` of a serial podcast, in that order.
-    /// - Parameter serverFinished: What the server has finished, without local unsynced flags;
-    ///   `finished` when `nil`.
+    /// - Parameter serverFinishedAt: When the server finished episodes, without local unsynced
+    ///   flags.
     func set(
-        _ podcastID: String, episodes ids: [String], finished: Set<String> = [], serverFinished: Set<String>? = nil
+        _ podcastID: String, episodes ids: [String], finished: Set<String> = [],
+        serverFinishedAt: [String: Date] = [:]
     ) {
         let episodes = ids.enumerated().map { PodcastEpisode(id: $0.element, publishedAt: $0.offset) }
         state.withLock {
             $0.listings[podcastID] = PodcastEpisodeListing(
                 isSerial: true, episodes: episodes, finishedEpisodeIDs: finished,
-                serverFinishedEpisodeIDs: serverFinished)
+                serverFinishedAt: serverFinishedAt)
         }
     }
 }

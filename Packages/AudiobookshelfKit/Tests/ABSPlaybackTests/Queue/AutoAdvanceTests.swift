@@ -176,7 +176,7 @@ struct AutoAdvanceTests {
         await a.finish()
         #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
 
-        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"])
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": Date()])
         a.advancer.connectionDidChange()
         await a.advancer.waitForPreparation()
         a.episodes.set("P", episodes: ["e1", "e2", "e3"])
@@ -187,14 +187,33 @@ struct AutoAdvanceTests {
         #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
     }
 
-    /// A listing finished only by a local unsynced flag is no confirmation: the episode stays
-    /// skipped after a reset.
+    /// A listing finished only by a local unsynced flag, or by the server without a date, is no
+    /// confirmation: the episode stays skipped after a reset.
     @Test func listingFinishedOnlyLocallyConfirmsNothing() async {
         a.episodes.set("P", episodes: ["e1", "e2", "e3"])
         await a.play("P", episode: "e1")
         await a.finish()
 
-        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinished: [])
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"])
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
+    }
+
+    /// Played again after the server finished it: a listing after the new end with the old finish
+    /// confirms nothing, so a late reset (the replay's unfinished sync) keeps it skipped (#554).
+    @Test func oldServerFinishDoesntConfirmAReplaysEnd() async {
+        let earlier = Date(timeIntervalSinceNow: -3600)
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": earlier])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
+
         a.advancer.connectionDidChange()
         await a.advancer.waitForPreparation()
         a.episodes.set("P", episodes: ["e1", "e2", "e3"])

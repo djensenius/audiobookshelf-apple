@@ -70,13 +70,15 @@ struct PodcastEpisodeSourceTests {
         let source = APIPodcastEpisodeSource(
             serverConnectionID: connection, localProgress: store, fetchItem: { _ in item },
             fetchFinished: {
-                UserFinishedMediaResponse(mediaProgress: [.init(libraryItemId: "P", episodeId: "e2", isFinished: true)])
+                UserFinishedMediaResponse(mediaProgress: [
+                    .init(libraryItemId: "P", episodeId: "e2", isFinished: true, finishedAt: 5_000)
+                ])
             })
 
         let listing = try await source.listing(podcastItemID: "P", excluding: ["e3"])
 
         #expect(listing.finishedEpisodeIDs == ["e1"])
-        #expect(listing.serverFinishedEpisodeIDs == ["e2"])
+        #expect(listing.serverFinishedAt == ["e2": Date(timeIntervalSince1970: 5)])
         #expect(listing.nextUnfinished(after: "e3")?.id == "e2")
     }
 

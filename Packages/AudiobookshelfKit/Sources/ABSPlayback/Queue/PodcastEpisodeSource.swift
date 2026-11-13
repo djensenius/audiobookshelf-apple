@@ -10,19 +10,18 @@ public struct PodcastEpisodeListing: Sendable, Hashable {
     /// In the server's order.
     public var episodes: [PodcastEpisode]
     public var finishedEpisodeIDs: Set<String>
-    /// The episodes the server has finished, without local changes not synced yet: evidence that
-    /// a finish reached the server.
-    public var serverFinishedEpisodeIDs: Set<String>
+    /// When the server finished each episode it has finished and dated, without local changes
+    /// not synced yet: evidence of when a finish reached the server.
+    public var serverFinishedAt: [String: Date]
 
-    /// - Parameter serverFinishedEpisodeIDs: `finishedEpisodeIDs` when `nil`.
     public init(
         isSerial: Bool, episodes: [PodcastEpisode], finishedEpisodeIDs: Set<String>,
-        serverFinishedEpisodeIDs: Set<String>? = nil
+        serverFinishedAt: [String: Date] = [:]
     ) {
         self.isSerial = isSerial
         self.episodes = episodes
         self.finishedEpisodeIDs = finishedEpisodeIDs
-        self.serverFinishedEpisodeIDs = serverFinishedEpisodeIDs ?? finishedEpisodeIDs
+        self.serverFinishedAt = serverFinishedAt
     }
 
     /// The podcast `item`'s episodes, finished per the user's `progress`.
@@ -32,7 +31,12 @@ public struct PodcastEpisodeListing: Sendable, Hashable {
         episodes = podcast?.episodes ?? []
         finishedEpisodeIDs = Set(
             progress.filter { $0.libraryItemId == item.id && $0.isFinished }.compactMap(\.episodeId))
-        serverFinishedEpisodeIDs = finishedEpisodeIDs
+        var serverFinishedAt: [String: Date] = [:]
+        for entry in progress where entry.libraryItemId == item.id && entry.isFinished {
+            guard let episodeID = entry.episodeId, let finishedAt = entry.finishedAt else { continue }
+            serverFinishedAt[episodeID] = Date(timeIntervalSince1970: Double(finishedAt) / 1000)
+        }
+        self.serverFinishedAt = serverFinishedAt
     }
 
     /// The episodes in the legacy "next episode" order (`pages/item/_id/index.vue` `play()`): by
