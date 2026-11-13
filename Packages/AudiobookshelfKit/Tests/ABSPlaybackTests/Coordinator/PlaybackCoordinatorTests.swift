@@ -378,6 +378,28 @@ struct PlaybackCoordinatorTests {
         #expect(service.closes.isEmpty)
     }
 
+    /// A play joining a pending start keeps its generation; a stop and a new start of the same item don't.
+    @Test func theStartGenerationTellsAPendingStartFromARestart() async throws {
+        let gate = Gate()
+        engine.loadGates = [gate]
+        let first = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { engine.loads.count == 1 }
+        let pending = coordinator.startGeneration
+        await coordinator.play(itemID: "A")
+        #expect(coordinator.startGeneration == pending)
+
+        coordinator.stop()
+        let stopped = coordinator.startGeneration
+        #expect(stopped != pending)
+        gate.open()
+        await first.value
+        await coordinator.play(itemID: "A")
+
+        #expect(coordinator.phase == .loaded)
+        #expect(coordinator.mediaKey == h.key("A"))
+        #expect(![pending, stopped].contains(coordinator.startGeneration))
+    }
+
     @Test func startTimeOrSeekWhileStartingIsAppliedOnLoad() async throws {
         let gate = Gate()
         engine.loadGates = [gate]

@@ -75,6 +75,9 @@ public final class PlaybackCoordinator {
     public private(set) var restoredRecord: LastPlayedRecord?
     /// The media a play is checking the streaming policy for, before it commits (a loading hint).
     public private(set) var pendingPlayKey: MediaKey?
+    /// Changes when a start begins, on stop, and on a restore: a start still pending under the
+    /// same value is the one seen earlier, not one begun after a stop. Not observed; read it again.
+    public var startGeneration: Int { generation }
     /// The play that ``error``'s `.streamingNeedsConfirmation` blocked, which
     /// ``confirmMeteredStreaming()`` replays.
     private var blockedPlay: (key: MediaKey, startTime: Double?)?

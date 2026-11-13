@@ -70,26 +70,30 @@ public final class PlaybackQueueControl: PlaybackQueueReading, PlayAllQueueing {
     /// Replaces the queue with `items`, in order, once the start of `started` has succeeded (play-all, #354): it is
     /// the loaded media, without an error. A start still pending (`.starting`, as when another screen began it and
     /// the player's `play` returned at once) is waited for, checking every ``startPollInterval`` for up to
-    /// ``startTimeout``. The current media isn't queued (``isCurrent(_:)``).
+    /// ``startTimeout``. Only the start under way when this is called counts (its
+    /// ``PlayerPlaybackControlling/startGeneration``): not one begun after a stop, even of the same media. The
+    /// current media isn't queued (``isCurrent(_:)``).
     ///
     /// - Returns: `false`, leaving the queue as it was, when a newer ``beginPlayAll()`` has begun, `started` is
-    ///   another connection's, the start failed, was cancelled, timed out or was replaced by another media, the
-    ///   caller was cancelled, or the session's scope is gone or has retired.
+    ///   another connection's, the start failed, was cancelled, timed out, stopped or was replaced by another start,
+    ///   the caller was cancelled, or the session's scope is gone or has retired.
     @discardableResult
     public func replace(with items: [QueueItem], afterStarting started: MediaKey, request: PlayAllRequest) async
         -> Bool
     {
-        guard started.serverConnectionID == serverConnectionID else { return false }
+        guard started.serverConnectionID == serverConnectionID, let generation = scope?.playback.startGeneration
+        else { return false }
         let deadline = ContinuousClock.now + startTimeout
-        while request.id == playAllRequests, let playback = scope?.playback, playback.mediaKey == started,
-            playback.error == nil, playback.phase == .starting
+        while request.id == playAllRequests, let playback = scope?.playback, playback.startGeneration == generation,
+            playback.mediaKey == started, playback.error == nil, playback.phase == .starting
         {
             guard ContinuousClock.now < deadline, (try? await Task.sleep(for: startPollInterval)) != nil else {
                 return false
             }
         }
         guard !Task.isCancelled, request.id == playAllRequests, let playback = scope?.playback,
-            playback.mediaKey == started, playback.error == nil, playback.phase == .loaded
+            playback.startGeneration == generation, playback.mediaKey == started, playback.error == nil,
+            playback.phase == .loaded
         else { return false }
         return edit { $0.replace(with: items.filter { !isCurrent($0) }) }
     }

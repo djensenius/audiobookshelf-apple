@@ -15,6 +15,8 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     var session: PlaybackSession? { get }
     var restoredRecord: LastPlayedRecord? { get }
     var error: PlaybackCoordinatorError? { get }
+    /// ``PlaybackCoordinator/startGeneration``: tells a pending start apart from one begun after a stop.
+    var startGeneration: Int { get }
     /// Global seconds.
     var currentTime: Double { get }
     var duration: Double { get }

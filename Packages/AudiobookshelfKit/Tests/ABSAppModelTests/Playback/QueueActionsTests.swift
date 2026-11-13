@@ -274,6 +274,30 @@ struct QueueActionsTests {
         #expect(queue.items.map(\.id) == ["x|"])
     }
 
+    /// The pending start is stopped and the same media started again between two checks: the play-all joined the
+    /// stopped start, so the new one's load doesn't replace the queue; a play-all of the new start does.
+    @Test func aPendingStartStoppedAndRestartedBetweenChecksKeepsThePreviousQueue() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        scope.control.phase = .starting
+
+        let request = queue.beginPlayAll()
+        let replacing = Task { await queue.replace(with: [item("b")], afterStarting: started, request: request) }
+        try await letItWait()
+        scope.control.phase = .idle
+        scope.control.mediaKey = nil
+        scope.control.startGeneration += 1
+        scope.control.mediaKey = started
+        scope.control.phase = .starting
+        scope.control.startGeneration += 1
+        try await letItWait()
+        scope.control.phase = .loaded
+
+        #expect(!(await replacing.value))
+        #expect(queue.items.map(\.id) == ["x|"])
+        #expect(await queue.replace(with: [item("c")], afterStarting: started, request: queue.beginPlayAll()))
+        #expect(queue.items.map(\.id) == ["c|"])
+    }
+
     @Test func aPendingStartThatNeverLoadsTimesOut() async throws {
         let (scope, queue, started) = try startedScope("a", items: [item("x")])
         scope.control.phase = .starting

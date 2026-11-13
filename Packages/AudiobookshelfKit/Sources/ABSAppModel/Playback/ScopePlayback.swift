@@ -24,6 +24,7 @@ final class ScopePlayback: PlayerPlaybackControlling {
     var session: PlaybackSession? { coordinator.session }
     var restoredRecord: LastPlayedRecord? { coordinator.restoredRecord }
     var error: PlaybackCoordinatorError? { coordinator.error }
+    var startGeneration: Int { coordinator.startGeneration }
     var currentTime: Double { coordinator.currentTime }
     var duration: Double { coordinator.duration }
     var rate: Double { coordinator.rate }
