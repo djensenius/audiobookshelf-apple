@@ -134,6 +134,30 @@ private final class CallCounter: Sendable {
         #expect(refreshes.count == 1)
     }
 
+    /// A refresh reports that it ran, to the client that started it and to one that joined it;
+    /// one skipped because a sign-in replaced the pair doesn't.
+    @Test func refreshReportsWhetherOneRan() async throws {
+        let vault = CredentialVault(keychain: InMemoryKeychain())
+        let credentials = ConnectionCredentials(connectionID: UUID(), vault: vault) { _, _ in }
+        _ = try await credentials.signIn(StoredSession(tokens: first, openIDSession: nil), customHeaders: [:])
+        let refreshing = StubGate()
+        let started = Task { try await credentials.refreshTokens(first) { await refreshing.pass() } }
+        await refreshing.arrived()
+        let joined = StubGate()
+        await credentials.observeRefreshJoins { joined.reach() }
+        let joining = Task {
+            try await credentials.refreshTokens(first) { Issue.record("A joined refresh ran its own") }
+        }
+        await joined.arrived()
+        refreshing.open()
+
+        #expect(try await started.value)
+        #expect(try await joining.value)
+
+        _ = try await credentials.signIn(StoredSession(tokens: second, openIDSession: nil), customHeaders: [:])
+        #expect(try await !credentials.refreshTokens(first) {})
+    }
+
     @Test func signOutKeepsASessionANewerCallStored() async throws {
         let vault = CredentialVault(keychain: InMemoryKeychain())
         let id = UUID()
