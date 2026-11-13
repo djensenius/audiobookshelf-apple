@@ -34,7 +34,8 @@ final class AppEnvironment {
     let dataStack: DataStack?
     let accounts: AccountManager?
     /// The one writer of local listening progress (`LocalProgressStore` must be shared), or `nil`
-    /// when the store couldn't be opened. Downloads link their progress rows in it (#74).
+    /// when the store couldn't be opened. Downloads link their progress rows in it (#74), and every
+    /// playback scope writes through it (#183).
     let localProgress: LocalProgressStore?
     let lifecycle: SessionLifecycle
     /// The stable device ID for playback sessions (ADR 0007), kept in the same Keychain as the
@@ -121,7 +122,7 @@ final class AppEnvironment {
         let deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
         self.deviceIdentifiers = deviceIdentifiers
         let playback = AppPlayback.make(
-            dataStack: dataStack, accounts: accounts, lifecycle: lifecycle, settings: settings,
+            writer: localProgress, accounts: accounts, lifecycle: lifecycle, settings: settings,
             deviceIdentifiers: deviceIdentifiers)
         self.playback = playback
         self.player = playback.player

@@ -1,4 +1,5 @@
 import Foundation
+import Synchronization
 @preconcurrency import ZIPFoundation
 
 /// Why a comic archive can't be read.
@@ -43,6 +44,9 @@ public actor ComicArchive {
     public nonisolated let cacheDirectory: URL
     /// How many extracted pages are kept.
     public nonisolated let maxCachedPages: Int
+    /// The cache directories of open archives (standardized paths, with how many archives use
+    /// each), which ``removeStaleCaches(in:)`` keeps.
+    private static let openCaches = Mutex<[String: Int]>([:])
     /// The most bytes one page may decompress to, so a small entry can't fill the disk.
     public nonisolated let maxPageBytes: Int
 
@@ -109,11 +113,31 @@ public actor ComicArchive {
         self.cacheDirectory = cacheDirectory
         self.maxCachedPages = max(maxCachedPages, 1)
         self.maxPageBytes = maxPageBytes
+        Self.openCaches.withLock { $0[cacheDirectory.standardizedFileURL.path, default: 0] += 1 }
         try? FileManager.default.removeItem(at: cacheDirectory)
     }
 
     deinit {
         try? FileManager.default.removeItem(at: cacheDirectory)
+        let key = cacheDirectory.standardizedFileURL.path
+        Self.openCaches.withLock { caches in
+            caches[key] = caches[key].flatMap { $0 > 1 ? $0 - 1 : nil }
+        }
+    }
+
+    /// Deletes the folders in `root` that no open archive extracts into, such as the caches of
+    /// readers open when the app was killed. Each one is checked and renamed in one step, so an
+    /// archive opening meanwhile keeps its directory; the slow delete happens after.
+    public static func removeStaleCaches(in root: URL) {
+        let manager = FileManager.default
+        guard let folders = try? manager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
+        for folder in folders {
+            let trash = root.appending(path: ".stale-\(UUID().uuidString)", directoryHint: .isDirectory)
+            let isStale = openCaches.withLock { caches in
+                caches[folder.standardizedFileURL.path] == nil && (try? manager.moveItem(at: folder, to: trash)) != nil
+            }
+            if isStale { try? manager.removeItem(at: trash) }
+        }
     }
 
     /// The file of page `number` (1-based), extracted now unless it is cached.
