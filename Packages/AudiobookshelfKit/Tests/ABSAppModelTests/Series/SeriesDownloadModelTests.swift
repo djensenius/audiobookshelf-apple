@@ -257,6 +257,23 @@ import Testing
         #expect(model.prompt == .confirm(SeriesDownloadPlan(itemIDs: ["a", "b"], fileCount: 4, size: 200)))
     }
 
+    @Test func anUndecodablePageFailsTheListing() async {
+        for undecodable in [0, 1] {
+            var service = Service()
+            // The server filled the page, but none of its rows decoded.
+            service.books.booksHandler = { _, query in
+                let page = query.page ?? 0
+                let books = page == undecodable ? [] : [Self.book("p\(page)a"), Self.book("p\(page)b")]
+                return PagedResults(results: books, total: 6, limit: 2, page: page, rawCount: 2)
+            }
+            let model = SeriesDownloadModel(
+                seriesID: "ser_1", connectionID: connection, service: service,
+                access: DownloadAccess(requester: Requester(), status: Status()), permitted: { true }, pageSize: 2)
+            await model.start(libraryID: "lib")
+            #expect(model.prompt == .loadFailed, "undecodable page \(undecodable)")
+        }
+    }
+
     @Test func listingPastTheCapFails() async {
         let queries = Recorder<LibraryQuery>()
         var service = Service()

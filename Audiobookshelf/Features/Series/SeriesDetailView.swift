@@ -22,9 +22,10 @@ struct SeriesDetailView: View {
         let libraryID = router?.libraryID
         let collapse = settings?.collapseBookSeries ?? AppSettings.Default.collapseBookSeries
         let key = BrowseModelKey(store: store, libraryID: libraryID, entityID: seriesID)
+        let permitted = canDownload(key)
         Group {
             if let host, let model = host.model(for: key) {
-                SeriesDetailContent(model: model, download: canDownload(key) ? download : nil)
+                SeriesDetailContent(model: model, download: permitted ? download : nil)
             } else {
                 BrowsePlaceholder(libraryID: libraryID, messages: SeriesPresentation.detailMessages)
                     .navigationTitle(Text(verbatim: L10n.string("LabelSeries")))
@@ -41,6 +42,9 @@ struct SeriesDetailView: View {
             await host?.model.setCollapseSeries(collapse)
             await host?.model.loadIfNeeded()
         }
+        // Opened offline, the user's permission is unknown until the account reconnects, which
+        // doesn't change the key.
+        .onChange(of: permitted) { download = makeDownload(for: key) }
         .onChange(of: collapse) { _, collapse in
             guard let model = host?.model else { return }
             Task { await model.setCollapseSeries(collapse) }

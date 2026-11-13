@@ -168,7 +168,8 @@ public final class SeriesDownloadModel {
         } catch  where Task.isCancelled {
         } catch {
             Log.downloads.error(
-                "Couldn't list a series' books to download: \(Log.redact(String(describing: error)), privacy: .public)")
+                "Couldn't list a series' books to download: \(RealtimeBridge.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"
+            )
             prompt = .loadFailed
         }
     }
@@ -191,6 +192,7 @@ public final class SeriesDownloadModel {
     }
 
     private struct TooManyBooks: Error {}
+    private struct UndecodablePage: Error {}
 
     private func allBooks(libraryID: String) async throws -> [LibraryItem] {
         var books: [LibraryItem] = []
@@ -200,6 +202,9 @@ public final class SeriesDownloadModel {
             try Task.checkCancellation()
             let query = LibraryQuery(filter: .series(id: seriesID), page: page, limit: pageSize)
             let results = try await service.filteredBooksPage(libraryID: libraryID, query: query)
+            // Rows decode lossily: a page the server filled but none of whose rows decoded can't be
+            // told from the end of the series, so the listing fails rather than offer part of it.
+            if results.results.isEmpty, results.rawCount > 0 { throw UndecodablePage() }
             let new = results.results.filter { ids.insert($0.id).inserted }
             if new.isEmpty { return books }
             books += new
@@ -242,7 +247,9 @@ public final class SeriesDownloadModel {
                 prompt = .meteredDenied
                 return
             case .failed(let error):
-                Log.downloads.error("Couldn't queue a series book: \(String(describing: error), privacy: .public)")
+                Log.downloads.error(
+                    "Couldn't queue a series book: \(RealtimeBridge.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"
+                )
                 failures += 1
                 pending.removeFirst()
             }
