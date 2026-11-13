@@ -81,6 +81,8 @@ struct PDFPageNavigator: View {
                     }
                     Spacer(minLength: 0)
                 }
+                // Fills the height whether or not the thumbnails show, so the bar stays at the bottom.
+                .frame(maxHeight: .infinity)
             #else
                 Spacer(minLength: 0)
                 if showsThumbnails {
@@ -182,6 +184,8 @@ struct PDFThumbnailStrip {
 
 #if os(macOS)
     extension PDFThumbnailStrip: NSViewRepresentable {
+        /// Returned as is: on macOS PDFKit's thumbnail view scrolls itself, a collection view in its
+        /// own `NSScrollView`. As another scroll view's document view it has no size to take.
         func makeNSView(context: Context) -> PDFThumbnailView {
             let view = PDFThumbnailView()
             view.maximumNumberOfColumns = 1

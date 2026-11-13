@@ -185,6 +185,65 @@ import Testing
             await settle()
             #expect(reported.pages.isEmpty)
         }
+
+        /// With the thumbnails hidden, as the navigator opens, the bar runs along the bottom of the
+        /// page (#510): a click mid-window reaches the page and one at the bottom edge the bar.
+        @Test func hostedNavigatorKeepsTheBarAlongTheBottom() throws {
+            let book = try #require(PDFDocument(data: pdfData(pages: 8)))
+            let window = Self.window(showing: PDFPageNavigator(document: book))
+            defer { window.close() }
+            let content = try #require(window.contentView)
+            let reader = try #require(HostedReader.find(in: content))
+
+            // Window coordinates run up from the bottom-left corner of the 600×400 window.
+            let middle = content.hitTest(NSPoint(x: 300, y: 200))
+            let bottom = try #require(content.hitTest(NSPoint(x: 300, y: 4)))
+            #expect(middle?.isDescendant(of: reader) == true)
+            #expect(!bottom.isDescendant(of: reader))
+        }
+
+        /// On Mac the strip is PDFKit's thumbnail view as is, which scrolls itself (#510): a column
+        /// of 30 thumbnails, far taller than the window, scrolls down to the last and never sideways.
+        @Test func hostedThumbnailStripScrollsThroughEveryPage() throws {
+            let book = try #require(PDFDocument(data: pdfData(pages: 30)))
+            let link = PDFReaderLink()
+            let window = Self.window(
+                showing: HStack(spacing: 0) {
+                    PDFThumbnailStrip(link: link).frame(width: 112)
+                    PDFReaderView(document: book, link: link)
+                })
+            defer { window.close() }
+            let reader = try #require(link.pdfView)
+            let thumbnails = try #require(link.thumbnailView)
+            #expect(thumbnails.pdfView === reader)
+
+            let scroll = try #require(Self.scrollViews(in: thumbnails).first)
+            let column = try #require(scroll.documentView)
+            let visible = scroll.contentView.bounds.height
+            #expect(scroll.hasVerticalScroller)
+            #expect(!scroll.hasHorizontalScroller)
+            #expect(visible > 0)
+            #expect(column.frame.height > visible)
+
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: column.frame.height - visible))
+            #expect(scroll.contentView.bounds.minY > 0)
+        }
+
+        /// `content` in a borderless 600×400 window, not shown, so AppKit lays it out and hit-tests
+        /// it as it would on screen.
+        private static func window(showing content: some View) -> NSWindow {
+            let window = NSWindow(
+                contentRect: CGRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.borderless],
+                backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = NSHostingView(rootView: content)
+            window.contentView?.layoutSubtreeIfNeeded()
+            return window
+        }
+
+        private static func scrollViews(in view: NSView) -> [NSScrollView] {
+            ((view as? NSScrollView).map { [$0] } ?? []) + view.subviews.flatMap { scrollViews(in: $0) }
+        }
     #endif
 
     private func shownPage(of view: PDFView) -> Int? {
@@ -281,7 +340,7 @@ private func pdfData(pages: Int) -> Data {
             hosting.layoutSubtreeIfNeeded()
         }
 
-        private static func find(in view: NSView) -> ReaderPDFView? {
+        static func find(in view: NSView) -> ReaderPDFView? {
             if let reader = view as? ReaderPDFView { return reader }
             return view.subviews.lazy.compactMap(find(in:)).first
         }
