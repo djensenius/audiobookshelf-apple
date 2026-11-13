@@ -19,11 +19,20 @@ import Synchronization
 /// A request in flight across a reconnect finishes on the client it started with; the next uses
 /// the new pair. ``invalidate()`` rejects later calls but can't retract a request under way. The
 /// identity never changes here: a different account ends the scope.
-public final class AccountPlaybackServices: PlaybackSessionService, ProgressSyncService, Sendable {
+///
+/// A `/sync` the server answers with 404 reports its session to ``setSessionGoneHandler(_:)``'s
+/// handler (#184): the server no longer has it, as after a restart.
+public final class AccountPlaybackServices: PlaybackSessionService, ProgressSyncService, LocalSessionUploadService,
+    Sendable
+{
+    /// Called with the ID of a session the server no longer has.
+    public typealias SessionGoneHandler = @Sendable (_ sessionID: String) -> Void
+
     private struct State {
         var client: APIClient?
         var features: ServerFeatures?
         var isInvalidated = false
+        var sessionGone: SessionGoneHandler?
     }
 
     public let serverConnectionID: UUID
@@ -55,8 +64,21 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
             state.isInvalidated = true
             state.client = nil
             state.features = nil
+            state.sessionGone = nil
         }
     }
+
+    /// Sets what's called, before the error is rethrown, when a `/sync` answers 404. Ignored after
+    /// ``invalidate()``.
+    public func setSessionGoneHandler(_ handler: SessionGoneHandler?) {
+        state.withLock { state in
+            guard !state.isInvalidated else { return }
+            state.sessionGone = handler
+        }
+    }
+
+    /// Whether a session-gone handler is set (tests).
+    var hasSessionGoneHandler: Bool { state.withLock { $0.sessionGone != nil } }
 
     /// Whether ``startSession(itemID:episodeID:)`` can reach the server: there is a client and
     /// features, and the services weren't invalidated.
@@ -117,9 +139,15 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
         try await client().mediaProgress(itemID: itemID, episodeID: episodeID)
     }
 
+    /// A 404 means the server no longer has the session: the session-gone handler hears of it.
     public func syncSession(id: String, report: PlaybackSyncReport) async throws {
-        try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
-            .syncSession(id: id, report: report)
+        do {
+            try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
+                .syncSession(id: id, report: report)
+        } catch {
+            if case .notFound = error as? APIError { state.withLock { $0.sessionGone }?(id) }
+            throw error
+        }
     }
 
     public func updateProgress(itemID: String, episodeID: String?, _ update: MediaProgressUpdate) async throws {
@@ -135,5 +163,15 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
     public func listeningSessions(itemID: String, episodeID: String?) async throws -> ListeningSessionsPage {
         try await APIProgressSyncService(serverConnectionID: serverConnectionID, client: client())
             .listeningSessions(itemID: itemID, episodeID: episodeID)
+    }
+
+    // MARK: LocalSessionUploadService
+
+    public func uploadAll(_ batch: LocalPlaybackSessionBatch) async throws -> LocalSessionSyncResponse {
+        try await APILocalSessionUploadService(client: client()).uploadAll(batch)
+    }
+
+    public func upload(_ session: LocalPlaybackSessionPayload) async throws {
+        try await APILocalSessionUploadService(client: client()).upload(session)
     }
 }
