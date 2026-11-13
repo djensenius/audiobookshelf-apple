@@ -36,6 +36,10 @@ public protocol AccountSessionSource: AnyObject, Observable, Sendable {
     /// Signs out of the active connection.
     /// - Returns: An OpenID end-session URL to open, if the server returned one.
     func logout() async -> URL?
+    /// Signs out of `connectionID` after it stopped being active, as when the server signed it
+    /// out first; does nothing if it's active again or another sign-in replaced its session.
+    /// - Returns: An OpenID end-session URL to open, as for ``logout()``.
+    func logout(connectionID: UUID) async -> URL?
     /// Makes another saved connection active.
     func `switch`(to connectionID: UUID) async throws
     /// Forgets a saved connection, signing out if it's the active one.
@@ -48,6 +52,9 @@ public protocol AccountSessionSource: AnyObject, Observable, Sendable {
 }
 
 extension AccountSessionSource {
+    /// Nothing to sign out of once the connection isn't active.
+    public func logout(connectionID: UUID) async -> URL? { nil }
+
     /// No saved connections to match, so an activity that names an account opens nothing.
     public func connectionID(for account: HandoffAccount) async -> UUID? { nil }
 }
