@@ -82,6 +82,7 @@ import SwiftData
             var removed: [DownloadPartDTO] = []
             if let existing {
                 model = existing
+                model.libraryId = record.libraryId
                 model.mediaType = record.mediaType.rawValue
                 model.title = record.title
                 model.state = record.state.rawValue
@@ -473,6 +474,7 @@ import SwiftData
             serverConnectionID: record.key.serverConnectionID,
             libraryItemId: record.key.libraryItemId,
             episodeId: record.key.episodeId,
+            libraryId: record.libraryId,
             mediaType: record.mediaType,
             title: record.title,
             state: record.state,

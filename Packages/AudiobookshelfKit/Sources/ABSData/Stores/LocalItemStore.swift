@@ -111,6 +111,8 @@ import SwiftData
             }
             item.serverAddress = connection.address
             item.serverUserId = connection.userId
+            // A record saved before the library was stored keeps the item's.
+            if let libraryId = download.libraryId { item.libraryId = libraryId }
             item.mediaType = download.mediaType.rawValue
             item.title = title
             let authors = download.media.metadata.authors

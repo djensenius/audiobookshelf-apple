@@ -6,6 +6,9 @@ public struct DownloadRecordDTO: Sendable, Equatable, Identifiable {
     public var id: UUID
     /// The media key of the downloaded item or episode; the record's natural key.
     public var key: MediaKey
+    /// The server library the item belongs to, from the item the download was planned from;
+    /// `nil` for records saved before it was stored.
+    public var libraryId: String?
     public var mediaType: MediaType
     public var title: String
     public var state: DownloadState
@@ -20,6 +23,7 @@ public struct DownloadRecordDTO: Sendable, Equatable, Identifiable {
     public init(
         id: UUID = UUID(),
         key: MediaKey,
+        libraryId: String? = nil,
         mediaType: MediaType,
         title: String,
         state: DownloadState = .queued,
@@ -31,6 +35,7 @@ public struct DownloadRecordDTO: Sendable, Equatable, Identifiable {
     ) {
         self.id = id
         self.key = key
+        self.libraryId = libraryId
         self.mediaType = mediaType
         self.title = title
         self.state = state
@@ -129,6 +134,7 @@ extension DownloadRecordDTO {
                 libraryItemId: record.libraryItemId,
                 episodeId: record.episodeId
             ),
+            libraryId: record.libraryId,
             mediaType: record.mediaTypeValue,
             title: record.title,
             state: record.stateValue ?? .failed,

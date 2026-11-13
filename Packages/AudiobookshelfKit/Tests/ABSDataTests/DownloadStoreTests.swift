@@ -71,6 +71,20 @@ import Testing
         #expect(try await store.part(id: track2.id) == track2)
     }
 
+    /// The item's library is saved with the record, on insert and on update (#571).
+    @Test func storesTheRecordsLibrary() async throws {
+        let (store, _) = try makeStore()
+        var record = Self.record(key: key, parts: [Self.part()])
+        record.libraryId = "lib_2"
+        #expect(try await store.upsertRecord(record, now: now).record.libraryId == "lib_2")
+        #expect(try await store.record(key: key)?.libraryId == "lib_2")
+
+        var updated = try #require(try await store.record(key: key))
+        updated.libraryId = "lib_3"
+        try await store.upsertRecord(updated, now: now)
+        #expect(try await store.record(key: key)?.libraryId == "lib_3")
+    }
+
     @Test func upsertSameKeyKeepsIDAndReconcilesParts() async throws {
         let (store, container) = try makeStore()
         let kept = Self.part(trackIndex: 1, filename: "a.mp3")

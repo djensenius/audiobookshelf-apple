@@ -57,6 +57,15 @@ import Testing
             record.parts[4].serverPath == DownloadRequests.coverPath(itemID: "li_book", updatedAt: Fixtures.updatedAt))
     }
 
+    /// The item's library is recorded with the download, so Home needn't look it up (#571).
+    @Test func recordsTheItemsLibrary() throws {
+        #expect(try plan(Fixtures.book()).libraryId == "lib_1")
+        #expect(try plan(Fixtures.podcast(), episodeID: "ep_2").libraryId == "lib_2")
+        let unknown = LibraryItem(
+            id: "li_book", libraryId: "", updatedAt: Fixtures.updatedAt, mediaType: .book, media: Fixtures.book().media)
+        #expect(try plan(unknown).libraryId == nil)
+    }
+
     @Test func bookWithoutACoverGetsNoCoverPartWhateverIsStoredLocally() throws {
         let record = try plan(Fixtures.book(coverPath: nil), existingCoverPath: nil)
         #expect(record.parts.map(\.kind) == [.audio, .audio, .audio, .ebook])

@@ -89,6 +89,9 @@ public enum SchemaV1: VersionedSchema {
         public var serverAddress: String
         public var serverUserId: String
         public var libraryItemId: String
+        /// The server library the item belongs to, recorded at download time; `nil` for items
+        /// downloaded before it was stored (an optional attribute, so older stores migrate).
+        public var libraryId: String?
         /// A `MediaType` raw value.
         public var mediaType: String
         public var title: String
@@ -110,6 +113,7 @@ public enum SchemaV1: VersionedSchema {
             serverAddress: String,
             serverUserId: String,
             libraryItemId: String,
+            libraryId: String? = nil,
             mediaType: MediaType,
             title: String,
             authorName: String? = nil,
@@ -126,6 +130,7 @@ public enum SchemaV1: VersionedSchema {
             self.serverAddress = serverAddress
             self.serverUserId = serverUserId
             self.libraryItemId = libraryItemId
+            self.libraryId = libraryId
             self.mediaType = mediaType.rawValue
             self.title = title
             self.authorName = authorName
@@ -301,6 +306,9 @@ public enum SchemaV1: VersionedSchema {
         public var serverConnectionID: UUID
         public var libraryItemId: String
         public var episodeId: String?
+        /// The server library the item belongs to, copied to ``LocalLibraryItem/libraryId`` when
+        /// the download completes; `nil` for records saved before it was stored.
+        public var libraryId: String?
         /// A `MediaType` raw value.
         public var mediaType: String
         public var title: String
@@ -319,6 +327,7 @@ public enum SchemaV1: VersionedSchema {
             serverConnectionID: UUID,
             libraryItemId: String,
             episodeId: String? = nil,
+            libraryId: String? = nil,
             mediaType: MediaType,
             title: String,
             state: DownloadState = .queued,
@@ -333,6 +342,7 @@ public enum SchemaV1: VersionedSchema {
             self.serverConnectionID = serverConnectionID
             self.libraryItemId = libraryItemId
             self.episodeId = episodeId
+            self.libraryId = libraryId
             self.mediaType = mediaType.rawValue
             self.title = title
             self.state = state.rawValue

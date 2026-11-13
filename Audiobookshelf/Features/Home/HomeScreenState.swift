@@ -365,12 +365,14 @@ enum HomePresentation {
 
     /// The library Add to playlist lists and creates playlists in for `item` on `section`, for
     /// ``AddToPlaylistAction``: `nil`, the scene's library, on the server's shelves, which are that
-    /// library's. A downloaded item can be from another of the account's libraries and the download
-    /// doesn't record which, so its own is read from the server, which Add to playlist needs anyway.
+    /// library's. A downloaded item can be from another of the account's libraries: its own is the
+    /// one recorded at download time, or, for a download made before that was stored, read from the
+    /// server, which Add to playlist needs anyway.
     static func playlistLibraryID(
         for item: ItemSummary, in section: HomeSection, items: any ItemDetailService
     ) async throws -> String? {
         guard isDownloaded(section) else { return nil }
+        if let libraryID = item.libraryID { return libraryID }
         return try await items.item(id: item.itemID).libraryId
     }
 

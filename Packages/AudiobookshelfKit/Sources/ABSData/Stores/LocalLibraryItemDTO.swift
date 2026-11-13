@@ -8,6 +8,9 @@ public struct LocalLibraryItemDTO: Sendable, Equatable, Identifiable {
     public var serverAddress: String
     public var serverUserId: String
     public var libraryItemId: String
+    /// The server library the item belongs to, recorded at download time; `nil` for items
+    /// downloaded before it was stored, whose library has to be read from the server.
+    public var libraryId: String?
     public var mediaType: MediaType
     public var title: String
     public var authorName: String?
@@ -27,6 +30,7 @@ public struct LocalLibraryItemDTO: Sendable, Equatable, Identifiable {
         serverAddress: String,
         serverUserId: String,
         libraryItemId: String,
+        libraryId: String? = nil,
         mediaType: MediaType,
         title: String,
         authorName: String? = nil,
@@ -43,6 +47,7 @@ public struct LocalLibraryItemDTO: Sendable, Equatable, Identifiable {
         self.serverAddress = serverAddress
         self.serverUserId = serverUserId
         self.libraryItemId = libraryItemId
+        self.libraryId = libraryId
         self.mediaType = mediaType
         self.title = title
         self.authorName = authorName
@@ -100,6 +105,7 @@ extension LocalLibraryItemDTO {
             serverAddress: item.serverAddress,
             serverUserId: item.serverUserId,
             libraryItemId: item.libraryItemId,
+            libraryId: item.libraryId,
             mediaType: item.mediaTypeValue,
             title: item.title,
             authorName: item.authorName,
