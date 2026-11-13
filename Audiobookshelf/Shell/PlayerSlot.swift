@@ -13,6 +13,10 @@ protocol PlayerSlotState: AnyObject, Observable {
     var title: String { get }
     /// The failure to show, with or without a session; `nil` when there is none.
     var errorMessageKey: PlayerErrorMessage? { get }
+    /// "Stream" for a `.streamingNeedsConfirmation` failure.
+    func confirmMeteredStreaming() async
+    /// "Cancel" for a `.streamingNeedsConfirmation` failure.
+    func declineMeteredStreaming()
 }
 
 extension PlayerViewModel: PlayerSlotState {}
@@ -28,6 +32,34 @@ final class PlaceholderPlayerState: PlayerSlotState {
         self.hasSession = hasSession
         self.title = title
         self.errorMessageKey = errorMessageKey
+    }
+
+    func confirmMeteredStreaming() async {
+        errorMessageKey = nil
+    }
+
+    func declineMeteredStreaming() {
+        errorMessageKey = nil
+    }
+}
+
+/// What a playback failure's alert offers besides dismissing it; a failure without one shows OK
+/// alone, and one with it shows the action and Cancel.
+enum PlayerErrorAction: Equatable {
+    /// "Stream", for a confirmation ("ask"), never for "never".
+    case streamAnyway
+
+    init?(_ error: PlayerErrorMessage) {
+        switch error {
+        case .streamingNeedsConfirmation: self = .streamAnyway
+        default: return nil
+        }
+    }
+
+    var titleKey: String {
+        switch self {
+        case .streamAnyway: "ButtonStream"
+        }
     }
 }
 
@@ -52,7 +84,8 @@ final class PlaceholderPlayerState: PlayerSlotState {
 /// A playback failure (`errorMessageKey`) shows in an alert, with or without a session, and only
 /// in the active scene, so other windows don't repeat it. On iOS the full player shows it while
 /// it covers the scene. Each scene shows a failure until it's dismissed there, and again only
-/// after the player has had none (or a different one).
+/// after the player has had none (or a different one). A failure with a ``PlayerErrorAction``
+/// offers it and Cancel instead of OK.
 struct PlayerSlot: ViewModifier {
     @Bindable var router: Router
     let player: any PlayerSlotState
@@ -140,11 +173,34 @@ struct PlayerSlot: ViewModifier {
                 get: { error != nil },
                 set: { if !$0 { dismissedError = player.errorMessageKey } }),
             presenting: error
-        ) { _ in
-            Button(role: .cancel) {
-            } label: {
-                Text(verbatim: L10n.string("ButtonOk"))
+        ) { error in
+            let action = PlayerErrorAction(error)
+            if let action {
+                Button {
+                    perform(action)
+                } label: {
+                    Text(verbatim: L10n.string(action.titleKey))
+                }
             }
+            Button(role: .cancel) {
+                dismiss(action)
+            } label: {
+                Text(verbatim: L10n.string(action == nil ? "ButtonOk" : "ButtonCancel"))
+            }
+        }
+    }
+
+    private func perform(_ action: PlayerErrorAction) {
+        switch action {
+        case .streamAnyway: Task { await player.confirmMeteredStreaming() }
+        }
+    }
+
+    /// The alert's cancel (or OK) button, after `action` was offered.
+    private func dismiss(_ action: PlayerErrorAction?) {
+        switch action {
+        case .streamAnyway: player.declineMeteredStreaming()
+        case nil: break
         }
     }
 
