@@ -104,6 +104,7 @@ final class AppEnvironment {
             lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: manager))
             if let downloads {
                 lifecycle.register(downloads.lifecycle, stage: .connect)
+                lifecycle.register(downloads.sessions, stage: .connect)
                 // A removal stops the downloads once the credentials are deleted, active or not.
                 manager.credentialsRemoved = { [weak downloadsLifecycle = downloads.lifecycle] in
                     await downloadsLifecycle?.connectionRemoved($0)

@@ -21,6 +21,8 @@ struct AppDownloads {
     let janitor: DownloadJanitor
     let controller: DownloadsController
     let lifecycle: DownloadsLifecycle
+    /// Registered after ``lifecycle``; see ``DownloadRequestSessions``.
+    let sessions: DownloadRequestSessions
     let access: DownloadAccess
     /// The downloaded items' cover files, which the image pipeline reads before the network
     /// (ADR 0005, "Offline covers").
@@ -59,9 +61,10 @@ struct AppDownloads {
             manager: manager, connections: ServerConnectionStore(modelContainer: dataStack.container),
             dataStack: dataStack)
         let monitor = NetworkMonitor()
+        let sessions = DownloadRequestSessions(accounts: accounts)
         let controller = DownloadsController(
             manager: manager, monitor: monitor, settings: settings, networkAccess: networkAccess,
-            storedRecords: { try await store.allRecords() })
+            storedRecords: { try await store.allRecords() }, sessions: { sessions.session(for: $0) })
         let lifecycle = DownloadsLifecycle(
             engine: engine, manager: manager,
             records: { try await store.records(serverConnectionID: $0) },
@@ -77,7 +80,7 @@ struct AppDownloads {
             })
         return AppDownloads(
             engine: engine, manager: manager, localItems: localItems, janitor: janitor, controller: controller,
-            lifecycle: lifecycle,
+            lifecycle: lifecycle, sessions: sessions,
             access: DownloadAccess(
                 requester: controller, status: StoredDownloadStatus(localItems: localItems, records: store)),
             covers: LocalDownloadedCovers(store: localItems, locations: locations))

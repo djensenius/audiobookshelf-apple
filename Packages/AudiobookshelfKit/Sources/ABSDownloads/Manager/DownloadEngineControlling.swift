@@ -21,10 +21,19 @@ public protocol DownloadEngineControlling: Sendable {
     func resume(recordID: UUID) async throws -> Bool
     /// See ``DownloadEngine/resume(recordID:unlessQuiescedSince:)``.
     func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool
+    /// See ``DownloadEngine/resumeNewRecord(recordID:unlessQuiescedSince:)``.
+    func resumeNewRecord(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool
     /// See ``DownloadEngine/quiesceGeneration()``.
     func quiesceGeneration() async -> Int
     /// See ``DownloadEngine/hasQuiesced(connectionID:since:)``.
     func hasQuiesced(connectionID: UUID, since generation: Int) async -> Bool
+}
+
+extension DownloadEngineControlling {
+    /// ``resume(recordID:unlessQuiescedSince:)``, for fakes without the engine's activation.
+    public func resumeNewRecord(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool {
+        try await resume(recordID: recordID, unlessQuiescedSince: generation)
+    }
 }
 
 extension DownloadEngine: DownloadEngineControlling {}
