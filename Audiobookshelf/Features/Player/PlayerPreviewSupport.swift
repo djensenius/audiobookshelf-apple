@@ -20,6 +20,7 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
     var isPlaying = false
     var isBuffering = false
     var isPlaybackRequested = false
+    var isWaitingForNetwork = false
     var timeline: PlaybackTimeline?
 
     var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }
@@ -83,6 +84,14 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
         timeline = nil
         isPlaying = false
         isPlaybackRequested = false
+    }
+
+    func confirmMeteredStreaming() async {
+        error = nil
+    }
+
+    func declineMeteredStreaming() {
+        error = nil
     }
 
     private static let session = PlaybackSession(

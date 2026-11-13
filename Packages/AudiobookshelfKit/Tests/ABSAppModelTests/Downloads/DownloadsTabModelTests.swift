@@ -39,10 +39,13 @@ private actor FakeControl: DownloadControlling {
     }
 
     func enqueue(
-        item: LibraryItem, episodeID: String?, connectionID: UUID, replacingExisting: Bool
+        item: LibraryItem, episodeID: String?, connectionID: UUID, replacingExisting: Bool,
+        unlessQuiescedSince generation: Int?
     ) async throws(DownloadManagerError) -> DownloadManager.EnqueueResult {
         .started(UUID())
     }
+
+    func quiesceGeneration() async -> Int { 0 }
 
     func restartActiveTransfers() async throws(DownloadManagerError) {}
 
@@ -126,7 +129,7 @@ struct DownloadsTabModelTests {
         let controller = DownloadsController(
             manager: control, monitor: monitor, settings: settings,
             networkAccess: DownloadNetworkAccess(defaults: defaults, treatsExpensiveAsCellular: false),
-            storedRecords: storedRecords ?? { records }, pathTimeout: .seconds(30))
+            storedRecords: storedRecords ?? { records }, sessions: { _ in nil }, pathTimeout: .seconds(30))
         await controller.start()
         let updates: (@Sendable (UUID) async throws -> AsyncStream<[LocalLibraryItemDTO]>)? =
             followsUpdates ? { @Sendable connectionID in await source.updates(connectionID) } : nil

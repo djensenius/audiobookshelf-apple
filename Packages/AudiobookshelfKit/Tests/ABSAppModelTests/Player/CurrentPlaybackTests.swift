@@ -85,14 +85,17 @@ private func dropSession(of playback: FakePlaybackControl) {
         #expect(await current.jump(by: 10) == 30)
         current.setRate(1.5)
         current.stop(reason: .user)
+        current.handleStreamReset(sessionID: "sess_li_book")
         #expect(
             playback.calls == [
                 .resume(rewindingBy: 5), .pause, .seek(20), .jump(10), .setRate(1.5), .stop(.user),
+                .streamReset(sessionID: "sess_li_book"),
             ])
 
         current.bind(nil)
         current.pause()
-        #expect(playback.calls.count == 6)
+        current.handleStreamReset(sessionID: "sess_li_book")
+        #expect(playback.calls.count == 7)
         #expect(current.phase == .idle)
     }
 
@@ -125,6 +128,28 @@ private func dropSession(of playback: FakePlaybackControl) {
             playbackA.load(FakePlaybackControl.bookSession(), at: 150)
             dropSession(of: playbackA)
             #expect(model.title == "Dune")
+        }
+    }
+
+    /// #543: an alert for the old binding's failure can't act on the new binding's equal one (an
+    /// account switch); the new failure's own alert does.
+    @Test func anAlertForTheOldBindingDoesNotActOnTheNewOne() async throws {
+        try await withUnboundPlayer { model, current in
+            let playbackA = FakePlaybackControl()
+            let playbackB = FakePlaybackControl()
+            playbackA.error = .recoveryExhausted
+            playbackB.error = .recoveryExhausted
+            current.bind(playbackA)
+            let earlier = try #require(model.failure)
+            current.bind(playbackB)
+            let now = try #require(model.failure)
+            #expect(now != earlier)
+
+            await model.respond(to: earlier, with: .retry)
+            #expect(playbackB.calls.isEmpty)
+            await model.respond(to: now, with: .retry)
+            #expect(playbackB.calls == [.resume(rewindingBy: nil)])
+            #expect(playbackA.calls.isEmpty)
         }
     }
 

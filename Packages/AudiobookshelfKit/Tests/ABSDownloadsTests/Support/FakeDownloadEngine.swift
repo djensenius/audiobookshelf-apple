@@ -189,9 +189,17 @@ actor FakeDownloadEngine: DownloadEngineControlling {
         return quiescedSince.contains(generation)
     }
 
+    /// Runs as each guarded resume begins, before it changes anything.
+    private var beforeGuardedResume: (@Sendable (UUID) async -> Void)?
+
+    func onGuardedResume(_ body: @escaping @Sendable (UUID) async -> Void) {
+        beforeGuardedResume = body
+    }
+
     /// ``resume(recordID:)``, unless quiesced since `generation` (and not made to throw): then it
     /// changes nothing, as the engine's puts the record back to `paused`.
     func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool {
+        await beforeGuardedResume?(recordID)
         guard !quiescedSince.contains(generation) || failingResumes > 0 else {
             calls.append(.resume(recordID))
             return false

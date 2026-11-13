@@ -437,6 +437,79 @@ struct PlaybackCoordinatorTests {
         #expect(coordinator.isPlaying)
     }
 
+    /// #376: "Stream anyway" replays the blocked play: its item, episode and start time.
+    @Test func confirmingMeteredStreamingPlaysTheBlockedItem() async {
+        h.policy.decision = .askUser(.cellular)
+        await coordinator.play(itemID: "A", episodeID: "E", startTime: 1000)
+        #expect(service.starts.isEmpty)
+
+        await coordinator.confirmMeteredStreaming()
+
+        #expect(coordinator.error == nil)
+        #expect(service.starts == ["A"])
+        #expect(coordinator.mediaKey?.libraryItemId == "A")
+        #expect(coordinator.mediaKey?.episodeId == "E")
+        #expect(coordinator.currentTime == 1000)
+        #expect(coordinator.isPlaying)
+    }
+
+    /// The latest block is the one confirmed, not an earlier one it replaced.
+    @Test func confirmingReplaysTheLatestBlockedPlay() async {
+        h.policy.decision = .askUser(.cellular)
+        await coordinator.play(itemID: "A", startTime: 1000)
+        await coordinator.play(itemID: "B")
+
+        await coordinator.confirmMeteredStreaming()
+
+        #expect(service.starts == ["B"])
+        #expect(coordinator.mediaKey == h.key("B"))
+    }
+
+    /// "Cancel" clears the confirmation and leaves playback stopped; a later confirm plays nothing.
+    @Test func decliningMeteredStreamingClearsTheErrorWithoutPlaying() async {
+        h.policy.decision = .askUser(.cellular)
+        await coordinator.play(itemID: "A")
+
+        coordinator.declineMeteredStreaming()
+
+        #expect(coordinator.error == nil)
+        #expect(coordinator.phase == .idle)
+        await coordinator.confirmMeteredStreaming()
+        #expect(service.starts.isEmpty)
+        #expect(coordinator.phase == .idle)
+    }
+
+    /// "Never" is never overridden: confirming (or declining) a "never" block does nothing, and a confirmation
+    /// accepted after the setting turned to "never" is blocked by it.
+    @Test func confirmingDoesNotOverrideNever() async {
+        h.policy.decision = .denied(.cellular)
+        await coordinator.play(itemID: "A")
+        await coordinator.confirmMeteredStreaming()
+        coordinator.declineMeteredStreaming()
+        #expect(coordinator.error == .streamingNotAllowed(.cellular, key: h.key("A")))
+
+        h.policy.decision = .askUser(.cellular)
+        await coordinator.play(itemID: "B")
+        h.policy.decision = .denied(.cellular)
+        await coordinator.confirmMeteredStreaming()
+
+        #expect(service.starts.isEmpty)
+        #expect(coordinator.error == .streamingNotAllowed(.cellular, key: h.key("B")))
+    }
+
+    /// A confirmation left over from a stopped (or retired) coordinator plays nothing.
+    @Test(arguments: [PlaybackStopReason.user, .accountSwitch])
+    func confirmingAfterAStopPlaysNothing(_ reason: PlaybackStopReason) async {
+        h.policy.decision = .askUser(.cellular)
+        await coordinator.play(itemID: "A")
+        coordinator.stop(reason: reason)
+
+        await coordinator.confirmMeteredStreaming()
+
+        #expect(service.starts.isEmpty)
+        #expect(coordinator.phase == .idle)
+    }
+
     @Test func blockedPolicyLeavesCurrentItemPlaying() async {
         await coordinator.play(itemID: "A")
         h.policy.decision = .askUser(.cellular)
