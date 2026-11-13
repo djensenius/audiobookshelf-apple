@@ -833,6 +833,33 @@ import Testing
         #expect(await events.next { _ in true } == .recordChanged(record))
     }
 
+    /// A discarded record whose delete fails is paused instead, and reported as it now is, so a
+    /// controller lists it with Retry whatever its snapshot read.
+    @Test func aDiscardedRecordThatCantBeDeletedIsReportedPaused() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let events = await manager.events()
+        let generation = await manager.quiesceGeneration()
+        await fixture.engine.quiesce(afterNextCheckSince: generation)
+        let store = fixture.store
+        // The guarded resume finds the quiesce and changes nothing; the delete after it fails.
+        await fixture.engine.onGuardedResume { _ in await store.failNextCommit(with: TestError()) }
+        let item = LibraryItemFixtures.book()
+
+        await #expect(throws: DownloadManagerError.downloadsStopped(fixture.connectionID)) {
+            try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID, unlessQuiescedSince: generation)
+        }
+
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(record.state == .paused)
+        #expect(await fixture.engine.started.isEmpty)
+        // Reported before the next enqueue's change.
+        _ = try await manager.enqueue(
+            item: LibraryItemFixtures.book(id: "li_other"), episodeID: nil, connectionID: fixture.connectionID)
+        #expect(await events.next { _ in true } == .recordChanged(record))
+    }
+
     @Test func aPausedRecordStaysPausedAfterAQuiesce() async throws {
         let fixture = try await ManagerFixture()
         let manager = fixture.makeManager()

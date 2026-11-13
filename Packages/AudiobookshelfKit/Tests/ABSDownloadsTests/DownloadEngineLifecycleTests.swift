@@ -1359,9 +1359,11 @@ import Testing
     }
 
     /// A guarded resume whose read fails after it queued the record, and whose rollback to
-    /// paused fails too, keeps the record unlaunchable: an overlapping activation pauses it
-    /// instead of starting a transfer, and a later resume still starts it.
-    @Test func aGuardedResumeWhoseReadFailsAfterQueueingStaysUnlaunchable() async throws {
+    /// paused fails too, leaves the record queued and unlaunchable until the next activation.
+    /// With no quiesce of its server since the resume's generation, that activation releases it
+    /// and starts it, as ``DownloadManager/restartActiveTransfers()`` leaves such a record queued
+    /// for: it isn't paused, which would need a manual retry.
+    @Test func aGuardedResumeWhoseRollbackFailsWithoutAQuiesceStartsAtTheNextActivation() async throws {
         let never = StubGate()
         let harness = try await DownloadHarness { _ in .status(200, gate: never) }
         let partID = UUID()
@@ -1386,14 +1388,13 @@ import Testing
             try await engine.resume(recordID: record.id, unlessQuiescedSince: generation)
         }
         #expect(try await store.record(id: record.id)?.state == .queued)
-        #expect(await engine.activate())
-        await engine.waitForRestart()
-        #expect(try await store.record(id: record.id)?.state == .paused)
         #expect(harness.requests.isEmpty)
 
-        #expect(try await engine.resume(recordID: record.id))
+        #expect(await engine.activate())
+        await engine.waitForRestart()
         await harness.waitForRequests(1)
         #expect(harness.requests.count == 1)
+        #expect(try await store.record(id: record.id)?.state != .paused)
         never.open()
     }
 
