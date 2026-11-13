@@ -68,6 +68,12 @@ struct LocalItemDetailView: View {
                                     Button(L10n.string("ButtonDelete")) { pendingDelete = .episode(episode) }
                                         .tint(.red)
                                 }
+                                // The same confirmation for a pointer (macOS) or a long press.
+                                .contextMenu {
+                                    Button(L10n.string("ButtonDelete"), role: .destructive) {
+                                        pendingDelete = .episode(episode)
+                                    }
+                                }
                         }
                     } header: {
                         Text(verbatim: "\(L10n.string("HeaderEpisodes")) (\(detail.episodes.count.formatted()))")

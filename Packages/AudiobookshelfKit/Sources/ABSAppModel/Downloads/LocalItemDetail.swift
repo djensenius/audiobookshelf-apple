@@ -79,11 +79,15 @@ public struct LocalItemDetail: Sendable, Equatable {
     public var link: LinkStatus
 
     public var isPodcast: Bool { mediaType == .podcast }
-    /// The tracks' or episodes' bytes.
-    public var audioBytes: Int64 { tracks.reduce(0) { $0 + $1.byteCount } + episodes.reduce(0) { $0 + $1.byteCount } }
-    public var ebookBytes: Int64 { ebooks.reduce(0) { $0 + $1.byteCount } }
+    /// The tracks' or episodes' bytes. Every sum saturates at `Int64.max`, as in ``DownloadsListing``.
+    public var audioBytes: Int64 {
+        Self.adding(Self.sum(tracks.map(\.byteCount)), Self.sum(episodes.map(\.byteCount)))
+    }
+    public var ebookBytes: Int64 { Self.sum(ebooks.map(\.byteCount)) }
     /// Every file's bytes.
-    public var totalBytes: Int64 { audioBytes + ebookBytes + otherFiles.reduce(0) { $0 + $1.byteCount } }
+    public var totalBytes: Int64 {
+        Self.adding(Self.adding(audioBytes, ebookBytes), Self.sum(otherFiles.map(\.byteCount)))
+    }
     /// The tracks' or episodes' seconds, where known.
     public var totalDuration: Double {
         tracks.reduce(0) { $0 + ($1.duration ?? 0) } + episodes.reduce(0) { $0 + ($1.duration ?? 0) }
@@ -150,6 +154,15 @@ public struct LocalItemDetail: Sendable, Equatable {
         return address
     }
 
+    /// `a + b`, or `Int64.max` if that overflows.
+    private static func adding(_ a: Int64, _ b: Int64) -> Int64 {
+        let (sum, overflow) = a.addingReportingOverflow(b)
+        return overflow ? .max : sum
+    }
+
+    /// The saturating sum of `sizes`.
+    private static func sum(_ sizes: [Int64]) -> Int64 { sizes.reduce(0, adding) }
+
     private static func file(_ file: LocalFileDTO, format: String? = nil) -> File {
         File(
             id: file.id, index: nil, title: file.filename, filename: file.filename, mimeType: file.mimeType,
@@ -159,7 +172,7 @@ public struct LocalItemDetail: Sendable, Equatable {
     /// The snapshot's episodes, plus files whose episode isn't in the snapshot (titled by filename).
     private static func episodes(_ snapshot: [LocalMediaSnapshot.Episode], files: [String: [LocalFileDTO]]) -> [Episode]
     {
-        func bytes(_ id: String) -> Int64 { files[id, default: []].reduce(0) { $0 + max($1.size, 0) } }
+        func bytes(_ id: String) -> Int64 { sum(files[id, default: []].map { max($0.size, 0) }) }
         var episodes = snapshot.map {
             Episode(
                 id: $0.id, title: $0.title, publishedAt: $0.publishedAt, duration: $0.track?.duration ?? $0.duration,

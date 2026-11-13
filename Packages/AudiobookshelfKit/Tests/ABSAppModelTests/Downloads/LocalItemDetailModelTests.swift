@@ -23,6 +23,7 @@ private actor FakeLocalStore: DownloadControlling {
     private(set) var item: LocalLibraryItemDTO?
     private(set) var reads = 0
     private var failure: DownloadManagerError?
+    private var failsReads = false
     private var subscribers: [AsyncStream<DownloadManagerEvent>.Continuation] = []
     private var updateSubscribers: [AsyncStream<[LocalLibraryItemDTO]>.Continuation] = []
 
@@ -38,8 +39,14 @@ private actor FakeLocalStore: DownloadControlling {
         failure = error
     }
 
-    func read(_ id: UUID) -> LocalLibraryItemDTO? {
+    /// Makes reads throw, as an unreadable store does, until set back.
+    func failReads(_ fails: Bool) {
+        failsReads = fails
+    }
+
+    func read(_ id: UUID) throws -> LocalLibraryItemDTO? {
         reads += 1
+        if failsReads { throw DownloadManagerError.storeFailure }
         return item?.id == id ? item : nil
     }
 
@@ -127,7 +134,7 @@ struct LocalItemDetailModelTests {
             storeUpdates ? { @Sendable connectionID in await store.updates(connectionID) } : nil
         let services = DownloadsServices(
             controller: controller, control: store, localItemUpdates: updates,
-            localItems: { _ in [] }, localItem: { await store.read($0) }, localFileURL: localFileURL,
+            localItems: { _ in [] }, localItem: { try await store.read($0) }, localFileURL: localFileURL,
             availableCapacity: { 0 })
         let model = LocalItemDetailModel(itemID: itemID, services: services, account: LocalItemDetailTests.account)
         let (reloads, report) = AsyncStream.makeStream(of: Void.self)
@@ -248,6 +255,28 @@ struct LocalItemDetailModelTests {
         #expect(model.detail?.episodes.map(\.id) == ["e2"])
         #expect(model.detail?.totalBytes == 10)
         #expect(!model.isDeleted)
+    }
+
+    @Test func aRetryAfterAFailedFirstReadFollowsTheStoreUpdates() async throws {
+        let item = Self.podcast(episodes: ["e1", "e2"])
+        let store = FakeLocalStore(item: item)
+        await store.failReads(true)
+        let (model, cleanUp) = try await makeModel(store: store, itemID: item.id, storeUpdates: true)
+        defer { cleanUp() }
+        #expect(model.loadError != nil)
+
+        // Retry, as the error view's button does.
+        await store.failReads(false)
+        await model.reload()
+        #expect(model.detail?.episodes.count == 2)
+
+        // Another window deletes e1: no download event, only the store's update.
+        await store.set(Self.podcast(episodes: ["e2"]).withID(item.id))
+        await store.publish()
+        try await eventually { model.detail?.episodes.count == 1 }
+
+        #expect(model.detail?.episodes.map(\.id) == ["e2"])
+        #expect(model.detail?.totalBytes == 10)
     }
 
     @Test func theCoverIsTheDownloadedFile() async throws {

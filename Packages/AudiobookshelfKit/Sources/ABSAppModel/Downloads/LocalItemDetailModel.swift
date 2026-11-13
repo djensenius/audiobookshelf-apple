@@ -1,8 +1,8 @@
 import ABSCore
 import ABSData
 import ABSDownloads
+import CoreGraphics
 import Foundation
-import ImageIO
 import Observation
 
 /// The local item screen's state and actions (#75): reads one downloaded item, shows it as a
@@ -37,6 +37,8 @@ public final class LocalItemDetailModel {
 
     @ObservationIgnored private let services: DownloadsServices
     @ObservationIgnored private var readGeneration = 0
+    /// While ``observe()`` waits for the item to be found, wakes it when a read finds it.
+    @ObservationIgnored private var itemFound: AsyncStream<Signal>.Continuation?
     /// Tests: called after each ``reload()`` that applied its result.
     @ObservationIgnored var reloaded: (@MainActor () -> Void)?
 
@@ -57,44 +59,72 @@ public final class LocalItemDetailModel {
     }
 
     /// The image in `url`, downsampled so its long side is at most `maxPixelSize`; `nil` if the
-    /// file is missing or isn't an image.
+    /// file is missing, isn't an image, or fails the shared decoder's source limits
+    /// (``ImageThumbnail``).
     @concurrent
     public nonisolated static func coverImage(at url: URL, maxPixelSize: Int) async -> CGImage? {
-        let options = [kCGImageSourceShouldCache: false] as CFDictionary
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, options) else { return nil }
-        return CGImageSourceCreateThumbnailAtIndex(
-            source, 0,
-            [
-                kCGImageSourceThumbnailMaxPixelSize: max(maxPixelSize, 1),
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-            ] as CFDictionary)
+        try? await ImageThumbnail.decode(contentsOf: url, maxPixelSize: maxPixelSize)
     }
 
     /// Reads the item, then again after every write to its connection's downloads
     /// (``DownloadsServices/localItemUpdates``), so a deletion in another window updates the rows
-    /// and totals or sets ``isDeleted``. Without those updates, or if the item isn't found, it
-    /// reads the item again after each completed download of it. Runs until the task is cancelled.
+    /// and totals or sets ``isDeleted``. Until the item is read (a failed or empty first read),
+    /// or without those updates, it reads the item again after each completed download of it,
+    /// and moves to the updates once a read (such as a retry) finds the item. Runs until the task
+    /// is cancelled.
     public func observe() async {
         // Subscribed before the read, so a completion during it is followed by another read.
-        var events: AsyncStream<DownloadManagerEvent>? = await services.control.events()
+        let events = await services.control.events()
         await reload()
-        // The store stream's first snapshot is the items as they are, so a write between the read
-        // above and the subscription is still followed by another read.
-        if let connectionID = item?.serverConnectionID,
-            let updates = try? await services.localItemUpdates?(connectionID)
-        {
-            events = nil  // Ends that subscription; the store reports completions too.
-            for await _ in updates { await reload() }
+        if let updates = await storeUpdates() {
+            await follow(updates)
             return
         }
-        guard let events else { return }
-        for await event in events {
-            guard case .completed(_, let completedItemID, let key) = event else { continue }
-            let sameServerItem =
-                key.serverConnectionID == item?.serverConnectionID && key.libraryItemId == item?.libraryItemId
-            if completedItemID == itemID || sameServerItem { await reload() }
+        let (signals, signal) = AsyncStream.makeStream(of: Signal.self)
+        let forwarding = Task {
+            for await event in events { signal.yield(.event(event)) }
         }
+        itemFound = signal
+        defer {
+            forwarding.cancel()
+            itemFound = nil
+        }
+        for await next in signals {
+            switch next {
+            case .event(.completed(_, let completedItemID, let key)):
+                let sameServerItem =
+                    key.serverConnectionID == item?.serverConnectionID && key.libraryItemId == item?.libraryItemId
+                if completedItemID == itemID || sameServerItem { await reload() }
+            case .event:
+                continue
+            case .itemFound:
+                guard let updates = await storeUpdates() else { continue }
+                // Ends the events subscription; the store reports completions too.
+                forwarding.cancel()
+                itemFound = nil
+                await follow(updates)
+                return
+            }
+        }
+    }
+
+    /// What the fallback loop in ``observe()`` waits for.
+    private enum Signal: Sendable {
+        case event(DownloadManagerEvent)
+        /// A read found the item, so its connection's store updates can be followed.
+        case itemFound
+    }
+
+    /// The item's connection's store updates, or `nil` before the item is read or without them.
+    private func storeUpdates() async -> AsyncStream<[LocalLibraryItemDTO]>? {
+        guard let connectionID = item?.serverConnectionID else { return nil }
+        return try? await services.localItemUpdates?(connectionID)
+    }
+
+    /// Reads the item after every store write. The stream's first snapshot is the items as they
+    /// are, so a write since the last read is still followed by another read.
+    private func follow(_ updates: AsyncStream<[LocalLibraryItemDTO]>) async {
+        for await _ in updates { await reload() }
     }
 
     /// Reads the item again.
@@ -115,6 +145,7 @@ public final class LocalItemDetailModel {
             item = fresh
             loadError = nil
             if fresh == nil, isLoaded { isDeleted = true }
+            if fresh != nil { itemFound?.yield(.itemFound) }
         case .failure(let error):
             loadError = error
             Log.downloads.error(

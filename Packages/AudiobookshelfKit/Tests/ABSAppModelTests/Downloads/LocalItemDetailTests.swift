@@ -91,6 +91,32 @@ struct LocalItemDetailTests {
         #expect(detail.totalBytes == 0)
     }
 
+    /// Sizes come from the server, so sums that overflow `Int64` saturate instead of trapping,
+    /// as in ``DownloadsListing``: per episode, per kind and in total.
+    @Test func byteTotalsSaturateInsteadOfOverflowing() {
+        let huge = Int64.max - 10
+        let book = LocalItemDetail(
+            item: Self.item(files: [
+                Self.file("01.mp3", size: huge, trackIndex: 1), Self.file("02.mp3", size: huge, trackIndex: 2),
+                Self.file("a.epub", kind: .ebook, size: huge), Self.file("b.epub", kind: .ebook, size: huge),
+            ]), account: nil)
+        #expect(book.audioBytes == .max)
+        #expect(book.ebookBytes == .max)
+        #expect(book.totalBytes == .max)
+
+        let podcast = LocalItemDetail(
+            item: Self.item(
+                mediaType: .podcast,
+                media: LocalMediaSnapshot(metadata: .init(title: "Radio"), episodes: [.init(id: "e1", title: "Pilot")]),
+                files: [
+                    Self.file("e1a.mp3", size: huge, episodeId: "e1"),
+                    Self.file("e1b.mp3", size: huge, episodeId: "e1"),
+                    Self.file("x.mp3", size: huge), Self.file("y.mp3", size: huge),
+                ]), account: nil)
+        #expect(podcast.episodes.first?.byteCount == .max)
+        #expect(podcast.totalBytes == .max)
+    }
+
     struct LinkCase: Sendable, CustomTestStringConvertible {
         let name: String
         let connection: UUID
