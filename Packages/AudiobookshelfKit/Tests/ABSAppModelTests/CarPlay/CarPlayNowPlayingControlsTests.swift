@@ -215,6 +215,19 @@ private func chapterRows(_ count: Int) -> [PlayerChapterRow] {
         #expect(CarPlayNowPlayingControls.returnsToNowPlaying(after: .discarded) == false)
     }
 
+    /// Review of #564: Stream on a queued play's alert pops back to the Now Playing under the
+    /// queue; a browse play pushes it, and nothing happens when it's already on top.
+    @Test func nowPlayingIsPoppedToWhenUnderAListAndPushedWhenAbsent() {
+        // Root, Now Playing, Up Next.
+        #expect(CarPlayNowPlayingControls.nowPlayingNavigation(index: 1, count: 3) == .pop)
+        // Root, browse list, Now Playing, Up Next.
+        #expect(CarPlayNowPlayingControls.nowPlayingNavigation(index: 2, count: 4) == .pop)
+        // Root, browse list.
+        #expect(CarPlayNowPlayingControls.nowPlayingNavigation(index: nil, count: 2) == .push)
+        // Root, Now Playing.
+        #expect(CarPlayNowPlayingControls.nowPlayingNavigation(index: 1, count: 2) == CarPlayNowPlayingNavigation.none)
+    }
+
     // MARK: List observation
 
     /// Review of #564: reopening Chapters ends the first list's loop, so loops don't pile up.

@@ -29,6 +29,13 @@ public enum CarPlayUpNext: Sendable, Hashable {
     case chapters
 }
 
+/// The navigation that shows Now Playing.
+public enum CarPlayNowPlayingNavigation: Sendable, Hashable {
+    case none
+    case pop
+    case push
+}
+
 /// What a tap on the sleep timer button does.
 public enum CarPlaySleepTimerAction: Sendable, Hashable {
     case start(SleepTimerMode)
@@ -95,6 +102,13 @@ public enum CarPlayNowPlayingControls {
     /// A blocked or failed play stays, so the root model's alert shows over the list.
     public static func returnsToNowPlaying(after outcome: CarPlayPlayOutcome) -> Bool {
         outcome == .started
+    }
+
+    /// How to show Now Playing in a stack of `count` templates where it sits at `index`, if
+    /// anywhere: push it when absent, pop back to it when lists are over it, nothing when on top.
+    public static func nowPlayingNavigation(index: Int?, count: Int) -> CarPlayNowPlayingNavigation {
+        guard let index else { return .push }
+        return index < count - 1 ? .pop : .none
     }
 
     /// The chapter list's rows, at most `limit`: all of them when they fit, otherwise a window
