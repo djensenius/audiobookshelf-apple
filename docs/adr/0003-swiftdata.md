@@ -358,6 +358,14 @@ Model notes:
       server values replace the group and its flag clears without a PATCH. The
       server's `lastUpdate` is row-wide, so it is an upper bound on when that group
       changed, and ambiguous cases favour the server.
+      One exception, which uses no clock across devices (#565): a dirty local finish
+      stays dirty when the server holds the item finished too and a dirty audio edit
+      made no later than the finish (both edit times are this device's clock) is
+      still to be sent. That audio PATCH goes first and un-finishes the server
+      (#53), so the finish is sent again after it. Without the exception, a device
+      clock behind the server's, or tied with it, settled the finish and then sent
+      the older position, un-finishing the item. A position edited after the finish
+      (the user played on) and a server un-finish follow the time rule as before.
 
     When the server wins a conflict, that group is also removed from every
     `unacknowledgedSends` entry, so an old send can't later match another device's
