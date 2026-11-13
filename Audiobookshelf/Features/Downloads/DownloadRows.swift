@@ -120,8 +120,8 @@ struct DownloadedItemRow: View {
 
     private var coverKey: ImageKey? {
         guard let serverID else { return nil }
-        let updatedAt = item.coverUpdatedAt.map { Int($0.timeIntervalSince1970 * 1000) }
-        return CoverRef(entityID: item.libraryItemId, updatedAt: updatedAt).key(serverID: serverID, bucket: .small)
+        return CoverRef(entityID: item.libraryItemId, updatedAt: item.coverVersion)
+            .key(serverID: serverID, bucket: .small)
     }
 
     /// For example "12 tracks · Ebook · 412 MB", or "3 episodes · 120 MB".

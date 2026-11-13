@@ -50,6 +50,10 @@ public struct WidgetSnapshot: Codable, Sendable, Hashable {
 
     /// The Continue Listening widget's kind, for `WidgetCenter.reloadTimelines(ofKind:)`.
     public static let continueListeningKind = "org.davidjensenius.Audiobookshelf.ContinueListening"
+    /// The play/pause control's kind, for `ControlCenter.reloadControls(ofKind:)`.
+    public static let playPauseControlKind = "org.davidjensenius.Audiobookshelf.PlayPauseControl"
+    /// The jump-back control's kind; it shows no state, so nothing reloads it.
+    public static let jumpBackControlKind = "org.davidjensenius.Audiobookshelf.JumpBackControl"
 
     /// `audiobookshelf://item/<itemID>?episode=<episodeID>&server=<serverID>`, the app's deep
     /// link to the item on this connection (`DeepLink`).
@@ -88,6 +92,12 @@ public struct WidgetSnapshot: Codable, Sendable, Hashable {
     public static func read(from url: URL) -> WidgetSnapshot? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(WidgetSnapshot.self, from: data)
+    }
+
+    /// Whether the play/pause control shows playing: the snapshot at `url` says play was requested.
+    /// Without a snapshot (none written, signed out, no App Group) it shows paused, so a tap plays.
+    public static func isPlaying(at url: URL?) -> Bool {
+        url.flatMap(read(from:))?.isPlaying ?? false
     }
 
     /// Replaces the file at `url` atomically, creating its folder.
