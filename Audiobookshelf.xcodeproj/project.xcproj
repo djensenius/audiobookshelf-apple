@@ -194,6 +194,13 @@
         "frameworks",
         "resources",
       ],
+      "package-product-members": [
+        {
+          "package": "AudiobookshelfKit",
+          "product-name": "AudiobookshelfWidgetKit",
+          "build-phase": { "build-phase": "frameworks" },
+        },
+      ],
       "build-settings": {
         "ABS_WIDGETS_MACOS_ENTITLEMENTS": "AudiobookshelfWidgets/AudiobookshelfWidgets.entitlements",
         "APPLICATION_EXTENSION_API_ONLY": "YES",
