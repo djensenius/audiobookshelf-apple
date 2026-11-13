@@ -79,6 +79,8 @@ public enum EPUBBridgeDecodingError: Error, Sendable, Equatable {
     case missingField(type: String, field: String)
     /// A field has the wrong JSON type.
     case invalidField(type: String, field: String)
+    /// The message is over ``EPUBBridgeEvent/maxMessageBytes``; it isn't parsed.
+    case tooLarge
 }
 
 /// A message from the EPUB reader page (JS → Swift), per the bridge contract and ADR 0008 §1.
@@ -99,9 +101,21 @@ public enum EPUBBridgeEvent: Sendable, Equatable {
     /// A `type` this version doesn't know; ignore it.
     case unknown(String)
 
+    /// The largest message decoded: well over a long book's generated locations, and a bound on
+    /// what a crafted book can make the main actor parse.
+    public static let maxMessageBytes = 4 << 20
+
     /// Decodes one message. Unknown types decode to ``unknown(_:)``. Optional fields (`href`,
     /// `phase`, a TOC entry's `subitems`) may be missing, and extra fields are ignored.
-    public static func decode(_ data: Data) throws(EPUBBridgeDecodingError) -> EPUBBridgeEvent {
+    ///
+    /// - Parameter skipping: Types the caller ignores; they decode to ``unknown(_:)`` without their
+    ///   body (for example a book's whole table of contents) being decoded.
+    /// - Throws: ``EPUBBridgeDecodingError/tooLarge`` for a message over ``maxMessageBytes``,
+    ///   before parsing anything.
+    public static func decode(
+        _ data: Data, skipping: Set<String> = []
+    ) throws(EPUBBridgeDecodingError) -> EPUBBridgeEvent {
+        guard data.count <= maxMessageBytes else { throw .tooLarge }
         let decoder = JSONDecoder()
         let type: String
         do {
@@ -115,6 +129,7 @@ public enum EPUBBridgeEvent: Sendable, Equatable {
         } catch {
             throw .missingType
         }
+        if skipping.contains(type) { return .unknown(type) }
         do {
             switch type {
             case "ready":
