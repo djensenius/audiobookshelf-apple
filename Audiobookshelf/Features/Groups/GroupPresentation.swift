@@ -198,9 +198,12 @@ enum GroupPresentation {
         return starts.begin()
     }
 
-    /// Plays the member play-all starts through `play`, like a card's Play, then hands its media on the connection
-    /// `serverID` and ``GroupPlayAll/queued`` to `requeue`, which replaces the play queue once the player has
-    /// accepted that start (``PlaybackQueueControl/replace(with:afterStarting:)``). Legacy plays only that member.
+    /// Plays the member play-all starts through `play`, like a card's Play, then replaces `queue` with
+    /// ``GroupPlayAll/queued`` once that start, on the connection `serverID`, has succeeded
+    /// (``PlayAllQueueing/replace(with:afterStarting:request:)``). Legacy plays only that member.
+    ///
+    /// The request begins before the start is awaited, so a newer play-all from another window, begun while this
+    /// one waits, keeps its queue.
     ///
     /// Does nothing while a member plays, which ``tap(_:starts:pause:)`` pauses instead, so Play never queues again
     /// then. A failed or cancelled start, or one without a connection, leaves the queue alone.
@@ -208,10 +211,10 @@ enum GroupPresentation {
     /// - Returns: The failure message's key; `nil` when it started, was cancelled or had nothing to play.
     @MainActor
     static func performPlayAll(
-        _ playAll: GroupPlayAll, play: PlayItemAction?, serverID: UUID? = nil,
-        requeue: (@MainActor (_ started: MediaKey, _ queued: [QueueItem]) -> Void)? = nil
+        _ playAll: GroupPlayAll, play: PlayItemAction?, serverID: UUID? = nil, queue: (any PlayAllQueueing)? = nil
     ) async -> String? {
         guard playAll.playing == nil, playAll.isEnabled, let next = playAll.next, let play else { return nil }
+        let request = queue?.beginPlayAll()
         do {
             try await play(itemID: next.target.itemID, episodeID: next.target.episodeID)
         } catch is CancellationError {
@@ -219,10 +222,12 @@ enum GroupPresentation {
         } catch {
             return ItemCardActions.failureMessageKey(for: .play)
         }
-        guard !Task.isCancelled, let serverID, let requeue else { return nil }
-        requeue(
-            MediaKey(serverConnectionID: serverID, libraryItemId: next.target.itemID, episodeId: next.target.episodeID),
-            playAll.queued)
+        guard !Task.isCancelled, let serverID, let queue, let request else { return nil }
+        await queue.replace(
+            with: playAll.queued,
+            afterStarting: MediaKey(
+                serverConnectionID: serverID, libraryItemId: next.target.itemID, episodeId: next.target.episodeID),
+            request: request)
         return nil
     }
 }

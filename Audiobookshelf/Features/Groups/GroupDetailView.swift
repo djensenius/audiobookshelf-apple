@@ -182,8 +182,7 @@ private struct GroupDetailHeader<Kind: GroupScreenKind>: View {
         Task {
             defer { starts.end(token) }
             if let key = await GroupPresentation.performPlayAll(
-                playAll, play: play, serverID: serverID,
-                requeue: { started, queued in queue?.replace(with: queued, afterStarting: started) })
+                playAll, play: play, serverID: serverID, queue: queue)
             {
                 failureKey = key
                 showsFailure = true

@@ -113,6 +113,37 @@ private func playing(_ itemID: String, episodeID: String? = nil, on connectionID
     MediaKey(serverConnectionID: connectionID, libraryItemId: itemID, episodeId: episodeID)
 }
 
+/// Records play-all's requests and replaces, in order, with the plays `log` also records.
+@MainActor
+private final class FakePlayAllQueue: PlayAllQueueing {
+    enum Event: Equatable {
+        case begin(Int)
+        case play
+        case replace(MediaKey, [QueueItem], request: Int)
+    }
+
+    var events: [Event] = []
+    private var requests = 0
+
+    func beginPlayAll() -> PlayAllRequest {
+        requests += 1
+        events.append(.begin(requests))
+        return PlayAllRequest(id: requests)
+    }
+
+    func replace(with items: [QueueItem], afterStarting started: MediaKey, request: PlayAllRequest) async -> Bool {
+        events.append(.replace(started, items, request: request.id))
+        return true
+    }
+
+    var replaces: Int { events.count { if case .replace = $0 { true } else { false } } }
+
+    /// A Play that records itself.
+    var play: PlayItemAction {
+        PlayItemAction { [weak self] _, _, _ in self?.events.append(.play) }
+    }
+}
+
 @MainActor
 @Suite struct GroupsPresentationTests {
     @Test func listsMapToCardsThatOpenTheirGroup() async throws {
@@ -445,17 +476,15 @@ private func playing(_ itemID: String, episodeID: String? = nil, on connectionID
             #expect(playAll.queued.map(\.id) == ["\(SampleLibrary.podcast.id)|ep_1"])
             #expect(playAll.queued.first?.episodeID == "ep_1")
 
-            let played = Mutex(false)
-            let play = PlayItemAction { _, _, _ in played.withLock { $0 = true } }
-            var requeued: [(MediaKey, [QueueItem], afterPlay: Bool)] = []
+            // The request begins before the start is awaited, and the queue is replaced after it.
+            let queue = FakePlayAllQueue()
             let failure = await GroupPresentation.performPlayAll(
-                playAll, play: play, serverID: account.connectionID,
-                requeue: { started, queued in requeued.append((started, queued, played.withLock { $0 })) })
+                playAll, play: queue.play, serverID: account.connectionID, queue: queue)
             #expect(failure == nil)
-            #expect(requeued.count == 1)
-            #expect(requeued.first?.0 == playing(SampleLibrary.sherlock.id))
-            #expect(requeued.first?.1 == playAll.queued)
-            #expect(requeued.first?.afterPlay == true)
+            #expect(
+                queue.events == [
+                    .begin(1), .play, .replace(playing(SampleLibrary.sherlock.id), playAll.queued, request: 1),
+                ])
 
             // Every member finished but the last: nothing is left to queue.
             store.progress.apply(finished(SampleLibrary.sherlock.id))
@@ -471,21 +500,20 @@ private func playing(_ itemID: String, episodeID: String? = nil, on connectionID
             await model.loadIfNeeded()
             let playAll = try #require(GroupPresentation.playAll(of: model, canPlay: true))
             #expect(playAll.queued.map(\.libraryItemID) == [SampleLibrary.frankenstein.id])
-            var requeues = 0
-            let requeue: @MainActor (MediaKey, [QueueItem]) -> Void = { _, _ in requeues += 1 }
+            let queue = FakePlayAllQueue()
 
             let failing = PlayItemAction { _, _, _ in throw Failure() }
             _ = await GroupPresentation.performPlayAll(
-                playAll, play: failing, serverID: account.connectionID, requeue: requeue)
+                playAll, play: failing, serverID: account.connectionID, queue: queue)
             let cancelled = PlayItemAction { _, _, _ in throw CancellationError() }
             _ = await GroupPresentation.performPlayAll(
-                playAll, play: cancelled, serverID: account.connectionID, requeue: requeue)
+                playAll, play: cancelled, serverID: account.connectionID, queue: queue)
             let succeeding = PlayItemAction { _, _, _ in }
-            _ = await GroupPresentation.performPlayAll(playAll, play: succeeding, serverID: nil, requeue: requeue)
+            _ = await GroupPresentation.performPlayAll(playAll, play: succeeding, serverID: nil, queue: queue)
             let task = Task {
                 withUnsafeCurrentTask { $0?.cancel() }
                 return await GroupPresentation.performPlayAll(
-                    playAll, play: succeeding, serverID: account.connectionID, requeue: requeue)
+                    playAll, play: succeeding, serverID: account.connectionID, queue: queue)
             }
             #expect(await task.value == nil)
 
@@ -495,11 +523,11 @@ private func playing(_ itemID: String, episodeID: String? = nil, on connectionID
                     of: model, canPlay: true, nowPlaying: playing(SampleLibrary.prideAndPrejudice.id),
                     isPlaying: true, serverID: account.connectionID))
             _ = await GroupPresentation.performPlayAll(
-                whilePlaying, play: succeeding, serverID: account.connectionID, requeue: requeue)
+                whilePlaying, play: succeeding, serverID: account.connectionID, queue: queue)
             var starts = GroupPlayStarts()
             #expect(GroupPresentation.tap(whilePlaying, starts: &starts, pause: {}) == nil)
 
-            #expect(requeues == 0)
+            #expect(queue.replaces == 0)
         }
     }
 

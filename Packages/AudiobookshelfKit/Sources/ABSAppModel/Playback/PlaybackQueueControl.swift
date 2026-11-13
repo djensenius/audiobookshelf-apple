@@ -11,10 +11,15 @@ import Observation
 /// control kept from an earlier session never changes a queue again, and never another
 /// account's.
 @MainActor
-public final class PlaybackQueueControl: PlaybackQueueReading {
+public final class PlaybackQueueControl: PlaybackQueueReading, PlayAllQueueing {
     public let serverConnectionID: UUID
     private let reader: any PlaybackQueueReading
     private weak var scope: (any PlaybackScopeHandle)?
+    /// The newest ``beginPlayAll()``'s ID, shared by every window of the session.
+    private var playAllRequests = 0
+    /// How often, and how long, ``replace(with:afterStarting:request:)`` checks a pending start.
+    var startPollInterval: Duration = .milliseconds(100)
+    var startTimeout: Duration = .seconds(60)
 
     /// `nil` when the scope has no queue.
     init?(scope: any PlaybackScopeHandle) {
@@ -57,16 +62,34 @@ public final class PlaybackQueueControl: PlaybackQueueReading {
         scope?.editQueue { $0.clear() }
     }
 
-    /// Replaces the queue with `items`, in order, once the player has accepted a start of `started` (play-all, #354):
-    /// it is the loaded media, starting or loaded, without an error. The current media isn't queued (``isCurrent(_:)``).
+    public func beginPlayAll() -> PlayAllRequest {
+        playAllRequests += 1
+        return PlayAllRequest(id: playAllRequests)
+    }
+
+    /// Replaces the queue with `items`, in order, once the start of `started` has succeeded (play-all, #354): it is
+    /// the loaded media, without an error. A start still pending (`.starting`, as when another screen began it and
+    /// the player's `play` returned at once) is waited for, checking every ``startPollInterval`` for up to
+    /// ``startTimeout``. The current media isn't queued (``isCurrent(_:)``).
     ///
-    /// - Returns: `false`, leaving the queue as it was, when `started` is another connection's, the start failed,
-    ///   was cancelled or was replaced by another media, or the session's scope is gone or has retired.
+    /// - Returns: `false`, leaving the queue as it was, when a newer ``beginPlayAll()`` has begun, `started` is
+    ///   another connection's, the start failed, was cancelled, timed out or was replaced by another media, the
+    ///   caller was cancelled, or the session's scope is gone or has retired.
     @discardableResult
-    public func replace(with items: [QueueItem], afterStarting started: MediaKey) -> Bool {
-        guard started.serverConnectionID == serverConnectionID, let playback = scope?.playback,
-            playback.mediaKey == started, playback.error == nil,
-            playback.phase == .starting || playback.phase == .loaded
+    public func replace(with items: [QueueItem], afterStarting started: MediaKey, request: PlayAllRequest) async
+        -> Bool
+    {
+        guard started.serverConnectionID == serverConnectionID else { return false }
+        let deadline = ContinuousClock.now + startTimeout
+        while request.id == playAllRequests, let playback = scope?.playback, playback.mediaKey == started,
+            playback.error == nil, playback.phase == .starting
+        {
+            guard ContinuousClock.now < deadline, (try? await Task.sleep(for: startPollInterval)) != nil else {
+                return false
+            }
+        }
+        guard request.id == playAllRequests, let playback = scope?.playback, playback.mediaKey == started,
+            playback.error == nil, playback.phase == .loaded
         else { return false }
         return edit { $0.replace(with: items.filter { !isCurrent($0) }) }
     }
