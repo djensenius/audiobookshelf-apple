@@ -142,6 +142,28 @@ private enum ReaderTestFailure: Error {
         #expect(harness.service.writes.value.map(\.update.ebookLocation) == ["4", "3"])
     }
 
+    /// A reader whose progress model came from the session's ``EbookProgressFactory`` (#102, #104):
+    /// a PDF page or EPUB location turn is saved and sent under the factory's connection, and a
+    /// book on another connection gets no model.
+    @Test(arguments: [ReaderKind.pdf, .epub])
+    func aFactoryModelSavesTurnsForItsOwnConnectionOnly(kind: ReaderKind) async throws {
+        let harness = try ProgressHarness()
+        let factory = EbookProgressFactory(
+            serverConnectionID: connection, store: harness.store,
+            sources: EbookProgressSources(service: harness.service, syncer: harness.syncer))
+        #expect(factory(MediaKey(serverConnectionID: UUID(), libraryItemId: "book"), kind, nil) == nil)
+
+        let model = makeModel(kind, progress: try #require(factory(harness.key, kind, nil)))
+        await model.load()
+        let turn: EbookLocation = kind == .pdf ? .page(4) : .cfi("epubcfi(/6/6!/4/2/1:0)")
+        model.record(turn, progress: 0.4)
+        await model.flush()
+
+        let row = try #require(try await harness.row())
+        #expect(row.ebookLocation == turn.stored)
+        #expect(harness.service.writes.value.map(\.update.ebookLocation) == [turn.stored])
+    }
+
     /// epub.js reports where it rendered the book on opening: the first page of an unread book, or
     /// the start of the page holding the saved CFI. Neither is a turn.
     @Test(arguments: [nil, "epubcfi(/6/4!/4/2/1:120)"])

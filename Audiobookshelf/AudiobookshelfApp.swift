@@ -72,6 +72,7 @@ struct AudiobookshelfApp: App {
                 ReaderWindow(presentation: presentation, store: environment.library?.store)
                     // macOS can restore a reader window alone, without the window that starts it.
                     .task { await environment.lifecycle.start() }
+                    .modifier(ReaderProgressEnvironment(participant: environment.playback.participant))
                     .environment(settings)
                     .environment(\.downloadedEbookFile, downloadedEbookFile)
                     .modifier(AppThemeModifier(settings: settings))

@@ -39,6 +39,9 @@ private final class FakeScope: PlaybackScopeHandle {
     }
 
     var playback: any PlayerPlaybackControlling { control }
+    var ebookProgressSources: EbookProgressSources? {
+        EbookProgressSources(service: NoEbookProgress(), syncer: NoDrain())
+    }
     var queue: (any PlaybackQueueReading)? { nil }
     private(set) lazy var sleepTimer: SleepTimer? = SleepTimer(control: control)
     func editQueue(_ edit: (PlaybackQueue) -> Void) {}
@@ -83,6 +86,17 @@ private final class FakeScope: PlaybackScopeHandle {
         log.record("\(name).finished")
         return finishResult
     }
+}
+
+/// A server without ebook progress.
+private struct NoEbookProgress: EbookProgressService {
+    func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? { nil }
+}
+
+/// A syncer that sends nothing.
+@MainActor
+private final class NoDrain: ProgressDraining {
+    func drainPendingProgress() async {}
 }
 
 /// A lifecycle whose playback is the real participant over fake scopes, between an image-like
@@ -491,6 +505,30 @@ private struct Harness {
 
         await harness.lifecycle.signOut()
         #expect(harness.participant.sleepTimer == nil)
+    }
+
+    /// Readers build progress models for the current session's connection only: each session
+    /// gets a factory of its own, a switch's outgoing factory refuses the next account's books,
+    /// and there is none between sessions.
+    @Test func ebookProgressFollowsTheCurrentSession() async throws {
+        let harness = try Harness()
+        try await harness.started()
+        let factoryA = try #require(harness.participant.ebookProgress)
+        let bookA = MediaKey(serverConnectionID: identityA.connectionID, libraryItemId: "book")
+        let bookB = MediaKey(serverConnectionID: identityB.connectionID, libraryItemId: "book")
+        #expect(factoryA.serverConnectionID == identityA.connectionID)
+        #expect(factoryA(bookA, .pdf, nil)?.key == bookA)
+        #expect(factoryA(bookB, .pdf, nil) == nil)
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        #expect(await eventually { harness.log.entries.contains("b.restore") })
+        let factoryB = try #require(harness.participant.ebookProgress)
+        #expect(factoryB !== factoryA)
+        #expect(factoryB(bookB, .epub, nil)?.key == bookB)
+        #expect(factoryB(bookA, .epub, nil) == nil)
+
+        await harness.lifecycle.signOut()
+        #expect(harness.participant.ebookProgress == nil)
     }
 
     /// Each session gets a bookmark store of its own, connected to its client, and the last

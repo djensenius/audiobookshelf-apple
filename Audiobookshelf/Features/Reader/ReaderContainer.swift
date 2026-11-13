@@ -21,9 +21,9 @@ struct ReaderPresentation: Codable, Hashable, Identifiable {
 
 extension EnvironmentValues {
     /// Builds an opened book's progress model with the account's `LocalProgressStore` and
-    /// `ProgressSyncer`. The shell sets it once the progress syncer is wired (#184); until then it's
-    /// `nil`, and readers open at the server's position and save nothing.
-    @Entry var makeEbookProgress: (@MainActor (MediaKey, ReaderKind, MediaProgress?) -> EbookProgressModel?)?
+    /// `ProgressSyncer`, for the current session's connection only (``ReaderProgressEnvironment``).
+    /// `nil` between sessions: readers then open at the server's position and save nothing.
+    @Entry var makeEbookProgress: EbookProgressFactory?
     /// Finds an ebook's downloaded copy (``EbookFileLoader/downloadedFileLookup(items:locations:)``);
     /// `nil` without the on-device store.
     @Entry var downloadedEbookFile: (@Sendable (EbookFileRequest) async -> URL?)?
@@ -58,10 +58,13 @@ struct ReaderContainer: View {
     @State private var isUnavailable = false
     @State private var serverURL: URL?
 
-    /// The book, and the client of the account serving it, if the store is on its connection.
+    /// The book, the client of the account serving it, if the store is on its connection, and the
+    /// session's progress factory: the store attaches an account before its session's playback
+    /// starts, so a reader opened in between gets its progress model when the factory arrives.
     private struct Source: Hashable {
         let presentation: ReaderPresentation
         let client: ObjectIdentifier?
+        let progress: ObjectIdentifier?
     }
 
     private var servingClient: APIClient? {
@@ -70,7 +73,9 @@ struct ReaderContainer: View {
     }
 
     private var source: Source {
-        Source(presentation: presentation, client: servingClient.map(ObjectIdentifier.init))
+        Source(
+            presentation: presentation, client: servingClient.map(ObjectIdentifier.init),
+            progress: makeEbookProgress.map(ObjectIdentifier.init))
     }
 
     var body: some View {

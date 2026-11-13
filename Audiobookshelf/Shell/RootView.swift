@@ -174,6 +174,9 @@ struct RootView: View {
             }
             .id(identity)
             .modifier(PlaybackEnvironment(participant: Self.playback(playback, accounts: accounts, for: identity)))
+            .modifier(
+                ReaderProgressEnvironment(participant: Self.playback(playback, accounts: accounts, for: identity))
+            )
             // `AccountManager` is observable, so a sign-in, switch, reconnect or sign-out updates it.
             .environment(\.statsService, Self.statsService(accounts, for: identity))
         case .storeUnavailable:
