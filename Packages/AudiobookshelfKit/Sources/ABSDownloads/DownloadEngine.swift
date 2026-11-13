@@ -146,6 +146,9 @@ public actor DownloadEngine {
     private let localItems: LocalItemStore
     private let credentials: any DownloadCredentialProviding
     private let vault: ResumeDataVault
+    /// Only a store in the App Group lists every download; a fallback store would make the
+    /// shared resume data look unreferenced.
+    private let sweepsOrphanedResumeData: Bool
     private let locations: DownloadLocations
     private let retryPolicy: RetryPolicy
     private let networkAccess: @Sendable () async -> NetworkAccess
@@ -212,6 +215,10 @@ public actor DownloadEngine {
     private var strandedRunning: Set<UUID> = []
     /// Stops under way: until one has queued its part, the store still has it `running`.
     private var stopping: [UUID: Task<Void, Never>] = [:]
+    /// The last resume-data sweep failed; the next ``activate()`` runs it again.
+    private var isResumeDataSweepPending = false
+    /// Parts sealed while a retried sweep reads the records, which it keeps; `nil` otherwise.
+    private var sealedDuringSweep: Set<UUID>?
     /// The last ``pause(recordID:)`` or ``resume(recordID:)`` of each record; each waits for
     /// the one before it.
     private var recordOperations: [UUID: Task<Void, Never>] = [:]
@@ -298,11 +305,14 @@ public actor DownloadEngine {
     ///     when each task is created.
     ///   - makeSession: ``backgroundSession()`` in the app.
     ///   - preflight: checks each request's redirects before its background task is made.
+    ///   - sweepsOrphanedResumeData: whether activation deletes resume data no record
+    ///     references; pass `true` only when `store` is the App Group store.
     public init(
         store: DownloadStore,
         localItems: LocalItemStore,
         credentials: any DownloadCredentialProviding,
         vault: ResumeDataVault,
+        sweepsOrphanedResumeData: Bool = false,
         locations: DownloadLocations,
         retryPolicy: RetryPolicy = .default,
         networkAccess: @escaping @Sendable () async -> NetworkAccess,
@@ -313,7 +323,8 @@ public actor DownloadEngine {
         preflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight()
     ) {
         self.init(
-            store: store, localItems: localItems, credentials: credentials, vault: vault, locations: locations,
+            store: store, localItems: localItems, credentials: credentials, vault: vault,
+            sweepsOrphanedResumeData: sweepsOrphanedResumeData, locations: locations,
             retryPolicy: retryPolicy, networkAccess: networkAccess, clock: clock, now: now, random: random,
             makeSession: makeSession, registry: .shared, readRecords: { try await $0.allRecords() },
             readRecord: { try await $0.record(id: $1) },
@@ -325,6 +336,7 @@ public actor DownloadEngine {
         localItems: LocalItemStore,
         credentials: any DownloadCredentialProviding,
         vault: ResumeDataVault,
+        sweepsOrphanedResumeData: Bool = false,
         locations: DownloadLocations,
         retryPolicy: RetryPolicy,
         networkAccess: @escaping @Sendable () async -> NetworkAccess,
@@ -351,6 +363,7 @@ public actor DownloadEngine {
         self.localItems = localItems
         self.credentials = credentials
         self.vault = vault
+        self.sweepsOrphanedResumeData = sweepsOrphanedResumeData
         self.locations = locations
         self.retryPolicy = retryPolicy
         self.networkAccess = networkAccess
@@ -392,6 +405,7 @@ public actor DownloadEngine {
         restartsQueuedParts = true
         isInBackground = false
         delegate.post(.restartQueued)
+        await retryResumeDataSweep()
         return true
     }
 
@@ -872,6 +886,8 @@ public actor DownloadEngine {
             activation = nil
             return false
         }
+        // No transfer runs without the session, so only a part still stopping can seal meanwhile.
+        sweepResumeData(records: records)
         survivorsToStop.formUnion(marked)
         // Their resume data goes before their complete records are finalised, which drops the
         // parts that lead to it; a quiesce under way deletes it itself, once its pauses end.
@@ -1118,6 +1134,28 @@ public actor DownloadEngine {
         updateContinuation.yield(
             .sessionUnavailable(code: .sessionInUse, message: "Another process is using the download session."))
         dropSession()
+    }
+
+    /// Deletes resume data no record references: a record went though its blob's delete failed
+    /// (#515). Run with no suspension since `records` was read; parts still stopping, or sealed
+    /// while a retry read the records, are kept.
+    private func sweepResumeData(records: [DownloadRecordDTO]) {
+        guard sweepsOrphanedResumeData else { return }
+        let kept = Set(records.flatMap(\.parts).map(\.id)).union(stopping.keys).union(sealedDuringSweep ?? [])
+        isResumeDataSweepPending = !vault.deleteBlobs(except: kept)
+    }
+
+    /// Runs a failed sweep again once the session exists. Transfers run meanwhile, so the parts
+    /// they seal during the read are kept; a sweep under way is not doubled.
+    private func retryResumeDataSweep() async {
+        guard isResumeDataSweepPending, sealedDuringSweep == nil else { return }
+        sealedDuringSweep = []
+        defer { sealedDuringSweep = nil }
+        do {
+            sweepResumeData(records: try await readRecords(store))
+        } catch {
+            logError("Couldn't read downloads to sweep resume data; the next activation tries again", error)
+        }
     }
 
     /// Adds a context for each part not yet known that hasn't completed, with the failures the
@@ -2025,6 +2063,7 @@ public actor DownloadEngine {
         do {
             try vault.seal(
                 data, partID: partID, credentialTag: ResumeDataVault.credentialTag(for: task.originalRequest))
+            sealedDuringSweep?.insert(partID)
             return true
         } catch {
             logError("Couldn't seal resume data", error)

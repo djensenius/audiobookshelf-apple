@@ -61,6 +61,9 @@ public final class AppSettings {
         case streamingUsingCellular = "settings_streamingUsingCellular"
         case playbackRate = "settings_playbackRate"
         case chapterTrack = "settings_chapterTrack"
+        case totalTrack = "settings_totalTrack"
+        case scaleElapsedTimeBySpeed = "settings_scaleElapsedTimeBySpeed"
+        case lockPlayer = "settings_lockPlayer"
         case collapseBookSeries = "settings_collapseBookSeries"
         /// A `[String: String]` dictionary from ``AppSettings/accountKey(serverID:userID:)``
         /// to library ID.
@@ -104,6 +107,9 @@ public final class AppSettings {
         public static let streamingUsingCellular = CellularPolicy.always
         public static let playbackRate = 1.0
         public static let chapterTrack = true
+        public static let totalTrack = true
+        public static let scaleElapsedTimeBySpeed = true
+        public static let lockPlayer = false
         public static let collapseBookSeries = false
         public static let readerSettings = ReaderSettings()
     }
@@ -195,6 +201,16 @@ public final class AppSettings {
         didSet { persist(.playbackRate, \.playbackRate, oldValue, isValid: Self.isPlaybackRate) }
     }
     public var chapterTrack = Default.chapterTrack { didSet { persist(.chapterTrack, chapterTrack) } }
+    /// Shows the whole item's track alongside the chapter track (legacy `playerSettings.useTotalTrack`).
+    public var totalTrack = Default.totalTrack { didSet { persist(.totalTrack, totalTrack) } }
+    /// Shows the elapsed time divided by the playback rate (legacy
+    /// `playerSettings.scaleElapsedTimeBySpeed`).
+    public var scaleElapsedTimeBySpeed = Default.scaleElapsedTimeBySpeed {
+        didSet { persist(.scaleElapsedTimeBySpeed, scaleElapsedTimeBySpeed) }
+    }
+    /// Hides the full player's jump and chapter controls and the scrubber's thumb, so a stray tap
+    /// can't move the position (legacy `playerSettings.lockUi`).
+    public var lockPlayer = Default.lockPlayer { didSet { persist(.lockPlayer, lockPlayer) } }
 
     // MARK: Browsing
 
@@ -504,6 +520,9 @@ public final class AppSettings {
         update(\.streamingUsingCellular, snapshot.streamingUsingCellular)
         update(\.playbackRate, snapshot.playbackRate)
         update(\.chapterTrack, snapshot.chapterTrack)
+        update(\.totalTrack, snapshot.totalTrack)
+        update(\.scaleElapsedTimeBySpeed, snapshot.scaleElapsedTimeBySpeed)
+        update(\.lockPlayer, snapshot.lockPlayer)
         update(\.collapseBookSeries, snapshot.collapseBookSeries)
         update(\.lastLibraryIDs, snapshot.lastLibraryIDs)
         update(\.libraryViewPreferences, snapshot.libraryViewPreferences)
@@ -549,6 +568,9 @@ extension AppSettings {
         public let streamingUsingCellular: CellularPolicy
         public let playbackRate: Double
         public let chapterTrack: Bool
+        public let totalTrack: Bool
+        public let scaleElapsedTimeBySpeed: Bool
+        public let lockPlayer: Bool
         public let collapseBookSeries: Bool
         public let lastLibraryIDs: [String: String]
         public let libraryViewPreferences: [String: String]
@@ -588,6 +610,9 @@ extension AppSettings {
             streamingUsingCellular = store.enumValue(.streamingUsingCellular, Default.streamingUsingCellular)
             playbackRate = store.double(.playbackRate, Default.playbackRate, where: isPlaybackRate)
             chapterTrack = store.bool(.chapterTrack, Default.chapterTrack)
+            totalTrack = store.bool(.totalTrack, Default.totalTrack)
+            scaleElapsedTimeBySpeed = store.bool(.scaleElapsedTimeBySpeed, Default.scaleElapsedTimeBySpeed)
+            lockPlayer = store.bool(.lockPlayer, Default.lockPlayer)
             collapseBookSeries = store.bool(.collapseBookSeries, Default.collapseBookSeries)
             lastLibraryIDs = store.stringDictionary(.lastLibraryIDs)
             libraryViewPreferences = store.stringDictionary(.libraryViewPreferences)

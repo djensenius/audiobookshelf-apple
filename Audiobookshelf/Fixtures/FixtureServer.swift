@@ -40,7 +40,7 @@
             defaults.removePersistentDomain(forName: suite)
             return AppEnvironment(
                 settings: AppSettings(defaults: defaults), storeLocation: .inMemory, keychain: FixtureKeychain(),
-                sessionConfiguration: sessionConfiguration, downloadsRoot: nil, covers: coverSource())
+                sessionConfiguration: sessionConfiguration, downloadsRoot: nil, covers: coverSource(), realtime: false)
         }
 
         /// A fixture launch's covers: answered by ``FixtureURLProtocol``, so they never wait for

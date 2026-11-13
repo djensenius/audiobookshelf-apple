@@ -183,6 +183,7 @@
                 showsPause: model.showsPause, isBuffering: model.isBuffering,
                 jumpBackwardSeconds: model.jumpBackwardSeconds, jumpForwardSeconds: model.jumpForwardSeconds,
                 hasPreviousChapter: model.hasPreviousChapter, hasNextChapter: model.hasNextChapter,
+                showsSkipControls: model.displayOptions.showsSkipControls,
                 haptic: settings?.hapticFeedback ?? .off, locale: locale
             ) { action in
                 Task { await model.perform(action) }
@@ -191,15 +192,7 @@
                 ChaptersSlot(model: model, sheet: $sheet)
                 BookmarksSlot(model: model, sheet: $sheet)
                 SleepTimerSlot(model: model, sheet: $sheet)
-                Button {
-                } label: {
-                    Label {
-                        Text(verbatim: L10n.string("LabelMore"))
-                    } icon: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                }
-                .disabled(true)
+                PlayerOptionsMenu(model: model)
             }
         }
     }
