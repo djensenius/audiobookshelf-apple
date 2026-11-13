@@ -140570,6 +140570,251 @@
         }
       }
     },
+    "MessageHandoffAccountNotSignedIn" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        }
+      }
+    },
     "MessageHideFromContinueListeningFailed" : {
       "extractionState" : "manual",
       "localizations" : {
