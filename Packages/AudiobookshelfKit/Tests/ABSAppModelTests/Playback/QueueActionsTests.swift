@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSData
 import Foundation
 import Testing
 
@@ -20,6 +21,8 @@ private final class MemoryQueueStore: PlaybackQueueStoring {
 private final class QueueScope: PlaybackScopeHandle {
     let queueStore = MemoryQueueStore()
     let playbackQueue: PlaybackQueue
+    /// Its player; set `mediaKey` to load media.
+    let control = FakePlaybackControl()
     var isRetired = false
     var onSessionRejected: (@MainActor () -> Void)?
 
@@ -29,7 +32,7 @@ private final class QueueScope: PlaybackScopeHandle {
         playbackQueue = PlaybackQueue(serverConnectionID: id, store: queueStore)
     }
 
-    var playback: any PlayerPlaybackControlling { FakePlaybackControl() }
+    var playback: any PlayerPlaybackControlling { control }
     var queue: (any PlaybackQueueReading)? { playbackQueue }
     var sleepTimer: SleepTimer? { nil }
     func editQueue(_ edit: (PlaybackQueue) -> Void) {
@@ -120,6 +123,45 @@ struct QueueActionsTests {
         queue.add(first, at: .end)
         queue.add(second, at: .next)
         #expect(queue.items.map(\.id) == ["li_podcast|ep_1", "li_podcast|ep_2"])
+    }
+
+    // MARK: The current media
+
+    /// The queue advances past the loaded media, so it isn't queued; another episode of the same
+    /// podcast is.
+    @Test func theCurrentMediaIsRefusedButAnotherEpisodeOfItsPodcastIsQueued() throws {
+        let scope = QueueScope()
+        let queue = try #require(PlaybackQueueControl(scope: scope))
+        let playing = try #require(QueueItem(item: SampleLibrary.podcast, episode: SampleLibrary.episodes[0]))
+        let other = try #require(QueueItem(item: SampleLibrary.podcast, episode: SampleLibrary.episodes[1]))
+        scope.control.mediaKey = playing.key(serverConnectionID: queue.serverConnectionID)
+
+        #expect(queue.isCurrent(playing))
+        #expect(!queue.isCurrent(other))
+        #expect(!queue.add(playing, at: .next))
+        #expect(!queue.add(playing, at: .end))
+        #expect(queue.add(other, at: .next))
+        #expect(queue.items.map(\.id) == ["li_podcast|ep_1"])
+    }
+
+    /// Whether the actions are offered follows the loaded media: hidden while it's the item, offered
+    /// again once something else (or nothing) is loaded, or for the same media on another connection.
+    @Test func theCurrentMediaFollowsThePlayer() throws {
+        let scope = QueueScope()
+        let queue = try #require(PlaybackQueueControl(scope: scope))
+        let book = try #require(QueueItem(item: SampleLibrary.frankenstein))
+        #expect(!queue.isCurrent(book))
+
+        scope.control.mediaKey = book.key(serverConnectionID: queue.serverConnectionID)
+        #expect(queue.isCurrent(book))
+
+        scope.control.mediaKey = book.key(serverConnectionID: UUID())
+        #expect(!queue.isCurrent(book))
+
+        scope.control.mediaKey = nil
+        #expect(!queue.isCurrent(book))
+        #expect(queue.add(book, at: .end))
+        #expect(queue.items.map(\.id) == ["li_frankenstein|"])
     }
 
     @Test func aRetiredSessionsQueueIsntChanged() throws {

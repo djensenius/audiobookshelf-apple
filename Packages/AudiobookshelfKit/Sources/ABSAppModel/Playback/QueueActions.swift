@@ -28,11 +28,22 @@ extension QueueItem {
 }
 
 extension PlaybackQueueControl {
+    /// Whether `item` is the media the player has loaded. It can't be queued: the queue advances
+    /// past the current media (``PlaybackQueueAdvancer``), so it would never play from the queue.
+    public func isCurrent(_ item: QueueItem) -> Bool {
+        currentMediaKey == item.key(serverConnectionID: serverConnectionID)
+    }
+
     /// Queues `item` at `placement`; an item already queued moves there.
-    public func add(_ item: QueueItem, at placement: QueuePlacement) {
+    ///
+    /// - Returns: `false`, queueing nothing, when `item` is the current media (``isCurrent(_:)``).
+    @discardableResult
+    public func add(_ item: QueueItem, at placement: QueuePlacement) -> Bool {
+        guard !isCurrent(item) else { return false }
         switch placement {
         case .next: playNext(item)
         case .end: addToEnd(item)
         }
+        return true
     }
 }
