@@ -1,11 +1,21 @@
 import ABSAppModel
+import ABSUI
 import SwiftUI
 
-/// The Downloads tab (legacy `pages/downloads.vue`). A stub until the Downloads feature
-/// replaces this file.
+/// The Downloads tab (legacy `pages/downloads.vue`): the downloads under way, then the
+/// signed-in server's downloaded books and podcasts with their sizes and the free space.
 struct DownloadsView: View {
+    @Environment(\.downloads) private var downloads
+
     var body: some View {
-        FeatureStub(titleKey: AppTab.downloads.titleKey, systemImage: AppTab.downloads.systemImage)
+        Group {
+            if let downloads {
+                DownloadsList(services: downloads, mode: .all)
+            } else {
+                DownloadsUnavailableView()
+            }
+        }
+        .navigationTitle(Text(verbatim: L10n.string("HeaderDownloads")))
     }
 }
 
@@ -29,11 +39,33 @@ struct LocalItemView: View {
     }
 }
 
-/// The download queue (legacy `pages/downloading.vue`). A stub until the Downloads feature
-/// replaces this file.
+/// The downloads under way (legacy `pages/downloading.vue`), with cancel and retry.
 struct DownloadQueueView: View {
+    @Environment(\.downloads) private var downloads
+
     var body: some View {
-        FeatureStub(titleKey: "MessageDownloading", systemImage: "arrow.down.circle.dotted")
+        Group {
+            if let downloads {
+                DownloadsList(services: downloads, mode: .queue)
+            } else {
+                DownloadsUnavailableView()
+            }
+        }
+        .navigationTitle(Text(verbatim: L10n.string("HeaderDownloading")))
+    }
+}
+
+/// Shown where the app has no download stack (the on-device store couldn't be opened).
+private struct DownloadsUnavailableView: View {
+    var body: some View {
+        ContentUnavailableView {
+            Label {
+                Text(verbatim: L10n.string("MessageDownloadsUnavailable"))
+            } icon: {
+                Image(systemName: "arrow.down.circle")
+                    .accessibilityHidden(true)
+            }
+        }
     }
 }
 
