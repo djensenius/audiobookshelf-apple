@@ -292,7 +292,7 @@ private struct PendingChapter {
 /// Play (or Resume, Play again, Missing), Read and Download.
 ///
 /// Play calls `onPlay`, which ``ItemDetailContent`` provides. Read opens the ebook through
-/// `openReader` (``ReaderPresenter``), and Download stays disabled until downloads exist.
+/// `openReader` (``ReaderPresenter``), and ``ItemDownloadButton`` downloads a book with audio.
 private struct ItemDetailActions: View {
     let model: ItemDetailModel
     @Environment(\.openReader) private var openReader
@@ -329,18 +329,7 @@ private struct ItemDetailActions: View {
                 .disabled(!model.isReadEnabled || openReader == nil)
             }
             if model.hasAudio {
-                Button {
-                    model.download()
-                } label: {
-                    Label {
-                        Text(verbatim: L10n.string("LabelDownload"))
-                    } icon: {
-                        Image(systemName: "arrow.down.circle")
-                    }
-                    .labelStyle(.iconOnly)
-                }
-                .buttonStyle(.bordered)
-                .disabled(!model.isDownloadAvailable)
+                ItemDownloadButton(libraryItemID: model.itemID, item: model.item)
             }
         }
         .controlSize(.large)

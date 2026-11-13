@@ -416,7 +416,6 @@ private func loadedModel(
         #expect(!without.hasEbook)
         #expect(without.ebookFormat == nil)
         #expect(!without.isReadEnabled)
-        #expect(!without.isDownloadAvailable)
     }
 
     @Test func observationFollowsTheItemsCacheEntry() async {

@@ -253,13 +253,6 @@ public final class ItemDetailModel {
     /// Read is shown when ``hasEbook``, and enabled once the item's ebook file is loaded.
     public var isReadEnabled: Bool { readerEbookFile != nil }
 
-    /// Placeholder for the Download button (legacy `index.vue:451-454`, `613-694`): `false`
-    /// until downloads exist, so the view shows the button disabled.
-    public var isDownloadAvailable: Bool { false }
-
-    /// Placeholder hook for the Download button; does nothing until downloads exist.
-    public func download() {}
-
     // MARK: Mapping
 
     static func details(item: LibraryItem, book: Book) -> Details {
