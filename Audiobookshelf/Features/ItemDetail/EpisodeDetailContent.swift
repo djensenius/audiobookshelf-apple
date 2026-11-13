@@ -5,11 +5,13 @@ import SwiftUI
 
 /// The loaded episode (legacy `pages/item/_id/_episode/index.vue`): the cover, a link to the
 /// podcast, when it was published and how long it is, the title and badges, Play, the user's
-/// progress, and the show notes.
+/// progress, and the show notes. Across a fold running down through it (iOS 27.1 and later), the
+/// show notes go on the other side of the fold (``DetailArrangement``).
 ///
 /// Play starts the episode through the environment's `playItem`, which is `nil` while signed
 /// out (and until the shell provides it), so it's disabled then, while a start is in progress,
-/// and while the podcast is gone from the server. A failed start shows an alert.
+/// and while the podcast is gone from the server. A failed start shows an alert. A time in the
+/// show notes plays from that time the same way.
 struct EpisodeDetailContent: View {
     let model: EpisodeDetailModel
     let episode: PodcastEpisode
@@ -28,29 +30,26 @@ struct EpisodeDetailContent: View {
             for: model, canPlay: playItem != nil && !isStarting, isGone: isGone)
         ScrollView {
             VStack(alignment: .leading, spacing: ABSSpacing.large) {
-                if let refreshFailure {
-                    ItemDetailRefreshFailedBanner(messageKey: refreshFailure.messageKey) {
-                        Task { await model.detail.load() }
-                    }
-                }
-                if dynamicTypeSize.isAccessibilitySize {
-                    VStack(alignment: .leading, spacing: ABSSpacing.medium) {
-                        cover
-                        header
-                    }
-                } else {
-                    HStack(alignment: .top, spacing: ABSSpacing.medium) {
-                        cover
-                        header
-                    }
-                }
+                refreshBanner(refreshFailure)
+                heading
                 playButton(play)
                 EpisodeDetailProgress(model: model)
-                EpisodeDetailShowNotes(html: model.showNotesHTML)
+                EpisodeDetailShowNotes(html: model.showNotesHTML, duration: episode.duration) { startTime in
+                    if play.isEnabled { start(from: startTime) }
+                }
             }
             .padding(ItemDetailLayout.padding)
             .frame(maxWidth: 800, alignment: .leading)
             .frame(maxWidth: .infinity)
+        }
+        // Across a fold running down through it (book pose), the show notes on the other side (#85).
+        .detailSplitAtFold {
+            refreshBanner(refreshFailure)
+            heading
+            playButton(play)
+            EpisodeDetailProgress(model: model)
+        } secondary: {
+            EpisodeDetailShowNotes(html: model.showNotesHTML)
         }
         .refreshable { await model.detail.load() }
         .absBackground()
@@ -66,6 +65,29 @@ struct EpisodeDetailContent: View {
         ) { _ in
         } message: { failure in
             Text(verbatim: failure.message)
+        }
+    }
+
+    @ViewBuilder private func refreshBanner(_ failure: ItemDetailRefreshFailure?) -> some View {
+        if let failure {
+            ItemDetailRefreshFailedBanner(messageKey: failure.messageKey) {
+                Task { await model.detail.load() }
+            }
+        }
+    }
+
+    /// The cover beside the header, or above it at accessibility sizes.
+    @ViewBuilder private var heading: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: ABSSpacing.medium) {
+                cover
+                header
+            }
+        } else {
+            HStack(alignment: .top, spacing: ABSSpacing.medium) {
+                cover
+                header
+            }
         }
     }
 
@@ -114,7 +136,9 @@ struct EpisodeDetailContent: View {
     }
 
     private func playButton(_ play: ItemDetailPlayPresentation) -> some View {
-        Button(action: start) {
+        Button {
+            start()
+        } label: {
             Label {
                 Text(verbatim: L10n.string(play.titleKey))
             } icon: {
@@ -133,14 +157,14 @@ struct EpisodeDetailContent: View {
         .accessibilityValue(Text(verbatim: episode.title))
     }
 
-    /// Plays the episode (``EpisodeDetailPresentation/startPlayback(of:with:)``) and shows an
-    /// alert if that fails.
-    private func start() {
+    /// Plays the episode (``EpisodeDetailPresentation/startPlayback(of:with:from:)``), from
+    /// `startTime` when given, and shows an alert if that fails.
+    private func start(from startTime: Double? = nil) {
         guard let playItem, !isStarting else { return }
         isStarting = true
         Task {
             defer { isStarting = false }
-            if let failure = await EpisodeDetailPresentation.startPlayback(of: model, with: playItem) {
+            if let failure = await EpisodeDetailPresentation.startPlayback(of: model, with: playItem, from: startTime) {
                 playFailure = failure
             }
         }
@@ -197,34 +221,52 @@ private struct EpisodeDetailProgress: View {
     }
 }
 
-/// The show notes in full, converted off the main actor once per distinct HTML
-/// (``EpisodeDetailPresentation/showNotes(html:)``); links open in the browser.
+/// The show notes in full, converted off the main actor once per distinct HTML and duration
+/// (``EpisodeDetailPresentation/showNotes(html:duration:)``); web links open in the browser,
+/// and times (``ShowNotesTimestamps``) call `playFrom` with their offset in seconds.
 private struct EpisodeDetailShowNotes: View {
+    /// What the notes were converted from.
+    private struct Source: Equatable {
+        let html: String
+        let duration: Double?
+    }
+
     let html: String?
-    @State private var converted: (html: String, text: AttributedString?)?
+    let duration: Double?
+    let playFrom: (Double) -> Void
+    @State private var converted: (source: Source, text: AttributedString?)?
+
+    private var source: Source? { html.map { Source(html: $0, duration: duration) } }
 
     var body: some View {
         // Empty until converted, and when there are no notes.
         VStack(alignment: .leading, spacing: ABSSpacing.small) {
-            if converted?.html == html, let text = converted?.text {
+            if let source, converted?.source == source, let text = converted?.text {
                 Text(verbatim: L10n.string("LabelDescription"))
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)
                 Text(text)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
+                    .environment(
+                        \.openURL,
+                        OpenURLAction { url in
+                            guard let seconds = ShowNotesTimestamps.seconds(in: url) else { return .systemAction }
+                            playFrom(Double(seconds))
+                            return .handled
+                        })
             }
         }
-        .task(id: html) { await convert() }
+        .task(id: source) { await convert() }
     }
 
     private func convert() async {
-        guard let html, converted?.html != html else { return }
+        guard let source, converted?.source != source else { return }
         let text = await Task.detached(priority: .userInitiated) {
-            EpisodeDetailPresentation.showNotes(html: html)
+            EpisodeDetailPresentation.showNotes(html: source.html, duration: source.duration)
         }
         .value
         guard !Task.isCancelled else { return }
-        converted = (html, text)
+        converted = (source, text)
     }
 }
