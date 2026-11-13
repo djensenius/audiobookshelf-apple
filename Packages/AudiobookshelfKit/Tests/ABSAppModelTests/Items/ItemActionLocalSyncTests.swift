@@ -1,11 +1,11 @@
 import ABSAPI
 import ABSCore
-import ABSData
 import ABSPlayback
 import Foundation
 import Testing
 
 @testable import ABSAppModel
+@testable import ABSData
 
 /// Accepts every request, or fails them all while `fails` is set.
 private struct ScriptedWriter: ProgressWriting {
@@ -166,6 +166,38 @@ private func cachedProgress(finished: Bool = false) -> MediaProgress {
         cache.apply(cachedProgress(finished: true))
         try await actions().markNotFinished(target)
         #expect(try await store.progress(for: key) == nil)
+    }
+
+    /// A closed session's position whose save failed, retried by the syncer after the action
+    /// (#368): the action superseded it, so the retry writes nothing, and neither restores the old
+    /// position nor recreates discarded progress. Negative control: a position reserved after the
+    /// action, by new playback, commits.
+    @Test(arguments: ["finished", "notFinished", "discard"])
+    func aFailedPlaybackSaveRetriedAfterTheActionCantUndoIt(action: String) async throws {
+        cache.apply(cachedProgress(finished: action == "notFinished"))
+        try await playedRow(at: 300)
+        let stale = ProgressEdit.Audio(currentTime: 310, duration: 600, progress: 310.0 / 600)
+        let failed = store.reservePlaybackPosition(for: key)
+        await store.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+        await #expect(throws: CocoaError.self) {
+            try await store.recordPlaybackPosition(stale, for: key, token: failed, now: edited)
+        }
+
+        switch action {
+        case "finished": try await actions().markFinished(target)
+        case "notFinished": try await actions().markNotFinished(target)
+        default: try await actions().discardProgress(target)
+        }
+        let acted = try await store.progress(for: key)
+        #expect((acted == nil) == (action == "discard"))
+
+        let retry = try await store.recordPlaybackPosition(stale, for: key, token: failed, now: edited)
+        #expect(retry == .supersededByCommittedPosition)
+        #expect(try await store.progress(for: key) == acted)
+
+        let later = store.reservePlaybackPosition(for: key)
+        #expect(try await store.recordPlaybackPosition(stale, for: key, token: later, now: edited) == .committed)
+        #expect(try await store.progress(for: key)?.currentTime == 310)
     }
 
     /// Negative control: the local row changes only after the server accepted the action.

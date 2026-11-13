@@ -26,6 +26,11 @@ public protocol ItemActionLocalSync: Sendable {
 /// - Discard deletes the row (legacy `removeLocalMediaProgress`), so its dirty values can't
 ///   create the progress again.
 ///
+/// Each action first supersedes the media's playback positions reserved so far
+/// (``LocalProgressStore/supersedePlaybackPositions(for:)``), row or not, so a closed session's
+/// position whose save failed and is retried later can't undo the action. The action's media
+/// lease keeps new playback of the media from reserving one until the edit is done.
+///
 /// Each action reads and writes the row in separate store calls; a playback write in between
 /// may be overwritten or follow the edit, which a playing session repeats anyway.
 public struct LocalProgressItemActionSync: ItemActionLocalSync {
@@ -40,19 +45,23 @@ public struct LocalProgressItemActionSync: ItemActionLocalSync {
 
     public func didMarkFinished(_ target: ItemActionTarget) async throws {
         let key = key(for: target)
+        await store.supersedePlaybackPositions(for: key)
         guard try await store.progress(for: key) != nil else { return }
         try await store.recordEdit(ProgressEdit(isFinished: true), for: key)
     }
 
     public func didMarkNotFinished(_ target: ItemActionTarget) async throws {
         let key = key(for: target)
+        await store.supersedePlaybackPositions(for: key)
         guard let row = try await store.progress(for: key) else { return }
         let audio = ProgressEdit.Audio(currentTime: 0, duration: row.duration, progress: 0)
         try await store.recordEdit(ProgressEdit(audio: audio, isFinished: false), for: key)
     }
 
     public func didDiscard(_ target: ItemActionTarget) async throws {
-        try await store.deleteProgress(for: key(for: target))
+        let key = key(for: target)
+        await store.supersedePlaybackPositions(for: key)
+        try await store.deleteProgress(for: key)
     }
 
     private func key(for target: ItemActionTarget) -> MediaKey {

@@ -2,6 +2,7 @@ import ABSData
 import Foundation
 import Testing
 
+@testable import ABSAPI
 @testable import ABSPlayback
 
 /// The coordinator's side of ``MediaLeases`` (#368): a closing session holds its media until the
@@ -30,6 +31,46 @@ struct PlaybackCoordinatorMediaLeaseTests {
         #expect(leases.isHeld(h.key("A"), by: .closingSession))
 
         gate.open()
+        await yieldUntil { !leases.isHeld(h.key("A"), by: .closingSession) }
+    }
+
+    /// The closing session's `/sync` in flight outlasts the close's wait (#337): `/close` goes out
+    /// and returns and the position saves, but the media stays held until that `/sync` returns.
+    @Test func aClosingSessionHoldsItsMediaUntilItsSyncInFlightReturns() async throws {
+        let report = try #require(PlaybackSyncReport(currentTime: 30, timeListened: 0, duration: 3600))
+        let position = PlaybackCloseResult<Void>()
+        let sync = PlaybackCloseResult<Void>()
+        coordinator.finalCloseReport = { _ in
+            PlaybackCloseHandoff(report: report, position: position, sessionSync: sync)
+        }
+        await coordinator.play(itemID: "A")
+        h.sleep.elapsesImmediately = true
+
+        coordinator.stop()
+        await yieldUntil { h.service.closes == ["A-1"] }
+        position.resolve(.success(()))
+        await coordinator.waitForPendingCloses()
+        for _ in 0..<50 { await Task.yield() }
+        #expect(leases.isHeld(h.key("A"), by: .closingSession))
+
+        sync.resolve(.success(()))
+        await yieldUntil { !leases.isHeld(h.key("A"), by: .closingSession) }
+    }
+
+    /// A position whose save failed ends the hold too, so a lease never outlives its receipts: the
+    /// syncer's later retry of it is superseded by the action instead (#368).
+    @Test func aFailedPositionSaveStillEndsTheHold() async throws {
+        let report = try #require(PlaybackSyncReport(currentTime: 30, timeListened: 0, duration: 3600))
+        let position = PlaybackCloseResult<Void>()
+        coordinator.finalCloseReport = { _ in PlaybackCloseHandoff(report: report, position: position) }
+        await coordinator.play(itemID: "A")
+
+        coordinator.stop()
+        await coordinator.waitForPendingCloses()
+        for _ in 0..<50 { await Task.yield() }
+        // Negative control: still held while the save is pending.
+        #expect(leases.isHeld(h.key("A"), by: .closingSession))
+        position.resolve(.failure(CocoaError(.fileWriteNoPermission)))
         await yieldUntil { !leases.isHeld(h.key("A"), by: .closingSession) }
     }
 

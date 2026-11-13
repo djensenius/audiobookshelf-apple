@@ -1367,13 +1367,16 @@ public final class PlaybackCoordinator {
         }
     }
 
-    /// Holds `key` for its closing session (``MediaLeases/Holder/closingSession``) until the close's
-    /// transport and its captured position write settle, whatever their outcome.
+    /// Holds `key` for its closing session (``MediaLeases/Holder/closingSession``) until everything
+    /// the close sends or saves settles, whatever the outcome: its `/close`, the session's `/sync`
+    /// in flight (which `/close` stops waiting for after ``closeWaitTimeout``), and its captured
+    /// position write. Each resolves once its request returns or its save ends, so the hold ends.
     private func holdUntilSettled(_ key: MediaKey, operation: PlaybackCloseOperation?) {
         guard let mediaLeases, let operation else { return }
         let lease = mediaLeases.acquire(key, for: .closingSession)
         Task { @MainActor in
             _ = try? await operation.transport.wait()
+            _ = try? await operation.handoff?.sessionSync?.wait()
             if operation.wasLoaded { try? await operation.handoff?.waitForAudioPosition() }
             lease.release()
         }
