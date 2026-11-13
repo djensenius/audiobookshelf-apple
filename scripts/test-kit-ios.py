@@ -272,12 +272,18 @@ def protected(args, timeout=120):
             signal.signal(sig, handler)
 
 
-def delete_simulator(device):
-    """Shut down and delete one owned simulator; returns success and signals received meanwhile."""
+def delete_simulator(device, missing_ok=False):
+    """Shut down and delete one owned simulator; returns success and signals received meanwhile.
+
+    With `missing_ok`, a device simctl doesn't know (a create that never registered it)
+    counts as deleted, quietly.
+    """
     _, _, pending = protected(["xcrun", "simctl", "shutdown", device])  # Fails if not booted.
     _, error, more = protected(["xcrun", "simctl", "delete", device])
     if error is None:
         print(f"Deleted ephemeral simulator {device}", flush=True)
+    elif missing_ok and "Invalid device" in error:
+        return True, pending + more
     else:
         print(f"warning: couldn't delete ephemeral simulator {device}: {error}", file=sys.stderr, flush=True)
     return error is None, pending + more
@@ -298,7 +304,7 @@ def with_ephemeral_simulator(selected, name, run):
         if pending:
             raise InterruptedRunner(pending[0])
         if error is not None:
-            target = None
+            # A timed-out create, or one whose output was lost, may still have registered it.
             raise ValueError(f"simctl create {name} failed: {error}")
         if target == name:
             raise ValueError(f"simctl create returned a malformed UDID: {output!r}")
@@ -311,7 +317,7 @@ def with_ephemeral_simulator(selected, name, run):
         raise
     finally:
         if target is not None:
-            _, pending = delete_simulator(target)
+            _, pending = delete_simulator(target, missing_ok=target == name)
             # A cancellation during cleanup wins over any failure, so main() can't retry.
             if pending and not isinstance(failure, InterruptedRunner):
                 raise InterruptedRunner(pending[0]) from failure

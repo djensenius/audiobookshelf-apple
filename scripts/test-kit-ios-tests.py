@@ -78,16 +78,22 @@ created = root / "created.json"
 owned = json.loads(created.read_text()) if created.exists() else []
 if args[:2] == ["simctl", "create"]:
     assert len(args) == 5, args
+    udid = json.loads((root / "udids.json").read_text())[len(owned)]
+    # A failed create may or may not have registered the device (`createRegisters`).
+    registered = not faults.get("create") or faults.get("createRegisters", False)
+    created.write_text(json.dumps(owned + [{"name": args[2], "udid": udid, "registered": registered}]))
     if faults.get("create"):
         sys.exit(faults["create"])
-    udid = json.loads((root / "udids.json").read_text())[len(owned)]
-    created.write_text(json.dumps(owned + [{"name": args[2], "udid": udid}]))
     print(faults.get("createOutput", udid))
     sys.exit(0)
 if args[:2] in (["simctl", "bootstatus"], ["simctl", "shutdown"], ["simctl", "delete"]):
-    # Only ever touch a simulator this run created.
-    assert args[2] in [item["udid"] for item in owned] + [item["name"] for item in owned], args
+    # Only ever touch a simulator this run asked simctl to create.
+    match = [item for item in owned if args[2] in (item["udid"], item["name"])]
+    assert match, args
     assert args[3:] == (["-b"] if args[1] == "bootstatus" else []), args
+    if not match[0].get("registered", True):
+        print(f"Invalid device: {args[2]}", file=sys.stderr)
+        sys.exit(148)
     if args[1] == "shutdown" and faults.get("cancelDuringShutdown"):
         os.kill(os.getppid(), signal.SIGTERM)  # The runner, as a cancelled job would see it.
     sys.exit(faults.get(args[1], 0))
@@ -389,9 +395,21 @@ class RunnerTests(unittest.TestCase):
         self.assert_ephemeral_lifecycle(1)
         self.setUp()
         self.ci()
-        self.faults = {"create": 148}
-        self.assertIn("simctl create", self.run_case(expected=1).stderr)
-        self.assertEqual([args[0] for args in self.simctl()], ["list", "list", "create"])
+        # A failed create still deletes by name: quietly if simctl never registered it,
+        # and for real if it did (its UDID was lost with the output).
+        for registers in (False, True):
+            with self.subTest(createRegisters=registers):
+                self.setUp()
+                self.ci()
+                self.faults = {"create": 148, "createRegisters": registers}
+                result = self.run_case(expected=1)
+                self.assertIn("simctl create", result.stderr)
+                self.assertNotIn("couldn't delete", result.stderr)
+                self.assertEqual("Deleted ephemeral simulator" in result.stdout, registers)
+                name = json.loads((self.root / "created.json").read_text())[0]["name"]
+                self.assertEqual([args for args in self.simctl() if args[0] != "list"],
+                                 [["create", name, PHONE_TYPE, runtime("27.2")["identifier"]],
+                                  ["shutdown", name], ["delete", name]])
         self.setUp()
         self.ci()
         self.faults = {"createOutput": "not a UDID"}  # Delete what was created, by name.
@@ -400,6 +418,37 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual([args for args in self.simctl() if args[0] != "list"],
                          [["create", name, PHONE_TYPE, runtime("27.2")["identifier"]],
                           ["shutdown", name], ["delete", name]])
+
+    def test_create_timeout_still_deletes_by_name_without_changing_the_outcome(self):
+        module = RUNNER["with_ephemeral_simulator"].__globals__
+        selected = {"udid": FIRST, "deviceTypeIdentifier": PHONE_TYPE,
+                    "runtimeIdentifier": runtime("27.2")["identifier"]}
+        name = "abs-ci-local-1-1-1"
+        for cleanup_signal in (None, signal.SIGTERM):
+            with self.subTest(cleanup_signal=cleanup_signal):
+                calls = []
+
+                def fake_protected(args, timeout=120):
+                    calls.append(args[2:4])
+                    if args[2] == "create":
+                        return None, f"Command {args} timed out after {timeout} seconds", []
+                    if args[2] == "delete":
+                        return "", None, [cleanup_signal] if cleanup_signal else []
+                    return None, "Unable to shutdown device in current state: Shutdown", []
+
+                run = mock.Mock()
+                with mock.patch.dict(module, protected=fake_protected):
+                    expected = RUNNER["InterruptedRunner"] if cleanup_signal else ValueError
+                    with self.assertRaises(expected) as failure:
+                        RUNNER["with_ephemeral_simulator"](selected, name, run)
+                run.assert_not_called()
+                self.assertEqual(calls, [["create", name], ["shutdown", name], ["delete", name]])
+                if cleanup_signal:
+                    # A cancellation during cleanup still wins over the create failure.
+                    self.assertEqual(failure.exception.signum, cleanup_signal)
+                    self.assertIsInstance(failure.exception.__cause__, ValueError)
+                else:
+                    self.assertIn("timed out", str(failure.exception))
 
     def test_delete_run_simulators_matches_only_this_run_attempt(self):
         names = {
