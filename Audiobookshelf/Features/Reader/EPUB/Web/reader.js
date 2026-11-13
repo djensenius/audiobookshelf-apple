@@ -30,6 +30,10 @@
   // How long the table of contents may take once the book is open; it comes from the archive
   // already in memory, so only a missing navigation document takes this long.
   const NAVIGATION_TIMEOUT_MS = 10000
+  // The largest table of contents posted, in UTF-8 bytes of its JSON. Swift drops a message over
+  // 4 MiB (EPUBBridgeEvent.maxMessageBytes), and its JSON can be up to twice this (`/` becomes
+  // `\/`); a larger one is reported as failing, so the contents sheet doesn't wait for good.
+  const MAX_TOC_BYTES = 2 * 1024 * 1024
   // The fonts the reader can override the book's with (ReaderSettings.FontFamily's raw values).
   const FONT_FAMILIES = ['serif', 'sans-serif']
   // Where a section's own inline font is kept, since epub.js clears it with the reader's override.
@@ -113,10 +117,13 @@
 
   function tocItems(items, navPath, directory, spine) {
     return (items || []).map(function (item) {
+      const href = String(item.href || '').trim()
       return {
         id: String(item.id || ''),
         label: String(item.label || '').trim(),
-        href: packageHref(String(item.href || ''), navPath, directory, spine),
+        // An unlinked heading (a group of chapters) stays unlinked: resolved, it'd be the
+        // navigation document itself.
+        href: href ? packageHref(href, navPath, directory, spine) : '',
         subitems: tocItems(item.subitems, navPath, directory, spine)
       }
     })
@@ -673,7 +680,12 @@
         const navPath = packaging.navPath || packaging.ncxPath
         const directory = opened.path && opened.path.directory
         const items = tocItems(navigation && navigation.toc, navPath, directory, spineHrefs(opened, directory))
-        if (isCurrent()) post({ type: 'toc', items: items })
+        const event = { type: 'toc', items: items }
+        const limit = Number(window.absReaderTOCMaxBytes) || MAX_TOC_BYTES
+        if (new TextEncoder().encode(JSON.stringify(event)).length > limit) {
+          throw new Error('The table of contents is too large')
+        }
+        if (isCurrent()) post(event)
       })
       .catch(function (error) {
         if (isCurrent()) postError('toc', error)

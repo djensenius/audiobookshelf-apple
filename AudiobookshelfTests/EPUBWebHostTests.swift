@@ -1,3 +1,4 @@
+import ABSAppModel
 import Foundation
 import Testing
 import WebKit
@@ -776,6 +777,41 @@ private final class ReaderPage {
 
         let items = try #require(try await page.next("toc")["items"] as? [[String: Any]])
         #expect(items.map { $0["href"] as? String } == ["../text/c1.xhtml#p2"])
+    }
+
+    /// An unlinked heading (a group of chapters) stays unlinked rather than resolving to the
+    /// navigation document, so the contents list gives way to its chapters.
+    @Test(.timeLimit(.minutes(1))) func anUnlinkedHeadingStaysUnlinked() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        let toc: [[String: Any]] = [
+            ["id": "part", "label": "Part One", "subitems": [["id": "one", "label": "One", "href": "c1.xhtml"]]],
+            ["id": "blank", "label": "Blank", "href": " "],
+        ]
+        try await page.fakeEPUBJS(toc: toc, navPath: "toc.xhtml")
+
+        try await page.open("tiny")
+
+        let event = try await page.next("toc")
+        let items = try #require(event["items"] as? [[String: Any]])
+        #expect(items.map { $0["href"] as? String } == ["", ""])
+        let message = try #require(EPUBMessageHandler.json(from: event))
+        let contents = try #require(EPUBTableOfContents.decode(message))
+        #expect(contents.entries == [EPUBContentsEntry(id: 0, label: "One", href: "c1.xhtml", level: 0)])
+    }
+
+    /// A table of contents too large for the bridge is reported as failing rather than posted
+    /// (Swift would drop it), so the contents sheet doesn't wait for it for good.
+    @Test(.timeLimit(.minutes(1))) func anOversizedTableOfContentsIsReported() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(toc: [["id": "one", "label": "One", "href": "c1.xhtml"]])
+        _ = try await page.evaluate("window.absReaderTOCMaxBytes = 40")
+
+        try await page.open("tiny")
+        let error = try await page.next("error")
+
+        #expect(error["phase"] as? String == "toc")
+        #expect(error["message"] as? String == "The table of contents is too large")
+        #expect(page.last("toc") == nil)
     }
 
     /// epub.js's `displayerror` doesn't say whose display failed, so a display queued behind one

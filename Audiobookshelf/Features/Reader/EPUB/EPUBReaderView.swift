@@ -113,6 +113,8 @@ final class EPUBReaderSession {
     @ObservationIgnored private let model: ReaderContainerModel
     @ObservationIgnored private var payload: ReaderSettingsPayload
     @ObservationIgnored private var isOpen = false
+    /// A contents entry chosen before the book opened, shown once it has.
+    @ObservationIgnored private(set) var pendingDestination: EPUBBridgeCommand?
     /// Whether the next `relocated` is where the book rendered on opening rather than a turn.
     @ObservationIgnored private var awaitsOpeningLocation = true
     @ObservationIgnored private let locationsKey: EPUBLocationsKey
@@ -145,10 +147,14 @@ final class EPUBReaderSession {
         send(command)
     }
 
-    /// Shows a table of contents entry, closing the sheet.
+    /// Shows a table of contents entry, closing the sheet. Chosen before the book has opened
+    /// (the page can list its contents first), it's shown once the book has.
     func show(_ entry: EPUBContentsEntry) {
         let command = contents.select(entry)
-        guard isOpen else { return }
+        guard isOpen else {
+            pendingDestination = command
+            return
+        }
         send(command)
     }
 
@@ -215,11 +221,20 @@ final class EPUBReaderSession {
                 EPUBBridgeCommand.open(url: Self.bookURL, location: location, locations: locations, settings: settings)
                     .jsonData())
             guard !isClosed else { return }
-            isOpen = true
+            didOpen()
             // Settings changed while the book opened.
             if payload != opening { apply(payload) }
         } catch {
             failed = true
+        }
+    }
+
+    /// The book is open: commands go to it, starting with a contents entry chosen while it opened.
+    func didOpen() {
+        isOpen = true
+        if let destination = pendingDestination {
+            pendingDestination = nil
+            send(destination)
         }
     }
 

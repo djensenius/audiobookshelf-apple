@@ -158,6 +158,34 @@ import WebKit
             }
         }
 
+        /// The page lists its contents before the book has opened: an entry chosen then isn't
+        /// dropped but shown once it has; one chosen after goes straight to the book.
+        @Test func anEntryChosenWhileTheBookOpensIsShownOnceItHas() async throws {
+            let request = EbookFileRequest(
+                connectionID: UUID(), itemID: "book", fileIno: "1", fileExtension: "epub", version: "1")
+            let loader = EbookFileLoader(
+                directory: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString),
+                fetcher: NoEbookFetcher())
+            let model = ReaderContainerModel(
+                request: request, kind: .epub, loader: loader, progress: nil, serverProgress: nil)
+            let session = EPUBReaderSession(
+                model: model, fileURL: URL(filePath: "/nonexistent/book.epub"),
+                payload: ReaderSettingsPayload(settings: ReaderSettings(), resolvedAppearance: .light, layout: .single))
+            let first = EPUBContentsEntry(id: 0, label: "One", href: "c1.xhtml", level: 0)
+            let second = EPUBContentsEntry(id: 1, label: "Two", href: "c2.xhtml#a", level: 0)
+
+            session.contents.isPresented = true
+            session.show(second)
+            session.show(first)
+            #expect(!session.contents.isPresented)
+            #expect(session.pendingDestination == .display(target: "c1.xhtml"))
+
+            session.didOpen()
+            #expect(session.pendingDestination == nil)
+            session.show(second)
+            #expect(session.pendingDestination == nil)
+        }
+
         /// A reader that goes away (dismissed, or replaced on an account switch) closes its page,
         /// so a command the page could never finish off screen doesn't keep it alive.
         @Test func goingAwayClosesThePage() async throws {
