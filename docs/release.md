@@ -92,8 +92,10 @@ to the App Store is a separate, manual step in App Store Connect.
    git push origin vx.y.z
    ```
 
-   The tag must match `MARKETING_VERSION`. `ci_post_clone.sh` checks this first on every
-   tag build (`CI_TAG` is set) and stops the build before anything else runs:
+   The tag must match `MARKETING_VERSION`. `ci_post_clone.sh` checks this first on tag
+   builds (`CI_TAG` is set) and stops the build before anything else runs. Xcode Cloud
+   runs the scripts of the tagged commit, so only tags on commits that include the check
+   are protected:
 
    - a tag that doesn't start with `v` and a digit, such as `nightly`, isn't a release
      tag; the script logs that and doesn't check it;
@@ -271,7 +273,8 @@ way as `TestFlight (main)`, or duplicate that workflow and change it:
 - [ ] Start condition: **Tag Changes** only, restricted to custom tags matching `v*`.
       Remove the Branch Changes condition. The repository still has old upstream tags
       such as `v0.9.x-beta`; they only start a build if someone pushes them again, so
-      don't. If one does, the tag check fails it.
+      don't. The tag check won't catch one: Xcode Cloud runs the `ci_scripts` of the
+      tagged commit, and those commits predate the check.
 - [ ] Action: Archive, platform **iOS**, scheme `Audiobookshelf`, deployment preparation
       **TestFlight and App Store**.
 - [ ] Action: Archive, platform **macOS**, scheme `Audiobookshelf`, deployment preparation
