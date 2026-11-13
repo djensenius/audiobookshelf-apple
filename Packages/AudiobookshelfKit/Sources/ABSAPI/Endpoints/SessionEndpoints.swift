@@ -203,13 +203,17 @@ public enum SessionEndpoints {
         Endpoint(.post, "/api/session/\(pathSegment(sessionID))/close", body: report)
     }
 
-    /// `POST /api/session/local`: creates or updates one locally played session.
+    /// `POST /api/session/local`: creates or updates one locally played session. Only redirects on
+    /// the server's origin are followed (``Endpoint/staysOnOrigin``): a 307 or 308 elsewhere would
+    /// re-post the session's title and position, and that origin's reply could be taken for the
+    /// server's acknowledgement.
     public static func syncLocal(_ session: LocalPlaybackSessionPayload) -> Endpoint<EmptyResponse> {
-        Endpoint(.post, "/api/session/local", body: session)
+        Endpoint(.post, "/api/session/local", body: session, staysOnOrigin: true)
     }
 
-    /// `POST /api/session/local-all`: uploads unsent local sessions.
+    /// `POST /api/session/local-all`: uploads unsent local sessions. Only redirects on the
+    /// server's origin are followed, as for ``syncLocal(_:)``.
     public static func syncLocalAll(_ batch: LocalPlaybackSessionBatch) -> Endpoint<LocalSessionSyncResponse> {
-        Endpoint(.post, "/api/session/local-all", body: batch)
+        Endpoint(.post, "/api/session/local-all", body: batch, staysOnOrigin: true)
     }
 }

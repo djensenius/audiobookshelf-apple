@@ -12,6 +12,9 @@ import SwiftUI
 /// VoiceOver reads it as one adjustable element: the elapsed and remaining times as its value,
 /// with swipe up and down calling `onIncrement` and `onDecrement` (the caller's jump forward and
 /// back).
+///
+/// A locked scrubber (`allowsScrubbing` off, the legacy player's lock) shows the track without its
+/// thumb, ignores drags and does nothing on VoiceOver's adjustable action.
 public struct PlayerScrubber: View {
     private let progress: Double
     private let elapsed: Double
@@ -20,6 +23,7 @@ public struct PlayerScrubber: View {
     private let onScrubEnd: () -> Void
     private let onIncrement: () -> Void
     private let onDecrement: () -> Void
+    private let allowsScrubbing: Bool
     @GestureState private var isDragging = false
     @ScaledMetric(relativeTo: .caption) private var trackHeight: CGFloat = 6
     @ScaledMetric(relativeTo: .caption) private var thumbDiameter: CGFloat = 14
@@ -35,9 +39,12 @@ public struct PlayerScrubber: View {
     ///   - onScrubEnd: Called once when a drag ends or is cancelled.
     ///   - onIncrement: VoiceOver's increment (swipe up).
     ///   - onDecrement: VoiceOver's decrement (swipe down).
+    ///   - allowsScrubbing: Shows the thumb and accepts drags and VoiceOver adjustments; `false`
+    ///     while the player is locked.
     public init(
         progress: Double, elapsed: Double, remaining: Double, onScrub: @escaping (Double) -> Void,
-        onScrubEnd: @escaping () -> Void, onIncrement: @escaping () -> Void, onDecrement: @escaping () -> Void
+        onScrubEnd: @escaping () -> Void, onIncrement: @escaping () -> Void, onDecrement: @escaping () -> Void,
+        allowsScrubbing: Bool = true
     ) {
         self.progress = clampedProgress(progress)
         self.elapsed = elapsed
@@ -46,6 +53,7 @@ public struct PlayerScrubber: View {
         self.onScrubEnd = onScrubEnd
         self.onIncrement = onIncrement
         self.onDecrement = onDecrement
+        self.allowsScrubbing = allowsScrubbing
     }
 
     /// The visible remaining time: the timestamp with a leading minus, like legacy.
@@ -83,8 +91,10 @@ public struct PlayerScrubber: View {
         if wasDragging, !isDragging { onScrubEnd() }
     }
 
-    /// Performs VoiceOver's adjustable action: up and down jump by the caller's skip intervals.
+    /// Performs VoiceOver's adjustable action: up and down jump by the caller's skip intervals,
+    /// unless the scrubber is locked.
     func adjust(_ direction: AccessibilityAdjustmentDirection) {
+        guard allowsScrubbing else { return }
         switch direction {
         case .increment: onIncrement()
         case .decrement: onDecrement()
@@ -131,6 +141,7 @@ public struct PlayerScrubber: View {
                     .frame(width: thumbDiameter, height: thumbDiameter)
                     .scaleEffect(isDragging ? 1.4 : 1)
                     .offset(x: width * progress - thumbDiameter / 2)
+                    .opacity(allowsScrubbing ? 1 : 0)
             }
             .frame(maxHeight: .infinity)
             .contentShape(.rect)
@@ -139,7 +150,8 @@ public struct PlayerScrubber: View {
                     .updating($isDragging) { _, dragging, _ in dragging = true }
                     .onChanged { value in
                         onScrub(Self.fraction(atX: value.location.x, width: width))
-                    }
+                    },
+                isEnabled: allowsScrubbing
             )
         }
         // At least a 44-point touch target, growing with the thumb at large text sizes.
@@ -156,6 +168,14 @@ public struct PlayerScrubber: View {
     PlayerScrubber(
         progress: 0.35, elapsed: 245, remaining: 3_600, onScrub: { _ in }, onScrubEnd: {}, onIncrement: {},
         onDecrement: {}
+    )
+    .padding()
+}
+
+#Preview("Locked") {
+    PlayerScrubber(
+        progress: 0.35, elapsed: 245, remaining: 3_600, onScrub: { _ in }, onScrubEnd: {}, onIncrement: {},
+        onDecrement: {}, allowsScrubbing: false
     )
     .padding()
 }

@@ -9,7 +9,7 @@ import Testing
 @testable import Audiobookshelf
 
 @MainActor
-@Suite struct ItemDetailPresentationTests {
+@Suite(.timeLimit(.minutes(1))) struct ItemDetailPresentationTests {
     private let locale = Locale(identifier: "en_US")
 
     private func loadedModel(_ item: ABSCore.LibraryItem) async -> ItemDetailModel {
@@ -180,7 +180,7 @@ import Testing
         // Retry, held at the server: the banner hides, but Play stays disabled.
         await service.hold()
         let retry = Task { await model.load() }
-        try await service.waitForHeldRequest()
+        await service.waitForHeldRequest()
         #expect(model.isLoading)
         #expect(ItemDetailRefreshFailure(model: model, isGone: isGone()) == nil)
         #expect(isGone())
@@ -197,7 +197,7 @@ import Testing
         await service.succeed()
         await service.hold()
         let success = Task { await model.load() }
-        try await service.waitForHeldRequest()
+        await service.waitForHeldRequest()
         #expect(isGone())
         await service.release()
         await success.value
@@ -351,6 +351,8 @@ private actor ScriptedItemService: ItemDetailService {
     private var error: (any Error)?
     private var isHolding = false
     private var held: CheckedContinuation<Void, Never>?
+    /// Callers of ``waitForHeldRequest()`` waiting for a request to be held.
+    private var heldWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(item: ABSCore.LibraryItem) {
         self.item = item
@@ -374,19 +376,21 @@ private actor ScriptedItemService: ItemDetailService {
         held = nil
     }
 
-    /// Waits until a request is held.
-    func waitForHeldRequest() async throws {
-        var attempts = 0
-        while held == nil, attempts < 1_000 {
-            attempts += 1
-            try await Task.sleep(for: .milliseconds(5))
-        }
-        #expect(held != nil)
+    /// Returns once a request is held: at once if one is, otherwise when the next one is. The
+    /// suite's time limit fails a test whose request never comes.
+    func waitForHeldRequest() async {
+        guard held == nil else { return }
+        await withCheckedContinuation { heldWaiters.append($0) }
     }
 
     func item(id: String) async throws -> ABSCore.LibraryItem {
         if isHolding {
-            await withCheckedContinuation { held = $0 }
+            await withCheckedContinuation {
+                held = $0
+                let waiters = heldWaiters
+                heldWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
         }
         if let error { throw error }
         return item

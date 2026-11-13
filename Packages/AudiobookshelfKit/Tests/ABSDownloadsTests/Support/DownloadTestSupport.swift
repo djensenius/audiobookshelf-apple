@@ -331,7 +331,10 @@ final class DownloadHarness: Sendable {
         startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil,
         adoptionStarted: (@Sendable (UUID) async -> Void)? = nil,
         listing: (@Sendable () async -> Void)? = nil,
+        beforeClearingResumeFlag: (@Sendable (UUID) async throws -> Void)? = nil,
+        afterUpsertingLocalItem: (@Sendable (UUID) async -> Void)? = nil,
         preflight: any DownloadRedirectPreflighting = StubPreflight(),
+        sweepsOrphanedResumeData: Bool = true,
         prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadEngine {
         let stubFactory = sessionFactory(prepare: prepare)
@@ -340,7 +343,8 @@ final class DownloadHarness: Sendable {
             factory = { ListingSession(base: stubFactory($0), listing: listing) }
         }
         return DownloadEngine(
-            store: store, localItems: localItems, credentials: credentials, vault: vault, locations: locations,
+            store: store, localItems: localItems, credentials: credentials, vault: vault,
+            sweepsOrphanedResumeData: sweepsOrphanedResumeData, locations: locations,
             retryPolicy: retryPolicy, networkAccess: { NetworkAccess(policy: .always) }, clock: clock ?? self.clock,
             now: { .now }, random: { 0.5 }, makeSession: factory,
             registry: registry ?? self.registry, readRecords: readRecords ?? { try await $0.allRecords() },
@@ -348,7 +352,8 @@ final class DownloadHarness: Sendable {
             cancelKeepingResumeData: cancel ?? { await $0.cancelByProducingResumeData() },
             beforeStoppingSiblings: beforeStoppingSiblings, afterPermanentFailure: afterPermanentFailure,
             beforeReplayStart: beforeReplayStart, startFoundSettling: startFoundSettling,
-            adoptionStarted: adoptionStarted, preflight: preflight)
+            adoptionStarted: adoptionStarted, beforeClearingResumeFlag: beforeClearingResumeFlag,
+            afterUpsertingLocalItem: afterUpsertingLocalItem, preflight: preflight)
     }
 
     func sessionFactory(

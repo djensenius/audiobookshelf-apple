@@ -4,7 +4,8 @@ import ABSUI
 import SwiftUI
 
 /// The mini player (port of the collapsed `components/app/AudioPlayer.vue`): the cover and title
-/// open the full player, with play/pause, the jumps and a close button that stops playback.
+/// open the full player, with play/pause, the jumps and a close button that stops playback. While
+/// the player is locked (``PlayerDisplayOptions/isLocked``) the jumps go, as in legacy.
 ///
 /// On iOS it is the tab view's bottom accessory; when the tab bar collapses it to the inline
 /// placement only play/pause stays. At accessibility text sizes the cover, author and jumps go, so
@@ -52,7 +53,8 @@ struct MiniPlayerView: View {
         HStack(spacing: 8) {
             openButton
             TransportControls(
-                style: layout.transportStyle, showsPause: model.showsPause,
+                style: model.displayOptions.showsSkipControls ? layout.transportStyle : .playPauseOnly,
+                showsPause: model.showsPause,
                 isBuffering: model.isBuffering, jumpBackwardSeconds: model.jumpBackwardSeconds,
                 jumpForwardSeconds: model.jumpForwardSeconds, haptic: settings?.hapticFeedback ?? .off
             ) { action in
@@ -102,10 +104,7 @@ struct MiniPlayerView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(verbatim: L10n.string("LabelMiniPlayerAccessibility", model.title)))
-        #if os(iOS)
-            // TODO(#183): the hint on macOS too, once the Now Playing window opens.
-            .accessibilityHint(Text(verbatim: L10n.string("LabelMiniPlayerHint")))
-        #endif
+        .accessibilityHint(Text(verbatim: L10n.string("LabelMiniPlayerHint")))
     }
 
     private var closeButton: some View {

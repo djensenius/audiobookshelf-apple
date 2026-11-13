@@ -1,3 +1,4 @@
+import ABSData
 import Foundation
 
 extension DeepLink {
@@ -43,6 +44,26 @@ extension DeepLink {
         }
     }
 
+    /// The `userInfo` an item or episode screen publishes for Handoff: `item`, `episode` when
+    /// there is one, and the account's `serverAddress` and `userID` (ADR 0004, "Handoff"). The
+    /// local connection ID is never included. ``HandoffActivity/init(userInfo:)`` reads it back as
+    /// the same item or episode link on that account.
+    ///
+    /// `nil` when `itemID` or `episodeID` isn't a valid ID, so no screen publishes an activity the
+    /// receiver would reject. An empty `episodeID` counts as absent, as it does when parsed.
+    public static func handoffUserInfo(
+        itemID: String, episodeID: String? = nil, account: HandoffAccount
+    ) -> [String: String]? {
+        guard isValidID(itemID) else { return nil }
+        var userInfo = account.userInfo
+        userInfo["item"] = itemID
+        if let episodeID, !episodeID.isEmpty {
+            guard isValidID(episodeID) else { return nil }
+            userInfo["episode"] = episodeID
+        }
+        return userInfo
+    }
+
     /// A start time from an activity: a number from 0 to ``maxStartTime``. Booleans are
     /// `NSNumber`s too, so they are told apart, or `true` would start the item at one second.
     private static func handoffPosition(_ value: Any?) -> TimeInterval? {
@@ -71,5 +92,13 @@ extension DeepLink {
         guard let text = value as? String else { return .invalid }
         if text.isEmpty { return .absent }
         return isValidID(text) ? .valid(text) : .invalid
+    }
+}
+
+extension HandoffAccount {
+    /// The account a saved connection is signed in to, for publishing: its normalized address and
+    /// user ID. `nil` when the saved address isn't normalized or the user ID isn't valid.
+    public init?(connection: ServerConnectionDTO) {
+        self.init(serverAddress: connection.address, userID: connection.userId)
     }
 }
