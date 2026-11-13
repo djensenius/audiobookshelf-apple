@@ -17,6 +17,9 @@ struct SceneRouterHost: View {
     /// Hands a link back to the root, which holds it for the next account's host; used after a
     /// confirmed server switch (``ServerSwitchConfirmation``).
     let reopen: LinkReopener
+    /// The continued Handoff activities the root received (``SceneLinks/handoffArrivals``). Each
+    /// replaces the server switch asked about, even if it opens nothing.
+    let handoffArrivals: UInt64
 
     @State private var navigation: SceneNavigation
     @State private var serverSwitchPrompt = ServerSwitchPrompt()
@@ -30,11 +33,12 @@ struct SceneRouterHost: View {
 
     init(
         identity: SessionIdentity, player: any PlayerSlotState, pendingLink: Binding<DeepLink?>,
-        reopen: LinkReopener = LinkReopener()
+        reopen: LinkReopener = LinkReopener(), handoffArrivals: UInt64 = 0
     ) {
         self.player = player
         _pendingLink = pendingLink
         self.reopen = reopen
+        self.handoffArrivals = handoffArrivals
         _navigation = State(initialValue: SceneNavigation(identity: identity))
         _snapshot = SceneStorage(identity.snapshotKey)
     }
@@ -54,7 +58,12 @@ struct SceneRouterHost: View {
         .playbackCommandAlert()
         .refreshCommands(refreshCommands, router: navigation.router)
         .onAppear(perform: restoreOnce)
-        .onChange(of: pendingLink) { openPendingLink() }
+        // Watched together, so an activity's arrival replaces the switch before a link that
+        // reaches this host in the same update opens.
+        .onChange(of: RootLinks(link: pendingLink, handoffArrivals: handoffArrivals)) { old, new in
+            if new.handoffArrivals != old.handoffArrivals { serverSwitchPrompt.supersede(in: navigation.router) }
+            openPendingLink()
+        }
         // Written through as the navigation changes, so a quit or a crash loses at most the last
         // move. This runs after the restore has finished, so a link opened by it is saved too.
         .onChange(of: navigation.router.snapshot) { save() }
@@ -83,6 +92,12 @@ struct SceneRouterHost: View {
     private func save() {
         if let data = navigation.snapshotToSave { snapshot = data }
     }
+}
+
+/// What the root hands ``SceneRouterHost``: the waiting link and the Handoff arrivals.
+private struct RootLinks: Equatable {
+    let link: DeepLink?
+    let handoffArrivals: UInt64
 }
 
 #Preview {

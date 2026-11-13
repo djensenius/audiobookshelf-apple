@@ -221,11 +221,17 @@ import UniformTypeIdentifiers
         #expect(await pipeline.largeDecodeCount == 1)
     }
 
-    @Test func sixteenBitSourcesAreNormalizedToEightBit() async throws {
-        let file = try TestImages.file(width: 600, height: 960, bitsPerComponent: 16, in: directory)
+    /// A 16-bit source becomes 8-bit premultiplied in its own gamut: sRGB stays sRGB, and a
+    /// Display P3 source stays Display P3 rather than being clipped to sRGB.
+    @Test(arguments: [CGColorSpace.sRGB as String, CGColorSpace.displayP3 as String])
+    func sixteenBitSourcesAreNormalizedToEightBit(space: String) async throws {
+        let file = try TestImages.file(
+            width: 600, height: 960, bitsPerComponent: 16, space: space as CFString, in: directory)
         let (pipeline, _) = await harness.make(local: file)
         let image = try await pipeline.image(for: harness.key(), pixelBox: gridBox)
         #expect(image.cgImage.bitsPerComponent == 8)
+        #expect([.premultipliedFirst, .premultipliedLast].contains(image.cgImage.alphaInfo))
+        #expect(image.cgImage.colorSpace?.name as String? == space)
         #expect(!ImageDecoder.needsNormalizing(image.cgImage))
         #expect(await pipeline.largeDecodeCount == 1)
     }

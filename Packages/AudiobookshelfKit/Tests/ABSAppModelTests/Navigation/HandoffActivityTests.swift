@@ -225,6 +225,33 @@ private let connectionB = UUID(uuidString: "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D
         #expect(router.pendingServerSwitch == expected)
         #expect(router[path: .library].isEmpty)
     }
+
+    /// The scene resolves through the lifecycle, which asks its own account source.
+    @Test func theLifecycleResolvesThroughItsAccountSource() async throws {
+        let accounts = MatchingAccounts(connections: [connection(connectionB, address: address, userID: "usr_2")])
+        let lifecycle = SessionLifecycle(source: accounts)
+        let known = try #require(HandoffActivity(userInfo: payload(address, "usr_2")))
+        #expect(
+            await lifecycle.resolve(known)
+                == .open(DeepLink(.item(id: "li_1", episodeID: nil), serverID: connectionB.uuidString)))
+
+        let stranger = try #require(HandoffActivity(userInfo: payload(address, "usr_3")))
+        #expect(await lifecycle.resolve(stranger) == .accountNotSignedIn(try account(address, "usr_3")))
+    }
+
+    /// On a cold launch an activity can arrive before the accounts restored their saved
+    /// connections: the lifecycle resolves it only once they have.
+    @Test func theLifecycleResolvesOnceTheAccountsRestored() async throws {
+        let accounts = MatchingAccounts(
+            connections: [], restoring: [connection(connectionB, address: address, userID: "usr_2")])
+        let lifecycle = SessionLifecycle(source: accounts)
+        let known = try #require(HandoffActivity(userInfo: payload(address, "usr_2")))
+
+        #expect(
+            await lifecycle.resolve(known)
+                == .open(DeepLink(.item(id: "li_1", episodeID: nil), serverID: connectionB.uuidString)))
+        #expect(accounts.connections.count == 1)
+    }
 }
 
 /// An accounts source with saved connections, matched as `AccountManager` matches them.
@@ -232,13 +259,18 @@ private let connectionB = UUID(uuidString: "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D
 private final class MatchingAccounts: AccountSessionSource {
     var phase: AccountSessionPhase = .signedOut
     var client: APIClient?
-    let connections: [ServerConnectionDTO]
+    private(set) var connections: [ServerConnectionDTO]
+    /// The connections ``restore()`` loads, as `AccountManager` loads its saved ones at launch.
+    private let restoring: [ServerConnectionDTO]?
 
-    init(connections: [ServerConnectionDTO]) {
+    init(connections: [ServerConnectionDTO], restoring: [ServerConnectionDTO]? = nil) {
         self.connections = connections
+        self.restoring = restoring
     }
 
-    func restore() async throws {}
+    func restore() async throws {
+        if let restoring { connections = restoring }
+    }
     func logout() async -> URL? { nil }
     func `switch`(to connectionID: UUID) async throws {}
     func remove(_ connectionID: UUID) async throws -> URL? { nil }
