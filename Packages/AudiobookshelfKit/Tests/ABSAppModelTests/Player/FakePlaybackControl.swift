@@ -29,6 +29,8 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     var restoredRecord: LastPlayedRecord?
     var error: PlaybackCoordinatorError?
     var startGeneration = 0
+    var playRequestCount = 0
+    var startPlayRequest: Int?
     var currentTime: Double = 0
     var duration: Double = 0
     var rate: Double = 1

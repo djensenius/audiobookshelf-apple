@@ -7,10 +7,13 @@ public struct PlayAllRequest: Sendable, Hashable {
     public let id: Int
     /// The player's ``PlayerPlaybackControlling/startGeneration`` when the request began, before its play.
     public let startGeneration: Int
+    /// The player's ``PlayerPlaybackControlling/playRequestCount`` then; the play-all's own play takes the next.
+    public let playRequest: Int
 
-    public init(id: Int, startGeneration: Int = 0) {
+    public init(id: Int, startGeneration: Int = 0, playRequest: Int = 0) {
         self.id = id
         self.startGeneration = startGeneration
+        self.playRequest = playRequest
     }
 }
 

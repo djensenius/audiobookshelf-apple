@@ -17,6 +17,10 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     var error: PlaybackCoordinatorError? { get }
     /// ``PlaybackCoordinator/startGeneration``: tells a pending start apart from one begun after a stop.
     var startGeneration: Int { get }
+    /// ``PlaybackCoordinator/playRequestCount``.
+    var playRequestCount: Int { get }
+    /// ``PlaybackCoordinator/startPlayRequest``: which play began the current start.
+    var startPlayRequest: Int? { get }
     /// Global seconds.
     var currentTime: Double { get }
     var duration: Double { get }

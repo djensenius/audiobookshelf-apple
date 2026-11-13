@@ -298,16 +298,50 @@ struct QueueActionsTests {
         #expect(queue.items.map(\.id) == ["c|"])
     }
 
-    /// The play-all's own play began the start: the generation advanced once since ``beginPlayAll()``.
+    /// A play of `key` beginning a start, as the coordinator records it: the play takes the next play request, and
+    /// the start the next generation and that request.
+    private func play(_ key: MediaKey, on control: FakePlaybackControl) {
+        control.playRequestCount += 1
+        control.startGeneration += 1
+        control.startPlayRequest = control.playRequestCount
+        control.mediaKey = key
+        control.phase = .starting
+    }
+
+    /// A stop, as the coordinator records it.
+    private func stop(_ control: FakePlaybackControl) {
+        control.playRequestCount += 1
+        control.startGeneration += 1
+        control.startPlayRequest = nil
+        control.mediaKey = nil
+        control.phase = .idle
+    }
+
+    /// The play-all's own play began the start.
     @Test func thePlayAllsOwnStartReplacesTheQueue() async throws {
         let (scope, queue, started) = try startedScope("a", items: [item("x")])
-        scope.control.phase = .idle
+        stop(scope.control)
         let request = queue.beginPlayAll()
-        scope.control.startGeneration += 1
+        play(started, on: scope.control)
         scope.control.phase = .loaded
 
         #expect(await queue.replace(with: [item("b")], afterStarting: started, request: request))
         #expect(queue.items.map(\.id) == ["b|"])
+    }
+
+    /// Another surface played the same media while the play-all's play awaited its streaming check, so the play-all's
+    /// play never began a start, and the other's start is the only one since ``beginPlayAll()``: its load doesn't
+    /// replace the queue.
+    @Test func aNewerPlayOfTheSameMediaThatSupersededThePlayAllsKeepsThePreviousQueue() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        stop(scope.control)
+        let request = queue.beginPlayAll()
+        scope.control.playRequestCount += 1
+        play(started, on: scope.control)
+        scope.control.phase = .loaded
+
+        #expect(!(await queue.replace(with: [item("b")], afterStarting: started, request: request)))
+        #expect(queue.items.map(\.id) == ["x|"])
     }
 
     /// The player is stopped and the same media started again while the play-all's play is still returning (the
@@ -316,17 +350,11 @@ struct QueueActionsTests {
     @Test(arguments: [false, true])
     func aStopAndRestartBeforeTheReplaceBeginsKeepsThePreviousQueue(ownStart: Bool) async throws {
         let (scope, queue, started) = try startedScope("a", items: [item("x")])
-        scope.control.phase = ownStart ? .idle : .starting
+        if ownStart { stop(scope.control) } else { play(started, on: scope.control) }
         let request = queue.beginPlayAll()
-        if ownStart {
-            scope.control.startGeneration += 1
-            scope.control.phase = .loaded
-        }
-        scope.control.phase = .idle
-        scope.control.mediaKey = nil
-        scope.control.startGeneration += 1
-        scope.control.mediaKey = started
-        scope.control.startGeneration += 1
+        if ownStart { play(started, on: scope.control) }
+        stop(scope.control)
+        play(started, on: scope.control)
         scope.control.phase = .loaded
 
         #expect(!(await queue.replace(with: [item("b")], afterStarting: started, request: request)))

@@ -42,6 +42,8 @@ public final class CurrentPlayback: PlayerPlaybackControlling {
     public var restoredRecord: LastPlayedRecord? { bound?.restoredRecord }
     public var error: PlaybackCoordinatorError? { bound?.error }
     public var startGeneration: Int { bound?.startGeneration ?? 0 }
+    public var playRequestCount: Int { bound?.playRequestCount ?? 0 }
+    public var startPlayRequest: Int? { bound?.startPlayRequest }
     public var currentTime: Double { bound?.currentTime ?? 0 }
     public var duration: Double { bound?.duration ?? 0 }
     public var rate: Double { bound?.rate ?? 1 }

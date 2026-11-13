@@ -78,6 +78,11 @@ public final class PlaybackCoordinator {
     /// Changes when a start begins, on stop, and on a restore: a start still pending under the
     /// same value is the one seen earlier, not one begun after a stop. Not observed; read it again.
     public var startGeneration: Int { generation }
+    /// Counts plays, and what cancels a play awaiting its streaming check; each play takes the next count, at once.
+    public var playRequestCount: Int { policyCheck }
+    /// The ``playRequestCount`` of the play that began the current start; `nil` when no play did (an auto-advance or
+    /// a rebuild began it), or after a stop or a restore.
+    @ObservationIgnored public private(set) var startPlayRequest: Int?
     /// The play that ``error``'s `.streamingNeedsConfirmation` blocked, which
     /// ``confirmMeteredStreaming()`` replays.
     private var blockedPlay: (key: MediaKey, startTime: Double?)?
@@ -390,7 +395,7 @@ public final class PlaybackCoordinator {
         case .denied(let reason): return block(.streamingNotAllowed(reason, key: key))
         }
         meteredConsent = allowingMeteredNetwork ? key : nil
-        await start(key: key, startTime: startTime, prepared: nil)
+        await start(key: key, startTime: startTime, prepared: nil, playRequest: check)
     }
 
     /// The user agreed to stream on a metered network: replays the play (or queue advance) that
@@ -418,7 +423,9 @@ public final class PlaybackCoordinator {
 
     /// Everything after a play passed the streaming policy. A `prepared` start (an auto-advance)
     /// reuses its server progress instead of fetching it.
-    private func start(key: MediaKey, startTime: Double?, prepared: PreparedNextItem?, playing: Bool = true) async {
+    private func start(
+        key: MediaKey, startTime: Double?, prepared: PreparedNextItem?, playing: Bool = true, playRequest: Int? = nil
+    ) async {
         // Consent is for one item: an auto-advance (or anything else) starting another drops it,
         // so coming back to the item later asks again; its own rebuilds keep it.
         if meteredConsent != key { meteredConsent = nil }
@@ -426,6 +433,7 @@ public final class PlaybackCoordinator {
         let episodeID = key.episodeId
         generation += 1
         let current = generation
+        startPlayRequest = playRequest
         // Retain pending old closes, but not a lifetime history of completed user sessions.
         closeOperations.removeAll {
             $0.transport.result != nil && ($0.handoff == nil || $0.handoff?.position.result != nil)
@@ -927,6 +935,7 @@ public final class PlaybackCoordinator {
             if reason == .accountSwitch || reason == .expired { preserveLastPlayedAtAccountEnd() }
         }
         generation += 1
+        startPlayRequest = nil
         policyCheck += 1
         pendingPlayKey = nil
         dropHeldPlay()
@@ -960,6 +969,7 @@ public final class PlaybackCoordinator {
             record.serverConnectionID == sessions.serverConnectionID
         else { return false }
         generation += 1
+        startPlayRequest = nil
         mediaKey = record.key
         restoredRecord = record
         unloadedPosition = record.position.isFinite ? max(record.position, 0) : 0
@@ -1220,6 +1230,7 @@ public final class PlaybackCoordinator {
             nextItemProvider?.isStillNext(next.key) == false
         else { return }
         generation += 1
+        startPlayRequest = nil
         mediaKey = key
         restoredRecord = lastPlayedStore.load().flatMap { $0.key == key ? $0 : nil }
         unloadedPosition = endedAt.position

@@ -64,15 +64,19 @@ public final class PlaybackQueueControl: PlaybackQueueReading, PlayAllQueueing {
 
     public func beginPlayAll() -> PlayAllRequest {
         playAllRequests += 1
-        return PlayAllRequest(id: playAllRequests, startGeneration: scope?.playback.startGeneration ?? 0)
+        let playback = scope?.playback
+        return PlayAllRequest(
+            id: playAllRequests, startGeneration: playback?.startGeneration ?? 0,
+            playRequest: playback?.playRequestCount ?? 0)
     }
 
     /// Replaces the queue with `items`, in order, once the start of `started` has succeeded (play-all, #354): it is
     /// the loaded media, without an error. A start still pending (`.starting`, as when another screen began it and
     /// the player's `play` returned at once) is waited for, checking every ``startPollInterval`` for up to
-    /// ``startTimeout``. Only the start the play-all's own play joined or began counts: the one under way at
-    /// ``beginPlayAll()``, or the next (``PlayerPlaybackControlling/startGeneration`` advanced at most once since),
-    /// held from here on. Not one begun after a stop, even of the same media, nor one begun while the play returned.
+    /// ``startTimeout``. Only the start the play-all's own play joined or began counts, held from here on: the one
+    /// under way at ``beginPlayAll()`` (the same ``PlayerPlaybackControlling/startGeneration``), or the one its play
+    /// began (``PlayerPlaybackControlling/startPlayRequest`` is the play request after the request's). Not one
+    /// another play began, even of the same media, nor one begun after a stop.
     /// The current media isn't queued (``isCurrent(_:)``).
     ///
     /// - Returns: `false`, leaving the queue as it was, when a newer ``beginPlayAll()`` has begun, `started` is
@@ -82,9 +86,11 @@ public final class PlaybackQueueControl: PlaybackQueueReading, PlayAllQueueing {
     public func replace(with items: [QueueItem], afterStarting started: MediaKey, request: PlayAllRequest) async
         -> Bool
     {
-        guard started.serverConnectionID == serverConnectionID, let generation = scope?.playback.startGeneration,
-            (0...1).contains(generation - request.startGeneration)
+        guard started.serverConnectionID == serverConnectionID, let current = scope?.playback,
+            current.startGeneration == request.startGeneration
+                || current.startPlayRequest == request.playRequest + 1
         else { return false }
+        let generation = current.startGeneration
         let deadline = ContinuousClock.now + startTimeout
         while request.id == playAllRequests, let playback = scope?.playback, playback.startGeneration == generation,
             playback.mediaKey == started, playback.error == nil, playback.phase == .starting
