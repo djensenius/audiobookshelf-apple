@@ -16,6 +16,10 @@ struct AudiobookshelfApp: App {
         EbookFileLoader.downloadedFileLookup(
             items: LocalItemStore(modelContainer: $0.container), locations: DownloadLocations())
     }
+    /// Readers fetch ebooks with the downloads' generation-checked credentials.
+    private let ebookCredentials = AppEnvironment.shared.accounts.map { accounts in
+        AccountDownloadCredentials { try await accounts.downloadAccess(for: $0, read: $1) }
+    }
 
     var body: some Scene {
         // Every window; Open in New Window opens one at a screen (``WindowRoute``).
@@ -28,6 +32,7 @@ struct AudiobookshelfApp: App {
             .environment(settings)
             .environment(\.windowRoute, $windowRoute)
             .environment(\.downloadedEbookFile, downloadedEbookFile)
+            .environment(\.ebookCredentials, ebookCredentials)
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {
@@ -65,6 +70,7 @@ struct AudiobookshelfApp: App {
                     .task { await environment.lifecycle.start() }
                     .environment(settings)
                     .environment(\.downloadedEbookFile, downloadedEbookFile)
+                    .environment(\.ebookCredentials, ebookCredentials)
                     .modifier(AppThemeModifier(settings: settings))
             }
 

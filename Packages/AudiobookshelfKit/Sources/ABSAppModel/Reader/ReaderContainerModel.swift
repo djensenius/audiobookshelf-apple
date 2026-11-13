@@ -45,7 +45,8 @@ public final class ReaderContainerModel {
     /// The reader has closed: a load finishing later releases its file at once.
     @ObservationIgnored private var isReleased = false
     @ObservationIgnored private let progressModel: EbookProgressModel?
-    @ObservationIgnored private let serverProgress: MediaProgress?
+    /// Resolves the progress known for the item when the book loads.
+    @ObservationIgnored private let serverProgress: @MainActor () async -> MediaProgress?
     /// Whether a location other than where the reader opened was reported.
     @ObservationIgnored private var turned = false
     /// Where the reader rendered the book on opening, if it said (``recordOpening(_:progress:)``).
@@ -54,9 +55,23 @@ public final class ReaderContainerModel {
     /// - Parameters:
     ///   - progress: The book's progress model; `nil` opens at `serverProgress` and saves nothing.
     ///   - serverProgress: The progress known for the item, used without `progress`.
-    public init(
+    public convenience init(
         request: EbookFileRequest, kind: ReaderKind, loader: EbookFileLoader, progress: EbookProgressModel?,
         serverProgress: MediaProgress?
+    ) {
+        self.init(request: request, kind: kind, loader: loader, progress: progress) { serverProgress }
+    }
+
+    /// - Parameters:
+    ///   - progress: The book's progress model; `nil` opens at `serverProgress` and saves nothing.
+    ///   - serverProgress: Resolves the progress known for the item, awaited by each ``load()``
+    ///     before the book shows (alongside the fetch): the app waits for the session's progress
+    ///     seed, so a reader restored before the seed arrived opens at the server's location
+    ///     (``LibraryStore/seededProgress(libraryItemID:timeout:)``). With `progress`, it's the
+    ///     model's fallback when the server can't be reached and there's no local row.
+    public init(
+        request: EbookFileRequest, kind: ReaderKind, loader: EbookFileLoader, progress: EbookProgressModel?,
+        serverProgress: @escaping @MainActor () async -> MediaProgress?
     ) {
         self.request = request
         self.kind = kind
@@ -120,8 +135,12 @@ public final class ReaderContainerModel {
     }
 
     private func resume() async -> EbookResumePoint {
-        if let progressModel { return await progressModel.resume() }
-        return EbookResumePoint.resolve(kind: kind, local: nil, server: serverProgress)
+        let server = await serverProgress()
+        if let progressModel {
+            if let server { progressModel.know(server) }
+            return await progressModel.resume()
+        }
+        return EbookResumePoint.resolve(kind: kind, local: nil, server: server)
     }
 
     /// Where the reader rendered the book on opening, before any turn: shown, but not saved, and

@@ -123,6 +123,15 @@ public final class EbookProgressModel {
         }
     }
 
+    /// Server progress learned after the model was made (the session's progress seed): the
+    /// fallback and seed as `serverProgress` is at init. Progress for other media, or older than
+    /// what the model knows (for example from its own fetch), is ignored.
+    public func know(_ serverProgress: MediaProgress) {
+        guard let matching = Self.matching(serverProgress, key) else { return }
+        if let known = knownServerProgress, (known.lastUpdate ?? 0) > (matching.lastUpdate ?? 0) { return }
+        knownServerProgress = matching
+    }
+
     /// Where to open: the row's location (see the type's documentation). Sets ``location`` until
     /// a page is turned.
     @discardableResult

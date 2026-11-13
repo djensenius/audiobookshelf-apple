@@ -164,7 +164,9 @@ private func request(_ itemID: String = "li_1", ino: String? = "ino_1", version:
             configuration: try APIClientConfiguration(
                 baseURL: try #require(URL(string: "https://\(host)")), customHeaders: ["X-Proxy": "secret"]),
             tokenProvider: FixedTokens(), sessionConfiguration: StubURLProtocol.sessionConfiguration())
-        return APIEbookFileFetcher(client: client, sessionConfiguration: StubURLProtocol.sessionConfiguration())
+        return APIEbookFileFetcher(
+            connectionID: connection, credentials: AccountDownloadCredentials(client: { _ in client }),
+            sessionConfiguration: StubURLProtocol.sessionConfiguration())
     }
 
     @Test func theFetcherSendsCredentialsToTheServerAndRefusesARedirect() async throws {
@@ -465,7 +467,9 @@ private func request(_ itemID: String = "li_1", ino: String? = "ino_1", version:
         let client = APIClient(
             configuration: try APIClientConfiguration(baseURL: try #require(URL(string: "https://\(host)"))),
             tokenProvider: FixedTokens(), sessionConfiguration: configuration)
-        return APIEbookFileFetcher(client: client, sessionConfiguration: configuration)
+        return APIEbookFileFetcher(
+            connectionID: connection, credentials: AccountDownloadCredentials(client: { _ in client }),
+            sessionConfiguration: configuration)
     }
 
     static let rejections: [(HoldingURLProtocol.Route, EbookFileLoadError?)] = [
