@@ -1025,11 +1025,11 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
     /// Signed in to `second`, then `first`, which a relaunch restores offline; then `first` comes
     /// back with an unsupported version and a reconnect signs out of it, keeping its tokens.
     private func unsupportedReconnect(
-        _ harness: Harness, first: FakeServer, second: FakeServer
+        _ harness: Harness, first: FakeServer, second: FakeServer, oidc: Bool = false
     ) async throws -> (manager: AccountManager, first: UUID, second: UUID) {
         let manager = harness.makeManager()
         let secondID = try await signIn(manager, to: second)
-        let firstID = try await signIn(manager, to: first)
+        let firstID = try await signIn(manager, to: first, oidc: oidc)
         first.update { $0.isOffline = true }
         let relaunched = harness.makeManager()
         await relaunched.restoreSession()
@@ -1069,6 +1069,51 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         // Once saved, signing out again does nothing.
         await manager.logout(connectionID: id)
         #expect(first.loggedOutRefreshTokens == ["refresh-1"])
+    }
+
+    /// An OpenID connection's end-session URL is returned, and opened (``AccountManager/hasBegunSinceLogout``
+    /// gates `AccountActions.open`), while no call has begun since the connection left.
+    @Test func signingOutOfAConnectionAnUnsupportedVersionEndedReturnsItsEndSessionURL() async throws {
+        let harness = try Harness()
+        let first = FakeServer()
+        let (manager, id, _) = try await unsupportedReconnect(
+            harness, first: first, second: FakeServer(userId: "usr-2"), oidc: true)
+        first.update { $0.logoutRedirect = "https://idp.example/end-session?id_token_hint=id.token.sig" }
+
+        let url = await manager.logout(connectionID: id)
+        #expect(url?.absoluteString == "https://idp.example/end-session?id_token_hint=id.token.sig")
+        #expect(!manager.hasBegunSinceLogout)
+        let logout = try #require(first.requests("/logout").first)
+        #expect(logout.value(forHTTPHeaderField: "Cookie") == "auth_method=openid-mobile; openid_id_token=id.token.sig")
+        #expect(try harness.session(id) == nil)
+    }
+
+    /// A call that begins while the server session ends, or began after the connection left,
+    /// drops the URL: the browser may be signing in.
+    @Test(arguments: [false, true])
+    func signingOutOfAnEndedConnectionDropsTheURLOnceACallBegins(during: Bool) async throws {
+        let harness = try Harness()
+        let first = FakeServer()
+        let second = FakeServer(userId: "usr-2")
+        let (manager, id, secondID) = try await unsupportedReconnect(harness, first: first, second: second, oidc: true)
+        first.update { $0.logoutRedirect = "https://idp.example/end-session" }
+
+        let url: URL?
+        if during {
+            let held = first.hold("/logout")
+            let logout = Task { await manager.logout(connectionID: id) }
+            await held.arrived()
+            #expect(try await signIn(manager, to: second) == secondID)
+            held.open()
+            url = await logout.value
+        } else {
+            try await manager.switch(to: secondID)
+            url = await manager.logout(connectionID: id)
+        }
+        #expect(url == nil && manager.hasBegunSinceLogout)
+        #expect(first.loggedOutRefreshTokens == ["refresh-1"])
+        #expect(try harness.session(id) == nil)
+        #expect(manager.state.user?.connectionID == secondID)
     }
 
     /// Another connection signed in to meanwhile is untouched.
