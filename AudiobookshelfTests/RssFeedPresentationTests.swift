@@ -149,4 +149,40 @@ private struct StubRssFeedService: RssFeedService {
         reopened.seed(from: closedNow)
         #expect(!RssFeedPresentation.showsOpen(fetched: true, model: reopened))
     }
+
+    /// The book's More menu entry and the podcast's toolbar button share one state: a sheet starts
+    /// from what the last one knew, the indicator only follows a sheet for the same item, and an
+    /// account change forgets it.
+    @MainActor
+    @Test func theEntryStateCarriesTheLastSheetForItsTarget() async {
+        let target = RssFeedTarget(.item, id: "li-1")
+        let other = RssFeedTarget(.item, id: "li-2")
+        let feed = RssFeed(id: "feed-1", entityType: "libraryItem", entityId: "li-1", feedUrl: "/feed/li-1")
+        let state = RssFeedEntryState()
+        #expect(state.showsOpen(target, fetched: true))
+        #expect(!state.isPresented)
+
+        state.open(target, service: StubRssFeedService(open: nil), hasEpisodesWithoutPubDate: true)
+        #expect(state.isPresented)
+        #expect(state.model?.target == target)
+        #expect(state.model?.hasEpisodesWithoutPubDate == true)
+        await state.model?.load()
+        state.isPresented = false
+        // Closed per the sheet, though the screen fetched it open; another item keeps its own fetch.
+        #expect(!state.showsOpen(target, fetched: true))
+        #expect(state.showsOpen(other, fetched: true))
+
+        // The next sheet starts closed until its own load answers.
+        state.open(target, service: StubRssFeedService(open: feed), hasEpisodesWithoutPubDate: false)
+        #expect(!state.showsOpen(target, fetched: true))
+
+        state.reset()
+        #expect(!state.isPresented)
+        #expect(state.model == nil)
+        #expect(state.showsOpen(target, fetched: true))
+    }
+
+    @Test func anOpenFeedHasItsOwnSymbol() {
+        #expect(RssFeedPresentation.systemImage(isOpen: true) != RssFeedPresentation.systemImage(isOpen: false))
+    }
 }
