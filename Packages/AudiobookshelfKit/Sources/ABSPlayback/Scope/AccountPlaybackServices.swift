@@ -117,7 +117,8 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
     }
 
     /// Throws ``StreamResolutionError/missingAccessToken`` without a client or features. The URLs
-    /// go through the track URL override, if there is one; the plan and transport don't.
+    /// go through the track URL override, if there is one; the plan and transport don't (the
+    /// engine loads an overridden `file:` URL without the transport).
     public func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
         guard let service = sessionService() else { throw StreamResolutionError.missingAccessToken }
         let stream = try await service.resolveStream(for: session)
