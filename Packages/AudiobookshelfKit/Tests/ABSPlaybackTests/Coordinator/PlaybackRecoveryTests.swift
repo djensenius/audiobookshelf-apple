@@ -116,6 +116,53 @@ struct PlaybackRecoveryTests {
         #expect(h.recoverySleep.durations == [.seconds(1)])
     }
 
+    /// A rebuild opens a new session, so the streaming policy decides it as it would a play.
+    @Test(arguments: [
+        NetworkDecision.denied(.cellular), .askUser(.cellular),
+    ])
+    func aRebuildTheStreamingPolicyBlocksSurfacesItsError(decision: NetworkDecision) async {
+        h.recoverySleep.elapsesImmediately = true
+        await playAt600()
+        h.policy.decision = decision
+
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { coordinator.error != nil }
+
+        let expected: PlaybackCoordinatorError =
+            switch decision {
+            case .askUser(let reason): .streamingNeedsConfirmation(reason, key: h.key("A"))
+            default: .streamingNotAllowed(.cellular, key: h.key("A"))
+            }
+        #expect(coordinator.error == expected)
+        #expect(service.starts == ["A"])
+        #expect(coordinator.phase == .unloaded)
+        #expect(coordinator.currentTime == 600)
+        #expect(!coordinator.isPlaybackRequested)
+    }
+
+    /// The user agreed to stream this item on a metered path: its rebuilds don't ask again, and
+    /// "never" still wins.
+    @Test(arguments: [false, true])
+    func aRebuildKeepsTheUsersMeteredConsent(denied: Bool) async {
+        h.recoverySleep.elapsesImmediately = true
+        h.policy.decision = .askUser(.cellular)
+        await coordinator.play(itemID: "A", startTime: 600, allowingMeteredNetwork: true)
+        #expect(coordinator.isPlaying)
+        if denied { h.policy.decision = .denied(.cellular) }
+
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { coordinator.error != nil || (service.starts.count == 2 && engine.isPlaybackRequested) }
+
+        if denied {
+            #expect(coordinator.error == .streamingNotAllowed(.cellular, key: h.key("A")))
+            #expect(service.starts == ["A"])
+        } else {
+            #expect(coordinator.error == nil)
+            #expect(service.starts == ["A", "A"])
+            #expect(engine.loads.last?.time == 600)
+        }
+    }
+
     @Test func aRebuiltItemFailingBeforeTheAttemptReturnsCountsAsAFailedAttempt() async {
         h.recoverySleep.elapsesImmediately = true
         await playAt600()
