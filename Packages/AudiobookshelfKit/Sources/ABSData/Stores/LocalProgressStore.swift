@@ -841,6 +841,31 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
     }
 
+    /// Deletes `key`'s sessions waiting for upload, after its progress was discarded (#566).
+    ///
+    /// The server takes an uploaded session's position as the media's progress when it holds no
+    /// newer progress, and after a discard it holds none, so the upload would bring the discarded
+    /// progress back. No field of the upload stops that, so the sessions are dropped with their
+    /// listening time, which is logged. Returns the ids deleted.
+    @discardableResult
+    public func deleteSessions(for key: MediaKey) throws -> Set<String> {
+        let connectionID = key.serverConnectionID
+        let itemID = key.libraryItemId
+        let dropped = try commit {
+            let descriptor = FetchDescriptor<PendingLocalSession>(
+                predicate: #Predicate { $0.serverConnectionID == connectionID && $0.libraryItemId == itemID })
+            let sessions = try modelContext.fetch(descriptor).filter { $0.episodeId == key.episodeId }
+            for session in sessions { modelContext.delete(session) }
+            return sessions.map { ($0.id, $0.timeListening) }
+        }
+        for (id, listened) in dropped {
+            Self.logger.notice(
+                "Dropped local session \(id, privacy: .public) with \(listened, privacy: .public) s of listening time: its progress was discarded"
+            )
+        }
+        return Set(dropped.map(\.0))
+    }
+
     /// Applies the per-session results of a `local-all` upload; never the batch's HTTP status.
     ///
     /// - A success resets the session's upload bookkeeping. The session is deleted only when it

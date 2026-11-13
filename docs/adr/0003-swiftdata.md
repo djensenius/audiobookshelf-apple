@@ -562,6 +562,9 @@ Model notes:
   (`closeSessionLifetime`), the next drain that reaches the server settles it by
   lookup without resending it, so it outlives the session only by up to six failed
   lookups. Keeping it lets the device end the session sooner, never later.
+  Admission also holds the resend while its row's finished edit is unsent: the
+  server un-finishes an item when a report moves its position, so the close must
+  never overtake a pending Mark finished (#557).
 - **Downloaded files live in the app container, not the App Group.** Widgets never
   read downloaded media files; they get covers through the image cache
   ([ADR 0005](0005-images.md), #89 (P5-11b)).
@@ -587,7 +590,10 @@ Model notes:
   kept and sent again on the next sync. Within those rules the legacy rule applies:
   only sessions that are not `isActive` are deleted (all acknowledged ones on the
   first sync after login, which is the playback scope's sync at an online session
-  start, #184).
+  start, #184). Discarding an item's progress deletes its pending sessions (the
+  listening time is logged, not uploaded): the server creates progress from an
+  uploaded session when it has none, so the upload would bring the discarded
+  progress back (#566).
 - **History** stays on the device, as in the legacy app. Events older than 90 days
   are deleted at launch (`AppEnvironment.pruneHistory`, #184).
 - **Connections:** the session to restore is the connected record with the latest

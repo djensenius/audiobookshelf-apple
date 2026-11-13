@@ -1,9 +1,9 @@
-import ABSAPI
 import ABSCore
 import ABSPlayback
 import Foundation
 import Testing
 
+@testable import ABSAPI
 @testable import ABSAppModel
 @testable import ABSData
 
@@ -89,6 +89,50 @@ private struct RecordingSync: ItemActionLocalSync {
         calls.value.append(call)
         if fails.value { throw Failure() }
     }
+}
+
+/// The server's progress by item for discards and offline session uploads: DELETE removes it,
+/// and an uploaded session sets it unless the stored progress is newer than the session, as ABS
+/// `PlaybackSessionManager.syncLocalSession` does (docs/testing/server-contracts.md). With no
+/// stored progress, the session's position becomes the progress.
+private final class LocalSessionServer: ProgressWriting, LocalSessionUploadService {
+    /// `currentTime` and `lastUpdate` (ms) by item.
+    let progress = Locked<[String: Progress]>([:])
+    let uploaded = Locked<[String]>([])
+
+    struct Progress: Equatable, Sendable {
+        var currentTime: Double
+        var lastUpdate: Int
+    }
+
+    func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {}
+
+    func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        progress.value[itemID] == nil ? nil : "mp-\(itemID)"
+    }
+
+    func deleteProgress(id: String) async throws {
+        progress.value[String(id.dropFirst("mp-".count))] = nil
+    }
+
+    func uploadAll(_ batch: LocalPlaybackSessionBatch) async throws -> LocalSessionSyncResponse {
+        LocalSessionSyncResponse(
+            results: batch.sessions.map { .init(id: $0.id, success: true, progressSynced: apply($0), error: nil) })
+    }
+
+    func upload(_ session: LocalPlaybackSessionPayload) async throws { _ = apply(session) }
+
+    private func apply(_ session: LocalPlaybackSessionPayload) -> Bool {
+        uploaded.value.append(session.libraryItemId)
+        if let stored = progress.value[session.libraryItemId], stored.lastUpdate > session.updatedAt { return false }
+        progress.value[session.libraryItemId] = Progress(
+            currentTime: session.currentTime, lastUpdate: session.updatedAt)
+        return true
+    }
+}
+
+private struct UploadDevice: DeviceIdentifying {
+    func deviceIdentifier() async -> String { "device" }
 }
 
 @MainActor
@@ -445,5 +489,48 @@ private func cachedProgress(finished: Bool = false) -> MediaProgress {
         #expect(finished.values.finished?.isFinished == true)
         #expect(try await store.completeSend(finished, serverLastUpdate: nil))
         #expect(try await store.beginSend(for: key) == nil)
+    }
+
+    /// #566: an offline session of the item waits for upload when its progress is discarded.
+    /// The server then has no progress to compare the session with, so uploading it would bring
+    /// the discarded position back; the discard drops it, and after the upload, which a relaunch
+    /// runs from the stored sessions, the progress stays discarded. Negative controls: another
+    /// item's session still uploads and creates that item's progress, and without a discard the
+    /// item's session uploads and moves its progress.
+    @Test(arguments: [true, false])
+    func discardingProgressDropsTheItemsPendingLocalSessions(discard: Bool) async throws {
+        let server = LocalSessionServer()
+        server.progress.value["item"] = .init(currentTime: 300, lastUpdate: 1_000_000)
+        cache.apply(cachedProgress())
+        try await playedRow(at: 420)
+        for (item, currentTime) in [("item", 420.0), ("other", 50)] {
+            let ended = Date(timeIntervalSince1970: 2_000)
+            try await store.saveSession(
+                PendingLocalSessionDTO(
+                    key: MediaKey(serverConnectionID: connection, libraryItemId: item), userId: "user",
+                    mediaType: .book, displayTitle: item, duration: 600, startTime: currentTime - 30,
+                    startedAt: ended.addingTimeInterval(-30), updatedAt: ended, timeListening: 30,
+                    currentTime: currentTime, isActive: false))
+        }
+
+        if discard {
+            let actions = ProgressItemActions(
+                cache: cache, writer: server,
+                localSync: LocalProgressItemActionSync(store: store, connectionID: connection))
+            try await actions.discardProgress(target)
+            #expect(server.progress.value["item"] == nil)
+        }
+        // A new process: another store over the same database uploads what was saved.
+        let relaunched = LocalProgressStore(modelContainer: store.modelContainer)
+        let uploader = LocalSessionUploader(
+            serverConnectionID: connection, store: relaunched, service: server, deviceIdentifiers: UploadDevice())
+        let report = await uploader.sync()
+
+        #expect(report.isComplete)
+        #expect(server.uploaded.value.sorted() == (discard ? ["other"] : ["item", "other"]))
+        #expect(server.progress.value["item"] == (discard ? nil : .init(currentTime: 420, lastUpdate: 2_000_000)))
+        #expect(server.progress.value["other"] == .init(currentTime: 50, lastUpdate: 2_000_000))
+        #expect(try await relaunched.pendingSessions(for: connection).isEmpty)
+        #expect((try await relaunched.progress(for: key) == nil) == discard)
     }
 }

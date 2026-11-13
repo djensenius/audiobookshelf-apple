@@ -279,9 +279,10 @@ extension ProgressSyncer {
             case .skip(.lookupFailed):
                 drainOutcome.failed = true
                 return false
-            case .skip(.closeChanged):
+            case .skip(.closeChanged), .skip(.finishedUnsent):
                 // Its settlement may have kept it with no drain to come (a retired scope's):
-                // the next drain reads it as saved.
+                // the next drain reads it as saved. Or the row's finished edit must reach the
+                // server first, which a later drain sends before it (#557).
                 drainOutcome.failed = true
                 continue
             case .skip:
