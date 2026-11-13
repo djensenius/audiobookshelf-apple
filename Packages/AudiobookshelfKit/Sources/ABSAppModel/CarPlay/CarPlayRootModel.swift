@@ -193,13 +193,33 @@ public final class CarPlayRootModel {
     /// supersedes it.
     @discardableResult
     public func play(_ row: CarPlayRow) -> Task<CarPlayPlayOutcome, Never>? {
-        guard case .play(let itemID, let episodeID) = row.action, row.isEnabled,
+        guard case .play = row.action, row.isEnabled,
             case .tabs(let list, _) = content,
             list.rows.contains(where: {
                 $0.id == row.id && $0.action == row.action && $0.image == row.image && $0.isEnabled
             }),
-            let identity, let playItem = playItem(identity)
+            let identity
         else { return nil }
+        return start(row, identity: identity)
+    }
+
+    /// ``play(_:)`` for a row of the Library or Latest tab (#80): `row` must be shown on the page
+    /// of `destination`'s list from `offset` in `browse`, the signed-in account's browse model.
+    @discardableResult
+    public func play(
+        _ row: CarPlayRow, in destination: CarPlayDestination, offset: Int, of browse: CarPlayBrowseModel
+    ) -> Task<CarPlayPlayOutcome, Never>? {
+        guard case .play = row.action, row.isEnabled, let identity, browse.identity == identity,
+            browse.shows(row, in: destination, offset: offset)
+        else { return nil }
+        return start(row, identity: identity)
+    }
+
+    /// Plays `row`, shown for `identity`'s account, or joins its play while it's starting.
+    private func start(_ row: CarPlayRow, identity: SessionIdentity) -> Task<CarPlayPlayOutcome, Never>? {
+        guard case .play(let itemID, let episodeID) = row.action, let playItem = playItem(identity) else {
+            return nil
+        }
         if let pendingPlay, pendingPlay.origin.action == row.action, pendingPlay.origin.operation == operation,
             isCurrent(pendingPlay.origin)
         {
