@@ -1079,6 +1079,9 @@ public final class PlaybackCoordinator {
         case .trackChanged:
             break
         case .endOfMedia:
+            // Before the observers and the advance: a stall that cleared into the end, with no
+            // playing tick to end its run, must not seek or play the ended item again.
+            recovery.noteEnded(generation: generation)
             reachedEnd = true
             lastPlayedAt = now()
             saveLastPlayed()

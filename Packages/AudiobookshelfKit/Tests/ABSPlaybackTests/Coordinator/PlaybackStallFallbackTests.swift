@@ -102,6 +102,27 @@ struct PlaybackStallFallbackTests {
         #expect(Array(engine.seeks.dropFirst(seeks)) == [600])
     }
 
+    @Test func aStallThatClearsIntoTheEndDoesNotPlayTheItemAgain() async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        let (seeks, plays) = (engine.seeks.count, engine.playCount)
+
+        stall()
+        await settle { h.recoverySleep.waitingCount == 1 }
+        // The stall clears and the item plays out before the time observer fires again.
+        engine.finish()
+        h.recoverySleep.fireOldest()
+        for _ in 0..<1_000 { await Task.yield() }
+
+        #expect(engine.seeks.count == seeks)
+        #expect(engine.playCount == plays)
+        #expect(engine.state == .ended)
+        #expect(!coordinator.isPlaying)
+        #expect(!coordinator.isPlaybackRequested)
+        #expect(service.starts == ["A"])
+        #expect(coordinator.error == nil)
+    }
+
     @Test func stallsThatNeverClearExhaustTheBudgetsAndSurface() async {
         h.recoverySleep.elapsesImmediately = true
         await playAt600()

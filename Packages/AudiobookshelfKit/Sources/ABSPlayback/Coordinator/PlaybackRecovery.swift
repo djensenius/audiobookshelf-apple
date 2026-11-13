@@ -245,6 +245,16 @@ final class PlaybackRecovery {
         if date.timeIntervalSince(since) >= Self.episodeReset { self.episode = nil }
     }
 
+    /// The item at `generation` played to its end: a run in flight for it (a stall's that cleared
+    /// with no playing tick before the end) ends before its attempt can seek or play the ended
+    /// item again.
+    func noteEnded(generation: Int) {
+        guard isRunning, episode?.generation == generation else { return }
+        logger.info("The item ended while recovery was in flight")
+        token += 1
+        isRunning = false
+    }
+
     private func isCurrent(_ run: Int, _ host: PlaybackRecoveryHost) -> Bool {
         run == token && episode?.generation == host.generation()
     }
