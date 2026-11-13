@@ -363,7 +363,7 @@ Cons:
      - `mediaPlayer: "AVPlayer"`
      - the server's `libraryItemId` and `episodeId`
    - **Online:** report with `POST /api/session/local` while playing.
-   - **After reconnecting:** batch unsent sessions with `POST /api/session/local-all`.
+   - **After reconnecting:** batch unsent sessions with `POST /api/session/local-all`. Each account's `PlaybackScope` does it in `syncWithServer(isFirstSync:)` (`LocalSessionUploader`), after draining pending progress, at an online session start and after each reconnect (#184).
    - Before a session starts, server progress that is newer than local progress wins, as in the legacy flow (`ApiClient.swift:532-591`).
      - Newer means saved later. An unsent edit is dated by its edit time, a synced group by the later of its edit time and the server's `lastUpdate`. That date covers the whole row, so for a synced group it is only an upper bound on when the group last changed. Equal dates go to the server, as in the sync merge (ADR 0003).
      - An unsent audio edit is kept when the server's audio still equals what the row last saw, however new its `lastUpdate`: another device changed something else, such as the ebook position or the finished flag.
@@ -380,7 +380,7 @@ Cons:
    - Sync with `POST /api/session/{id}/sync` `{currentTime, timeListened, duration}`.
    - Close with `POST /api/session/{id}/close` when playback stops, the item changes or the user signs out.
    - These calls use `Authorization: Bearer` (plus any custom headers) through the shared API client with token refresh.
-   - **Active baseline refresh (#281).** After a progress drain's dirty-row and PATCH-acknowledgement confirmation work, the still-loaded session's key gets one canonical `GET /api/me/progress/:id` if that drain has not already issued a GET for it. There is no timer, immediate retry or reconnect wiring (#184), and the refresh never sends a sync, PATCH or close.
+   - **Active baseline refresh (#281).** After a progress drain's dirty-row and PATCH-acknowledgement confirmation work, the still-loaded session's key gets one canonical `GET /api/me/progress/:id` if that drain has not already issued a GET for it. There is no timer or immediate retry; a reconnect refreshes through the playback scope's drain (#184). The refresh never sends a sync, PATCH or close.
      - GET-attempt deduplication is separate from acknowledgement accounting: a genuinely new acknowledgement after a pre-drain read still gets its confirmation GET. Retained settlements and owned position writes still block the request.
      - It reuses the start GET's one-shot store capture and intake: capture before the request, then validate the dated item/episode, generation and row identity atomically, seeding a missing row cleanly. Ordinary server intake still skips unknown rows. A failed read is not absence, a failed save rolls back, and local edits, new acknowledgements or deletion (including absent → created → deleted) invalidate the old read. An unusable response creates no baseline or confirmation; a later drain may try again.
      - It changes durable progress only, never the loaded position, playback state, LastPlayed or the current resume decision. Admission belongs to the loaded session, not just its media key: stop, replacement, detach or quiescence prevents a new stale submission. Already-submitted store work is not cancelled and stays provenance-guarded. It adds no backend fence, conditional write, exactly-once or listening-time guarantee.
@@ -452,6 +452,7 @@ Cons:
 **Recovery and position tests.** These are engine unit tests with a stubbed player and API client. Where marked, #49 also runs them on a device.
 - **Playlist 404 mid-play:** a 404 on the HLS playlist with the session gone (`GET /api/session/{id}` → 404) recovers through one rebuild. A new `/play` session is opened and the old id is never reused. Playback resumes within ≤ 0.5 s of the saved position at the same rate. On a device (#49), restart the server mid-play.
 - **Segment 404 with the session alive:** re-seeks without opening a new session. A failed item is recreated with the same playlist URL.
+- **`/sync` 404 while the session is loaded (#184):** the account's `PlaybackScope` opens a new session for the same media at the current position (`PlaybackCoordinator.replaceGoneSession`), playing only if playback was requested, and the 404'd report's listening time joins the new session (#383). Nothing happens if the session is no longer the loaded one or the scope retired (`PlaybackScopeSyncTests`).
 - **401 on media or on `GET /api/session/{id}`:** the token is refreshed exactly once and recovery happens once. A second 401 in the same episode stops with an error and makes no further refresh or rebuild calls.
 - **Three failed rebuild attempts:** surface the error with a Retry action after 1, 2 and 4 s backoff. There is no fourth `/play` call.
 - **Network loss:** no attempts are spent while the path is unsatisfied. A retry happens immediately when the path becomes satisfied. The error appears after 5 minutes offline.
