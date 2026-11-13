@@ -279,7 +279,7 @@ final class PlaybackRecovery {
                 let error = await host.refresh()
                 guard isCurrent(run, host) else { return }
                 if let error { return giveUp(error, host) }
-                guard await rebuild(run, host) else { return }
+                guard await rebuildAfterRefresh(run, host) else { return }
             case .rebuild:
                 guard await rebuild(run, host) else { return }
             }
@@ -353,6 +353,28 @@ final class PlaybackRecovery {
         }
         // The path source ended: don't wait on it.
         return timer == nil ? .online : .returned
+    }
+
+    /// The rebuild after a refresh, which the path may have dropped during: it waits for the path
+    /// (no `/play` offline) and checks the session once it returns; a 401 then, the one refresh
+    /// already spent, surfaces. Returns whether the run goes on.
+    private func rebuildAfterRefresh(_ run: Int, _ host: PlaybackRecoveryHost) async -> Bool {
+        let network = await waitForNetwork()
+        guard isCurrent(run, host) else { return false }
+        switch network {
+        case .online: break
+        case .timedOut:
+            giveUp(.recoveryExhausted, host)
+            return false
+        case .returned:
+            let session = await host.checkSession()
+            guard isCurrent(run, host) else { return false }
+            if session == .unauthorized {
+                giveUp(.streamRejected, host)
+                return false
+            }
+        }
+        return await rebuild(run, host)
     }
 
     /// One rebuild attempt; returns whether the run goes on (the attempt failed recoverably).

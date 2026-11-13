@@ -263,6 +263,8 @@ final class StubSessionService: PlaybackSessionService {
         /// The `rejected` token of each refresh.
         var refreshedTokens: [String?] = []
         var refreshError: APIError?
+        /// Holds the next refresh before it completes.
+        var refreshGate: Gate?
         var starts: [String] = []
         var closes: [String] = []
         var canceledCloses: [String] = []
@@ -396,12 +398,15 @@ final class StubSessionService: PlaybackSessionService {
     }
 
     func refreshStreamAccess(replacing rejected: String?) async throws {
-        let error = state.withLock {
+        let (error, gate) = state.withLock {
             $0.refreshes += 1
             $0.refreshedTokens.append(rejected)
             $0.log.append("refresh")
-            return $0.refreshError
+            let gate = $0.refreshGate
+            $0.refreshGate = nil
+            return ($0.refreshError, gate)
         }
+        await gate?.wait()
         if let error { throw error }
     }
 

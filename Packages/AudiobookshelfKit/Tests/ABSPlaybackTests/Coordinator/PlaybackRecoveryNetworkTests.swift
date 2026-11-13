@@ -239,6 +239,46 @@ struct PlaybackRecoveryNetworkTests {
         #expect(coordinator.error == nil)
     }
 
+    /// The path drops while the refresh is in flight: the rebuild waits for it, checks the session
+    /// once it returns, and doesn't refresh again.
+    @Test(arguments: [PlaybackSessionStatus.gone, .unauthorized])
+    func connectivityLostDuringTheRefreshHoldsTheRebuildUntilItReturns(session: PlaybackSessionStatus) async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        let gate = Gate()
+        service.state.withLock { $0.refreshGate = gate }
+
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 401))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        h.recoverySleep.fireOldest()
+        await settle { service.state.withLock { $0.refreshes } == 1 }
+        paths.isOnline = false
+        gate.open()
+        await settle { h.recoverySleep.waitingCount == 1 }
+        await drain()
+
+        // Offline: no `/play`, no rebuild budget spent, only the five-minute limit waiting.
+        #expect(service.starts == ["A"])
+        #expect(h.recoverySleep.durations.last == .seconds(300))
+        #expect(lookups.isEmpty)
+
+        setSession(session)
+        paths.isOnline = true
+        if session == .gone {
+            await settle { service.starts.count == 2 && engine.isPlaybackRequested }
+            #expect(engine.loads.last?.time == 600)
+            #expect(coordinator.error == nil)
+        } else {
+            // Still rejected after the one refresh: it stops.
+            await settle { coordinator.error != nil }
+            #expect(coordinator.error == .streamRejected)
+            #expect(service.starts == ["A"])
+        }
+        #expect(lookups == ["A-1"])
+        #expect(service.state.withLock { $0.refreshes } == 1)
+        #expect(h.recoverySleep.waitingCount == 0)
+    }
+
     // MARK: - A user seek during recovery
 
     @Test func aSeekReplacingOneThatTookOverRecoveryStillPlays() async {
