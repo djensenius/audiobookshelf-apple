@@ -41,13 +41,24 @@ enum ImageDecoder {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, options) else {
             throw FileManager.default.fileExists(atPath: url.path) ? ImagePipelineError.unsupportedImage : .fileMissing
         }
+        return try inspect(
+            source, url: url,
+            unreadable: FileManager.default.fileExists(atPath: url.path)
+                ? ImagePipelineError.unsupportedImage : .fileMissing)
+    }
+
+    /// The dimension and sample-depth checks of ``inspect(_:)`` on an already open `source`, so
+    /// a caller can check and decode the same input. `unreadable` is thrown when the source has
+    /// no readable size.
+    static func inspect(
+        _ source: CGImageSource, url: URL, unreadable: @autoclosure () -> ImagePipelineError
+    ) throws -> SourceInfo {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
         guard
             let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, options) as? [CFString: Any],
             let width = properties[kCGImagePropertyPixelWidth] as? Int,
             let height = properties[kCGImagePropertyPixelHeight] as? Int, width > 0, height > 0
-        else {
-            throw FileManager.default.fileExists(atPath: url.path) ? ImagePipelineError.unsupportedImage : .fileMissing
-        }
+        else { throw unreadable() }
         let limit = ImageCacheLimits.maxSourceDimension
         guard width <= limit, height <= limit else { throw ImagePipelineError.tooLarge }
         let depth = properties[kCGImagePropertyDepth] as? Int ?? 8
