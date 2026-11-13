@@ -52,6 +52,8 @@ struct MainTabView<Root: View>: View {
             .defaultTabBarPlacement(.sidebar)
             .tabBarMinimizeBehavior(.onScrollDown)
         #endif
+        // Above the tabs and sidebar while the network or the server is unavailable (#76).
+        .modifier(ConnectionBannerHost())
         .modifier(PlayerSlot(router: router, player: player))
         .modifier(SceneLibrarySync(router: router))
         .onChange(of: horizontalSizeClass) { _, sizeClass in

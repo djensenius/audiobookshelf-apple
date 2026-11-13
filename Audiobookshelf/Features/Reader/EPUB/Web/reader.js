@@ -340,6 +340,19 @@
     }
   }
 
+  // A pattern matching any of `urls`, longest first.
+  function alternation(urls) {
+    return urls
+      .slice()
+      .sort(function (a, b) {
+        return b.length - a.length
+      })
+      .map(function (url) {
+        return url.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')
+      })
+      .join('|')
+  }
+
   // Every URL in `content` swapped for its replacement in one pass, longest first. epub.js swaps
   // each in turn over the whole text, so a later URL also matches inside the blob URLs an earlier
   // one put in, and the text grows exponentially with the assets a book lists. `null` once the
@@ -350,14 +363,7 @@
       if (url && replacements[index] && !swaps.has(url)) swaps.set(url, replacements[index])
     })
     if (swaps.size === 0) return content
-    const pattern = Array.from(swaps.keys())
-      .sort(function (a, b) {
-        return b.length - a.length
-      })
-      .map(function (url) {
-        return url.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&')
-      })
-      .join('|')
+    const pattern = alternation(Array.from(swaps.keys()))
     // Tests lower the budget.
     const budget = Math.min(Number(window.absReaderRewriteBudget) || MAX_REWRITE_GROWTH, allowance ?? Infinity)
     const overBudget = new Error('Over the rewrite budget')
@@ -430,26 +436,85 @@
         const replaced = substituteOnce(content, url ? this.relativeTo(url) : this.urls, replacements())
         return replaced === null ? content : replaced
       }
+      const rewrite = function (href, css) {
+        const absolute = resources.settings.resolver(href)
+        const replaced = substituteOnce(css, resources.relativeTo(absolute), replacements(), sheetsAllowance)
+        if (replaced !== null) sheetsAllowance -= replaced.length - css.length
+        // Over the budget, an empty sheet: with none, `replacements()` would use the original.
+        const body = replaced === null ? '' : replaced
+        sheets.set(href, keep(URL.createObjectURL(new Blob([body], { type: 'text/css' }))))
+      }
+      // The other style sheets `css` (at `href`) refers to. Its URLs are matched as `rewrite`
+      // matches them, every asset with a replacement (`available`) or still to be rewritten
+      // longest first, so a longer asset path starting with a sheet's isn't taken for that sheet.
+      const referenced = function (href, css, texts, available) {
+        const relative = resources.relativeTo(resources.settings.resolver(href))
+        const byURL = new Map()
+        resources.urls.forEach(function (other, index) {
+          const url = relative[index]
+          if (url && !byURL.has(url) && (available[index] || texts.has(other))) byURL.set(url, other)
+        })
+        if (byURL.size === 0) return []
+        const found = new Set()
+        for (const match of css.matchAll(new RegExp(alternation(Array.from(byURL.keys())), 'g'))) {
+          const other = byURL.get(match[0])
+          if (other !== href && texts.has(other)) found.add(other)
+        }
+        return Array.from(found)
+      }
+      // epub.js rewrites the style sheets all at once, so a sheet importing another could get that
+      // sheet's original, whose relative URLs don't resolve from a blob. Instead they're all
+      // rewritten once, each after the sheets it refers to; in a cycle, the sheet that closes it
+      // gets the other's original. Iterative, so a long chain of imports can't overflow the stack.
+      let rewriting
+      const rewriteSheets = function () {
+        if (rewriting) return rewriting
+        const hrefs = (resources.cssUrls || []).filter(function (href) {
+          return href.charAt(0) !== '/'
+        })
+        const reads = hrefs.map(function (href) {
+          const text = resources.settings.archive.getText(resources.settings.resolver(href))
+          return text
+            ? text.then(
+                function (css) {
+                  return [href, css]
+                },
+                function () {
+                  return undefined
+                }
+              )
+            : undefined
+        })
+        rewriting = Promise.all(reads).then(function (read) {
+          const texts = new Map(read.filter(Boolean))
+          const available = replacements()
+          const seen = new Set()
+          texts.forEach(function (css, root) {
+            if (seen.has(root)) return
+            seen.add(root)
+            const stack = [{ href: root, refs: referenced(root, css, texts, available) }]
+            while (stack.length > 0) {
+              const top = stack[stack.length - 1]
+              const next = top.refs.find(function (href) {
+                return !seen.has(href)
+              })
+              if (next === undefined) {
+                stack.pop()
+                rewrite(top.href, texts.get(top.href))
+              } else {
+                seen.add(next)
+                stack.push({ href: next, refs: referenced(next, texts.get(next), texts, available) })
+              }
+            }
+          })
+        })
+        return rewriting
+      }
       // As epub.js's own, which `replaceCss` calls once the assets' blob URLs exist.
       resources.createCssFile = function (href) {
-        if (href.charAt(0) === '/') return Promise.resolve()
-        const absolute = this.settings.resolver(href)
-        const text = this.settings.archive.getText(absolute)
-        if (!text) return Promise.resolve()
-        return text.then(
-          function (css) {
-            const replaced = substituteOnce(css, this.relativeTo(absolute), replacements(), sheetsAllowance)
-            if (replaced !== null) sheetsAllowance -= replaced.length - css.length
-            // Over the budget, an empty sheet: with none, `replacements()` would use the original.
-            const body = replaced === null ? '' : replaced
-            const sheet = keep(URL.createObjectURL(new Blob([body], { type: 'text/css' })))
-            sheets.set(href, sheet)
-            return sheet
-          }.bind(this),
-          function () {
-            return undefined
-          }
-        )
+        return rewriteSheets().then(function () {
+          return sheets.get(href)
+        })
       }
       return unpacked
     }

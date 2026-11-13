@@ -11,9 +11,10 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 /// The coordinator makes one attempt. A close carrying listening time is stored while that
 /// attempt is out, so a relaunch still finds it, and settled by its result:
 /// - acknowledged: removed;
-/// - suppressed (the account ended), or rejected for good (400, 404, 410, 422): removed, and its
-///   listening time logged as dropped. TODO(#382): on 404, decide from the item's listening
-///   sessions instead (ADR 0007).
+/// - 404: the server no longer had the session, so nothing applied: removed, and its listening
+///   time carried into the media's next session (``CloseRetryQueue/carried``, ADR 0007);
+/// - suppressed (the account ended), or rejected for good (400, 410, 422): removed, and its
+///   listening time logged as dropped;
 /// - any other failure: kept. One that may have reached the server (a timeout, a lost
 ///   response, 5xx) isn't resent before ``ProgressSyncer/reconcileDelay``, so the original has
 ///   either applied (the server then answers the resend with 404, because a close removes the
@@ -21,7 +22,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///
 /// The drain's ``ProgressSyncer/retryRetainedCloses()`` resends each close that is due, oldest
 /// first, once ``ProgressSyncer/admitDeferredReport(sessionID:key:currentTime:editedAt:)``
-/// admits it; a skip for a newer session or position removes it.
+/// admits it; a skip for a newer session or position removes it. A resend answered 404 is
+/// decided from the session's stored record (``ProgressSyncer/reconcileMissingClose(_:)``).
 @MainActor
 final class CloseRetryQueue {
     /// Sessions whose coordinator `/close` hasn't settled yet: the drain leaves them alone.
@@ -37,6 +39,11 @@ final class CloseRetryQueue {
     /// dropped first; dropped on detach, as no drain follows.
     fileprivate(set) var unsaved: [PendingSessionCloseDTO] = []
     static let unsavedLimit = 16
+    /// Listening time of closes the server never applied, by media, for that media's next loaded
+    /// session to report (``ProgressSyncer/creditCarriedListening()``). At most ``unsavedLimit``
+    /// media, the oldest dropped first. Only memory holds it: dropped on detach, and lost on a
+    /// relaunch, which undercounts but never counts twice.
+    fileprivate(set) var carried: [(key: MediaKey, seconds: TimeInterval)] = []
 
     /// The store calls after which state may have moved on (tests).
     enum Step: Sendable {
@@ -77,12 +84,34 @@ final class CloseRetryQueue {
         }
     }
 
-    /// Drops the unsaved closes, which no drain will save once the syncer is detached.
+    /// Drops the unsaved closes and the carried listening time, which no drain or session will
+    /// report once the syncer is detached.
     func dropUnsaved() {
         for close in unsaved {
             ProgressSyncer.logDroppedClose(close.timeListened, reason: "it was never saved and the syncer detached")
         }
         unsaved = []
+        for held in carried {
+            ProgressSyncer.logDroppedClose(held.seconds, reason: "it was carried and the syncer detached")
+        }
+        carried = []
+    }
+
+    /// Holds `seconds` for `key`'s next loaded session.
+    func carry(_ seconds: TimeInterval, for key: MediaKey) {
+        if let index = carried.firstIndex(where: { $0.key == key }) {
+            carried[index].seconds += seconds
+            return
+        }
+        carried.append((key, seconds))
+        while carried.count > Self.unsavedLimit {
+            ProgressSyncer.logDroppedClose(carried.removeFirst().seconds, reason: "too many media had time carried")
+        }
+    }
+
+    /// Takes the time carried for `key`.
+    func takeCarried(for key: MediaKey) -> TimeInterval? {
+        carried.firstIndex { $0.key == key }.map { carried.remove(at: $0).seconds }
     }
 }
 
@@ -91,8 +120,13 @@ extension ProgressSyncer {
     /// coordinator's attempt is out, then settles it by that attempt's result. The store
     /// keeps it even if this syncer is detached meanwhile (an account switch lets the close go on).
     /// One kept to retry that was never saved, its settlement's save included, waits in
-    /// ``CloseRetryQueue/unsaved`` for the next drain to save it.
-    func retainClose(_ handoff: PlaybackCloseHandoff, for closing: ClosingSession, token: PlaybackPositionToken?) {
+    /// ``CloseRetryQueue/unsaved`` for the next drain to save it. `ackedTotal` is the session's
+    /// listening time the server acknowledged, and `inFlightTotal` that of its `/sync` still out,
+    /// for a later 404's lookup.
+    func retainClose(
+        _ handoff: PlaybackCloseHandoff, for closing: ClosingSession, ackedTotal: TimeInterval,
+        inFlightTotal: TimeInterval, token: PlaybackPositionToken?
+    ) {
         guard handoff.report.timeListened > 0, closing.key.serverConnectionID == service.serverConnectionID
         else { return }
         let queue = closeQueue
@@ -115,7 +149,7 @@ extension ProgressSyncer {
             let close = PendingSessionCloseDTO(
                 key: closing.key, sessionID: closing.sessionID, currentTime: report.currentTime,
                 timeListened: report.timeListened, duration: report.duration, positionEditedAt: editedAt,
-                capturedAt: clock.now())
+                capturedAt: clock.now(), ackedTotal: ackedTotal, inFlightTotal: inFlightTotal)
             var stored = false
             if handoff.transport.result == nil, editedAt != nil {
                 // The attempt may reach the server: a relaunch waits before resending it.
@@ -138,7 +172,17 @@ extension ProgressSyncer {
             }
             await queue.reached?(.transportSettled)
             let now = clock.now()
-            let settlement = await Self.settleClose(close, after: result, store: store, now: now, stored: stored)
+            let settlement: CloseSettlement
+            if case .failure(let error) = result, Self.isNotFound(error), let self, !self.isDetached,
+                !self.isTransportQuiesced
+            {
+                // The server no longer had the session when the attempt arrived, so nothing
+                // applied (ADR 0007): its listening time goes to the media's next session.
+                settlement =
+                    await self.settleMissingClose(close, .notApplied, stored: stored) ? .finished : .storeFailed
+            } else {
+                settlement = await Self.settleClose(close, after: result, store: store, now: now, stored: stored)
+            }
             // Kept to retry but never saved (the attempt failed before it could be, or its save
             // failed too): nothing but memory holds it now.
             var unsaved: PendingSessionCloseDTO?
@@ -200,6 +244,12 @@ extension ProgressSyncer {
                 drainOutcome.failed = true
                 continue
             }
+            if close.failedLookups > 0 || clock.now() >= close.capturedAt + Self.closeSessionLifetime {
+                // The server answered 404 and the lookup failed, or the session must have ended:
+                // its stored record decides, and nothing is resent (admission can't hold it).
+                guard await reconcileMissingClose(close) else { return false }
+                continue
+            }
             var verdict = await admitDeferredReport(
                 sessionID: close.sessionID, key: close.key, currentTime: close.currentTime,
                 editedAt: close.positionEditedAt)
@@ -243,6 +293,11 @@ extension ProgressSyncer {
                 result = .success(true)
             } catch {
                 result = .failure(error)
+            }
+            if case .failure(let error) = result, Self.isNotFound(error) {
+                // The session is gone: its stored record tells whether the close counted.
+                guard await reconcileMissingClose(close) else { return false }
+                continue
             }
             switch await Self.settleClose(close, after: result, store: store, now: clock.now()) {
             case .finished:
@@ -308,7 +363,8 @@ extension ProgressSyncer {
         case .success(false):
             logDroppedClose(close.timeListened, reason: "the account ended")
         case .failure(let error) where isPermanent(error):
-            // TODO(#382): on 404, decide from the item's listening sessions (ADR 0007).
+            // A 404 reaches here only for a capture whose syncer detached: nothing would report
+            // its time (ADR 0007).
             logDroppedClose(close.timeListened, reason: "the server answered \(caseName(error))")
         case .failure(let error):
             do {
