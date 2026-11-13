@@ -40,6 +40,10 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     @discardableResult func jumpOutcome(by offset: Double) async -> JumpOutcome
     func setRate(_ rate: Double)
     func stop(reason: PlaybackStopReason)
+    /// Replays the play a `.streamingNeedsConfirmation` error blocked, allowing the metered path.
+    func confirmMeteredStreaming() async
+    /// Clears a `.streamingNeedsConfirmation` error without playing.
+    func declineMeteredStreaming()
     /// The server restarted the transcode of session `sessionID` (`stream_reset`); see
     /// ``PlaybackCoordinator/handleStreamReset(sessionID:)``.
     func handleStreamReset(sessionID: String)

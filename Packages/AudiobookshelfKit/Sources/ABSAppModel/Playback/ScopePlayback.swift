@@ -69,6 +69,18 @@ final class ScopePlayback: PlayerPlaybackControlling {
         coordinator.stop(reason: reason)
     }
 
+    func confirmMeteredStreaming() async {
+        if let scope {
+            await scope.confirmMeteredStreaming()
+        } else {
+            await coordinator.confirmMeteredStreaming()
+        }
+    }
+
+    func declineMeteredStreaming() {
+        coordinator.declineMeteredStreaming()
+    }
+
     func handleStreamReset(sessionID: String) {
         coordinator.handleStreamReset(sessionID: sessionID)
     }

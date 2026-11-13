@@ -82,6 +82,14 @@ public final class CurrentPlayback: PlayerPlaybackControlling {
         current?.stop(reason: reason)
     }
 
+    public func confirmMeteredStreaming() async {
+        await current?.confirmMeteredStreaming()
+    }
+
+    public func declineMeteredStreaming() {
+        current?.declineMeteredStreaming()
+    }
+
     public func handleStreamReset(sessionID: String) {
         current?.handleStreamReset(sessionID: sessionID)
     }
