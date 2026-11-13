@@ -170,25 +170,77 @@ struct HomeRefreshSchedule {
         return request(libraryID: libraryID, hasLoaded: hasLoaded, now: now, force: force)
     }
 
-    /// Whether `trigger` reloads the libraries list while no library is selected, so the shell
-    /// selects one and Home loads its shelves. Always on the user's refresh, as before. On the load
-    /// trigger only after the list failed and while it isn't loading: when the server answers
-    /// again (the disconnected state's Retry, or the banner's own check), the list loads at once
-    /// instead of Home showing the libraries' failure and waiting for another Retry. Not on scene
-    /// activation, and never without the server.
+    /// What a trigger does with the libraries list while no library is selected.
+    enum LibrariesRequest: Equatable {
+        /// Reload the list now.
+        case now
+        /// Wait for the libraries request in flight, then reload the list once if it failed
+        /// (``retriesLibrariesAfterInFlight(failed:isConnected:isCancelled:)``).
+        case afterInFlight
+    }
+
+    /// What `trigger` does with the libraries list while no library is selected, so the shell
+    /// selects one and Home loads its shelves; `nil` for nothing. Always reloads on the user's
+    /// refresh, as before. On the load trigger, reloads after the list failed: when the server
+    /// answers again (the disconnected state's Retry, or the banner's own check), the list loads
+    /// at once instead of Home showing the libraries' failure and waiting for another Retry. A
+    /// request already in flight may have started before the server answered again, so the load
+    /// trigger waits for it rather than leaving its failure up. Nothing on scene activation, and
+    /// never without the server.
     ///
     /// - Parameters:
     ///   - librariesFailed: The store's last libraries request failed.
     ///   - librariesLoading: The store is loading the libraries.
     ///   - isConnected: The server can be used (no connection banner).
-    static func refreshesLibraries(
+    static func librariesRequest(
         for trigger: Trigger, librariesFailed: Bool, librariesLoading: Bool, isConnected: Bool
-    ) -> Bool {
-        guard isConnected else { return false }
-        return switch trigger {
-        case .loadTrigger: librariesFailed && !librariesLoading
-        case .sceneActivation: false
-        case .userRefresh: true
+    ) -> LibrariesRequest? {
+        guard isConnected else { return nil }
+        switch trigger {
+        case .loadTrigger:
+            if librariesLoading { return .afterInFlight }
+            return librariesFailed ? .now : nil
+        case .sceneActivation: return nil
+        case .userRefresh: return .now
+        }
+    }
+
+    /// Whether to reload the libraries list once the request ``LibrariesRequest/afterInFlight``
+    /// waited for has ended: only when it failed, the server can still be used and the trigger's
+    /// task wasn't cancelled (Home disappeared, or the trigger changed and runs again).
+    static func retriesLibrariesAfterInFlight(failed: Bool, isConnected: Bool, isCancelled: Bool) -> Bool {
+        failed && isConnected && !isCancelled
+    }
+
+    /// Reloads `store`'s libraries list as ``librariesRequest(for:librariesFailed:librariesLoading:isConnected:)``
+    /// decides for `trigger`, while no library is selected. Behind a request in flight it checks
+    /// every `pollInterval` until that request ends or the calling task is cancelled, then reloads
+    /// the list at most once (``retriesLibrariesAfterInFlight(failed:isConnected:isCancelled:)``),
+    /// so a server whose list keeps failing isn't asked again until the next trigger or Retry.
+    ///
+    /// - Parameter isConnected: Whether the server can be used now (no connection banner).
+    @MainActor
+    static func updateLibraries(
+        of store: LibraryStore, for trigger: Trigger, isConnected: () -> Bool,
+        pollInterval: Duration = .milliseconds(100)
+    ) async {
+        switch librariesRequest(
+            for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
+            isConnected: isConnected())
+        {
+        case nil:
+            return
+        case .now:
+            await store.refresh()
+        case .afterInFlight:
+            while store.isLoading, !Task.isCancelled {
+                try? await Task.sleep(for: pollInterval)
+            }
+            if retriesLibrariesAfterInFlight(
+                failed: store.error != nil, isConnected: isConnected(), isCancelled: Task.isCancelled)
+            {
+                await store.refresh()
+            }
         }
     }
 

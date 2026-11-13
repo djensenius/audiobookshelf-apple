@@ -98,7 +98,8 @@ private struct HomeScreen: View {
         // attaches a client after an offline start without one or keeps the offline session's,
         // or the server answering again, loads again even when the library is unchanged, and
         // retries a failed load or refresh even while the shelves are fresh, or, with no library
-        // yet, a failed libraries list. Losing the connection runs it too, and makes no request.
+        // yet, a failed libraries list, waiting for one in flight. Losing the connection runs it
+        // too, and makes no request.
         .task(
             id: HomeLoadTrigger(
                 libraryID: libraryID, connection: store.connectedKey, onlineRevision: store.onlineRevision,
@@ -128,12 +129,8 @@ private struct HomeScreen: View {
     /// one once loaded.
     private func update(_ trigger: HomeRefreshSchedule.Trigger) async {
         guard let libraryID = model.libraryID else {
-            if HomeRefreshSchedule.refreshesLibraries(
-                for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
-                isConnected: connectionStatus == nil)
-            {
-                await store.refresh()
-            }
+            await HomeRefreshSchedule.updateLibraries(
+                of: store, for: trigger, isConnected: { connectionStatus == nil })
             return
         }
         guard

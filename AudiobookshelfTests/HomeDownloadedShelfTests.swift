@@ -18,6 +18,55 @@ private struct EmptyLibraryService: LibraryService {
     func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> { throw Unused() }
 }
 
+/// Answers each libraries request as scripted, holding a `.held` one until ``answer(succeeds:)``,
+/// and counts them; requests past the script fail.
+private actor ScriptedLibraries: LibraryService {
+    enum Outcome { case fails, succeeds, held }
+    struct Failure: Error {}
+    struct Unused: Error {}
+
+    private var outcomes: [Outcome]
+    private(set) var requests = 0
+    private let answers: AsyncStream<Bool>
+    private let answersContinuation: AsyncStream<Bool>.Continuation
+
+    init(_ outcomes: [Outcome]) {
+        self.outcomes = outcomes
+        let (answers, continuation) = AsyncStream.makeStream(of: Bool.self)
+        self.answers = answers
+        answersContinuation = continuation
+    }
+
+    func libraries() async throws -> [Library] {
+        requests += 1
+        let outcome = outcomes.isEmpty ? .fails : outcomes.removeFirst()
+        var succeeds = outcome == .succeeds
+        if outcome == .held {
+            for await answer in answers {
+                succeeds = answer
+                break
+            }
+        }
+        guard succeeds else { throw Failure() }
+        return []
+    }
+
+    /// Ends the held request: with no libraries, or a failure.
+    nonisolated func answer(succeeds: Bool) {
+        answersContinuation.yield(succeeds)
+    }
+
+    func library(id: String) async throws -> LibraryWithFilterData { throw Unused() }
+    func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
+    func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> { throw Unused() }
+}
+
+/// Whether a test's server can be used, as Home reads it from the connection banner.
+@MainActor
+private final class UsableConnection {
+    var isUsable = true
+}
+
 /// Serves items' libraries and records the item lookups and the libraries Add to playlist lists
 /// and creates playlists in.
 private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
@@ -205,8 +254,9 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
     /// The libraries list failed before a library was selected, and the server stopped answering:
     /// Home says it's disconnected, and its Retry checks the server. When the server answers again,
     /// the load trigger reloads the list at once, so the shell selects a library and Home loads
-    /// its shelves, rather than Home showing the libraries' failure until another Retry. A list
-    /// that loaded or is loading isn't requested again, and nothing is without the server.
+    /// its shelves, rather than Home showing the libraries' failure until another Retry. Behind a
+    /// request in flight it waits, and reloads once if that request failed. A list that loaded
+    /// isn't requested again, and nothing is without the server.
     @Test func reconnectingWithoutALibraryReloadsTheFailedLibrariesAtOnce() {
         let unreachableState = HomeScreenState.resolve(
             Inputs(librariesLoaded: false, librariesFailed: true, libraryID: nil, connection: unreachable))
@@ -215,23 +265,90 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
             HomeScreenState.resolve(Inputs(librariesLoaded: false, librariesFailed: true, libraryID: nil))
                 == .librariesFailed)
 
-        func refreshes(
+        func request(
             _ trigger: HomeRefreshSchedule.Trigger, failed: Bool = true, loading: Bool = false, connected: Bool = true
-        ) -> Bool {
-            HomeRefreshSchedule.refreshesLibraries(
+        ) -> HomeRefreshSchedule.LibrariesRequest? {
+            HomeRefreshSchedule.librariesRequest(
                 for: trigger, librariesFailed: failed, librariesLoading: loading, isConnected: connected)
         }
-        #expect(refreshes(.loadTrigger))
-        #expect(!refreshes(.loadTrigger, failed: false))
-        #expect(!refreshes(.loadTrigger, loading: true))
-        #expect(!refreshes(.sceneActivation))
+        #expect(request(.loadTrigger) == .now)
+        #expect(request(.loadTrigger, failed: false) == nil)
+        #expect(request(.loadTrigger, loading: true) == .afterInFlight)
+        #expect(request(.loadTrigger, failed: false, loading: true) == .afterInFlight)
+        #expect(request(.sceneActivation) == nil)
+        #expect(request(.sceneActivation, loading: true) == nil)
         // Pull to refresh, the Refresh command and Retry reload the list whenever none is selected.
-        #expect(refreshes(.userRefresh))
-        #expect(refreshes(.userRefresh, failed: false))
-        #expect(refreshes(.userRefresh, failed: false, loading: true))
+        #expect(request(.userRefresh) == .now)
+        #expect(request(.userRefresh, failed: false) == .now)
+        #expect(request(.userRefresh, failed: false, loading: true) == .now)
         for trigger in HomeRefreshSchedule.Trigger.allCases {
-            #expect(!refreshes(trigger, connected: false), "\(trigger)")
+            #expect(request(trigger, connected: false) == nil, "\(trigger)")
+            #expect(request(trigger, loading: true, connected: false) == nil, "\(trigger)")
         }
+
+        // After the request in flight: once, only when it failed, still connected and not cancelled.
+        for failed in [false, true] {
+            for connected in [false, true] {
+                for cancelled in [false, true] {
+                    #expect(
+                        HomeRefreshSchedule.retriesLibrariesAfterInFlight(
+                            failed: failed, isConnected: connected, isCancelled: cancelled)
+                            == (failed && connected && !cancelled),
+                        "failed \(failed), connected \(connected), cancelled \(cancelled)")
+                }
+            }
+        }
+    }
+
+    /// The libraries requests made in all when the list failed, Retry (or the banner, or the shell)
+    /// asks for it again, and Home's load trigger fires while that request is in flight; then
+    /// the connection drops or the trigger's task is cancelled, if asked, and the request ends
+    /// with no libraries or a failure. The list's first failure is request 1, the one in flight
+    /// request 2, so 3 is exactly one reload.
+    private func librariesRequests(
+        inFlightSucceeds succeeds: Bool, dropsConnection: Bool = false, cancels: Bool = false
+    ) async throws -> Int {
+        let service = ScriptedLibraries([.fails, .held])
+        let suiteName = "HomeDownloadedShelfTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = LibraryStore(settings: AppSettings(defaults: defaults))
+        store.attach(client: service, connectionKey: LibraryConnectionKey(connectionID: connectionID, userID: "u"))
+        await store.refresh()
+        #expect(store.error != nil && !store.isLoading)
+
+        let inFlight = Task { await store.refresh() }
+        while !store.isLoading { await Task.yield() }
+        let connection = UsableConnection()
+        // Runs until it waits, so it decides while the request is in flight.
+        let update = Task.immediate { @MainActor in
+            await HomeRefreshSchedule.updateLibraries(
+                of: store, for: .loadTrigger, isConnected: { connection.isUsable }, pollInterval: .milliseconds(5))
+        }
+        #expect(store.isLoading)
+        if dropsConnection { connection.isUsable = false }
+        if cancels { update.cancel() }
+        service.answer(succeeds: succeeds)
+        await inFlight.value
+        await update.value
+        #expect(!store.isLoading)
+        return await service.requests
+    }
+
+    @Test func aLibrariesRequestInFlightOnTheLoadTriggerThatFailsIsRetriedOnce() async throws {
+        #expect(try await librariesRequests(inFlightSucceeds: false) == 3)
+    }
+
+    @Test func aLibrariesRequestInFlightOnTheLoadTriggerThatSucceedsIsntRetried() async throws {
+        #expect(try await librariesRequests(inFlightSucceeds: true) == 2)
+    }
+
+    @Test func aLibrariesRequestInFlightIsntRetriedOnceTheConnectionDrops() async throws {
+        #expect(try await librariesRequests(inFlightSucceeds: false, dropsConnection: true) == 2)
+    }
+
+    @Test func aLibrariesRequestInFlightIsntRetriedOnceTheTriggerIsCancelled() async throws {
+        #expect(try await librariesRequests(inFlightSucceeds: false, cancels: true) == 2)
     }
 
     /// Losing the connection runs Home's load trigger again: no trigger, not even pull to refresh,
