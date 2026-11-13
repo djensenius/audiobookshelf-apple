@@ -167,6 +167,85 @@ struct RealtimeRoutingTests {
         }
     }
 
+    /// The cache reports a socket update before its local merge, which waits for the merges
+    /// before it; once merged it reports again, as an update, so auto-advance prepares from the
+    /// merged local progress (#554).
+    @Test func socketProgressReportsAgainOnceMergedLocally() async throws {
+        try await withLibrarySettings { settings in
+            let container = try DataStack(location: .inMemory).container
+            let local = LocalProgressStore(modelContainer: container)
+            let context = ModelContext(container)
+            for episode in ["e1", "e2"] {
+                let key = MediaKey(
+                    serverConnectionID: identityA.connectionID, libraryItemId: "podcast", episodeId: episode)
+                context.insert(
+                    LocalMediaProgress(
+                        key: key.rawValue, serverConnectionID: key.serverConnectionID,
+                        libraryItemId: key.libraryItemId, episodeId: episode))
+            }
+            try context.save()
+            let routed = RoutedBridge(settings: settings, localProgress: local)
+            let changes = Recorder<String>()
+            routed.store.progress.onChange = { _, episode, kind in changes.append("\(episode ?? "-") \(kind)") }
+            let socket = try await routed.start()
+
+            // e1's merge comes first; e2's waits for it.
+            await routed.send(progressUpdate("podcast", episode: "e1", currentTime: 4, lastUpdate: 1_000), on: socket)
+            await routed.send(
+                progressUpdate("podcast", episode: "e2", currentTime: 9, isFinished: true, lastUpdate: 1_000),
+                on: socket)
+            await routed.bridge.mergeTask?.value
+
+            let e2 = MediaKey(serverConnectionID: identityA.connectionID, libraryItemId: "podcast", episodeId: "e2")
+            #expect(try await local.progress(for: e2)?.isFinished == true)
+            #expect(changes.values.filter { $0.hasPrefix("e2") } == ["e2 finished", "e2 updated"])
+            #expect(changes.values.last == "e2 updated")
+        }
+    }
+
+    /// A socket reset reaches auto-advance once, with the cache's own report; the report after
+    /// the local merge is freshness-only. Replaying the reset after the merge would clear an
+    /// exclusion added meanwhile, as when the episode ends here again (#554).
+    @Test func aSocketResetIsntReplayedAfterItsMerge() async throws {
+        try await withLibrarySettings { settings in
+            let container = try DataStack(location: .inMemory).container
+            let local = LocalProgressStore(modelContainer: container)
+            let key = MediaKey(serverConnectionID: identityA.connectionID, libraryItemId: "podcast", episodeId: "e1")
+            let context = ModelContext(container)
+            context.insert(
+                LocalMediaProgress(
+                    key: key.rawValue, serverConnectionID: key.serverConnectionID, libraryItemId: "podcast",
+                    episodeId: "e1"))
+            try context.save()
+            let routed = RoutedBridge(settings: settings, localProgress: local)
+            let socket = try await routed.start()
+            routed.store.progress.apply(
+                MediaProgress(
+                    id: "p-podcast", libraryItemId: "podcast", episodeId: "e1", currentTime: 60, isFinished: true,
+                    lastUpdate: 1_000))
+            // Auto-advance's view, as `PlaybackQueueAdvancer.endedEpisodes`: e1 ended here. The
+            // reset clears that, then e1 ends here again while its merge waits: the merge task runs
+            // on the main actor, so not before this report returns.
+            let ended = Locked<Set<String>>(["e1"])
+            let kinds = Recorder<ProgressChangeKind>()
+            routed.store.progress.onChange = { _, episode, kind in
+                guard let episode else { return }
+                if kind == .reset { ended.value.remove(episode) }
+                // After the reset's own report, the episode ends here again; the merge can't have
+                // run yet.
+                if kinds.values.isEmpty { ended.value.insert(episode) }
+                kinds.append(kind)
+            }
+
+            await routed.send(progressUpdate("podcast", episode: "e1", currentTime: 0, lastUpdate: 2_000), on: socket)
+            await routed.bridge.mergeTask?.value
+
+            #expect(try await local.progress(for: key)?.serverBaseline?.lastUpdate == Date(timeIntervalSince1970: 2))
+            #expect(kinds.values == [.reset, .updated])
+            #expect(ended.value == ["e1"])
+        }
+    }
+
     /// The server sends every stream's reset to every socket; the playback matches the ID against
     /// its own session (``PlaybackCoordinator/handleStreamReset(sessionID:)``), so the bridge
     /// forwards each one, once, and nothing else.

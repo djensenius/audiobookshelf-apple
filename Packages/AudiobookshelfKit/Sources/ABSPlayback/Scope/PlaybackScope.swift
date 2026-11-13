@@ -56,6 +56,9 @@ public struct PlaybackProgressUpdate: Sendable, Equatable {
 ///   an edit, and the connection's next scope loads what it saved.
 /// - **Reconnect.** ``reconnect(client:features:)`` swaps the client and features behind the
 ///   coordinator (``AccountPlaybackServices``); the scope and its playback carry on.
+/// - **Auto-advance freshness (#160).** The advancer prepares the next item again after a
+///   reconnect, on each change of the configured network path, and on
+///   ``progressDidChange(for:kind:)``, until the scope retires.
 /// - **Sleep timer.** The configured ``sleepTimer`` (#185) is attached to the coordinator, which
 ///   asks it before playback starts and tells it of item changes and seeks, until the scope
 ///   retires, which detaches and cancels it. The release detaches it again, as a backstop.
@@ -245,7 +248,8 @@ public final class PlaybackScope {
     /// Test seam: a scope over a coordinator and a syncer already attached to it, an advancer
     /// over `queue`, when one is given, attached to the coordinator, `sleepTimer`, detached
     /// when the scope retires, and again when it's released, `uploader`, sending through any
-    /// services, and `paths`, followed for reconnects.
+    /// services, and `paths`, followed for reconnects and, after its first path, to have the
+    /// advancer prepare again on each change.
     init(
         coordinator: PlaybackCoordinator, syncer: ProgressSyncer, services: AccountPlaybackServices?,
         nowPlaying: any NowPlayingHandle, queue: PlaybackQueue? = nil, episodes: (any PodcastEpisodeSource)? = nil,
@@ -394,9 +398,20 @@ public final class PlaybackScope {
         edit(queue)
     }
 
-    /// Swaps the account's client and features after a reconnect, without rebuilding anything.
+    /// Swaps the account's client and features after a reconnect, without rebuilding anything,
+    /// and prepares the next item again through them.
     public func reconnect(client: APIClient?, features: ServerFeatures?) {
         services?.update(client: client, features: features)
+        guard !isRetired else { return }
+        advancer?.connectionDidChange()
+    }
+
+    /// Progress changed for `key` (a seed, the socket, or an action on another screen): the
+    /// advancer prepares again when it is the next item or an episode of the playing podcast.
+    /// Nothing after retirement.
+    public func progressDidChange(for key: MediaKey, kind: ProgressChangeKind) {
+        guard !isRetired else { return }
+        advancer?.progressDidChange(for: key, kind: kind)
     }
 
     /// Saves the loaded item as the last-played record. Local only.
@@ -443,7 +458,8 @@ public final class PlaybackScope {
     /// syncer's rule: not on repeated or initial online paths, but on an online path whose
     /// `onlineEpoch` grew (the offline one between was dropped). The syncer drains on the same
     /// transition by itself; this also retries the pending uploads, which the session's
-    /// reconnects miss when the account and its client stay the same.
+    /// reconnects miss when the account and its client stay the same. Any change of path after
+    /// the first also has the auto-advance prepare the next item again (#160).
     private func watch(_ paths: AsyncStream<NetworkPath>) {
         pathTask = Task { [weak self] in
             var previous: NetworkPath?
@@ -451,8 +467,10 @@ public final class PlaybackScope {
                 guard let self, !self.isRetired else { return }
                 let reconnected =
                     previous.map { path.isOnline && (!$0.isOnline || path.onlineEpoch != $0.onlineEpoch) } ?? false
+                let changed = previous.map { $0 != path } ?? false
                 previous = path
                 if reconnected { self.syncWithServer(isFirstSync: false) }
+                if changed { self.advancer?.connectionDidChange() }
                 self.pathHandled?(path, reconnected)
             }
         }

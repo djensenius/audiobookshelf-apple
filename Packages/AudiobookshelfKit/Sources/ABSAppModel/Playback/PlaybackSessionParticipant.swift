@@ -23,6 +23,8 @@ public protocol PlaybackScopeHandle: AnyObject, Sendable {
     /// Changes the queue, unless the scope has retired.
     func editQueue(_ edit: (PlaybackQueue) -> Void)
     func reconnect(client: APIClient?, features: ServerFeatures?)
+    /// Progress changed for `key`; the auto-advance prepares again if it concerns it (#160).
+    func progressDidChange(for key: MediaKey, kind: ProgressChangeKind)
     /// Saves the last-played record; local only.
     func saveLocally()
     /// Hears where playback is, for the library's progress cache, until ``retire(reason:)``.
@@ -127,6 +129,8 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     @ObservationIgnored private var scope: (any PlaybackScopeHandle)?
     /// The running scope's session.
     @ObservationIgnored private var scopeSessionID: UInt64?
+    /// The running scope's connection, for ``progressDidChange(libraryItemID:episodeID:kind:)``.
+    @ObservationIgnored private var scopeConnectionID: UUID?
     /// The session whose retirement ``lastEnd`` reports.
     @ObservationIgnored private var latestEndedSessionID: UInt64?
     /// Reports a session starting while another is running. Tests record instead of stopping.
@@ -199,6 +203,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
                 features: features(context.identity), deviceIdentifiers: deviceIdentifiers, writer: writer))
         self.scope = scope
         scopeSessionID = context.sessionID
+        scopeConnectionID = context.identity.connectionID
         scope.onSessionRejected = { [weak self, weak scope] in
             guard let self, let scope, self.scope === scope else { return }
             self.requestSignOut(context)
@@ -254,6 +259,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         let bookmarks = bookmarks
         self.scope = nil
         scopeSessionID = nil
+        scopeConnectionID = nil
         latestEndedSessionID = sessionID
         // The previous session's result no longer describes the latest end.
         lastEnd = nil
@@ -280,6 +286,15 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         }
         guard latestEndedSessionID == ending.sessionID else { return }
         lastEnd = result
+    }
+
+    /// The library's progress for an item or episode changed (``ProgressCache/onChange``): tells
+    /// the running scope, as progress on its account. Nothing between sessions.
+    public func progressDidChange(libraryItemID: String, episodeID: String?, kind: ProgressChangeKind) {
+        guard let scope, let scopeConnectionID else { return }
+        scope.progressDidChange(
+            for: MediaKey(serverConnectionID: scopeConnectionID, libraryItemId: libraryItemID, episodeId: episodeID),
+            kind: kind)
     }
 
     public func flush() async {

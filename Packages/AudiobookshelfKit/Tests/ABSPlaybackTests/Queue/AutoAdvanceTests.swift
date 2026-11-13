@@ -113,11 +113,27 @@ struct AutoAdvanceTests {
         await a.finish()
         await a.advancer.waitForPreparation()
 
-        a.advancer.progressDidChange(for: a.key("P", episode: "e1"))
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .finished)
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
         await a.advancer.waitForPreparation()
         await a.finish()
 
         #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
+    /// Any other change to an episode that ended here (hidden from Continue Listening, a new
+    /// position) keeps it skipped: its finish may not have reached the server yet (#554).
+    @Test func episodeUpdatedAfterEndingHereStaysSkipped() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        await a.advancer.waitForPreparation()
+
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .updated)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
     }
 
     /// Marked unfinished while nothing is loaded: still no longer skipped once playing again.
@@ -127,11 +143,221 @@ struct AutoAdvanceTests {
         await a.finish()
         coordinator.stop()
 
-        a.advancer.progressDidChange(for: a.key("P", episode: "e1"))
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .finished)
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
         await a.play("P", episode: "e2")
         await a.finish()
 
         #expect(coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
+    /// A reset before the server has shown the finish of an episode that ended here keeps it
+    /// skipped: a seed dropping progress never synced, a stale socket update or a rolled-back
+    /// action resets it while the listing still lacks the finish (#554).
+    @Test func resetBeforeTheFinishIsConfirmedKeepsTheEpisodeSkipped() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        await a.advancer.waitForPreparation()
+
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
+    }
+
+    /// A refreshed listing, requested after the end, that has the episode finished on the server
+    /// confirms the finish without a cache change: a discard after it makes the episode eligible
+    /// again (#554).
+    @Test func listingConfirmedFinishLetsALaterResetCount() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
+
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": Date()])
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
+    /// A listing finished only by a local unsynced flag, or by the server without a date, is no
+    /// confirmation: the episode stays skipped after a reset.
+    @Test func listingFinishedOnlyLocallyConfirmsNothing() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"])
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
+    }
+
+    /// Server finish times far behind this device's clock (2000), around it, and far ahead of it
+    /// (2100): only server times are compared, so the outcome doesn't depend on the device clock.
+    nonisolated static let serverTimes = [
+        Date(timeIntervalSince1970: 946_684_800), Date(timeIntervalSinceNow: -3600),
+        Date(timeIntervalSince1970: 4_102_444_800),
+    ]
+
+    /// Played again after the server finished it: a listing after the new end with the old finish
+    /// (the baseline seen while it played) confirms nothing, so a late reset (the replay's
+    /// unfinished sync) keeps it skipped (#554).
+    @Test(arguments: serverTimes)
+    func oldServerFinishDoesntConfirmAReplaysEnd(finishedAt: Date) async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": finishedAt])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
+
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
+    }
+
+    /// Played again after the server finished it: a listing after the new end with a later
+    /// server finish than the baseline confirms it, so a discard after it counts (#554).
+    @Test(arguments: serverTimes)
+    func laterServerFinishConfirmsAReplaysEnd(finishedAt: Date) async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": finishedAt])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
+
+        a.episodes.set(
+            "P", episodes: ["e1", "e2", "e3"], finished: ["e1"],
+            serverFinishedAt: ["e1": finishedAt.addingTimeInterval(60)])
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
+    /// The server's finish of an episode first seen in a near-end refresh is this play's own
+    /// (synced near the end), not a baseline: a listing after the end with it confirms the end, so
+    /// a discard or mark-not-finished after it makes the episode eligible again (#554).
+    @Test func nearEndRefreshesFinishIsNoBaselineForTheEnd() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": Date()])
+        a.h.engine.onEvent?(.tick(3590))
+        await a.advancer.waitForPreparation()
+        #expect(a.episodes.fetches == 2)
+
+        await a.finish()
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
+    /// Opens `gate` and waits until the superseded fetch it held has returned to the advancer.
+    private func release(_ gate: Gate, returns: Int) async {
+        gate.open()
+        while a.episodes.state.withLock({ $0.returns }) < returns { await Task.yield() }
+        for _ in 0..<20 { await Task.yield() }
+    }
+
+    /// Waits until the fetch the advancer started has reached its gate.
+    private func waitForFetch(_ count: Int) async {
+        while a.episodes.fetches < count { await Task.yield() }
+    }
+
+    /// A superseded listing returning late with the episode finished confirms nothing: the
+    /// episode stays skipped after a reset (#554).
+    @Test func staleListingDoesntConfirmAnEnd() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        await a.advancer.waitForPreparation()
+        let gate = Gate()
+        a.episodes.state.withLock { $0.gate = gate }
+        a.advancer.connectionDidChange()
+        await waitForFetch(3)
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": Date()])
+        await release(gate, returns: 4)
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
+    }
+
+    /// A superseded load-time listing returning late, with a finish newer than the playing
+    /// episode's, sets no baseline: the same finish after the end confirms it, so a reset makes
+    /// the episode eligible again (#554).
+    @Test func staleListingSetsNoBaseline() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        let gate = Gate()
+        a.episodes.state.withLock { $0.gate = gate }
+        await a.coordinator.play(itemID: "P", episodeID: "e1")
+        await waitForFetch(1)
+        a.advancer.progressDidChange(for: a.key("P", episode: "e2"), kind: .updated)
+        await a.advancer.waitForPreparation()
+
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": Date()])
+        await release(gate, returns: 2)
+        await a.finish()
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
+    /// The server can show the finish while the episode is still loaded; a later reset counts.
+    /// Ending it here again makes the finish unconfirmed again.
+    @Test func finishConfirmedWhileLoadedCountsUntilItEndsAgain() async {
+        a.episodes.set("P", episodes: ["e1", "e2"], finished: ["e2"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        #expect(coordinator.mediaKey == a.key("P", episode: "e1"))
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .finished)
+        coordinator.stop()
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.play("P", episode: "e2")
+        await a.finish()
+        #expect(coordinator.mediaKey == a.key("P", episode: "e1"))
+
+        await a.finish()
+        coordinator.stop()
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.play("P", episode: "e2")
+        await a.finish()
+
+        #expect(coordinator.mediaKey != a.key("P", episode: "e1"))
     }
 
     @Test func advanceStaysAtEndWhenAllEpisodesFinished() async {
@@ -427,6 +653,63 @@ struct AutoAdvanceTests {
         let begin = try #require(a.service.log.firstIndex(of: "begin activity"))
         let start = try #require(a.service.log.firstIndex(of: "start B"))
         #expect(begin < start)
+    }
+
+    /// The next item's initial seek was interrupted, so its start returns with the engine still
+    /// buffering while the engine retries the seek: the activity lasts until the audio plays,
+    /// or the app could be suspended first (#554).
+    @Test func activityLastsUntilTheNextItemPlays() async {
+        a.enqueue("B")
+        await a.play("A")
+        a.h.engine.interruptedLoads = 1
+
+        a.h.engine.finish()
+        await yieldUntil { coordinator.mediaKey == a.key("B") && a.h.engine.state == .buffering }
+        for _ in 0..<100 { await Task.yield() }
+        #expect(a.activity.active == 1)
+
+        _ = await a.h.engine.seek(to: a.h.engine.pendingSeekTarget ?? 0)
+        await coordinator.waitForAutoAdvance()
+
+        #expect(a.h.engine.state == .playing)
+        #expect(a.activity.active == 0)
+    }
+
+    /// A pause while the initial seek is pending ends the activity: nothing will play.
+    @Test func activityEndsWhenPausedBeforeTheNextItemPlays() async {
+        a.enqueue("B")
+        await a.play("A")
+        a.h.engine.interruptedLoads = 1
+        a.h.engine.finish()
+        await yieldUntil { coordinator.mediaKey == a.key("B") && a.h.engine.state == .buffering }
+
+        coordinator.pause()
+        await coordinator.waitForAutoAdvance()
+
+        #expect(a.activity.begun.count == 1)
+        #expect(a.activity.active == 0)
+    }
+
+    /// Another play takes over while the next item's load is suspended and loads before that
+    /// start returns: the superseded advance ends its activity rather than wait on the
+    /// replacement, which buffers on an interrupted seek here (#554).
+    @Test func supersededAdvanceEndsActivityOnTakeover() async {
+        a.enqueue("B")
+        await a.play("A")
+        let gate = Gate()
+        a.h.engine.loadGates = [gate]
+        a.h.engine.finish()
+        await yieldUntil { a.h.engine.loads.count == 2 && coordinator.mediaKey == a.key("B") }
+
+        a.h.engine.interruptedLoads = 1
+        await coordinator.play(itemID: "C")
+        #expect(coordinator.mediaKey == a.key("C"))
+        #expect(a.h.engine.state == .buffering)
+        gate.open()
+
+        await yieldUntil { a.activity.active == 0 }
+        #expect(a.activity.begun.count == 1)
+        #expect(a.h.engine.state == .buffering)
     }
 }
 

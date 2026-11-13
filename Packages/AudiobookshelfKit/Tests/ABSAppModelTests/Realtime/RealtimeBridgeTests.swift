@@ -74,6 +74,34 @@ struct RealtimeBridgeTests {
         #expect(cache.progress(libraryItemID: "show", episodeID: "e1")?.currentTime == 3)
     }
 
+    /// A socket update still carrying an episode's earlier finish (a late echo of a replay's sync)
+    /// is no new finish, so it can't confirm the replay's end to auto-advance; a later finish
+    /// is (#554).
+    @Test func aSocketUpdateWithTheSameFinishIsNoNewFinish() async throws {
+        let harness = BridgeHarness()
+        let socket = try await harness.start()
+        let cache = harness.cache
+        func update(currentTime: Double, finishedAt: Int, lastUpdate: Int) -> RealtimeEvent {
+            .userItemProgressUpdated(
+                UserItemProgressUpdate(
+                    id: "p-show", sessionId: "remote", deviceDescription: nil,
+                    progress: MediaProgress(
+                        id: "p-show", libraryItemId: "show", episodeId: "e1", currentTime: currentTime,
+                        isFinished: true, lastUpdate: lastUpdate, finishedAt: finishedAt)))
+        }
+        cache.apply(
+            MediaProgress(
+                id: "p-show", libraryItemId: "show", episodeId: "e1", currentTime: 60, isFinished: true,
+                lastUpdate: 100, finishedAt: 100))
+        var kinds: [ProgressChangeKind] = []
+        cache.onChange = { _, _, kind in kinds.append(kind) }
+
+        await harness.send(update(currentTime: 30, finishedAt: 100, lastUpdate: 200), on: socket)
+        await harness.send(update(currentTime: 60, finishedAt: 300, lastUpdate: 300), on: socket)
+
+        #expect(kinds == [.updated, .finished])
+    }
+
     @Test func nothingIsAppliedAfterTheSessionEnds() async throws {
         let harness = BridgeHarness()
         let socket = try await harness.start()

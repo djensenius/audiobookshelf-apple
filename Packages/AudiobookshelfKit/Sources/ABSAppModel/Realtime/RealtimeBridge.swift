@@ -375,7 +375,11 @@ public final class RealtimeBridge: SessionParticipant {
     }
 
     /// Merges dated `progress` into ``localProgress`` as a `.socket` value, after the merges before
-    /// it. A merge still waiting when the session ends is dropped.
+    /// it. A merge still waiting when the session ends is dropped. Once merged, the media is
+    /// reported to ``ProgressCache/onChange`` again, so the auto-advance prepares again from the
+    /// merged local progress: the cache's own report came before the merge (#160). Only as
+    /// `.updated`: the cache's report already carried any reset, and replaying it after the
+    /// merge could undo what happened meanwhile, such as the episode ending here again (#554).
     private func merge(_ progress: MediaProgress) {
         guard let store = localProgress, let identity, let lastUpdate = progress.lastUpdate else { return }
         let key = MediaKey(
@@ -388,6 +392,8 @@ public final class RealtimeBridge: SessionParticipant {
             ebookLocation: progress.ebookLocation, ebookProgress: progress.ebookProgress,
             lastUpdate: Date(timeIntervalSince1970: Double(lastUpdate) / 1000))
         let generation = generation
+        let cache = self.progress
+        let session = cache.sessionToken()
         let previous = mergeTask
         mergeTask = Task { [weak self] in
             let capturedAt = await store.captureGeneration()
@@ -397,6 +403,9 @@ public final class RealtimeBridge: SessionParticipant {
             guard generation == self.generation else { return }
             do {
                 try await store.applyServerProgress([key: server], capturedAt: capturedAt, source: .socket)
+                guard generation == self.generation else { return }
+                cache.reportSettled(
+                    progress.libraryItemId, episodeID: progress.episodeId, kind: .updated, token: session)
             } catch {
                 Log.realtime.error(
                     "Couldn't merge socket progress: \(Self.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"
