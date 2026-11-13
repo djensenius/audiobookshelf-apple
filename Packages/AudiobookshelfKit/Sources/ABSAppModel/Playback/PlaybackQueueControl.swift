@@ -88,8 +88,8 @@ public final class PlaybackQueueControl: PlaybackQueueReading, PlayAllQueueing {
                 return false
             }
         }
-        guard request.id == playAllRequests, let playback = scope?.playback, playback.mediaKey == started,
-            playback.error == nil, playback.phase == .loaded
+        guard !Task.isCancelled, request.id == playAllRequests, let playback = scope?.playback,
+            playback.mediaKey == started, playback.error == nil, playback.phase == .loaded
         else { return false }
         return edit { $0.replace(with: items.filter { !isCurrent($0) }) }
     }

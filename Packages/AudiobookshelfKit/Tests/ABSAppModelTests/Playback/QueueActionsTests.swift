@@ -305,6 +305,23 @@ struct QueueActionsTests {
         #expect(queue.items.map(\.id) == ["c|"])
     }
 
+    /// A cancelled caller replaces nothing, even with the media already loaded.
+    @Test func aCancelledReplaceKeepsThePreviousQueue() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        let request = queue.beginPlayAll()
+
+        let replacing = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await queue.replace(with: [item("b")], afterStarting: started, request: request)
+        }
+
+        #expect(!(await replacing.value))
+        #expect(queue.items.map(\.id) == ["x|"])
+        // The scope is kept, so only the cancellation refused it: the same request then replaces.
+        #expect(await queue.replace(with: [item("b")], afterStarting: started, request: request))
+        #expect(scope.queueStore.saved[queue.serverConnectionID]?.map(\.id) == ["b|"])
+    }
+
     @Test func aRetiredSessionsQueueIsntReplaced() async throws {
         let (scope, queue, started) = try startedScope("a", items: [item("x")])
         scope.retire(reason: .signOut)
