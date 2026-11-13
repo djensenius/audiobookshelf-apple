@@ -55,6 +55,8 @@ final class StubProgressSyncService: ProgressSyncService {
         var closes: [(id: String, report: PlaybackSyncReport?)] = []
         /// Each retried `/close` takes the next (`nil` succeeds); an error never reaches the model.
         var closeErrors: [APIError?] = []
+        /// Each stored-session lookup throws the next until none is left; an error never reaches the model.
+        var recordsErrors: [any Error] = []
         var log: [String] = []
         var canceledCalls: [String] = []
         var syncWaiters: [(count: Int, continuation: CheckedContinuation<Void, Never>)] = []
@@ -219,6 +221,17 @@ final class StubProgressSyncService: ProgressSyncService {
         // A queued error never reaches the model, like a failed connection.
         if let error { throw error }
         if let client { try await client.model.close(client, id: id, report: report) }
+    }
+
+    /// Model-only: the stored sessions of the shared session model.
+    func listeningSessions(itemID: String, episodeID: String?) async throws -> ListeningSessionsPage {
+        let (client, error) = state.withLock { state in
+            state.log.append("records \(itemID)")
+            return (state.sessionClient, state.recordsErrors.isEmpty ? nil : state.recordsErrors.removeFirst())
+        }
+        if let error { throw error }
+        guard let client else { preconditionFailure("Configure sessionClient") }
+        return try await client.model.records(client, itemID: itemID, episodeID: episodeID)
     }
 }
 

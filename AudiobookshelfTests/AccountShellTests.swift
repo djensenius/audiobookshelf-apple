@@ -749,6 +749,71 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
     }
 
+    // MARK: Playback
+
+    @Test func theSignedInShellGetsTheActiveAccountsPlayback() async throws {
+        let environment = try makeEnvironment()
+        let accounts = try #require(environment.accounts)
+        let participant = try #require(environment.playback.participant)
+        let (a, b, hosts) = try await twoServers(environment, recorder: Recorder())
+        defer { cleanUp(hosts) }
+        #expect(RootView.playback(participant, accounts: accounts, for: b) === participant)
+        #expect(participant.playItem != nil && participant.bookmarks != nil)
+        // The outgoing shell of a switch, still up for A after accounts moved to B, gets none.
+        #expect(RootView.playback(participant, accounts: accounts, for: a) == nil)
+        #expect(RootView.playback(participant, accounts: nil, for: b) == nil)
+
+        _ = await environment.lifecycle.signOut()
+        #expect(RootView.playback(participant, accounts: accounts, for: b) == nil)
+        #expect(participant.playItem == nil && participant.bookmarks == nil)
+    }
+
+    /// The Playback menu reads the current session's bookmarks, so Create Bookmark (⌘B) can enable
+    /// once they load, and follows a switch and sign-out.
+    @Test func thePlaybackMenuFollowsTheSessionsBookmarks() async throws {
+        let environment = try makeEnvironment()
+        let participant = try #require(environment.playback.participant)
+        let (a, _, hosts) = try await twoServers(environment, recorder: Recorder())
+        defer { cleanUp(hosts) }
+        let commands = PlaybackCommands(player: environment.player, participant: participant)
+        let storeB = try #require(participant.bookmarks)
+        #expect(commands.model.bookmarks === storeB)
+
+        let switched = try await #require(
+            AccountActions(lifecycle: environment.lifecycle).switchAccount(to: a.connectionID)
+        ).value
+        #expect(switched.succeeded)
+        let storeA = try #require(participant.bookmarks)
+        #expect(storeA !== storeB)
+        #expect(commands.model.bookmarks === storeA)
+
+        _ = await environment.lifecycle.signOut()
+        #expect(commands.model.bookmarks == nil)
+    }
+
+    #if os(macOS)
+        /// The Now Playing window rebuilds its player for each session, so a switch discards a
+        /// pending bookmark edit even if the window never saw the session end.
+        @Test func theNowPlayingWindowsKeyChangesWithEachSession() async throws {
+            let environment = try makeEnvironment()
+            let participant = try #require(environment.playback.participant)
+            let (a, _, hosts) = try await twoServers(environment, recorder: Recorder())
+            defer { cleanUp(hosts) }
+            // Held, as the window's view graph holds the store it rendered.
+            let storeB = try #require(participant.bookmarks)
+
+            let switched = try await #require(
+                AccountActions(lifecycle: environment.lifecycle).switchAccount(to: a.connectionID)
+            ).value
+            #expect(switched.succeeded)
+            let keyA = try #require(NowPlayingWindow.sessionKey(participant.bookmarks))
+            #expect(keyA != NowPlayingWindow.sessionKey(storeB))
+
+            _ = await environment.lifecycle.signOut()
+            #expect(NowPlayingWindow.sessionKey(participant.bookmarks) == nil)
+        }
+    #endif
+
     // MARK: Server switch for a link
 
     @Test func aLinkForAnotherServerSwitchesOnlyOnceConfirmed() async throws {

@@ -9,6 +9,84 @@ set -eu
 
 repo_root="${CI_PRIMARY_REPOSITORY_PATH:-$(cd "$(dirname "$0")/.." && pwd)}"
 
+# A release tag must match the version the build ships (docs/release.md › Releasing a
+# version). Branch builds have no CI_TAG. A tag that doesn't start with "v" and a digit
+# isn't a release tag and is ignored. Any other must be exactly v<MAJOR.MINOR.PATCH>, as
+# scripts/set-version.sh accepts, and equal every MARKETING_VERSION setting (conditional
+# ones too) in project.xcproj. A setting's value may be a string or an array of strings;
+# each must be a plain string or a one-string array, and any other form (a longer array,
+# a number, an escaped string) fails the build rather than going unchecked.
+check_release_tag() {
+  tag="${CI_TAG:-}"
+  case "$tag" in
+    "") return 0 ;;
+    v[0-9]*) ;;
+    *)
+      echo "CI_TAG $tag is not a release tag (v<x.y.z>); not checking MARKETING_VERSION"
+      return 0
+      ;;
+  esac
+  version="${tag#v}"
+  case "$version" in
+    *[!0-9.]*) valid=0 ;;
+    *) valid=1 ;;
+  esac
+  if [ "$valid" = 0 ] || ! printf '%s\n' "$version" |
+    grep -Eqx '(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})'; then
+    echo "error: release tag $tag is not v<MAJOR.MINOR.PATCH> (no leading zeros or suffixes)" >&2
+    exit 1
+  fi
+  project="$repo_root/Audiobookshelf.xcodeproj/project.xcproj"
+  if [ ! -f "$project" ]; then
+    echo "error: $project not found; can't check release tag $tag" >&2
+    exit 1
+  fi
+  # Every MARKETING_VERSION key, wherever it is: "=<value>" for each value it can check,
+  # "!<key>" for each it can't.
+  settings="$(awk '
+    { text = text $0 "\n" }
+    END {
+      rest = text
+      while (match(rest, /"MARKETING_VERSION(\[[^]"]*\])*"/)) {
+        key = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        if (!match(rest, /^[ \t\n]*:[ \t\n]*/)) { print "!" key; continue }
+        rest = substr(rest, RLENGTH + 1)
+        if (match(rest, /^"[^"\\\n]+"/)) {
+          print "=" substr(rest, 2, RLENGTH - 2)
+        } else if (match(rest, /^\[[ \t\n]*"[^"\\\n]+"[ \t\n]*,?[ \t\n]*\]/)) {
+          value = substr(rest, 1, RLENGTH)
+          sub(/^\[[ \t\n]*"/, "", value)
+          sub(/"[ \t\n]*,?[ \t\n]*\]$/, "", value)
+          print "=" value
+        } else {
+          print "!" key
+          continue
+        }
+        rest = substr(rest, RLENGTH + 1)
+      }
+    }' "$project")"
+  unsupported="$(printf '%s\n' "$settings" | sed -n 's/^!//p' | tr '\n' ' ' | sed 's/ $//')"
+  if [ -n "$unsupported" ]; then
+    echo "error: unsupported MARKETING_VERSION value for $unsupported in $project (expected a" \
+      "string or a one-string array); can't check release tag $tag" >&2
+    exit 1
+  fi
+  versions="$(printf '%s\n' "$settings" | sed -n 's/^=//p' | sort -u)"
+  if [ -z "$versions" ]; then
+    echo "error: no MARKETING_VERSION setting in $project; can't check release tag $tag" >&2
+    exit 1
+  fi
+  if [ "$versions" != "$version" ]; then
+    found="$(printf '%s' "$versions" | tr '\n' ' ')"
+    echo "error: release tag $tag doesn't match MARKETING_VERSION ($found) in project.xcproj." >&2
+    echo "Run mise run release:version $version on main, merge it, and tag that commit." >&2
+    exit 1
+  fi
+  echo "Release tag $tag matches MARKETING_VERSION $version"
+}
+check_release_tag
+
 xcodebuild -version
 
 # Fallback if Xcode Cloud rejects the JSON project format (project.xcproj).
