@@ -2,15 +2,19 @@ import ABSCore
 import ABSData
 import ABSDownloads
 import Foundation
+import ImageIO
 import Observation
 
 /// The local item screen's state and actions (#75): reads one downloaded item, shows it as a
 /// ``LocalItemDetail`` for the signed-in account, and deletes it or one of its podcast episodes.
 ///
-/// - ``observe()`` reads the item, then again whenever a download of the same server item
-///   completes (another episode arriving).
+/// - ``observe()`` reads the item, then again after every write to its connection's downloads
+///   (a deletion in another window, another episode arriving), or, without those updates,
+///   whenever a download of the same server item completes.
 /// - Deleting the item, or its last episode, sets ``isDeleted``; the view then leaves.
 /// - A failed delete sets ``notice``; the view shows it and clears it.
+/// - ``coverFileURL`` is the downloaded cover, which the view shows itself, so it appears offline
+///   even after the image cache dropped it.
 @MainActor
 @Observable
 public final class LocalItemDetailModel {
@@ -47,11 +51,44 @@ public final class LocalItemDetailModel {
         item.map { LocalItemDetail(item: $0, account: account) }
     }
 
-    /// Reads the item, then again after each completed download of it, until the task is cancelled.
+    /// The item's downloaded cover file, or `nil` without one.
+    public var coverFileURL: URL? {
+        item?.coverRelativePath.flatMap(services.localFileURL)
+    }
+
+    /// The image in `url`, downsampled so its long side is at most `maxPixelSize`; `nil` if the
+    /// file is missing or isn't an image.
+    @concurrent
+    public nonisolated static func coverImage(at url: URL, maxPixelSize: Int) async -> CGImage? {
+        let options = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, options) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(
+            source, 0,
+            [
+                kCGImageSourceThumbnailMaxPixelSize: max(maxPixelSize, 1),
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+            ] as CFDictionary)
+    }
+
+    /// Reads the item, then again after every write to its connection's downloads
+    /// (``DownloadsServices/localItemUpdates``), so a deletion in another window updates the rows
+    /// and totals or sets ``isDeleted``. Without those updates, or if the item isn't found, it
+    /// reads the item again after each completed download of it. Runs until the task is cancelled.
     public func observe() async {
         // Subscribed before the read, so a completion during it is followed by another read.
-        let events = await services.control.events()
+        var events: AsyncStream<DownloadManagerEvent>? = await services.control.events()
         await reload()
+        // The store stream's first snapshot is the items as they are, so a write between the read
+        // above and the subscription is still followed by another read.
+        if let connectionID = item?.serverConnectionID,
+            let updates = try? await services.localItemUpdates?(connectionID)
+        {
+            events = nil  // Ends that subscription; the store reports completions too.
+            for await _ in updates { await reload() }
+            return
+        }
+        guard let events else { return }
         for await event in events {
             guard case .completed(_, let completedItemID, let key) = event else { continue }
             let sameServerItem =

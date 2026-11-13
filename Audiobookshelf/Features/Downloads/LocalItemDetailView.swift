@@ -50,7 +50,7 @@ struct LocalItemDetailView: View {
     private var content: some View {
         if let detail = model.detail {
             List {
-                Section { LocalItemHeader(detail: detail) }
+                Section { LocalItemHeader(detail: detail, coverFileURL: model.coverFileURL) }
                 if !detail.tracks.isEmpty {
                     Section {
                         ForEach(detail.tracks) { LocalFileRow(file: $0) }
@@ -63,9 +63,10 @@ struct LocalItemDetailView: View {
                         ForEach(detail.episodes) { episode in
                             LocalEpisodeRow(episode: episode)
                                 .swipeActions {
-                                    Button(L10n.string("ButtonDelete"), role: .destructive) {
-                                        pendingDelete = .episode(episode)
-                                    }
+                                    // Not `.destructive`: the list would remove the row before
+                                    // the confirmation (as in `DownloadsList.deleteButton`).
+                                    Button(L10n.string("ButtonDelete")) { pendingDelete = .episode(episode) }
+                                        .tint(.red)
                                 }
                         }
                     } header: {
@@ -147,23 +148,59 @@ private enum PendingLocalDelete {
     }
 }
 
-/// The cover, title, author, sizes and link status of a downloaded item.
-private struct LocalItemHeader: View {
+/// A downloaded item's cover: its downloaded file, read here so it shows offline even after the
+/// image cache dropped it, else the cover through the image pipeline.
+private struct LocalItemCover: View {
     let detail: LocalItemDetail
+    let fileURL: URL?
+    @Environment(\.displayScale) private var displayScale
+    @State private var image: CGImage?
+
+    private static let width: CGFloat = 96
 
     var body: some View {
-        VStack(alignment: .leading, spacing: ABSSpacing.medium) {
-            HStack(alignment: .top, spacing: ABSSpacing.medium) {
+        Group {
+            if let image {
+                Image(decorative: image, scale: 1)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: Self.width, height: Self.width * shape.aspectRatio)
+                    .clipShape(.rect(cornerRadius: ABSRadius.small))
+                    .accessibilityHidden(true)
+            } else {
                 CoverView(
                     key: CoverRef(
                         entityID: detail.libraryItemId,
                         updatedAt: LocalDownloadedCovers.version(of: detail.coverUpdatedAt)
                     )
                     .key(serverID: detail.serverConnectionID),
-                    title: detail.title, author: detail.author, shape: detail.isPodcast ? .square : .book,
-                    accessibility: .hidden
+                    title: detail.title, author: detail.author, shape: shape, accessibility: .hidden
                 )
-                .frame(width: 96)
+            }
+        }
+        .task(id: fileURL) {
+            guard let fileURL else {
+                image = nil
+                return
+            }
+            let pixels = Int((Self.width * max(shape.aspectRatio, 1) * displayScale).rounded(.up))
+            image = await LocalItemDetailModel.coverImage(at: fileURL, maxPixelSize: pixels)
+        }
+    }
+
+    private var shape: CoverShape { detail.isPodcast ? .square : .book }
+}
+
+/// The cover, title, author, sizes and link status of a downloaded item.
+private struct LocalItemHeader: View {
+    let detail: LocalItemDetail
+    let coverFileURL: URL?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: ABSSpacing.medium) {
+            HStack(alignment: .top, spacing: ABSSpacing.medium) {
+                LocalItemCover(detail: detail, fileURL: coverFileURL)
+                    .frame(width: 96)
                 VStack(alignment: .leading, spacing: ABSSpacing.xSmall) {
                     Text(verbatim: detail.title)
                         .font(.headline)

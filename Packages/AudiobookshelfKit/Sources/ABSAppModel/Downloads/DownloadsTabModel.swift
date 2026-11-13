@@ -18,6 +18,9 @@ public struct DownloadsServices {
     public let localItems: @Sendable (UUID) async throws -> [LocalLibraryItemDTO]
     /// One downloaded item, as `LocalItemStore.item(id:)` reads it; `nil` once it's deleted.
     public let localItem: @Sendable (UUID) async throws -> LocalLibraryItemDTO?
+    /// The file a downloaded item's relative path names, as `DownloadLocations.fileURL(forRelativePath:)`
+    /// resolves it; `nil` for an invalid path.
+    public let localFileURL: @Sendable (String) -> URL?
     /// The bytes still available for downloads, as ``StorageCapacityProviding`` reports them.
     public let availableCapacity: @Sendable () async throws -> Int64
 
@@ -26,6 +29,7 @@ public struct DownloadsServices {
         localItemUpdates: (@Sendable (UUID) async throws -> AsyncStream<[LocalLibraryItemDTO]>)? = nil,
         localItems: @escaping @Sendable (UUID) async throws -> [LocalLibraryItemDTO],
         localItem: @escaping @Sendable (UUID) async throws -> LocalLibraryItemDTO? = { _ in nil },
+        localFileURL: @escaping @Sendable (String) -> URL? = { _ in nil },
         availableCapacity: @escaping @Sendable () async throws -> Int64
     ) {
         self.controller = controller
@@ -33,6 +37,7 @@ public struct DownloadsServices {
         self.localItemUpdates = localItemUpdates
         self.localItems = localItems
         self.localItem = localItem
+        self.localFileURL = localFileURL
         self.availableCapacity = availableCapacity
     }
 }
