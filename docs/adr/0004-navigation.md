@@ -422,6 +422,7 @@ ArrangementView { primary } secondary: { secondary }
 
 - Cover grids compute columns from `reservedRegions(kind: .division, options: .includeInactive)` so the column count stays even and no cover straddles the fold.
 - Without a fold region, the grid uses the normal adaptive column count.
+- *Amended by #85:* `ItemGrid` puts as many equal columns on each side as the narrower side fits, with a gap over the fold. A side too narrow for one card stays empty, so the other side's count can be odd. Below iOS 27.1 and on macOS the grid is unchanged.
 
 **Bars**
 
