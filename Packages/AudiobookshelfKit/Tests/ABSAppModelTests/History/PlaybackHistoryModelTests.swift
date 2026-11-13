@@ -1,5 +1,6 @@
 import ABSCore
 import ABSData
+import ABSTestSupport
 import Foundation
 import Synchronization
 import Testing
@@ -77,13 +78,12 @@ private func makeModel(
 }
 
 /// Polls `condition` every 10 ms until it holds or `timeout` passes; the timeout only bounds a
-/// failing test.
+/// failing test, and a stall of the process doesn't spend it (``WaitBudget``, #485).
 @MainActor
 private func eventually(timeout: Duration = .seconds(10), _ condition: () -> Bool) async -> Bool {
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: timeout)
+    var budget = WaitBudget(timeout)
     while !condition() {
-        guard clock.now < deadline else { return false }
+        guard budget.hasTimeLeft() else { return false }
         do { try await Task.sleep(for: .milliseconds(10)) } catch { return false }
     }
     return true
