@@ -7,6 +7,8 @@ public enum ProgressChangeKind: Sendable, Hashable {
     /// an unfinished one, or a change the server hasn't confirmed yet (an optimistic action).
     case updated
     /// Finished, with the change confirmed: from the server, or an action the server accepted.
+    /// A new finish only: one already finished at the same `finishedAt` (hidden, or a new
+    /// position on a replay) is an update, since that finish predates anything since (#554).
     case finished
     /// Back to unfinished: a finished progress made unfinished (marked not finished), or the
     /// progress removed (discarded).
@@ -17,6 +19,7 @@ public enum ProgressChangeKind: Sendable, Hashable {
         switch (old, new) {
         case (.some, nil): self = .reset
         case (let old?, let new?) where old.isFinished && !new.isFinished: self = .reset
+        case (let old?, let new?) where old.isFinished && new.finishedAt == old.finishedAt: self = .updated
         case (_, let new?) where new.isFinished: self = .finished
         default: self = .updated
         }

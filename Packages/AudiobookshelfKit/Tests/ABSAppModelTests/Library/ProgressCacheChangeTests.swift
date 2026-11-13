@@ -47,24 +47,31 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
             ])
     }
 
-    /// Only a change back to unfinished is a reset; a finished value from the server, even
-    /// hidden, is a finish; a new position on an unfinished one is an update.
+    /// Only a change back to unfinished is a reset; a finished value from the server is a finish,
+    /// but only a new one: the same finish hidden (an earlier finish, older than a replay's end)
+    /// is an update, a later finish a finish again; a new position on an unfinished one is an
+    /// update (#554).
     @Test func onlyUnfinishingIsAReset() {
         let cache = ProgressCache()
         let recorder = recording(cache)
         var value = progress("book", currentTime: 1, lastUpdate: 10)
         cache.apply(value)
         value.isFinished = true
+        value.finishedAt = 20
         value.lastUpdate = 20
         cache.apply(value)
         value.hideFromContinueListening = true
         value.lastUpdate = 30
         cache.apply(value)
+        value.finishedAt = 35
+        value.lastUpdate = 35
+        cache.apply(value)
         value.isFinished = false
+        value.finishedAt = nil
         value.lastUpdate = 40
         cache.apply(value)
 
-        #expect(recorder.changes.map(\.kind) == [.updated, .finished, .finished, .reset])
+        #expect(recorder.changes.map(\.kind) == [.updated, .finished, .updated, .finished, .reset])
     }
 
     /// An update the cache keeps out, a read, or removing nothing changes no value.
@@ -144,7 +151,9 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
 
     /// Each action's settled report carries the kind of its change: a finish only once the
     /// server accepted it, the optimistic report being an update; hiding a finished episode is
-    /// no reset, so auto-advance keeps it skipped; marking it not finished or discarding it is.
+    /// neither a reset nor a new finish (its finish may predate a replay that ended since), so
+    /// auto-advance keeps it skipped and unconfirmed (#554); marking it not finished or
+    /// discarding it is a reset.
     @Test func settledReportsCarryTheActionsKind() async throws {
         let cache = ProgressCache()
         let log = Locked<[String]>([])
@@ -155,7 +164,7 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
 
         try await actions.markFinished(target)
         try await actions.hideFromContinueListening(target)
-        #expect(log.value == ["updated", "finished", "updated", "finished"])
+        #expect(log.value == ["updated", "finished", "updated", "updated"])
 
         log.value = []
         try await actions.markNotFinished(target)

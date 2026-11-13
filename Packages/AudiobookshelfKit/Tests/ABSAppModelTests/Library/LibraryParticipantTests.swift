@@ -462,7 +462,8 @@ private struct Harness {
     }
 
     /// Replaying a finished item: the finished flag playback keeps isn't the server confirming
-    /// this play's end, so its position reports as an update; the server's row is a finish (#554).
+    /// this play's end, so its position reports as an update; so does the server's row with the
+    /// same, earlier finish; only its new finish is one (#554).
     @Test func playbackProgressOnAFinishedRowIsNoConfirmedFinish() async throws {
         try await withLibrarySettings { settings in
             let harness = Harness(settings: settings)
@@ -470,6 +471,7 @@ private struct Harness {
             var finished = progress("a", at: 10)
             finished.duration = 100
             finished.isFinished = true
+            finished.finishedAt = 1_000
             finished.lastUpdate = 1_000
             harness.store.progress.apply(finished)
             let kinds = Locked<[ProgressChangeKind]>([])
@@ -478,8 +480,11 @@ private struct Harness {
             #expect(harness.participant.applyPlaybackProgress(playback("a", at: 100), sessionID: 7))
             finished.lastUpdate = 3_000
             harness.store.progress.apply(finished)
+            finished.finishedAt = 4_000
+            finished.lastUpdate = 4_000
+            harness.store.progress.apply(finished)
 
-            #expect(kinds.value == [.updated, .finished])
+            #expect(kinds.value == [.updated, .updated, .finished])
         }
     }
 
