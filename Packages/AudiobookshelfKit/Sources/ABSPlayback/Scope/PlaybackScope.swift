@@ -113,6 +113,10 @@ public final class PlaybackScope {
         /// Records the scope's playback history (``ProgressSyncer``'s `history`); the app sets a
         /// `PlaybackHistoryRecorder` over its one history store. `nil` records none.
         public var history: (any PlaybackHistoryRecording)?
+        /// Rewrites each stream URL the scope's services resolve, before the engine loads it. The
+        /// app sets it only for a UI-test fixture launch, whose tracks play from a bundled file
+        /// (#46). `nil` plays the server's URLs.
+        public var trackURLOverride: (@Sendable (URL) -> URL)?
 
         public init(
             connectionID: UUID, client: APIClient?, features: ServerFeatures?,
@@ -209,7 +213,8 @@ public final class PlaybackScope {
     ) -> PlaybackScope {
         let services = AccountPlaybackServices(
             serverConnectionID: configuration.connectionID, client: configuration.client,
-            features: configuration.features, deviceIdentifiers: configuration.deviceIdentifiers)
+            features: configuration.features, deviceIdentifiers: configuration.deviceIdentifiers,
+            trackURLOverride: configuration.trackURLOverride)
         let coordinator = PlaybackCoordinator(
             engine: configuration.engine, sessions: services, progressStore: configuration.writer,
             settings: configuration.settings, policy: configuration.policy,

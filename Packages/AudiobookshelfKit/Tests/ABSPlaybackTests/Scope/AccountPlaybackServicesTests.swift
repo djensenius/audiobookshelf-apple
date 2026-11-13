@@ -180,6 +180,19 @@ struct AccountPlaybackServicesTests {
         #expect(!services.canStartSessions)
     }
 
+    /// A track URL override (a fixture launch's, #46) rewrites the URLs the engine loads, not the plan.
+    @Test func aTrackURLOverrideRewritesTheResolvedURLs() async throws {
+        let file = URL(filePath: "/fixtures/silence.m4a")
+        let services = AccountPlaybackServices(
+            serverConnectionID: UUID(), client: try client(), features: features, deviceIdentifiers: FixedDevice(),
+            trackURLOverride: { _ in file })
+
+        let stream = try await services.resolveStream(for: session)
+
+        #expect(stream.urls == [file])
+        #expect(stream.plan.tracks.map(\.url.absoluteString) == ["https://abs.example/public/session/sess/track/1"])
+    }
+
     /// The negative control for "an expired account uses no network": nothing brings it back.
     @Test func invalidateIsPermanent() async throws {
         let services = services(client: try client(), features: features)

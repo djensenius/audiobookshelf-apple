@@ -581,7 +581,10 @@ static, unauthenticated remote images (none are planned).
   - It stores the result as `cover.jpg` in the item's download folder, which is
     not a cache directory. It records the relative path and
     `LocalLibraryItem.coverUpdatedAt` in ABSData, which is what
-    `DownloadedCoverLookup` reads.
+    `DownloadedCoverLookup` reads. The app's pipeline gets ABSAppModel's
+    `LocalDownloadedCovers`, over the download stack's `LocalItemStore` and its
+    `DownloadLocations` root (#143); an app built without a download stack
+    (the test host) has no downloaded covers.
   - JPEG keeps exported or shared files portable. 1200 px is enough for the player
     on every device we target.
   - If a later fetch shows a newer `updatedAt`, the cover is refreshed in the

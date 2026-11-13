@@ -138,6 +138,7 @@ struct AppPlayback {
             queueStore: UserDefaultsPlaybackQueueStore(defaults: settings.defaults))
         configuration.networkPaths = SystemNetworkPathSource()
         configuration.history = history
+        configuration.trackURLOverride = fixtureTrackURL
         return configuration
     }
 }
