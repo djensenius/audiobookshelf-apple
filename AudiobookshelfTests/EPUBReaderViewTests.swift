@@ -147,7 +147,9 @@ import WebKit
             #expect(contents.entries.map(\.label) == (fails ? [] : ["One", "Two"]))
             #expect(contents.entries.map(\.level) == (fails ? [] : [0, 1]))
 
-            post(#"{"type":"relocated","startCfi":"a","endCfi":"b","progress":0.1,"href":"c2.xhtml","atStart":false,"atEnd":false}"#)
+            post(
+                #"{"type":"relocated","startCfi":"a","endCfi":"b","progress":0.1,"href":"c2.xhtml","atStart":false,"atEnd":false}"#
+            )
             #expect(session.contents.currentEntryID == (fails ? nil : 1))
             if let entry = contents.entries.first {
                 session.contents.isPresented = true
