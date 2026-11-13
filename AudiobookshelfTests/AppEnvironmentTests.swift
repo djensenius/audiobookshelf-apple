@@ -54,6 +54,9 @@ struct TestDownloads {
             #expect(environment.downloads != nil)
             // The library is the lifecycle's seeder, and stays cleared while signed out.
             #expect(environment.library != nil)
+            #expect(environment.realtime?.bridge.connectionState == .idle)
+            // Socket progress merges through the environment's one writer.
+            #expect(environment.realtime?.bridge.localProgress === environment.localProgress)
             #expect(environment.lifecycle.gate == .launching)
 
             await environment.lifecycle.start()
