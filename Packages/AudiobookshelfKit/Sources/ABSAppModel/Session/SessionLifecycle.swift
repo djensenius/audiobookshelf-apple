@@ -389,8 +389,11 @@ public final class SessionLifecycle {
 
     /// Resolves a continued Handoff activity's account to a connection on this device through
     /// the account source (``HandoffActivity/resolve(using:)``), before the scene opens its link.
+    /// It waits for the launch first (``start()``), whose restore loads the saved connections: on
+    /// a cold launch the activity can arrive before them.
     public func resolve(_ activity: HandoffActivity) async -> HandoffResolution {
-        await activity.resolve(using: source)
+        await start()
+        return await activity.resolve(using: source)
     }
 
     /// Flushes the running session when a scene goes to the background, for at most the flush

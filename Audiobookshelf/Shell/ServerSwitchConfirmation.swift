@@ -16,6 +16,10 @@ struct SceneLinks {
     /// Counts the links received, so one resolved after it arrived (Handoff) doesn't replace a
     /// link received while it resolved.
     private var arrivals: UInt64 = 0
+    /// Counts the continued Handoff activities received. At each, the host drops the server
+    /// switch it asks about (``ServerSwitchPrompt/supersede(in:)``), whatever the activity
+    /// resolves to.
+    private(set) var handoffArrivals: UInt64 = 0
 
     mutating func receive(_ link: DeepLink, gate: AuthGate, epoch: UInt64) {
         arrivals &+= 1
@@ -23,26 +27,32 @@ struct SceneLinks {
     }
 
     /// Takes the next arrival for a continued Handoff activity, before its account is resolved
-    /// (``receive(_:gate:epoch:arrival:)``).
+    /// (``receive(_:gate:epoch:arrival:currentEpoch:)``). The activity is the newest link even if
+    /// it opens nothing, so the waiting link and a confirmed switch's link go now.
     mutating func reserveArrival() -> UInt64 {
         arrivals &+= 1
+        handoffArrivals &+= 1
+        pending = nil
+        afterSwitch = nil
         return arrivals
     }
 
     /// A continued Handoff activity's resolution, with the gate, epoch and arrival from when it
-    /// arrived. Its link waits like any other, unless a link arrived while it resolved: the last
-    /// received wins. An activity whose account isn't signed in here opens nothing, on no account.
+    /// arrived. Its link waits like any other. An activity whose account isn't signed in here
+    /// opens nothing, on no account. Either result is stale, and does nothing, when a link arrived
+    /// while it resolved (the last received wins) or the session changed (`currentEpoch`, the
+    /// lifecycle's now, isn't `epoch`).
     /// - Returns: That account, for the scene to say it isn't signed in on this device.
     mutating func receive(
-        _ resolution: HandoffResolution, gate: AuthGate, epoch: UInt64, arrival: UInt64
+        _ resolution: HandoffResolution, gate: AuthGate, epoch: UInt64, arrival: UInt64, currentEpoch: UInt64
     ) -> HandoffAccount? {
+        guard arrival == arrivals, epoch == currentEpoch else {
+            Log.ui.notice("Dropped a Handoff activity: a newer link arrived, or the session changed, while it resolved")
+            return nil
+        }
         switch resolution {
         case .open(let link):
-            if arrival == arrivals {
-                keep(link, gate: gate, epoch: epoch)
-            } else {
-                Log.ui.notice("Dropped a Handoff link: a newer link arrived while it resolved")
-            }
+            keep(link, gate: gate, epoch: epoch)
             return nil
         case .accountNotSignedIn(let account):
             return account
@@ -126,6 +136,14 @@ struct ServerSwitchPrompt {
         generation += 1
         shown = nil
         return open(link)
+    }
+
+    /// Replaces the request shown, and the switch `router` holds to ask about, for a newer
+    /// arrival that may open nothing: a continued Handoff activity (``SceneLinks/handoffArrivals``).
+    @MainActor mutating func supersede(in router: Router) {
+        generation += 1
+        shown = nil
+        router.pendingServerSwitch = nil
     }
 
     mutating func present(_ link: DeepLink, for connection: ServerConnectionDTO) {

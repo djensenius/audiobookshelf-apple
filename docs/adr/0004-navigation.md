@@ -331,7 +331,10 @@ IDs follow the URL rules. A present but invalid `item` or `episode` rejects the 
   - No match gives `accountNotSignedIn`: nothing opens, on no account, and the scene shows an alert saying that account isn't signed in on this device (`MessageHandoffAccountNotSignedIn`).
   - Two servers, or two users on one server, resolve to their own connections.
 - The app's `AccountSessionAdapter` forwards `connectionID(for:)` to `AccountManager` (#504). The scene resolves through `SessionLifecycle.resolve(_:)`, which asks the same source the lifecycle follows.
-- The lookup is asynchronous, so `SceneLinks` orders the links by arrival. A Handoff activity reserves its place when it arrives (`reserveArrival()`) and is kept with the gate and link epoch from that moment. If another link arrived while it resolved, the newer link wins and the activity's link is dropped. If the session changed meanwhile, the old epoch drops the link, as for any waiting link.
+- The scene resolves after the launch: `SessionLifecycle.resolve(_:)` awaits `start()` before the lookup, because on a cold launch the activity can arrive before `AccountManager` has loaded its saved connections. The activity keeps the arrival, gate and epoch from when it arrived, so if the launch ends signed out it does nothing, as a URL received then would.
+- The lookup is asynchronous, so `SceneLinks` orders the links by arrival. A Handoff activity reserves its place when it arrives (`reserveArrival()`) and is kept with the gate and link epoch from that moment.
+  - It is the newest link even if it turns out to open nothing, so on arrival it drops the waiting link and a confirmed switch's link, and the host drops the server switch its dialog or router asks about (`handoffArrivals`, `ServerSwitchPrompt.supersede(in:)`).
+  - Its result is stale, and does nothing, if another link arrived while it resolved (the newer link wins) or the session changed (the epoch moved on). That holds for both results: a stale link isn't kept, not even for a confirmed switch's next account, and a stale `accountNotSignedIn` shows no alert.
 - Publishing from the player is a follow-up (#219).
 
 ### State restoration

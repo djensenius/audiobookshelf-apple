@@ -119,15 +119,16 @@ struct RootView: View {
 
     /// Resolves the activity's account to a connection here (ADR 0004, "Handoff"), then lets its
     /// link wait as if it had arrived when the activity did; or, when that account isn't signed
-    /// in here, opens nothing and says so.
+    /// in here, opens nothing and says so. It replaces the older links when it arrives; a result
+    /// a newer link or a session change made stale does nothing (``SceneLinks``).
     private func receive(_ handoff: HandoffActivity) {
         let arrival = links.reserveArrival()
         let (gate, epoch) = (lifecycle.gate, lifecycle.linkEpoch)
         Task {
             let resolution = await lifecycle.resolve(handoff)
-            if links.receive(resolution, gate: gate, epoch: epoch, arrival: arrival) != nil {
-                showsHandoffAccountMissing = true
-            }
+            let missing = links.receive(
+                resolution, gate: gate, epoch: epoch, arrival: arrival, currentEpoch: lifecycle.linkEpoch)
+            if missing != nil { showsHandoffAccountMissing = true }
         }
     }
 
@@ -166,7 +167,8 @@ struct RootView: View {
                         beginSwitch: { links.beginSwitch(with: $0, epoch: lifecycle.linkEpoch) },
                         finishSwitch: {
                             links.finishSwitch($0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
-                        })
+                        }),
+                    handoffArrivals: links.handoffArrivals
                 )
                 .environment(\.imagePipeline, imagePipeline)
             }
