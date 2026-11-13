@@ -2210,6 +2210,7 @@ private struct CancelledAuthenticator: WebAuthenticator {
             : try await manager.authenticate(local: validated, username: "david", password: "pw")
         #expect(manager.state == .signedOut && manager.activeConnection == nil && manager.client == nil)
         #expect(manager.connections.isEmpty && harness.keychain.isEmpty)
+        #expect(manager.credentialsRevision == 0)
         #expect(try await harness.store.connectionToRestore() == nil)
 
         try await manager.activate(signIn)
@@ -2246,6 +2247,7 @@ private struct CancelledAuthenticator: WebAuthenticator {
         let firstID = try await signIn(manager, to: FakeServer())
         let state = manager.state
         let session = try harness.session(firstID)
+        let revision = manager.credentialsRevision
         let server = FakeServer(userId: "usr-2")
         let validated = try await validate(server)
 
@@ -2261,7 +2263,7 @@ private struct CancelledAuthenticator: WebAuthenticator {
         }
         #expect(manager.state == state && manager.activeConnection?.id == firstID && manager.lastError == nil)
         #expect(manager.connections.map(\.id) == [firstID])
-        #expect(try harness.session(firstID) == session)
+        #expect(try harness.session(firstID) == session && manager.credentialsRevision == revision)
         #expect(server.requests("/logout").isEmpty)
     }
 
