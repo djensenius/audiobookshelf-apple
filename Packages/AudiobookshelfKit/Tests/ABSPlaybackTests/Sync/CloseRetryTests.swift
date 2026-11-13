@@ -196,6 +196,37 @@ struct CloseRetryTests {
         #expect(try await f.listened("session-1") == 15)
     }
 
+    /// The item is marked finished while session 1's close waits to be resent. A resend carries
+    /// the old position, which un-finishes the item on the server unless the row's position
+    /// PATCH and its finished PATCH reached the server first. So a pass whose PATCH for the row
+    /// fails leaves the close for the next drain, which sends both PATCHes before it.
+    @Test(arguments: [false, true])
+    func aResendWaitsForItsRowsPatches(patchFails: Bool) async throws {
+        let f = try CloseRetryFixture()
+        try await f.stopSessionOne(.unapplied)
+        #expect(try await f.serverTime() == 15)
+        try await f.model.update(f.client, itemID: "a", episodeID: nil, .finished(true))
+        // The action's local hook runs once the server accepted it.
+        try await f.s.store.recordEdit(ProgressEdit(isFinished: true), for: f.key, now: f.s.h.clock.now + 1)
+        if patchFails { f.s.service.state.withLock { $0.patchErrors = [.http(status: 500, message: nil)] } }
+
+        await f.drainWhenDue()
+
+        let server = try #require(try await f.model.fetchProgress(f.client, itemID: "a", episodeID: nil))
+        if patchFails {
+            #expect(f.s.service.closes.isEmpty)
+            #expect(server.isFinished && server.currentTime == 15)
+            #expect(try await f.queued().map(\.sessionID) == ["session-1"])
+            await f.drainWhenDue()
+        }
+        #expect(f.s.service.closes.map(\.id) == ["session-1"])
+        let log = f.s.service.log.filter { $0 == "patch a" || $0 == "close session-1" }
+        #expect(log.suffix(3) == ["patch a", "patch a", "close session-1"])
+        let patches = f.s.service.patches.suffix(2).map(\.update)
+        #expect(patches.map(\.currentTime) == [20, nil] && patches.map(\.isFinished) == [nil, true])
+        #expect(try await f.queued().isEmpty)
+    }
+
     /// A resend's attempt time is saved before it reaches the server, as the coordinator's
     /// attempt is, so a relaunch while it is out waits for it. One that never reached the server
     /// (no connection to the host) keeps the previous attempt's time.
