@@ -1,5 +1,6 @@
 import ABSAppModel
 import ABSCore
+import ABSData
 import ABSUI
 import Foundation
 
@@ -21,16 +22,22 @@ extension PlaylistGroupKind: GroupScreenKind {
 }
 
 /// What play-all offers on a collection or playlist: legacy shows Play while any member is playable, and plays the
-/// first playable member that isn't finished.
+/// first playable member that isn't finished. While one of the members plays, the button is Pause and pauses it.
 struct GroupPlayAll: Hashable {
     /// The member Play starts; `nil` when every playable member is finished. Legacy's Play then does nothing; here
     /// it is disabled and its hint says why (``hintKey``).
     let next: GroupMember?
-    /// There is a member to play and a player to play it.
+    /// There is a member to play and a player to play it, or a member playing to pause.
     let isEnabled: Bool
+    /// The member playing now, which the button pauses; `nil` while none plays.
+    var playing: GroupMember?
+
+    /// The button's title: Pause while a member plays, else Play.
+    var titleKey: String { playing == nil ? "ButtonPlay" : "ButtonPause" }
+    var systemImage: String { playing == nil ? "play.fill" : "pause.fill" }
 
     /// The hint of a Play disabled because every playable member is finished.
-    var hintKey: String? { next == nil ? "MessageGroupAllFinished" : nil }
+    var hintKey: String? { playing == nil && next == nil ? "MessageGroupAllFinished" : nil }
 }
 
 /// What the collection and playlist screens decide, kept out of the views so app tests cover it.
@@ -125,27 +132,44 @@ enum GroupPresentation {
     }
 
     /// Play-all for the model's group; `nil` (no button) until it has loaded or when no member is playable.
+    ///
+    /// - Parameters:
+    ///   - nowPlaying: The player's media (`CurrentPlayback.mediaKey`); a member of the group on the connection
+    ///     `serverID` makes the button Pause while `isPlaying`.
     @MainActor
-    static func playAll<Kind>(of model: GroupDetailModel<Kind>, canPlay: Bool) -> GroupPlayAll? {
+    static func playAll<Kind>(
+        of model: GroupDetailModel<Kind>, canPlay: Bool, nowPlaying: MediaKey? = nil, isPlaying: Bool = false,
+        serverID: UUID? = nil
+    ) -> GroupPlayAll? {
         guard let members = model.detail?.members, !model.playTargets.isEmpty else { return nil }
         let next = model.nextToPlay.flatMap { target in members.first { $0.target == target } }
-        return GroupPlayAll(next: next, isEnabled: canPlay && next != nil)
+        let playing = nowPlaying.flatMap { key -> GroupMember? in
+            guard isPlaying, key.serverConnectionID == serverID else { return nil }
+            let target = GroupPlayTarget(itemID: key.libraryItemId, episodeID: key.episodeId)
+            return members.first { $0.target == target }
+        }
+        return GroupPlayAll(next: next, isEnabled: playing != nil || (canPlay && next != nil), playing: playing)
     }
 
-    /// Play as VoiceOver reads it: the action, then what it plays.
+    /// The button as VoiceOver reads it: the action, then what it plays or pauses.
     static func playAllAccessibilityLabel(_ playAll: GroupPlayAll) -> String {
-        [L10n.string("ButtonPlay"), playAll.next?.summary.title].compactMap(\.self).joined(separator: ", ")
+        [L10n.string(playAll.titleKey), (playAll.playing ?? playAll.next)?.summary.title].compactMap(\.self)
+            .joined(separator: ", ")
     }
 
-    /// Plays the member play-all starts through `play`, like a card's Play.
+    /// Pauses through `pause` while a member plays; else plays the member play-all starts through `play`, like a
+    /// card's Play.
     ///
-    /// Legacy plays only that member, and Play becomes Pause while one of the group's members plays.
-    /// TODO(#354): queue the playable members after it, and show Pause, once the app has a `PlaybackQueue` and the
-    /// player's state.
+    /// Legacy plays only that member. TODO(#354): queue the playable members after it once the app has a
+    /// `PlaybackQueue`.
     ///
-    /// - Returns: The failure message's key; `nil` when it started, was cancelled or had nothing to play.
+    /// - Returns: The failure message's key; `nil` when it paused, started, was cancelled or had nothing to play.
     @MainActor
-    static func performPlayAll(_ playAll: GroupPlayAll, play: PlayItemAction?) async -> String? {
+    static func performPlayAll(_ playAll: GroupPlayAll, play: PlayItemAction?, pause: () -> Void) async -> String? {
+        if playAll.playing != nil {
+            pause()
+            return nil
+        }
         guard playAll.isEnabled, let next = playAll.next else { return nil }
         return await ItemCardActions.perform(.play, on: next.summary, actions: NoOpItemActions(), play: play)
     }

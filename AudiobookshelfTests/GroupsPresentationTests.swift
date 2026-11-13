@@ -1,6 +1,7 @@
 import ABSAPI
 import ABSAppModel
 import ABSCore
+import ABSData
 import ABSUI
 import Foundation
 import Synchronization
@@ -102,6 +103,18 @@ private func finished(_ itemID: String, episodeID: String? = nil, _ isFinished: 
     MediaProgress(
         id: "mp_\(itemID)_\(episodeID ?? "")", libraryItemId: itemID, episodeId: episodeID,
         progress: isFinished ? 1 : 0.5, isFinished: isFinished)
+}
+
+/// A pause for play-all calls that must play rather than pause.
+private func unexpectedPause() {
+    Issue.record("Play-all paused instead of playing")
+}
+
+/// The media key of `itemID` (and `episodeID`) on the test account's connection.
+private func playing(_ itemID: String, episodeID: String? = nil, on connectionID: UUID = account.connectionID)
+    -> MediaKey
+{
+    MediaKey(serverConnectionID: connectionID, libraryItemId: itemID, episodeId: episodeID)
 }
 
 @MainActor
@@ -238,7 +251,7 @@ private func finished(_ itemID: String, episodeID: String? = nil, _ isFinished: 
                 #expect(startTime == nil)
                 played.withLock { $0.append(GroupPlayTarget(itemID: itemID, episodeID: episodeID)) }
             }
-            #expect(await GroupPresentation.performPlayAll(playAll, play: play) == nil)
+            #expect(await GroupPresentation.performPlayAll(playAll, play: play, pause: unexpectedPause) == nil)
             #expect(played.withLock { $0 } == [GroupPlayTarget(itemID: SampleLibrary.podcast.id, episodeID: "ep_1")])
 
             #expect(playAll.hintKey == nil)
@@ -249,8 +262,88 @@ private func finished(_ itemID: String, episodeID: String? = nil, _ isFinished: 
             #expect(playAll == GroupPlayAll(next: nil, isEnabled: false))
             #expect(playAll.hintKey == "MessageGroupAllFinished")
             #expect(GroupPresentation.playAllAccessibilityLabel(playAll) == L10n.string("ButtonPlay"))
-            #expect(await GroupPresentation.performPlayAll(playAll, play: play) == nil)
+            #expect(await GroupPresentation.performPlayAll(playAll, play: play, pause: unexpectedPause) == nil)
             #expect(played.withLock { $0.count } == 1)
+        }
+    }
+
+    @Test func playingMemberBookMakesPlayPause() async throws {
+        try await withStore { store, services in
+            let model = CollectionDetailModel(id: "col_classics", service: services, cache: store.progress)
+            await model.loadIfNeeded()
+            let frankenstein = playing(SampleLibrary.frankenstein.id)
+
+            // Pause stays enabled while a start is in flight or there is no Play action.
+            let playAll = try #require(
+                GroupPresentation.playAll(
+                    of: model, canPlay: false, nowPlaying: frankenstein, isPlaying: true,
+                    serverID: account.connectionID))
+            #expect(playAll.playing?.target == GroupPlayTarget(itemID: SampleLibrary.frankenstein.id))
+            #expect(playAll.next?.target == GroupPlayTarget(itemID: SampleLibrary.prideAndPrejudice.id))
+            #expect(playAll.isEnabled)
+            #expect(playAll.titleKey == "ButtonPause")
+            #expect(playAll.systemImage == "pause.fill")
+            #expect(playAll.hintKey == nil)
+            #expect(
+                GroupPresentation.playAllAccessibilityLabel(playAll)
+                    == "\(L10n.string("ButtonPause")), Frankenstein; or, The Modern Prometheus")
+
+            var pauses = 0
+            let play = PlayItemAction { _, _, _ in Issue.record("Pause played") }
+            #expect(await GroupPresentation.performPlayAll(playAll, play: play, pause: { pauses += 1 }) == nil)
+            #expect(pauses == 1)
+        }
+    }
+
+    @Test func playingMemberEpisodeMakesPlayPause() async throws {
+        try await withStore { store, services in
+            let model = PlaylistDetailModel(id: "pl_commute", service: services, cache: store.progress)
+            await model.loadIfNeeded()
+
+            let episode = playing(SampleLibrary.podcast.id, episodeID: playableEpisode.id)
+            let playAll = try #require(
+                GroupPresentation.playAll(
+                    of: model, canPlay: true, nowPlaying: episode, isPlaying: true, serverID: account.connectionID))
+            #expect(playAll.playing?.target == GroupPlayTarget(itemID: SampleLibrary.podcast.id, episodeID: "ep_1"))
+            #expect(playAll.titleKey == "ButtonPause")
+            #expect(
+                GroupPresentation.playAllAccessibilityLabel(playAll)
+                    == "\(L10n.string("ButtonPause")), \(playableEpisode.title)")
+
+            // Another episode of the same podcast isn't a member.
+            let other = playing(SampleLibrary.podcast.id, episodeID: "ep_other")
+            let notMember = try #require(
+                GroupPresentation.playAll(
+                    of: model, canPlay: true, nowPlaying: other, isPlaying: true, serverID: account.connectionID))
+            #expect(notMember.playing == nil)
+            #expect(notMember.titleKey == "ButtonPlay")
+        }
+    }
+
+    @Test func nonMemberPausedMemberOrOtherConnectionKeepsPlay() async throws {
+        try await withStore { store, services in
+            let model = CollectionDetailModel(id: "col_classics", service: services, cache: store.progress)
+            await model.loadIfNeeded()
+            let member = playing(SampleLibrary.frankenstein.id)
+            let cases: [(MediaKey?, Bool, UUID?)] = [
+                (playing(SampleLibrary.emma.id), true, account.connectionID),
+                (member, false, account.connectionID),
+                (playing(SampleLibrary.frankenstein.id, on: UUID()), true, account.connectionID),
+                (member, true, nil),
+                (nil, true, account.connectionID),
+            ]
+            for (key, isPlaying, serverID) in cases {
+                let playAll = try #require(
+                    GroupPresentation.playAll(
+                        of: model, canPlay: true, nowPlaying: key, isPlaying: isPlaying, serverID: serverID))
+                #expect(playAll.playing == nil)
+                #expect(playAll.titleKey == "ButtonPlay")
+                #expect(playAll.systemImage == "play.fill")
+                #expect(playAll.next?.target == GroupPlayTarget(itemID: SampleLibrary.prideAndPrejudice.id))
+                #expect(
+                    GroupPresentation.playAllAccessibilityLabel(playAll)
+                        == "\(L10n.string("ButtonPlay")), Pride and Prejudice")
+            }
         }
     }
 
@@ -298,9 +391,11 @@ private func finished(_ itemID: String, episodeID: String? = nil, _ isFinished: 
             let playAll = try #require(GroupPresentation.playAll(of: model, canPlay: true))
             #expect(playAll.next?.target.itemID == SampleLibrary.prideAndPrejudice.id)
             let failing = PlayItemAction { _, _, _ in throw Failure() }
-            #expect(await GroupPresentation.performPlayAll(playAll, play: failing) == "MessagePlaybackStartFailed")
+            #expect(
+                await GroupPresentation.performPlayAll(playAll, play: failing, pause: unexpectedPause)
+                    == "MessagePlaybackStartFailed")
             let cancelled = PlayItemAction { _, _, _ in throw CancellationError() }
-            #expect(await GroupPresentation.performPlayAll(playAll, play: cancelled) == nil)
+            #expect(await GroupPresentation.performPlayAll(playAll, play: cancelled, pause: unexpectedPause) == nil)
         }
     }
 
@@ -315,7 +410,7 @@ private func finished(_ itemID: String, episodeID: String? = nil, _ isFinished: 
                     GroupPresentation.detailTitleKey(kind), GroupPresentation.membersHeaderKey(kind),
                     GroupPresentation.tab(kind).titleKey,
                 ]
-            } + ["LabelGroupOneItem", "LabelGroupItemCount", "ButtonPlay", "MessageGroupAllFinished"]
+            } + ["LabelGroupOneItem", "LabelGroupItemCount", "ButtonPlay", "ButtonPause", "MessageGroupAllFinished"]
         for key in keys {
             #expect(L10n.string(key) != key, "\(key) isn't in the catalog")
         }
