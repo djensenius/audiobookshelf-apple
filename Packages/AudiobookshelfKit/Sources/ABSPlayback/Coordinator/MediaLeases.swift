@@ -19,6 +19,7 @@ public final class MediaLeases {
     }
 
     private var holds: [MediaKey: [UUID: Holder]] = [:]
+    private var actionGenerations: [MediaKey: Int] = [:]
     private var waiters: [MediaKey: [UUID: CheckedContinuation<Void, Never>]] = [:]
 
     public init() {}
@@ -27,6 +28,7 @@ public final class MediaLeases {
     public func acquire(_ key: MediaKey, for holder: Holder) -> MediaLease {
         let id = UUID()
         holds[key, default: [:]][id] = holder
+        if holder == .progressAction { actionGenerations[key, default: 0] += 1 }
         return MediaLease { [weak self] in self?.release(id, of: key) }
     }
 
@@ -34,6 +36,12 @@ public final class MediaLeases {
     public func acquire(_ key: MediaKey, for holder: Holder, after other: Holder) async -> MediaLease {
         await waitUntilFree(key, of: other)
         return acquire(key, for: holder)
+    }
+
+    /// Changes each time a ``Holder/progressAction`` lease on `key` is taken or released. Work read
+    /// before an action began, or while one held the key, has a different value from now on.
+    public func actionGeneration(of key: MediaKey) -> Int {
+        actionGenerations[key] ?? 0
     }
 
     public func isHeld(_ key: MediaKey, by holder: Holder) -> Bool {
@@ -59,7 +67,8 @@ public final class MediaLeases {
     }
 
     private func release(_ id: UUID, of key: MediaKey) {
-        guard holds[key]?.removeValue(forKey: id) != nil else { return }
+        guard let holder = holds[key]?.removeValue(forKey: id) else { return }
+        if holder == .progressAction { actionGenerations[key, default: 0] += 1 }
         if holds[key]?.isEmpty == true { holds[key] = nil }
         // Each waiter checks its own holder again.
         let resumed = waiters.removeValue(forKey: key) ?? [:]

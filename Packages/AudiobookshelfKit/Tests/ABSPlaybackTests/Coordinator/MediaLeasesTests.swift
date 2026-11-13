@@ -25,6 +25,20 @@ struct MediaLeasesTests {
         #expect(!leases.isHeld(a, by: .closingSession))
     }
 
+    @Test func theActionGenerationChangesAsAProgressActionTakesAndReleasesItsKey() {
+        let closing = leases.acquire(a, for: .closingSession)
+        closing.release()
+        #expect(leases.actionGeneration(of: a) == 0)
+
+        let action = leases.acquire(a, for: .progressAction)
+        let held = leases.actionGeneration(of: a)
+        #expect(held != 0)
+        action.release()
+        action.release()
+        #expect(leases.actionGeneration(of: a) == held + 1)
+        #expect(leases.actionGeneration(of: MediaKey(serverConnectionID: UUID(), libraryItemId: "a")) == 0)
+    }
+
     @Test func waitingEndsOnceEveryLeaseOfTheHolderIsReleased() async {
         let first = leases.acquire(a, for: .closingSession)
         let second = leases.acquire(a, for: .closingSession)

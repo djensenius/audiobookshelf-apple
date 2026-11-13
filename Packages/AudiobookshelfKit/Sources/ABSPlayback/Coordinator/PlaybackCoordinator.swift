@@ -227,6 +227,8 @@ public final class PlaybackCoordinator {
     /// the next stop, or a failed start, deactivates it.
     @ObservationIgnored private var keepsAudioSession = false
     @ObservationIgnored private var closeOperations: [PlaybackCloseOperation] = []
+    /// Each prepared item's ``MediaLeases/actionGeneration(of:)`` as its preparation began (#368).
+    @ObservationIgnored private var preparedActionGenerations: [MediaKey: Int] = [:]
     @ObservationIgnored private var startTask: Task<StartedSession, any Error>?
     @ObservationIgnored private var resolvingTasks: [UUID: Task<ResolvedStream, any Error>] = [:]
     @ObservationIgnored private var pendingOpenings: [UUID: PlaybackCloseResult<Void>] = [:]
@@ -1120,6 +1122,8 @@ public final class PlaybackCoordinator {
     /// What a start fetches before `/play` (the streaming decision and server progress, after
     /// capturing local progress as a start does), done ahead of time for the item to follow.
     func prepareStart(for key: MediaKey) async -> PreparedNextItem {
+        let actions = mediaLeases?.actionGeneration(of: key)
+        defer { preparedActionGenerations[key] = actions }
         let capture = try? await progressStore.captureStartProgress(for: key)
         let progress = await Self.serverProgress(sessions, itemID: key.libraryItemId, episodeID: key.episodeId)
         let decision = await policy.streamingDecision()
@@ -1371,8 +1375,8 @@ public final class PlaybackCoordinator {
     /// the close sends or saves settles, whatever the outcome: its `/close`, the session's `/sync`
     /// in flight (which `/close` stops waiting for after ``closeWaitTimeout``), and its captured
     /// position write. Each resolves once its request returns or its save ends, so the hold ends.
-    private func holdUntilSettled(_ key: MediaKey, operation: PlaybackCloseOperation?) {
-        guard let mediaLeases, let operation else { return }
+    private func holdUntilSettled(_ key: MediaKey, operation: PlaybackCloseOperation) {
+        guard let mediaLeases else { return }
         let lease = mediaLeases.acquire(key, for: .closingSession)
         Task { @MainActor in
             _ = try? await operation.transport.wait()
@@ -1386,13 +1390,16 @@ public final class PlaybackCoordinator {
     private func closeInBackground(
         sessionID: String, report: PlaybackSyncReport? = nil,
         handoff: PlaybackCloseHandoff? = nil, wasLoaded: Bool = false
-    ) -> PlaybackCloseOperation? {
-        guard closingSessionIDs.insert(sessionID).inserted else {
-            // The server reused an ID whose close is pending: that close covers it, not this one.
-            handoff?.transport.resolve(.success(false))
-            return nil
-        }
+    ) -> PlaybackCloseOperation {
         let operation = PlaybackCloseOperation(sessionID: sessionID, wasLoaded: wasLoaded, handoff: handoff)
+        guard closingSessionIDs.insert(sessionID).inserted else {
+            // The server reused an ID whose close is pending: that close covers it, so this one sends
+            // no `/close`. Its handoff's `/sync` in flight and position save are still its own, so the
+            // returned operation keeps its media held until they settle (#368).
+            operation.transport.resolve(.success(false))
+            operation.dispatched.resolve(.success(()))
+            return operation
+        }
         closeOperations.append(operation)
         guard permitsCloseTransport else {
             operation.transport.resolve(.success(false))
@@ -1545,6 +1552,11 @@ public final class PlaybackCoordinator {
         let progressStore = self.progressStore
         let key = MediaKey(
             serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
+        // A progress action on the item since its preparation began (#368) changed its progress: the
+        // prepared server progress could put back what the action discarded or reset, so it's
+        // fetched again, as an unprepared start does.
+        let actions = preparedActionGenerations.removeValue(forKey: key)
+        let prepared = prepared.flatMap { actions == mediaLeases?.actionGeneration(of: key) ? $0 : nil }
         let task = Task { @MainActor in
             try Task.checkCancellation()
             if let prepared {
