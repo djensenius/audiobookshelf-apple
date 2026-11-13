@@ -28,12 +28,14 @@ struct ItemGridFold: Equatable, Sendable {
 }
 
 /// An ``ItemGrid``'s columns around a fold (``ItemGridFold``): as many on each side, of one width, with a gap
-/// covering the fold, so the count is even and no card straddles it. A side too narrow for a card is left empty.
+/// covering the fold, so the count is even and no card straddles it. A side too narrow for a card is left empty;
+/// when neither side fits one, narrower cards still keep to their sides.
 struct ItemGridFoldLayout: Equatable, Sendable {
     /// The columns before the fold and after it.
     let leadingColumns: Int
     let trailingColumns: Int
-    /// Every column's width, at least the minimum cell width.
+    /// Every column's width: at least the minimum cell width, unless neither side fits one or the fold is wider than
+    /// ``ItemGridMetrics/foldReservation``.
     let columnWidth: CGFloat
     /// The space between columns on the same side.
     let spacing: CGFloat
@@ -52,50 +54,77 @@ struct ItemGridFoldLayout: Equatable, Sendable {
 }
 
 extension ItemGridMetrics {
-    /// The columns of an ``ItemGrid`` with `spacing` around `fold` at `dynamicTypeSize`; `nil` when neither side
-    /// fits a card, so the grid keeps its adaptive columns.
+    /// The gap kept over a fold whatever its width in the current pose. Lying flat its region has no width and folded
+    /// it has some; keeping the same gap for both leaves every card where it is as the display folds and unfolds. A
+    /// fold wider than this widens the gap and narrows the columns, but keeps their count.
+    static let foldReservation = ABSSpacing.xxLarge
+
+    /// The columns of an ``ItemGrid`` with `spacing` around `fold` at `dynamicTypeSize`, none of them over the fold.
+    ///
+    /// The count comes from the room beside ``foldReservation`` (or `spacing`, if wider) centred on the fold, so it is
+    /// the same for any fold width at the same grid width; the width comes from the room beside the actual gap.
+    /// - Each side gets as many columns as the narrower side fits at the minimum cell width.
+    /// - If only one side fits one, that side gets its columns and the other stays empty.
+    /// - If neither does, the cards get narrower than the minimum instead of crossing the fold: one on each side, unless
+    ///   the narrower side's would be under half the minimum and under half the wider side's room; then one on the
+    ///   wider side.
+    ///
+    /// `nil` only when neither side has any room, so the grid keeps its adaptive columns.
     static func foldLayout(
         _ fold: ItemGridFold, dynamicTypeSize: DynamicTypeSize, spacing: CGFloat = ABSSpacing.large
     ) -> ItemGridFoldLayout? {
         let padding = ABSSpacing.large
         let minimum = minimumCellWidth(for: dynamicTypeSize)
-        // The gap is at least the usual spacing, centred on a fold narrower than that (a flat display's).
-        let foldSpacing = max(spacing, fold.maxX - fold.minX)
-        let gapStart = (fold.minX + fold.maxX - foldSpacing) / 2
-        let gapEnd = gapStart + foldSpacing
-        let leadingSpace = gapStart - padding
-        let trailingSpace = fold.width - padding - gapEnd
+        let centre = (fold.minX + fold.maxX) / 2
+        let reserved = max(spacing, foldReservation)
+        // Centred on the fold and at least the reservation, so a flat display's zero-width region gets a folded one's.
+        let foldSpacing = max(reserved, fold.maxX - fold.minX)
+        let gapStart = centre - foldSpacing / 2
+        let gapEnd = centre + foldSpacing / 2
+        func room(beside gap: CGFloat) -> (leading: CGFloat, trailing: CGFloat) {
+            (centre - gap / 2 - padding, fold.width - padding - centre - gap / 2)
+        }
+        let planned = room(beside: reserved)
+        let actual = room(beside: foldSpacing)
 
         func fitting(_ space: CGFloat) -> Int {
             let columns = ((space + spacing) / (minimum + spacing)).rounded(.down)
             return columns.isFinite && columns > 0 ? Int(columns) : 0
         }
+        let leadingFit = fitting(planned.leading)
+        let trailingFit = fitting(planned.trailing)
+        let narrower = min(planned.leading, planned.trailing)
+        let wider = max(planned.leading, planned.trailing)
+        let counts: (leading: Int, trailing: Int)
+        if min(leadingFit, trailingFit) > 0 {
+            counts = (min(leadingFit, trailingFit), min(leadingFit, trailingFit))
+        } else if leadingFit > 0 || trailingFit > 0 {
+            counts = (leadingFit, trailingFit)
+        } else if wider <= 0 {
+            return nil
+        } else if narrower >= min(minimum, wider) / 2 {
+            counts = (1, 1)
+        } else {
+            counts = planned.leading >= planned.trailing ? (1, 0) : (0, 1)
+        }
+
+        // The narrower side with columns sets their width, so every card matches; the other side's extra goes
+        // outside its columns.
         func width(of columns: Int, in space: CGFloat) -> CGFloat {
             (space - CGFloat(columns - 1) * spacing) / CGFloat(columns)
         }
-
-        let perSide = min(fitting(leadingSpace), fitting(trailingSpace))
-        if perSide > 0 {
-            // The narrower side sets the width, so both sides' cards match; the wider side's extra goes outside.
-            let columnWidth = width(of: perSide, in: min(leadingSpace, trailingSpace))
-            let side = CGFloat(perSide) * columnWidth + CGFloat(perSide - 1) * spacing
-            return ItemGridFoldLayout(
-                leadingColumns: perSide, trailingColumns: perSide, columnWidth: columnWidth, spacing: spacing,
-                foldSpacing: foldSpacing, leadingInset: gapStart - side, trailingInset: fold.width - gapEnd - side)
+        let widths =
+            (counts.leading > 0 ? [width(of: counts.leading, in: actual.leading)] : [])
+            + (counts.trailing > 0 ? [width(of: counts.trailing, in: actual.trailing)] : [])
+        guard let columnWidth = widths.min(), columnWidth.isFinite, columnWidth > 0 else { return nil }
+        func extent(of columns: Int) -> CGFloat {
+            CGFloat(columns) * columnWidth + CGFloat(columns - 1) * spacing
         }
-        let leading = fitting(leadingSpace)
-        if leading > 0 {
-            return ItemGridFoldLayout(
-                leadingColumns: leading, trailingColumns: 0, columnWidth: width(of: leading, in: leadingSpace),
-                spacing: spacing, foldSpacing: foldSpacing, leadingInset: padding,
-                trailingInset: fold.width - gapStart)
-        }
-        let trailing = fitting(trailingSpace)
-        if trailing > 0 {
-            return ItemGridFoldLayout(
-                leadingColumns: 0, trailingColumns: trailing, columnWidth: width(of: trailing, in: trailingSpace),
-                spacing: spacing, foldSpacing: foldSpacing, leadingInset: gapEnd, trailingInset: padding)
-        }
-        return nil
+        return ItemGridFoldLayout(
+            leadingColumns: counts.leading, trailingColumns: counts.trailing, columnWidth: columnWidth,
+            spacing: spacing, foldSpacing: foldSpacing,
+            leadingInset: counts.leading > 0 ? gapStart - extent(of: counts.leading) : gapEnd,
+            trailingInset: counts.trailing > 0
+                ? fold.width - gapEnd - extent(of: counts.trailing) : fold.width - gapStart)
     }
 }

@@ -88,8 +88,9 @@ private struct ItemGridFoldReader: ViewModifier {
         #if os(iOS)
             if #available(iOS 27.1, *) {
                 content
-                    // The measured width is the offered one, whatever the columns add up to.
-                    .frame(maxWidth: .infinity)
+                    // The measured width is the offered one, whatever the columns add up to, even when the fixed
+                    // columns of a wider proposal would otherwise hold it wider than a narrower one.
+                    .frame(minWidth: 0, maxWidth: .infinity)
                     .onGeometryChange(for: ItemGridFold?.self) { proxy in
                         ItemGridFold(
                             width: proxy.size.width,
