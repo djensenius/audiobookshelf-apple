@@ -919,6 +919,31 @@ import Testing
         #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
     }
 
+    /// A recreated session that deletes the resume data an earlier activation couldn't releases
+    /// that connection's complete records, as it removes the marker.
+    @Test func aRecreatedSessionReleasesTheRecordsItsCleanupHeld() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .downloading, partState: .completed)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        let blob = harness.vault.fileURL(partID: partID)
+        let folder = blob.deletingLastPathComponent().path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder) }
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        #expect(try await harness.store.record(id: record.id) != nil)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder)
+        await engine.delegate.post(.sessionInvalidated)
+
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(try await harness.store.record(id: record.id) == nil)
+        #expect(!FileManager.default.fileExists(atPath: blob.path(percentEncoded: false)))
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+    }
+
     /// Resume data that couldn't be deleted, because the downloads couldn't be read, leaves the
     /// quiesce unfinished, so it's tried again.
     @Test func quiesceThatCouldNotDeleteTheResumeDataReportsItDidNotFinish() async throws {

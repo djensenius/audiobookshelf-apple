@@ -828,6 +828,9 @@ public actor DownloadEngine {
         for connectionID in marked where !quiescingConnections.contains(connectionID) {
             if await discardResumeData(connectionID: connectionID) { discarded.insert(connectionID) }
         }
+        // A hold an earlier activation left goes once its data is deleted, unless a quiesce began
+        // meanwhile: that one may seal more, and releases the hold once it has deleted it.
+        undiscardedSignOuts.subtract(discarded.filter { !hasQuiesced(connectionID: $0, since: generation) })
         undiscardedSignOuts.formUnion(marked.subtracting(discarded).subtracting(quiescingConnections))
         await finaliseCompletedRecords()
         let session = makeSession(delegate)
