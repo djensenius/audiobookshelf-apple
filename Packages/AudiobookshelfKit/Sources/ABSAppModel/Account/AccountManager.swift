@@ -146,6 +146,9 @@ public final class AccountManager {
     /// A test seam: a sign-in or switch awaits it just before marking its connection used, so a
     /// test can expire the session in that window.
     @ObservationIgnored var willMarkUsed: (@MainActor () async -> Void)?
+    /// A test seam: a call that saves an expiry's skipped or undone sign-out awaits it just before
+    /// saving, so a test can sign in again in that window.
+    @ObservationIgnored var willSaveSignOutOfExpiry: (@MainActor () async -> Void)?
     /// A test seam: ``remove(_:)`` awaits it after signing out locally and finding the connection,
     /// and before deleting its session, so a test can change the state in that window.
     @ObservationIgnored var willDeleteRemovedSession: (@MainActor () async -> Void)?
@@ -913,7 +916,15 @@ public final class AccountManager {
         guard let expired = expiredGenerations[id], expired != expiredBefore,
             expired > signInGenerations[id, default: 0]
         else { return false }
-        return await saveSignOut(of: id) != nil
+        await willSaveSignOutOfExpiry?()
+        guard let savedAt = await saveSignOut(of: id) else { return false }
+        // As in `sessionExpired`: a sign-in that saved a newer session while this saved may have
+        // marked the connection used first, so clear this one by its date, unless a newer expiry
+        // signed that session out too.
+        if signInGenerations[id, default: 0] > expired, expiredGenerations[id, default: 0] <= expired {
+            _ = try? await store.clearSignedOut(id: id, savedAt: savedAt)
+        }
+        return true
     }
 
     /// Clears, once, the settings of accounts that aren't saved: ``remove(_:)`` clears them

@@ -2106,4 +2106,42 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(manager.state == .signedIn(user) && manager.activeConnection?.id == user.connectionID)
         #expect(try harness.session(firstID) != nil)
     }
+
+    /// A failed removal saves the sign-out of an expiry meanwhile; a sign-in that saves a newer
+    /// session and marks the connection used while that save is pending keeps its session usable,
+    /// even after a relaunch.
+    @Test func failedRemovalsExpirySaveDoesNotMarkANewerSignInSignedOut() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let client = try #require(manager.client)
+        let deleting = StubGate()
+        manager.willDeleteRemovedSession = { await deleting.pass() }
+        let removing = Task { try await manager.remove(id) }
+        await deleting.arrived()
+        manager.willDeleteRemovedSession = nil
+
+        // The Keychain can delete neither the expired session nor the connection's items.
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        server.revokeSession()
+        await #expect(throws: APIError.sessionExpired) { try await client.send(AuthEndpoints.authorize()) }
+        var signedInAgain = false
+        // After the removal failed, before it saves the expiry's sign-out.
+        manager.willSaveSignOutOfExpiry = {
+            manager.willSaveSignOutOfExpiry = nil
+            harness.keychain.failWrites(with: nil)
+            _ = try? await signIn(manager, to: server)
+            signedInAgain = true
+        }
+        deleting.open()
+        await #expect(throws: KeychainError(status: errSecInteractionNotAllowed)) { try await removing.value }
+
+        #expect(signedInAgain)
+        #expect(try await harness.store.connection(id: id)?.signedOutAt == nil)
+        #expect(manager.state.user?.connectionID == id)
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        #expect(relaunched.state.user?.connectionID == id && relaunched.lastError == nil)
+    }
 }
