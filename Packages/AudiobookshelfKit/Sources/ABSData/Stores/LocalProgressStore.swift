@@ -860,7 +860,7 @@ public enum SessionUploadResult: Sendable, Equatable {
         }
         for (id, listened) in dropped {
             Self.logger.notice(
-                "Dropped local session \(id, privacy: .public) with \(listened, privacy: .public) s of listening time: its progress was discarded"
+                "Dropped local session \(id, privacy: .private) with \(listened, privacy: .private) s of listening time: its progress was discarded"
             )
         }
         return Set(dropped.map(\.0))
