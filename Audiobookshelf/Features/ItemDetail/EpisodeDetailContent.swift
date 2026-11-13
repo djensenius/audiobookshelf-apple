@@ -49,7 +49,9 @@ struct EpisodeDetailContent: View {
             playButton(play)
             EpisodeDetailProgress(model: model)
         } secondary: {
-            EpisodeDetailShowNotes(html: model.showNotesHTML)
+            EpisodeDetailShowNotes(html: model.showNotesHTML, duration: episode.duration) { startTime in
+                if play.isEnabled { start(from: startTime) }
+            }
         }
         .refreshable { await model.detail.load() }
         .absBackground()
