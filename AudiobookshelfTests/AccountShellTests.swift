@@ -200,6 +200,45 @@ private final class Recorder: SessionParticipant {
         #expect(RootView.statsService(accounts, for: a) == nil)
     }
 
+    // MARK: History source
+
+    private func historyEvent(_ key: MediaKey, title: String) -> PlaybackHistoryEventDTO {
+        PlaybackHistoryEventDTO(
+            serverConnectionID: key.serverConnectionID, mediaKey: key, mediaDisplayTitle: title, name: .play,
+            type: .playback, currentTime: 60, timestamp: .now)
+    }
+
+    /// The first snapshot `source` sends for `key`.
+    private func firstSnapshot(
+        _ source: PlaybackHistoryModel.EventSource, for key: MediaKey
+    ) async throws -> [PlaybackHistoryEventDTO] {
+        for await snapshot in try await source(key) { return snapshot }
+        Issue.record("The history source ended without a snapshot")
+        return []
+    }
+
+    @Test func theShownShellReadsOnlyItsConnectionsHistory() async throws {
+        let store = PlaybackHistoryStore(modelContainer: try DataStack(location: .inMemory).container)
+        let (a, b) = (UUID(), UUID())
+        // The same item, played on two accounts' connections.
+        let mine = MediaKey(serverConnectionID: a, libraryItemId: "li_1")
+        let theirs = MediaKey(serverConnectionID: b, libraryItemId: "li_1")
+        try await store.record(historyEvent(mine, title: "Mine"))
+        try await store.record(historyEvent(theirs, title: "Theirs"))
+
+        let source = try #require(RootView.playbackHistorySource(store, serverID: a))
+        #expect(try await firstSnapshot(source, for: mine).map(\.mediaDisplayTitle) == ["Mine"])
+        // Control: the other account's events are in the store, but A's shell never reads them.
+        #expect(try await store.events(for: theirs).map(\.mediaDisplayTitle) == ["Theirs"])
+        #expect(try await firstSnapshot(source, for: theirs).isEmpty)
+        // B's shell reads its own.
+        let other = try #require(RootView.playbackHistorySource(store, serverID: b))
+        #expect(try await firstSnapshot(other, for: theirs).map(\.mediaDisplayTitle) == ["Theirs"])
+        // No shown shell, or no store: no source, and the screen shows no history.
+        #expect(RootView.playbackHistorySource(store, serverID: nil) == nil)
+        #expect(RootView.playbackHistorySource(nil, serverID: a) == nil)
+    }
+
     // MARK: Handoff
 
     @Test func handoffNamesOnlyTheShownShellsActiveAccount() async throws {
