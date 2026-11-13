@@ -6,7 +6,8 @@ import SwiftUI
 /// progress reader for item cards and rows, and item actions that run on the store's one
 /// ``ProgressItemActions`` for the session (``LibraryStore/itemActions(for:)``), so every screen
 /// and every window shares its per-item queue, and a restarted session gets fresh actions. Each
-/// shell also gets its own connection banner (``ConnectionBannerSession``).
+/// shell also gets its own connection banner (``ConnectionBannerSession``), which restores the
+/// account's session after reconnecting when given the accounts and the session lifecycle.
 @MainActor
 final class AccountShellValues {
     let store: LibraryStore
@@ -14,11 +15,11 @@ final class AccountShellValues {
     let itemActions: any ItemActionPerforming
     let connectionBanner: ConnectionBannerSession
 
-    init(store: LibraryStore) {
+    init(store: LibraryStore, accounts: AccountManager? = nil, lifecycle: SessionLifecycle? = nil) {
         self.store = store
         progressReader = BrowsePresentation.progressReader(store.progress)
         itemActions = store.sessionItemActions() ?? NoOpItemActions()
-        connectionBanner = ConnectionBannerSession(store: store)
+        connectionBanner = ConnectionBannerSession(store: store, accounts: accounts, lifecycle: lifecycle)
     }
 }
 
@@ -33,25 +34,31 @@ final class AccountShellValuesCache {
 
     /// The values for `store`, or `nil` without one (signed out, or a switch's outgoing shell,
     /// once the store serves the next account).
-    func values(for store: LibraryStore?) -> AccountShellValues? {
+    func values(
+        for store: LibraryStore?, accounts: AccountManager? = nil, lifecycle: SessionLifecycle? = nil
+    ) -> AccountShellValues? {
         guard let store else { return nil }
         if let values, values.store === store { return values }
-        let values = AccountShellValues(store: store)
+        let values = AccountShellValues(store: store, accounts: accounts, lifecycle: lifecycle)
         self.values = values
         return values
     }
 }
 
 /// The signed-in shell around `content`: injects its account's store, progress reader and item
-/// actions, or the signed-out defaults while the store doesn't serve the account.
+/// actions, or the signed-out defaults while the store doesn't serve the account. The accounts
+/// and session lifecycle in its environment let its banner restore the session on reconnect.
 struct AccountShell<Content: View>: View {
     /// The store while it serves the shell's account, `nil` otherwise.
     let store: LibraryStore?
     @ViewBuilder let content: Content
+    @Environment(AccountManager.self) private var accounts: AccountManager?
+    @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
     @State private var cache = AccountShellValuesCache()
 
     var body: some View {
-        content.modifier(AccountShellEnvironment(values: cache.values(for: store)))
+        content.modifier(
+            AccountShellEnvironment(values: cache.values(for: store, accounts: accounts, lifecycle: lifecycle)))
     }
 }
 

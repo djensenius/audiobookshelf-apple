@@ -146,6 +146,57 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.log.entries.isEmpty)
     }
 
+    /// A reconnect after coming back online runs in turn with a sign-out: one that started first
+    /// holds the sign-out's flush until it's done; one queued during a sign-out's flush doesn't
+    /// run, as the session it was for has ended.
+    @Test(.timeLimit(.minutes(1)), arguments: [true, false])
+    func aReconnectRunsInTurnWithASignOut(reconnectFirst: Bool) async throws {
+        let harness = Harness(restoredPhase: .active(identityA, isOffline: true))
+        try await harness.started()
+        let origin = try #require(harness.lifecycle.readySession)
+        let bodyGate = Gate()
+        let flushGate = Gate()
+        defer {
+            bodyGate.open()
+            flushGate.open()
+        }
+        let reconnect = { [log = harness.log, lifecycle = harness.lifecycle] in
+            Task {
+                await lifecycle.reconnect(origin) {
+                    log.record("reconnect")
+                    await bodyGate.wait()
+                    log.record("reconnected")
+                }
+            }
+        }
+
+        if reconnectFirst {
+            let reconnecting = reconnect()
+            try #require(await eventually { harness.log.entries.contains("reconnect") })
+            let signingOut = Task { await harness.lifecycle.signOut() }
+            for _ in 0..<100 { await Task.yield() }
+            #expect(harness.log.flushes.isEmpty)
+            bodyGate.open()
+            #expect(await reconnecting.value)
+            _ = await signingOut.value
+            let reconnected = try #require(harness.log.entries.firstIndex(of: "reconnected"))
+            let firstFlush = try #require(harness.log.entries.firstIndex { $0.contains(".flush") })
+            #expect(reconnected < firstFlush)
+        } else {
+            bodyGate.open()
+            harness.playback.flushGate = flushGate
+            let signingOut = Task { await harness.lifecycle.signOut() }
+            try #require(await eventually { harness.log.entries.contains("playback.flush") })
+            let reconnecting = reconnect()
+            flushGate.open()
+            _ = await signingOut.value
+            #expect(await !reconnecting.value)
+            #expect(!harness.log.entries.contains("reconnect"))
+        }
+        #expect(harness.log.count(of: "accounts.logout") == 1)
+        #expect(harness.lifecycle.gate == .connect)
+    }
+
     // MARK: Sign out
 
     @Test func signOutFlushesThenEndsInReverseThenClearsThenLogsOut() async throws {

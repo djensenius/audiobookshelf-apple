@@ -19,6 +19,8 @@ public final class ConnectionBannerModel {
 
     /// The reducer, with the banner's ``state``.
     public private(set) var reachability = ConnectionReachability()
+    /// Called with each new ``state`` as it changes, such as ``ReconnectRestorer/observe(_:)``.
+    @ObservationIgnored public var stateDidChange: (@MainActor (ConnectionBannerState) -> Void)?
 
     @ObservationIgnored private let paths: @MainActor () -> AsyncStream<NetworkPath>
     @ObservationIgnored private let ping: Ping
@@ -76,7 +78,10 @@ public final class ConnectionBannerModel {
     }
 
     func send(_ event: ConnectionReachability.Event) {
-        perform(reachability.reduce(event))
+        let previous = state
+        let effect = reachability.reduce(event)
+        if state != previous { stateDidChange?(state) }
+        perform(effect)
     }
 
     private func perform(_ effect: ConnectionReachability.Effect) {

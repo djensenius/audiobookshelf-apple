@@ -944,6 +944,81 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         await #expect(throws: APIError.sessionExpired) { try await client.send(AuthEndpoints.authorize()) }
         #expect(manager.state == .signedOut && manager.lastError == .server(.sessionExpired))
     }
+    /// A reconnect is bound to its connection: while the offline account's server is back but a
+    /// cancelled sign-in has marked another connection used, reconnecting signs the offline one in
+    /// (control: `restoreSession()` takes the other account).
+    @Test(arguments: [true, false])
+    func reconnectRestoresTheOfflineConnection(bound: Bool) async throws {
+        let harness = try Harness()
+        let first = FakeServer()
+        let second = FakeServer(userId: "usr-2")
+        let firstID = try await signIn(harness.makeManager(), to: first)
+        first.update { $0.isOffline = true }
+        let readings = Mutex<Int?>(nil)
+        // The second reading after arming is the cancelled sign-in's, marking its connection used.
+        let relaunched = harness.makeManager {
+            let reading = readings.withLock { count -> Int? in
+                count = count.map { $0 + 1 }
+                return count
+            }
+            if reading == 2 { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        await relaunched.restoreSession()
+        let user = try #require(relaunched.state.user)
+        #expect(relaunched.state == .offline(user) && user.connectionID == firstID)
+
+        let validated = try await validate(second)
+        readings.withLock { $0 = 0 }
+        let signingIn = Task { try await relaunched.connect(local: validated, username: "david", password: "pw") }
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        readings.withLock { $0 = nil }
+        let secondID = try #require(relaunched.connections.first { $0.id != firstID }?.id)
+        #expect(try await harness.store.connectionToRestore()?.id == secondID)
+        #expect(relaunched.state == .offline(user))
+
+        // Nothing for a connection that isn't the offline one.
+        let authorized = second.requests("/api/authorize").count
+        await relaunched.reconnect(secondID)
+        #expect(relaunched.state == .offline(user) && second.requests("/api/authorize").count == authorized)
+
+        first.update { $0.isOffline = false }
+        if bound {
+            await relaunched.reconnect(firstID)
+            #expect(relaunched.state == .signedIn(user) && relaunched.activeConnection?.id == firstID)
+        } else {
+            await relaunched.restoreSession()
+            #expect(relaunched.state.user?.connectionID == secondID)
+        }
+
+        // Signed in, a reconnect does nothing.
+        guard bound else { return }
+        let requests = first.requests("/api/authorize").count
+        await relaunched.reconnect(firstID)
+        #expect(relaunched.state == .signedIn(user) && first.requests("/api/authorize").count == requests)
+    }
+
+    /// Offline after a locked Keychain there's no client; once it unlocks, a reconnect reads the
+    /// saved session again and signs in with one (control: still locked, it stays offline).
+    @Test(arguments: [true, false])
+    func reconnectAfterALockedKeychain(unlocked: Bool) async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        harness.keychain.failReads(with: errSecInteractionNotAllowed)
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        let user = try #require(relaunched.state.user)
+        #expect(relaunched.state == .offline(user) && relaunched.client == nil)
+
+        if unlocked { harness.keychain.failReads(with: nil) }
+        await relaunched.reconnect(id)
+        if unlocked {
+            #expect(relaunched.state == .signedIn(user) && relaunched.client != nil)
+        } else {
+            #expect(relaunched.state == .offline(user) && relaunched.client == nil)
+            #expect(server.requests("/api/authorize").isEmpty)
+        }
+    }
 }
 
 /// Calls that overlap: the newer call wins, and signing out also ends the session of a call that
