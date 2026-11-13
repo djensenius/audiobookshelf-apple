@@ -346,4 +346,26 @@ struct PlaybackStallFallbackTests {
         #expect(engine.loads.last?.time == 100)
         #expect(coordinator.error == nil)
     }
+
+    /// A session the server lost (#184) is replaced as a transcode too: the fallback is for the play.
+    @Test func replacingAGoneSessionKeepsTheFallbacksTranscode() async throws {
+        h.recoverySleep.elapsesImmediately = true
+        await playAt600()
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.decode)))
+        await settle { service.starts.count == 2 && coordinator.isPlaying }
+        let gone = try #require(coordinator.session?.id)
+
+        // A replacement does nothing until the fallback's recovery run has ended.
+        for _ in 0..<20_000 where service.starts.count == 2 {
+            await coordinator.replaceGoneSession(gone)
+            await Task.yield()
+        }
+
+        #expect(service.forcedTranscodes == [false, true, true])
+        // An HLS source, at the same position.
+        #expect(engine.loads.last?.source.seekTolerance == 0.5)
+        #expect(engine.loads.last?.time == 600)
+        #expect(coordinator.isPlaying)
+        #expect(coordinator.error == nil)
+    }
 }

@@ -916,7 +916,8 @@ public final class PlaybackCoordinator {
     /// Replaces a session the server no longer has (its `/sync` answered 404, as after a server
     /// restart) with a new one for the same media at ``currentTime``, playing only if playback was
     /// requested: an explicit start, like recovery's rebuild, so neither server progress nor
-    /// auto-rewind moves it (#184). Does nothing unless `sessionID` is still the loaded session,
+    /// auto-rewind moves it (#184). A forced transcode (the HLS fallback) stays forced, as for a
+    /// rebuild. Does nothing unless `sessionID` is still the loaded session,
     /// or while a play waits on its streaming-policy check or recovery is rebuilding.
     public func replaceGoneSession(_ sessionID: String) async {
         guard !isRetired, phase == .loaded, session?.id == sessionID, let key = mediaKey, pendingPlayKey == nil,
@@ -926,7 +927,9 @@ public final class PlaybackCoordinator {
         // A play an interruption held still holds it on the new session (`start` takes
         // `generation + 1` at once).
         if heldPlay?.generation == generation { heldPlay?.generation = generation + 1 }
-        await start(key: key, startTime: currentTime, prepared: nil, playing: isPlaybackRequested)
+        await start(
+            key: key, startTime: currentTime, prepared: nil, playing: isPlaybackRequested,
+            forceTranscode: transcodeForced)
     }
 
     /// Ordinary user stop remains reusable and clears LastPlayed. Account end permanently
