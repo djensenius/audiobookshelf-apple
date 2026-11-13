@@ -136,7 +136,7 @@ struct ReaderContainer: View {
 }
 
 /// The loaded reader with its chrome.
-private struct ReaderContent: View {
+struct ReaderContent: View {
     let model: ReaderContainerModel
     let title: String
     let serverURL: URL?
@@ -166,6 +166,9 @@ private struct ReaderContent: View {
             }
         }
         .animation(.default, value: model.isChromeVisible)
+        // A replacement model (the account's client changed) gets fresh reader state: the EPUB
+        // session, PDF view and their resume points belong to the model they were made for.
+        .id(ObjectIdentifier(model))
         // Native text and controls follow the reader's theme, not the app's appearance; "match
         // system" was resolved from the appearance outside.
         .environment(\.colorScheme, theme.colorScheme)

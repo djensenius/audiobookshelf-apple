@@ -38,6 +38,8 @@
   "ButtonPreviousChapter": "Previous Chapter",
   "ButtonReadInBrowser": "Read in Browser",
   "ButtonReaderGoToPage": "Go to Page",
+  "ButtonReaderNextPage": "Next Page",
+  "ButtonReaderPreviousPage": "Previous Page",
   "ButtonReaderThumbnails": "Page Thumbnails",
   "ButtonRefresh": "Refresh",
   "ButtonRestartSleepTimer": "Restart Timer",

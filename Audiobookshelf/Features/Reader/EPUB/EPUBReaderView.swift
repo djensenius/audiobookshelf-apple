@@ -20,6 +20,13 @@ struct EPUBReaderView: View {
             } else if let session {
                 EPUBWebView(controller: session.controller)
                     .ignoresSafeArea()
+                    // For VoiceOver and Switch Control; the hidden buttons below are the keyboard's.
+                    .accessibilityAction(named: Text(verbatim: L10n.string("ButtonReaderPreviousPage"))) {
+                        session.turn(.prev)
+                    }
+                    .accessibilityAction(named: Text(verbatim: L10n.string("ButtonReaderNextPage"))) {
+                        session.turn(.next)
+                    }
                     .background {
                         // Hidden buttons, so the arrow keys turn pages wherever focus is.
                         Group {
