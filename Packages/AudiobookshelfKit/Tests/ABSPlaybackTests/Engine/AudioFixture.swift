@@ -1,4 +1,5 @@
 import ABSCore
+import ABSTestSupport
 import AVFoundation
 import Foundation
 import Testing
@@ -49,34 +50,6 @@ final class AudioFixture: Sendable {
         try file.write(from: buffer)
         file.close()
         return url
-    }
-}
-
-/// A wait's time budget that a stall of the main actor doesn't use up. A busy CI runner can hold
-/// the whole test process for over ten seconds; the work a condition waits on is then still queued
-/// behind the waiter when it wakes, so a wall-clock deadline fails a passing test (#482). Each
-/// check counts for at most ``maxStep``, so a stall costs one step while a hang still ends.
-/// `now` is the time source, injectable so tests can simulate a stall without blocking the actor.
-struct WaitBudget {
-    typealias Now = () -> ContinuousClock.Instant
-
-    static let maxStep = Duration.milliseconds(100)
-    private let now: Now
-    private var remaining: Duration
-    private var last: ContinuousClock.Instant
-
-    init(_ timeout: Duration, now: @escaping Now = { ContinuousClock.now }) {
-        self.now = now
-        remaining = timeout
-        last = now()
-    }
-
-    /// Charges the time since the last check (at most ``maxStep``); whether any is left.
-    mutating func hasTimeLeft() -> Bool {
-        let now = now()
-        remaining -= min(now - last, Self.maxStep)
-        last = now
-        return remaining > .zero
     }
 }
 
