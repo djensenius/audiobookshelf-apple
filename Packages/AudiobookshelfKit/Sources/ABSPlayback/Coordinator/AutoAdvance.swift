@@ -44,6 +44,9 @@ struct PreparedNextItem: Sendable {
     let serverProgress: Result<MediaProgress?, any Error>
     /// Taken before `serverProgress` was fetched, so admitting it checks local changes since.
     let progressCapture: PlaybackStartProgressCapture?
+    /// The item's ``MediaLeases/actionGeneration(of:)`` as the preparation began, `nil` without
+    /// leases: a start uses this snapshot only while it's unchanged (#368).
+    let actionGeneration: Int?
 }
 
 /// Picks and prepares what plays when an item ends (``PlaybackQueueAdvancer``).

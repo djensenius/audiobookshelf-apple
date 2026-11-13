@@ -131,11 +131,18 @@ actor ReconciliationSessionModel {
         // The server updates the session date on nonzero listening, not every position write.
         if report.timeListened > 0 { session.updatedAt = milliseconds }
         let key = Key(user: session.userId ?? "", item: session.libraryItemId, episode: session.episodeId)
+        let finished = progress[key].flatMap { $0.isFinished ? $0 : nil }
         progress[key] = MediaProgress(
             id: "progress-\(session.libraryItemId)", libraryItemId: session.libraryItemId,
             episodeId: session.episodeId, duration: report.duration,
             progress: report.duration > 0 ? report.currentTime / report.duration : 0,
             currentTime: report.currentTime, lastUpdate: milliseconds)
+        // As ABS `MediaProgress.applyProgressUpdate`: finished progress stays finished unless the
+        // report moves its position at least 10 s from the end.
+        if let finished, finished.currentTime == report.currentTime || report.duration - report.currentTime < 10 {
+            progress[key]?.isFinished = true
+            progress[key]?.finishedAt = finished.finishedAt
+        }
         save(session)
     }
 

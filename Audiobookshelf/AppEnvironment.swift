@@ -3,6 +3,7 @@ import ABSAppModel
 import ABSCore
 import ABSData
 import ABSDownloads
+import ABSPlayback
 import Foundation
 import Observation
 
@@ -136,13 +137,21 @@ final class AppEnvironment {
         self.lifecycle = lifecycle
         let deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
         self.deviceIdentifiers = deviceIdentifiers
-        // Before playback, whose progress reaches the library's cache.
-        let library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
+        // Before playback, whose progress reaches the library's cache. The library's item actions
+        // share playback's writer, binding and media leases (#368), so those are made first.
+        let current = CurrentPlayback()
+        let mediaLeases = MediaLeases()
+        let library = accounts.map {
+            Self.makeLibrary(
+                settings: settings, accounts: $0, lifecycle: lifecycle, writer: localProgress, current: current,
+                mediaLeases: mediaLeases)
+        }
         self.library = library
         let playback = AppPlayback.make(
             writer: localProgress, accounts: accounts, lifecycle: lifecycle, settings: settings,
             deviceIdentifiers: deviceIdentifiers, library: library,
-            history: playbackHistory.map { PlaybackHistoryRecorder(store: $0) })
+            history: playbackHistory.map { PlaybackHistoryRecorder(store: $0) }, current: current,
+            mediaLeases: mediaLeases)
         self.playback = playback
         self.player = playback.player
         self.downloads = downloads

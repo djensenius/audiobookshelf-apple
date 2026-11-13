@@ -76,8 +76,9 @@ public final class PlaybackCoordinator {
     /// The media a play is checking the streaming policy for, before it commits (a loading hint).
     public private(set) var pendingPlayKey: MediaKey?
     /// The play that ``error``'s `.streamingNeedsConfirmation` blocked, which
-    /// ``confirmMeteredStreaming()`` replays.
-    private var blockedPlay: (key: MediaKey, startTime: Double?)?
+    /// ``confirmMeteredStreaming()`` replays; `forceTranscode` for a blocked recovery rebuild's HLS
+    /// fallback, which the replay keeps.
+    private var blockedPlay: (key: MediaKey, startTime: Double?, forceTranscode: Bool)?
     private var unloadedPosition: Double = 0
     private var unloadedDuration: Double = 0
     /// Where playback is or is going. An interrupted seek leaves the engine's own time behind
@@ -167,6 +168,7 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private let lastPlayedStore: any LastPlayedStoring
     @ObservationIgnored private let now: @Sendable () -> Date
     @ObservationIgnored private let sleep: @Sendable (Duration) async -> Void
+    @ObservationIgnored private let mediaLeases: MediaLeases?
     @ObservationIgnored private let backgroundActivity: any BackgroundActivity
 
     // MARK: Bookkeeping
@@ -277,6 +279,9 @@ public final class PlaybackCoordinator {
     ///   - recoveryWait: Times recovery's backoff (tests replace it).
     ///   - networkPaths: The network path recovery waits on (`SystemNetworkPathSource`); `nil`
     ///     treats it as always satisfied.
+    ///   - mediaLeases: Shared with the progress actions (#368): each closing session's media is
+    ///     held until its close settles, and a start waits for an action on its media. `nil`
+    ///     holds and waits for nothing.
     public init(
         engine: any AudioEngineProtocol, sessions: any PlaybackSessionService, progressStore: any LocalProgressReading,
         settings: any PlaybackSettingsProviding, policy: any StreamingPolicyChecking,
@@ -284,8 +289,9 @@ public final class PlaybackCoordinator {
         sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
         backgroundActivity: any BackgroundActivity = NoBackgroundActivity(),
         recoveryWait: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
-        networkPaths: (any NetworkPathSource)? = nil
+        networkPaths: (any NetworkPathSource)? = nil, mediaLeases: MediaLeases? = nil
     ) {
+        self.mediaLeases = mediaLeases
         self.backgroundActivity = backgroundActivity
         self.engine = engine
         self.sessions = sessions
@@ -344,6 +350,17 @@ public final class PlaybackCoordinator {
     public func play(
         itemID: String, episodeID: String? = nil, startTime: Double? = nil, allowingMeteredNetwork: Bool = false
     ) async {
+        await play(
+            itemID: itemID, episodeID: episodeID, startTime: startTime,
+            allowingMeteredNetwork: allowingMeteredNetwork, forceTranscode: false)
+    }
+
+    /// ``play(itemID:episodeID:startTime:allowingMeteredNetwork:)``; `forceTranscode` asks `/play`
+    /// for an HLS transcode, which only ``confirmMeteredStreaming()`` does, replaying a blocked
+    /// fallback. A user's play never forces one.
+    private func play(
+        itemID: String, episodeID: String?, startTime: Double?, allowingMeteredNetwork: Bool, forceTranscode: Bool
+    ) async {
         guard !isRetired else { return }
         let key = MediaKey(
             serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
@@ -395,21 +412,22 @@ public final class PlaybackCoordinator {
         case .denied(let reason): return block(.streamingNotAllowed(reason, key: key))
         }
         meteredConsent = allowingMeteredNetwork ? key : nil
-        await start(key: key, startTime: startTime, prepared: nil)
+        await start(key: key, startTime: startTime, prepared: nil, forceTranscode: forceTranscode)
     }
 
     /// The user agreed to stream on a metered network: replays the play (or queue advance) that
     /// ``error``'s ``PlaybackCoordinatorError/streamingNeedsConfirmation(_:key:)`` blocked, with
-    /// its item, episode and start time, allowing the metered path. Does nothing unless that is
-    /// still the error, so a confirmation shown for another failure, an earlier block or a
-    /// stopped (or retired) coordinator plays nothing. The policy is checked again: "never"
-    /// still blocks.
+    /// its item, episode and start time, allowing the metered path. A blocked recovery rebuild's
+    /// HLS fallback stays forced, so the direct play that failed isn't loaded again. Does nothing
+    /// unless that is still the error, so a confirmation shown for another failure, an earlier
+    /// block or a stopped (or retired) coordinator plays nothing. The policy is checked again:
+    /// "never" still blocks.
     public func confirmMeteredStreaming() async {
         guard case .streamingNeedsConfirmation(_, let key) = error, let blockedPlay, blockedPlay.key == key
         else { return }
         await play(
             itemID: key.libraryItemId, episodeID: key.episodeId, startTime: blockedPlay.startTime,
-            allowingMeteredNetwork: true)
+            allowingMeteredNetwork: true, forceTranscode: blockedPlay.forceTranscode)
     }
 
     /// The user declined to stream on a metered network: clears the
@@ -466,6 +484,20 @@ public final class PlaybackCoordinator {
         }
         guard current == generation else { return }
 
+        // A progress action on this media (#368) finishes first, so the start reads its result. The
+        // wait comes before the opening is registered: until it ends no request is issued, so an
+        // account end mustn't wait for it, and the generation check drops the start after one.
+        if let mediaLeases, mediaLeases.isHeld(key, by: .progressAction) {
+            await mediaLeases.waitUntilFree(key, of: .progressAction)
+            guard current == generation else { return }
+            if Task.isCancelled {
+                // A cancelled caller abandons the start; that isn't a failure.
+                if phase == .starting { phase = .unloaded }
+                releaseKeptAudioSession()
+                return
+            }
+        }
+
         let openingID = UUID()
         let opening = PlaybackCloseResult<Void>()
         pendingOpenings[openingID] = opening
@@ -490,7 +522,10 @@ public final class PlaybackCoordinator {
             return fail(Self.sessionError(error), generation: current)
         }
         let session = started.session
-        guard current == generation else { return closeInBackground(sessionID: session.id, report: nil) }
+        guard current == generation else {
+            closeInBackground(sessionID: session.id, report: nil)
+            return
+        }
 
         let source: AudioEngineSource
         let stream: ResolvedStream
@@ -507,7 +542,10 @@ public final class PlaybackCoordinator {
             }
             return fail(Self.streamError(error), generation: current)
         }
-        guard current == generation else { return closeInBackground(sessionID: session.id, report: nil) }
+        guard current == generation else {
+            closeInBackground(sessionID: session.id, report: nil)
+            return
+        }
         // From here the coordinator owns the session: whoever replaces it closes it.
         self.session = session
         streamAccessToken = stream.accessToken
@@ -984,11 +1022,14 @@ public final class PlaybackCoordinator {
 
     /// Publishes the last-played item for this connection, paused at its saved position, with
     /// its display metadata in ``restoredRecord``, without starting a session or loading the
-    /// engine. Returns whether an item was restored.
+    /// engine. Returns whether an item was restored. A progress action on the record's media
+    /// (``MediaLeases``) skips it: the action clears the record, and a snapshot taken first would
+    /// save the old position again at account end (#368).
     @discardableResult
     public func restoreLastPlayed() -> Bool {
         guard !isRetired, phase == .idle, let record = lastPlayedStore.load(),
-            record.serverConnectionID == sessions.serverConnectionID
+            record.serverConnectionID == sessions.serverConnectionID,
+            mediaLeases?.isHeld(record.key, by: .progressAction) != true
         else { return false }
         generation += 1
         mediaKey = record.key
@@ -1207,10 +1248,13 @@ public final class PlaybackCoordinator {
     /// What a start fetches before `/play` (the streaming decision and server progress, after
     /// capturing local progress as a start does), done ahead of time for the item to follow.
     func prepareStart(for key: MediaKey) async -> PreparedNextItem {
+        let actions = mediaLeases?.actionGeneration(of: key)
         let capture = try? await progressStore.captureStartProgress(for: key)
         let progress = await Self.serverProgress(sessions, itemID: key.libraryItemId, episodeID: key.episodeId)
         let decision = await policy.streamingDecision()
-        return PreparedNextItem(key: key, decision: decision, serverProgress: progress, progressCapture: capture)
+        return PreparedNextItem(
+            key: key, decision: decision, serverProgress: progress, progressCapture: capture,
+            actionGeneration: actions)
     }
 
     /// Starts the next item after `key` ended, holding background activity from now until its
@@ -1437,8 +1481,9 @@ public final class PlaybackCoordinator {
         case .allowed: break
         case .askUser where meteredConsent == key: break
         case .askUser(let reason):
-            // ``confirmMeteredStreaming()`` plays it again where recovery stopped.
-            blockedPlay = (key, target)
+            // ``confirmMeteredStreaming()`` plays it again where recovery stopped, keeping a forced
+            // transcode.
+            blockedPlay = (key, target, forceTranscode || transcodeForced)
             return .failed(.streamingNeedsConfirmation(reason, key: key), generation: generation)
         case .denied(let reason): return .failed(.streamingNotAllowed(reason, key: key), generation: generation)
         }
@@ -1479,7 +1524,7 @@ public final class PlaybackCoordinator {
     /// ``confirmMeteredStreaming()``.
     private func block(_ error: PlaybackCoordinatorError, startTime: Double? = nil) {
         if case .streamingNeedsConfirmation(_, let key) = error {
-            blockedPlay = (key, startTime)
+            blockedPlay = (key, startTime, false)
         } else {
             blockedPlay = nil
         }
@@ -1519,26 +1564,50 @@ public final class PlaybackCoordinator {
                 sessionID: session.id, key: key, currentTime: unloadedPosition, duration: unloadedDuration,
                 wasLoaded: wasLoaded, reason: reason)
             let handoff = wasLoaded ? finalCloseReport?(closing) : nil
-            closeInBackground(sessionID: session.id, handoff: handoff, wasLoaded: wasLoaded)
+            let operation = closeInBackground(sessionID: session.id, handoff: handoff, wasLoaded: wasLoaded)
+            holdUntilSettled(key, operation: operation)
             emit(.sessionWillClose(closing))
         }
     }
 
+    /// Holds `key` for its closing session (``MediaLeases/Holder/closingSession``) until everything
+    /// the close sends or saves settles, whatever the outcome: its `/close`, the session's `/sync`
+    /// in flight (which `/close` stops waiting for after ``closeWaitTimeout``), and its captured
+    /// position write. Each resolves once its request returns or its save ends, so the hold ends.
+    /// An account end resolves the close's receipt at once and cancels its task, but a `/close`
+    /// already sent may still reach the server, so the hold also waits for that task to return.
+    private func holdUntilSettled(_ key: MediaKey, operation: PlaybackCloseOperation) {
+        guard let mediaLeases else { return }
+        let lease = mediaLeases.acquire(key, for: .closingSession)
+        let close = operation.task
+        Task { @MainActor in
+            _ = try? await operation.transport.wait()
+            await close?.value
+            _ = try? await operation.handoff?.sessionSync?.wait()
+            if operation.wasLoaded { try? await operation.handoff?.waitForAudioPosition() }
+            lease.release()
+        }
+    }
+
+    @discardableResult
     private func closeInBackground(
         sessionID: String, report: PlaybackSyncReport? = nil,
         handoff: PlaybackCloseHandoff? = nil, wasLoaded: Bool = false
-    ) {
-        guard closingSessionIDs.insert(sessionID).inserted else {
-            // The server reused an ID whose close is pending: that close covers it, not this one.
-            handoff?.transport.resolve(.success(false))
-            return
-        }
+    ) -> PlaybackCloseOperation {
         let operation = PlaybackCloseOperation(sessionID: sessionID, wasLoaded: wasLoaded, handoff: handoff)
+        guard closingSessionIDs.insert(sessionID).inserted else {
+            // The server reused an ID whose close is pending: that close covers it, so this one sends
+            // no `/close`. Its handoff's `/sync` in flight and position save are still its own, so the
+            // returned operation keeps its media held until they settle (#368).
+            operation.transport.resolve(.success(false))
+            operation.dispatched.resolve(.success(()))
+            return operation
+        }
         closeOperations.append(operation)
         guard permitsCloseTransport else {
             operation.transport.resolve(.success(false))
             operation.dispatched.resolve(.success(()))
-            return
+            return operation
         }
         let id = UUID()
         let sessions = self.sessions
@@ -1573,6 +1642,7 @@ public final class PlaybackCoordinator {
         }
         closeTasks[id] = task
         operation.task = task
+        return operation
     }
 
     /// Joins closes captured so far, without another callback or request. The deadline bounds
@@ -1685,6 +1755,12 @@ public final class PlaybackCoordinator {
         let progressStore = self.progressStore
         let key = MediaKey(
             serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
+        // A progress action on the item since this snapshot's preparation began (#368) changed its
+        // progress: the prepared server progress could put back what the action discarded or reset,
+        // so it's fetched again, as an unprepared start does.
+        let prepared = prepared.flatMap {
+            $0.actionGeneration == mediaLeases?.actionGeneration(of: key) ? $0 : nil
+        }
         let task = Task { @MainActor in
             try Task.checkCancellation()
             if let prepared {

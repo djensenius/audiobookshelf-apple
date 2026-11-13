@@ -103,7 +103,7 @@ import Testing
 
         let configuration = AppPlayback.configuration(
             for: request, settings: settings, policy: NetworkPolicy(monitor: NetworkMonitor(), settings: settings),
-            engine: AudioEngine(audioSession: nil))
+            engine: AudioEngine(audioSession: nil), mediaLeases: nil)
 
         #if os(iOS)
             #expect(configuration.backgroundActivity is SystemBackgroundActivity)
