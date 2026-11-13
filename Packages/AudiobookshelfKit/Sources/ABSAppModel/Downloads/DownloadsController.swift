@@ -53,7 +53,7 @@ public final class DownloadsController {
     /// The latest progress of each record in ``records`` that reported any, by record ID.
     public private(set) var progress: [UUID: Progress] = [:]
     /// Why the stored records couldn't be read at ``start()`` (after one retry), or `nil`. Records
-    /// still appear as their events arrive.
+    /// still appear as their events arrive, and ``DownloadsTabModel/reload()`` reads them again.
     public private(set) var loadError: (any Error)?
 
     /// The network access flags for new download tasks, shared with the engine.
@@ -143,6 +143,19 @@ public final class DownloadsController {
                     self.handle(event)
                 }
             })
+        await loadStoredRecords()
+    }
+
+    /// Reads the stored records again if ``start()`` couldn't (``loadError``), as it does: a
+    /// record that events changed or removed meanwhile keeps its newer state. Does nothing once a
+    /// read succeeded, or while one is under way. For the Downloads tab's refresh (#75).
+    func retryLoadingStoredRecords() async {
+        guard loadError != nil, changedWhileLoading == nil else { return }
+        await loadStoredRecords()
+    }
+
+    /// Lists the stored records, except those events changed or removed during the read.
+    private func loadStoredRecords() async {
         changedWhileLoading = []
         defer { changedWhileLoading = nil }
         if let stored = await readStoredRecords() {
