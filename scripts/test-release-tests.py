@@ -424,6 +424,49 @@ class ReleaseTagTests(unittest.TestCase):
         self.file.write_text(text.replace(anchor, anchor + '    "MARKETING_VERSION[config=Debug]": "1.2.4",\n'))
         self.assert_fails(f"v{self.VERSION}", "doesn't match MARKETING_VERSION (1.2.3 1.2.4)")
 
+    def add_setting(self, line):
+        text = self.file.read_text()
+        anchor = '    "MACOSX_DEPLOYMENT_TARGET": "27.0",\n'
+        self.assertIn(anchor, text)
+        self.file.write_text(text.replace(anchor, anchor + line, 1))
+
+    def test_an_array_override_that_differs_fails(self):
+        for line in (
+            '    "MARKETING_VERSION[config=Release]": ["1.2.4"],\n',
+            '    "MARKETING_VERSION[config=Release]": [ "1.2.4", ],\n',
+            '    "MARKETING_VERSION[sdk=macosx*]": [\n      "1.2.4",\n    ],\n',
+        ):
+            with self.subTest(line=line):
+                self.setUp()
+                self.add_setting(line)
+                self.assert_fails(f"v{self.VERSION}", "doesn't match MARKETING_VERSION (1.2.3 1.2.4)")
+
+    def test_a_matching_one_string_array_passes(self):
+        for line in (
+            f'    "MARKETING_VERSION[config=Release]": ["{self.VERSION}"],\n',
+            f'    "MARKETING_VERSION[sdk=macosx*]": [\n      "{self.VERSION}",\n    ],\n',
+        ):
+            with self.subTest(line=line):
+                self.setUp()
+                self.add_setting(line)
+                self.assert_passes(f"v{self.VERSION}")
+
+    def test_an_unsupported_value_fails(self):
+        for line in (
+            f'    "MARKETING_VERSION[config=Release]": ["{self.VERSION}", "1.2.4"],\n',
+            f'    "MARKETING_VERSION[config=Release]": ["{self.VERSION}", "{self.VERSION}"],\n',
+            '    "MARKETING_VERSION[config=Release]": [],\n',
+            '    "MARKETING_VERSION[config=Release]": 1.2,\n',
+            '    "MARKETING_VERSION[config=Release]": "",\n',
+            '    "MARKETING_VERSION[config=Release]": "1.2.\\u0033",\n',
+            '    "MARKETING_VERSION[config=Release]": { "value": "1.2.3" },\n',
+        ):
+            with self.subTest(line=line):
+                self.setUp()
+                self.add_setting(line)
+                self.assert_fails(
+                    f"v{self.VERSION}", 'unsupported MARKETING_VERSION value for "MARKETING_VERSION[config=Release]"')
+
     def test_a_project_without_marketing_version_fails(self):
         self.file.write_text(re.sub(r'\n\s*"MARKETING_VERSION": "[^"]*",', "", self.file.read_text()))
         self.assert_fails(f"v{self.VERSION}", "no MARKETING_VERSION setting")

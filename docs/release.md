@@ -102,7 +102,9 @@ to the App Store is a separate, manual step in App Store Connect.
    - any other tag must be exactly `v<MAJOR.MINOR.PATCH>`, with the same rules as
      `release:version` (no leading zeros, no suffixes), so `v1.0` and `v0.9.1-beta` fail;
    - every `MARKETING_VERSION` setting in `project.xcproj`, conditional ones included,
-     must equal the tag's version.
+     must equal the tag's version. A setting may be a string or a one-string array
+     (`["1.2.3"]`); any other value (a longer or empty array, a number, an escaped
+     string) fails the build, since the check can't read it.
 
    The workflow builds every `v*` tag, so a malformed one fails rather than shipping a
    build whose version isn't the tag. `mise run test:release` covers the check.

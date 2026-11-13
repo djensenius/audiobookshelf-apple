@@ -13,7 +13,9 @@ repo_root="${CI_PRIMARY_REPOSITORY_PATH:-$(cd "$(dirname "$0")/.." && pwd)}"
 # version). Branch builds have no CI_TAG. A tag that doesn't start with "v" and a digit
 # isn't a release tag and is ignored. Any other must be exactly v<MAJOR.MINOR.PATCH>, as
 # scripts/set-version.sh accepts, and equal every MARKETING_VERSION setting (conditional
-# ones too) in project.xcproj, which keeps one setting per line in its canonical form.
+# ones too) in project.xcproj. A setting's value may be a string or an array of strings;
+# each must be a plain string or a one-string array, and any other form (a longer array,
+# a number, an escaped string) fails the build rather than going unchecked.
 check_release_tag() {
   tag="${CI_TAG:-}"
   case "$tag" in
@@ -39,8 +41,38 @@ check_release_tag() {
     echo "error: $project not found; can't check release tag $tag" >&2
     exit 1
   fi
-  versions="$(sed -nE 's/^[[:space:]]*"MARKETING_VERSION(\[[^]]*\])*"[[:space:]]*:[[:space:]]*"([^"]*)".*/\2/p' \
-    "$project" | sort -u)"
+  # Every MARKETING_VERSION key, wherever it is: "=<value>" for each value it can check,
+  # "!<key>" for each it can't.
+  settings="$(awk '
+    { text = text $0 "\n" }
+    END {
+      rest = text
+      while (match(rest, /"MARKETING_VERSION(\[[^]"]*\])*"/)) {
+        key = substr(rest, RSTART, RLENGTH)
+        rest = substr(rest, RSTART + RLENGTH)
+        if (!match(rest, /^[ \t\n]*:[ \t\n]*/)) { print "!" key; continue }
+        rest = substr(rest, RLENGTH + 1)
+        if (match(rest, /^"[^"\\\n]+"/)) {
+          print "=" substr(rest, 2, RLENGTH - 2)
+        } else if (match(rest, /^\[[ \t\n]*"[^"\\\n]+"[ \t\n]*,?[ \t\n]*\]/)) {
+          value = substr(rest, 1, RLENGTH)
+          sub(/^\[[ \t\n]*"/, "", value)
+          sub(/"[ \t\n]*,?[ \t\n]*\]$/, "", value)
+          print "=" value
+        } else {
+          print "!" key
+          continue
+        }
+        rest = substr(rest, RLENGTH + 1)
+      }
+    }' "$project")"
+  unsupported="$(printf '%s\n' "$settings" | sed -n 's/^!//p' | tr '\n' ' ' | sed 's/ $//')"
+  if [ -n "$unsupported" ]; then
+    echo "error: unsupported MARKETING_VERSION value for $unsupported in $project (expected a" \
+      "string or a one-string array); can't check release tag $tag" >&2
+    exit 1
+  fi
+  versions="$(printf '%s\n' "$settings" | sed -n 's/^=//p' | sort -u)"
   if [ -z "$versions" ]; then
     echo "error: no MARKETING_VERSION setting in $project; can't check release tag $tag" >&2
     exit 1
