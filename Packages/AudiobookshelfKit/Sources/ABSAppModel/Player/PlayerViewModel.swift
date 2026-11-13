@@ -34,6 +34,27 @@ public enum PlayerErrorMessage: Sendable, Hashable {
         case .engine, .playback, .unexpected: self = .playbackFailed
         }
     }
+
+    /// The alert's buttons, in order. Recovery giving up offers Retry, which starts a fresh
+    /// recovery attempt, and Cancel, which stops playback (ADR 0007); the others only dismiss.
+    public var actions: [PlayerErrorAction] {
+        switch self {
+        case .streamingInterrupted: [.retry, .cancel]
+        case .streamingNeedsConfirmation, .streamingNotAllowed, .sessionStartFailed, .streamUnavailable,
+            .playbackFailed, .streamRejected:
+            [.dismiss]
+        }
+    }
+}
+
+/// A button on a playback failure's alert; see ``PlayerViewModel/respond(to:with:)``.
+public enum PlayerErrorAction: Sendable, Hashable {
+    /// Closes the alert, leaving playback as it is ("OK").
+    case dismiss
+    /// Plays the item again from where it stopped.
+    case retry
+    /// Stops playback and clears the failure.
+    case cancel
 }
 
 /// State and commands for the mini player and the full player (port of
@@ -197,6 +218,9 @@ public final class PlayerViewModel {
     /// Whether the play/pause button shows pause: while play is requested, including while starting
     /// or stalled.
     public var showsPause: Bool { playback.isPlaybackRequested }
+    /// Whether playback waits for the network to return ("No network connection") before recovery
+    /// tries again.
+    public var isWaitingForNetwork: Bool { playback.isWaitingForNetwork }
     public var rate: Double { playback.rate }
     public var jumpForwardSeconds: Int { settings.jumpForwardTime }
     public var jumpBackwardSeconds: Int { settings.jumpBackwardsTime }
@@ -381,6 +405,18 @@ public final class PlayerViewModel {
             ineligibleScrubOwners.insert(scrub.owner)
         }
         playback.stop(reason: .user)
+    }
+
+    /// Handles a button on the alert for `message`, while it is still the current failure; an
+    /// alert left from an earlier one (another item playing since) does nothing.
+    public func respond(to message: PlayerErrorMessage, with action: PlayerErrorAction) async {
+        guard errorMessageKey == message else { return }
+        switch action {
+        case .dismiss: break
+        // The item stayed, unloaded where it stopped: playing it starts a new session there.
+        case .retry: await playback.resume(rewindingBy: nil)
+        case .cancel: close()
+        }
     }
 
     // MARK: Private

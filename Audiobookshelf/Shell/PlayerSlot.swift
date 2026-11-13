@@ -13,6 +13,8 @@ protocol PlayerSlotState: AnyObject, Observable {
     var title: String { get }
     /// The failure to show, with or without a session; `nil` when there is none.
     var errorMessageKey: PlayerErrorMessage? { get }
+    /// Handles a button of the alert for `message` (its ``PlayerErrorMessage/actions``).
+    func respond(to message: PlayerErrorMessage, with action: PlayerErrorAction) async
 }
 
 extension PlayerViewModel: PlayerSlotState {}
@@ -29,6 +31,8 @@ final class PlaceholderPlayerState: PlayerSlotState {
         self.title = title
         self.errorMessageKey = errorMessageKey
     }
+
+    func respond(to message: PlayerErrorMessage, with action: PlayerErrorAction) async {}
 }
 
 /// Places the player around the tab shell (ADR 0004). Whether the full player and the queue
@@ -52,7 +56,8 @@ final class PlaceholderPlayerState: PlayerSlotState {
 /// A playback failure (`errorMessageKey`) shows in an alert, with or without a session, and only
 /// in the active scene, so other windows don't repeat it. On iOS the full player shows it while
 /// it covers the scene. Each scene shows a failure until it's dismissed there, and again only
-/// after the player has had none (or a different one).
+/// after the player has had none (or a different one). Its buttons are the failure's
+/// ``PlayerErrorMessage/actions``, which ``PlayerSlotState/respond(to:with:)`` handles.
 struct PlayerSlot: ViewModifier {
     @Bindable var router: Router
     let player: any PlayerSlotState
@@ -131,6 +136,23 @@ struct PlayerSlot: ViewModifier {
         #endif
     }
 
+    /// The string key of an alert button's label.
+    nonisolated static func labelKey(for action: PlayerErrorAction) -> String {
+        switch action {
+        case .dismiss: "ButtonOk"
+        case .retry: "ButtonRetry"
+        case .cancel: "ButtonCancel"
+        }
+    }
+
+    /// An alert button's role: the one that leaves playback as it is, or stops it, is the cancel.
+    nonisolated static func role(for action: PlayerErrorAction) -> ButtonRole? {
+        switch action {
+        case .dismiss, .cancel: .cancel
+        case .retry: nil
+        }
+    }
+
     /// ``shownError``'s alert on `view`, while `isEnabled`.
     private func errorAlert(_ view: some View, isEnabled: Bool) -> some View {
         let error = isEnabled ? shownError : nil
@@ -140,10 +162,13 @@ struct PlayerSlot: ViewModifier {
                 get: { error != nil },
                 set: { if !$0 { dismissedError = player.errorMessageKey } }),
             presenting: error
-        ) { _ in
-            Button(role: .cancel) {
-            } label: {
-                Text(verbatim: L10n.string("ButtonOk"))
+        ) { error in
+            ForEach(error.actions, id: \.self) { action in
+                Button(role: Self.role(for: action)) {
+                    Task { await player.respond(to: error, with: action) }
+                } label: {
+                    Text(verbatim: L10n.string(Self.labelKey(for: action)))
+                }
             }
         }
     }

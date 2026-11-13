@@ -734,6 +734,58 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         }
     }
 
+    /// Recovery giving up offers Retry and Cancel; every other failure only dismisses.
+    @Test func onlyAnInterruptedStreamOffersRetryAndCancel() {
+        #expect(PlayerErrorMessage.streamingInterrupted.actions == [.retry, .cancel])
+        let others: [PlayerErrorMessage] = [
+            .streamingNeedsConfirmation, .streamingNotAllowed, .sessionStartFailed, .streamUnavailable,
+            .playbackFailed, .streamRejected,
+        ]
+        for message in others { #expect(message.actions == [.dismiss]) }
+    }
+
+    /// Retry plays the kept item again (a fresh session where it stopped); Cancel stops it; OK
+    /// leaves it.
+    @Test(arguments: [PlayerErrorAction.retry, .cancel, .dismiss])
+    func theAlertsActionsDriveThePlayback(action: PlayerErrorAction) async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            playback.phase = .unloaded
+            playback.error = .recoveryExhausted
+            playback.clearCalls()
+
+            await model.respond(to: .streamingInterrupted, with: action)
+
+            switch action {
+            case .retry: #expect(playback.calls == [.resume(rewindingBy: nil)])
+            case .cancel: #expect(playback.calls == [.stop(.user)])
+            case .dismiss: #expect(playback.calls.isEmpty)
+            }
+        }
+    }
+
+    /// An alert left from an earlier failure acts on nothing: the item playing now stays.
+    @Test(arguments: [PlayerErrorAction.retry, .cancel])
+    func aStaleAlertsActionDoesNothing(action: PlayerErrorAction) async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            playback.error = nil
+            playback.clearCalls()
+
+            await model.respond(to: .streamingInterrupted, with: action)
+
+            #expect(playback.calls.isEmpty)
+        }
+    }
+
+    @Test func theWaitingStateFollowsPlayback() async throws {
+        try await withPlayer { model, playback, _, _ in
+            #expect(!model.isWaitingForNetwork)
+            #expect(invalidates({ _ = model.isWaitingForNetwork }, when: { playback.isWaitingForNetwork = true }))
+            #expect(model.isWaitingForNetwork)
+        }
+    }
+
     // MARK: Retained text
 
     @Test func textIsKeptWhenTheSessionDrops() async throws {
