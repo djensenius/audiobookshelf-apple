@@ -247,17 +247,18 @@ struct SyncHarness {
 
     init(
         progressStore: LocalProgressStore? = nil, connectionID: UUID = UUID(),
-        paths: (any NetworkPathSource)? = nil
+        paths: (any NetworkPathSource)? = nil, history: (any PlaybackHistoryRecording)? = nil,
+        source: ((PlaybackCoordinator) -> any PlaybackProgressSource)? = nil
     ) throws {
         h = try CoordinatorHarness(progressStore: progressStore, connectionID: connectionID)
         h.settings.disableAutoRewind = true
         service = StubProgressSyncService(serverConnectionID: connectionID)
         let clock = h.clock
         syncer = ProgressSyncer(
-            source: h.coordinator, service: service, store: h.progressStore,
+            source: source?(h.coordinator) ?? h.coordinator, service: service, store: h.progressStore,
             clock: ProgressSyncClock(
                 now: { clock.now }, uptime: { clock.now.timeIntervalSince1970 }, sleep: sleeper.sleep),
-            tickInterval: 0.5, paths: paths)
+            tickInterval: 0.5, paths: paths, history: history)
     }
 
     var coordinator: PlaybackCoordinator { h.coordinator }

@@ -134,6 +134,10 @@ final class IdlePlaybackSource: PlaybackProgressSource {
     var duration: Double = 0
     var isPlaying = false
     var chapterIndex: Int?
+    var sessionDisplayTitle: String?
+    var resumeRewindLanding: Double?
+    var loadLandingIsUserSeek = false
+    var startProgressChange: ServerAudioPositionChange?
     var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackCloseHandoff?)?
     var quiesceProgressTransport: (@MainActor () -> Void)?
 

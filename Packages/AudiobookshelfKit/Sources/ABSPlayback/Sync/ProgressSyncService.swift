@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSData
 import Foundation
 
 /// The server calls ``ProgressSyncer`` makes for one connection. ``APIProgressSyncService`` is
@@ -102,6 +103,16 @@ public protocol PlaybackProgressSource: AnyObject {
     var duration: Double { get }
     var isPlaying: Bool { get }
     var chapterIndex: Int? { get }
+    /// The open session's title, for playback history.
+    var sessionDisplayTitle: String? { get }
+    /// Where the latest automatic seek (a resume's rewind, or a load's late landing) landed
+    /// (history doesn't count it as a seek).
+    var resumeRewindLanding: Double? { get }
+    /// The latest load's landing is a seek or jump the user made while it loaded (history records
+    /// it as a seek, even at `loaded`'s time).
+    var loadLandingIsUserSeek: Bool { get }
+    /// How the latest start's server progress moved the stored position (history).
+    var startProgressChange: ServerAudioPositionChange? { get }
     var finalCloseReport: (@MainActor (ClosingSession) -> PlaybackCloseHandoff?)? { get set }
     /// Synchronously suppresses sync/PATCH transport before account teardown can suspend.
     var quiesceProgressTransport: (@MainActor () -> Void)? { get set }
@@ -109,4 +120,6 @@ public protocol PlaybackProgressSource: AnyObject {
     func removeObserver(_ token: PlaybackObserverToken)
 }
 
-extension PlaybackCoordinator: PlaybackProgressSource {}
+extension PlaybackCoordinator: PlaybackProgressSource {
+    public var sessionDisplayTitle: String? { session?.displayTitle }
+}
