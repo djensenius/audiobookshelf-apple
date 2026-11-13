@@ -45,6 +45,8 @@ struct AudiobookshelfApp: App {
             RefreshCommands()
             PlaybackCommands(player: environment.player, participant: environment.playback.participant)
             GoCommands()
+            // View > Show/Hide Inspector toggles the scene's queue inspector (ADR 0004).
+            InspectorCommands()
         }
         // The system relaunches the app for finished background downloads; this waits until
         // the download engine has processed every event before the system suspends it again.

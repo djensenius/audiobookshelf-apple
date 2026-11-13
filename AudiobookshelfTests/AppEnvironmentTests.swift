@@ -133,6 +133,8 @@ struct TestDownloads {
             #expect(environment.accounts != nil)
             #expect(environment.downloads == nil)
             #expect(environment.accounts?.credentialsRemoved == nil)
+            // A committed removal still deletes the saved play queue (PlaybackQueueWiringTests).
+            #expect(environment.accounts?.connectionRemoved != nil)
 
             await environment.lifecycle.start()
 
