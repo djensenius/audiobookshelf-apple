@@ -256,6 +256,9 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var transcodeForced = false
     /// The latest start's resolved stream kind, kept after a failed load.
     @ObservationIgnored private var streamKind: StreamPlan.Kind?
+    /// Whether the latest start plays downloaded files (a local session), kept after a failed load:
+    /// they're never transcoded, so their decode and format errors surface (ADR 0007, decision 7).
+    @ObservationIgnored private var playsLocalFiles = false
 
     /// The last-played record is saved at most this often from time updates.
     static let lastPlayedSaveInterval: TimeInterval = 15
@@ -434,6 +437,7 @@ public final class PlaybackCoordinator {
         let current = generation
         transcodeForced = forceTranscode
         streamKind = nil
+        playsLocalFiles = false
         // Retain pending old closes, but not a lifetime history of completed user sessions.
         closeOperations.removeAll {
             $0.transport.result != nil && ($0.handoff == nil || $0.handoff?.position.result != nil)
@@ -508,6 +512,7 @@ public final class PlaybackCoordinator {
         self.session = session
         streamAccessToken = stream.accessToken
         streamKind = stream.plan.kind
+        playsLocalFiles = session.playMethod == .local
         // From here teardown can capture this known session without waiting for the engine load.
         opening.resolve(.success(()))
         pendingOpenings[openingID] = nil
@@ -1426,9 +1431,9 @@ public final class PlaybackCoordinator {
         return .failed(error, generation: attempt)
     }
 
-    /// Whether the direct-play to HLS fallback can run: the latest start resolved direct play and
-    /// didn't force a transcode (once per play).
-    private var canTranscode: Bool { streamKind == .directPlay && !transcodeForced }
+    /// Whether the direct-play to HLS fallback can run: the latest start resolved direct play from
+    /// the server, not downloaded files, and didn't force a transcode (once per play).
+    private var canTranscode: Bool { streamKind == .directPlay && !playsLocalFiles && !transcodeForced }
 
     /// The item that was to follow a switch failed or was abandoned: release the audio session the
     /// switch kept, so other apps' audio can resume.

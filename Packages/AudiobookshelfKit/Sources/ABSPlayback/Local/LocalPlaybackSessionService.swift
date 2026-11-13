@@ -33,8 +33,8 @@ public enum LocalPlaybackError: Error, Sendable, Hashable {
 ///   ``LocalPlaybackSessionBuilder``: play method local, a new UUIDv4 id, `deviceInfo`, and the
 ///   saved local position (legacy parity). It throws ``LocalPlaybackError/notDownloaded`` without
 ///   a download of the media, and ``LocalPlaybackError/downloadFilesMissing(_:)`` when one of its
-///   files is missing. Only a server transcodes, so `forceTranscode` is ignored here;
-///   ``PreferringLocalSessionService`` streams a forced transcode instead.
+///   files is missing. Only a server transcodes, so `forceTranscode` is ignored here; the
+///   coordinator never forces one for downloaded files.
 /// - ``resolveStream(for:)`` returns the files' URLs, with no transport or token.
 /// - ``mediaProgress(itemID:episodeID:)`` throws ``LocalPlaybackError/serverProgressUnavailable``:
 ///   the coordinator takes its answer as the server's, so on failure it reads local progress itself.

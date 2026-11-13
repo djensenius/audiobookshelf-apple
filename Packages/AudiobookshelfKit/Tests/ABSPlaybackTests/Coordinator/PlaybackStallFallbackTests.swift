@@ -293,6 +293,39 @@ struct PlaybackStallFallbackTests {
         #expect(failedEvents == 0)
     }
 
+    /// ADR 0007, decision 7: a download never falls back to streaming silently. A decode or format
+    /// error in downloaded files is final, while playing or at load, with no forced start on the
+    /// server.
+    @Test(arguments: [PlaybackFailure.Kind.decode, .unsupported], [false, true])
+    func aDecodeErrorInADownloadIsFinal(kind: PlaybackFailure.Kind, atLoad: Bool) async {
+        h.recoverySleep.elapsesImmediately = true
+        let error = Self.failure(kind)
+        // As ``LocalPlaybackSessionService`` builds it: a local session over direct-play files.
+        let file = URL(filePath: "/downloads/A/1.mp3")
+        service.state.withLock {
+            $0.sessionOverride = PlaybackSession(
+                id: "L-1", libraryItemId: "A", mediaType: .book, duration: 3600, playMethod: .local,
+                audioTracks: [AudioTrack(index: 1, startOffset: 0, duration: 3600, mimeType: "audio/mpeg")])
+            $0.streamOverride = ResolvedStream(
+                plan: .localFiles([(url: file, mimeType: "audio/mpeg", startOffset: 0, duration: 3600)]), urls: [file])
+        }
+        if atLoad { engine.loadError = .itemFailed(trackIndex: 0, error) }
+        await coordinator.play(itemID: "A", startTime: 600)
+        if !atLoad {
+            #expect(coordinator.isPlaying)
+            #expect(coordinator.session?.playMethod == .local)
+            engine.fail(.itemFailed(trackIndex: 0, error))
+        }
+        await settle { coordinator.error != nil }
+
+        #expect(coordinator.error == .playback(error))
+        #expect(failedEvents == 1)
+        #expect(service.forcedTranscodes == [false])
+        #expect(service.starts == ["A"])
+        #expect(h.recoverySleep.durations.isEmpty)
+        #expect(coordinator.phase == .unloaded)
+    }
+
     enum HLSStart: CaseIterable {
         /// The server chose a transcode.
         case session

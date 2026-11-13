@@ -64,8 +64,8 @@ struct PlaybackRecoveryHost {
     /// transcode if `forceTranscode`. The attempt takes the next generation (`generation() + 1`)
     /// at once, before suspending.
     var rebuild: (_ target: Double, _ playing: Bool, _ forceTranscode: Bool) async -> PlaybackRecoveryRebuild
-    /// Whether the direct-play to HLS fallback can still run: the item is direct play, and no
-    /// forced transcode has run since the user's start.
+    /// Whether the direct-play to HLS fallback can still run: the item is direct play from the
+    /// server (never downloaded files), and no forced transcode has run since the user's start.
     var canTranscode: () -> Bool
     /// Refreshes the access token once; returns the error that stops recovery, if any.
     var refresh: () async -> PlaybackCoordinatorError?
@@ -409,7 +409,7 @@ final class PlaybackRecovery {
         case .failure(let failure):
             action = failure.recoveryAction
             if action == .fatal { return .surface(.playback(failure)) }
-            // Once per play, and never from HLS: the error is the media's.
+            // Once per play, and never from HLS or a download: the error is the media's.
             if action == .transcode {
                 return host?.canTranscode() == true ? .transcode : .surface(.playback(failure))
             }

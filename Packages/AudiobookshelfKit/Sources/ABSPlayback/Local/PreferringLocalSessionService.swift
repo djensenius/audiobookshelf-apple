@@ -22,7 +22,9 @@ import Synchronization
 /// reads local progress itself rather than taking a cache for a server answer.
 ///
 /// A forced transcode (the direct-play to HLS fallback after a decode or format error) always
-/// streams: only the server transcodes.
+/// streams: only the server transcodes. The coordinator forces one only for a session it streamed
+/// (such as a "Stream instead" start), never for downloaded files, whose decode and format errors
+/// surface instead, so recovery never streams a download.
 public final class PreferringLocalSessionService: PlaybackSessionService {
     public let local: LocalPlaybackSessionService
     public let remote: any PlaybackSessionService
