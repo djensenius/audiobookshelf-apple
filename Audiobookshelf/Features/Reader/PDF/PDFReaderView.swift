@@ -31,12 +31,24 @@ enum PDFReaderBackground: Sendable, Hashable, CaseIterable {
     }
 }
 
+/// A request for a ``PDFReaderView`` to go to a page (#102), such as one picked in
+/// ``PDFPageNavigator``: its 1-based number, clamped to the document. Each request is its own, so
+/// asking again for a page the reader has turned away from goes back to it.
+struct PDFPageRequest: Equatable, Sendable {
+    let page: Int
+    private let id = UUID()
+
+    init(page: Int) {
+        self.page = page
+    }
+}
+
 /// A PDFKit reader (ADR 0008, decision 2). It shows `document` from `initialPage`, one page or
 /// a two-page book spread, and reports each page the reader turns to.
 ///
 /// Pages are 1-based, the form `ebookLocation` stores. The initial page isn't reported, so
 /// opening a book doesn't count as reading it; nor is a page reported twice in a row, nor one
-/// PDFKit passes through while a document or layout is being set.
+/// PDFKit passes through while a document or layout is being set or a requested page reached.
 struct PDFReaderView {
     let document: PDFDocument
     /// The 1-based page to open on, clamped to the document. Read when `document` changes.
@@ -44,6 +56,12 @@ struct PDFReaderView {
     /// Two pages side by side, as a book (``ReaderSpreadPolicy``). Otherwise one page.
     var isSpread = false
     var background = PDFReaderBackground.light
+    /// A page to go to. Each request is followed once, and one made before the view exists not at
+    /// all (`initialPage` opens it). The page reached is reported once it settles, after the update,
+    /// unless it is the page already shown.
+    var requestedPage: PDFPageRequest?
+    /// Lends the page view to a thumbnail strip (``PDFThumbnailStrip``).
+    var link: PDFReaderLink?
     /// The 1-based page the reader turned to.
     var onPageChange: @MainActor (Int) -> Void = { _ in }
 
@@ -55,6 +73,39 @@ struct PDFReaderView {
         private(set) var lastPage: Int?
         /// Set while ``withoutReporting(_:_:)`` reconfigures the view.
         private var isReconfiguring = false
+        /// The request last followed (``follow(_:in:)``), so each is followed once.
+        private var followedRequest: PDFPageRequest?
+        /// The page a request reached, until it is reported after the update; a turn first drops it.
+        private var pendingPage: Int?
+
+        /// Marks `request` followed without going to its page: the one the view is made with.
+        func markFollowed(_ request: PDFPageRequest?) {
+            followedRequest = request
+        }
+
+        /// Goes to `request`'s page unless it was followed already, without reporting the pages
+        /// PDFKit passes through. The page reached, if it isn't the one shown before, is reported
+        /// once the update is over, so a caller's state doesn't change during it; unless a turn
+        /// or another document comes first.
+        func follow(_ request: PDFPageRequest?, in view: PDFView) {
+            guard let request, request != followedRequest else { return }
+            followedRequest = request
+            guard let document = view.document, let page = document.page(oneBased: request.page) else { return }
+            let shown = lastPage
+            withoutReporting(view) { view.go(to: page) }
+            guard let reached = lastPage, reached != shown else { return }
+            pendingPage = reached
+            Task { @MainActor [weak self, weak view] in
+                guard let self, let view, view.document === document else { return }
+                reportPendingPage()
+            }
+        }
+
+        private func reportPendingPage() {
+            guard let page = pendingPage else { return }
+            pendingPage = nil
+            onPageChange(page)
+        }
 
         /// Runs `body` without reporting the pages PDFKit passes through: assigning a document
         /// selects its first page before `go(to:)` reaches the one to open on. Afterwards the
@@ -80,6 +131,7 @@ struct PDFReaderView {
                 let number = view.document?.oneBasedPageNumber(of: page), number != lastPage
             else { return }
             lastPage = number
+            pendingPage = nil
             onPageChange(number)
         }
     }
@@ -88,6 +140,7 @@ struct PDFReaderView {
         let view = ReaderPDFView()
         view.displayDirection = .horizontal
         context.coordinator.observe(view)
+        context.coordinator.markFollowed(requestedPage)
         update(view, context: context)
         return view
     }
@@ -113,7 +166,9 @@ struct PDFReaderView {
                 }
             }
         }
+        coordinator.follow(requestedPage, in: view)
         view.backgroundColor = background.color
+        if let link, link.pdfView !== view { link.pdfView = view }
     }
 }
 
@@ -213,4 +268,8 @@ private func previewDocument(pages: Int) -> PDFDocument {
 
 #Preview("Spread, dark") {
     PDFReaderView(document: previewDocument(pages: 8), initialPage: 3, isSpread: true, background: .dark)
+}
+
+#Preview("Page navigator") {
+    PDFPageNavigator(document: previewDocument(pages: 24), initialPage: 5)
 }
