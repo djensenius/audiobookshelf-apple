@@ -205,11 +205,19 @@ struct AutoAdvanceTests {
         #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
     }
 
+    /// Server finish times far behind this device's clock (2000), around it, and far ahead of it
+    /// (2100): only server times are compared, so the outcome doesn't depend on the device clock.
+    nonisolated static let serverTimes = [
+        Date(timeIntervalSince1970: 946_684_800), Date(timeIntervalSinceNow: -3600),
+        Date(timeIntervalSince1970: 4_102_444_800),
+    ]
+
     /// Played again after the server finished it: a listing after the new end with the old finish
-    /// confirms nothing, so a late reset (the replay's unfinished sync) keeps it skipped (#554).
-    @Test func oldServerFinishDoesntConfirmAReplaysEnd() async {
-        let earlier = Date(timeIntervalSinceNow: -3600)
-        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": earlier])
+    /// (the baseline seen while it played) confirms nothing, so a late reset (the replay's
+    /// unfinished sync) keeps it skipped (#554).
+    @Test(arguments: serverTimes)
+    func oldServerFinishDoesntConfirmAReplaysEnd(finishedAt: Date) async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": finishedAt])
         await a.play("P", episode: "e1")
         await a.finish()
         #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
@@ -222,6 +230,28 @@ struct AutoAdvanceTests {
         await a.finish()
 
         #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
+    }
+
+    /// Played again after the server finished it: a listing after the new end with a later
+    /// server finish than the baseline confirms it, so a discard after it counts (#554).
+    @Test(arguments: serverTimes)
+    func laterServerFinishConfirmsAReplaysEnd(finishedAt: Date) async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": finishedAt])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
+
+        a.episodes.set(
+            "P", episodes: ["e1", "e2", "e3"], finished: ["e1"],
+            serverFinishedAt: ["e1": finishedAt.addingTimeInterval(60)])
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
     }
 
     /// The server can show the finish while the episode is still loaded; a later reset counts.

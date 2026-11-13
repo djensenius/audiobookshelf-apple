@@ -39,11 +39,13 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     private var confirmedEndings: Set<MediaKey> = []
     /// Bumped by every end, so a listing requested before one isn't evidence of its finish.
     private var endings = 0
-    /// When the play that ended each of `endedEpisodes` was loaded: a server finish from before
-    /// it (an episode played again after finishing) is no evidence of that end's finish.
-    private var endedPlayStarts: [MediaKey: Date] = [:]
-    /// When the current item was loaded.
-    private var loadedAt: Date?
+    /// The server's latest finish of each episode seen in a listing requested before its play's
+    /// end, from its load on: a finish the server shows after the end confirms that end only when
+    /// it is later. Server times are only compared with server times, so the device's clock
+    /// doesn't matter.
+    private var finishBaselines: [MediaKey: Date] = [:]
+    /// The current item ended in this play.
+    private var currentHasEnded = false
     /// When the last preparation finished, with or without a next item.
     private var preparedAt: TimeInterval = 0
     /// Near-end refreshes done since the load, a resume or a seek out of them.
@@ -55,7 +57,6 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     private var revision = 0
     private var task: Task<Void, Never>?
     private let uptime: @Sendable () -> TimeInterval
-    private let now: @Sendable () -> Date
 
     private enum NearEndTrigger { case finalChapter, window }
 
@@ -67,16 +68,13 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     /// - Parameters:
     ///   - episodes: Where podcast episodes come from; `nil` turns off the podcast fallback.
     ///   - uptime: Monotonic seconds, for the age of a preparation.
-    ///   - now: The wall clock, compared with the server's finish times.
     public init(
         queue: PlaybackQueue, episodes: (any PodcastEpisodeSource)?,
-        uptime: @escaping @Sendable () -> TimeInterval = ProgressSyncClock.live.uptime,
-        now: @escaping @Sendable () -> Date = { Date() }
+        uptime: @escaping @Sendable () -> TimeInterval = ProgressSyncClock.live.uptime
     ) {
         self.queue = queue
         self.episodes = episodes
         self.uptime = uptime
-        self.now = now
     }
 
     /// Becomes `coordinator`'s next-item provider and follows its playback. Attach to one
@@ -107,7 +105,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         self.coordinator = nil
         endedEpisodes = []
         confirmedEndings = []
-        endedPlayStarts = [:]
+        finishBaselines = [:]
         advancingFromQueue = nil
         reset()
     }
@@ -128,7 +126,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         // Even with nothing loaded: playing again later must not skip it.
         if kind == .reset, confirmedEndings.remove(key) != nil {
             endedEpisodes.remove(key)
-            endedPlayStarts[key] = nil
+            finishBaselines[key] = nil
         }
         guard let current else { return }
         let samePodcast =
@@ -187,14 +185,21 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         switch event {
         case .itemChanged(let key):
             let advancing = candidate?.isQueued == true && key == candidate?.key ? key : nil
+            // The server's finish in the listing held from before this play is its first baseline.
+            let held = listing
             reset()
+            if let key {
+                finishBaselines[key] =
+                    held?.podcastItemID == key.libraryItemId
+                    ? key.episodeId.flatMap { held?.listing.serverFinishedAt[$0] } : nil
+            }
             advancingFromQueue = advancing
         case .sessionStarted(_, let key):
             advancingFromQueue = nil
             queue.remove(key)
         case .loaded:
             current = coordinator?.mediaKey
-            loadedAt = now()
+            currentHasEnded = false
             rearmOnStart = false
             // Loading inside a trigger prepares anyway.
             refreshed = nearEndTriggers(at: coordinator?.currentTime ?? 0)
@@ -211,9 +216,9 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         case .tick(let time):
             refreshIfNearEnd(at: time)
         case .ended:
+            currentHasEnded = true
             if let current, current.episodeId != nil {
                 endedEpisodes.insert(current)
-                endedPlayStarts[current] = loadedAt ?? now()
                 endings += 1
                 // This end's finish is unconfirmed again, even if an earlier one was.
                 confirmedEndings.remove(current)
@@ -317,17 +322,24 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
             try Task.checkCancellation()
             let ended = endedEpisodes.filter { $0.libraryItemId == key.libraryItemId }.compactMap(\.episodeId)
             let endings = endings
+            let playing = currentHasEnded ? nil : current
             listing = try await episodes.listing(
                 podcastItemID: key.libraryItemId, excluding: Set(ended).union([episodeID]))
-            // The server's finishes, requested after these ends and dated from the plays that
-            // ended them, confirm them; an older or undated finish, the local unsynced flags and
+            // Requested while the current episode played: its server finish is a baseline.
+            if let playing, playing.libraryItemId == key.libraryItemId, let id = playing.episodeId,
+                let finishedAt = listing.serverFinishedAt[id]
+            {
+                finishBaselines[playing] = max(finishBaselines[playing] ?? finishedAt, finishedAt)
+            }
+            // The server's finishes, requested after these ends and later than their baselines,
+            // confirm them; a baseline's own or an undated finish, the local unsynced flags and
             // this advancer's exclusions don't.
             if self.endings == endings {
                 for id in ended {
                     let ended = MediaKey(
                         serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId, episodeId: id)
                     guard endedEpisodes.contains(ended), let finishedAt = listing.serverFinishedAt[id],
-                        let playStart = endedPlayStarts[ended], finishedAt >= playStart
+                        finishBaselines[ended].map({ finishedAt > $0 }) ?? true
                     else { continue }
                     confirmedEndings.insert(ended)
                 }
