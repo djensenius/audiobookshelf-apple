@@ -150,9 +150,11 @@ struct DownloadsList: View {
         if !books.isEmpty {
             Section {
                 ForEach(books) { book in
-                    DownloadedItemRow(item: book, serverID: serverID)
-                        .disabled(model.busy.contains(book.id))
-                        .swipeActions { deleteButton(.item(book)) }
+                    NavigationLink(value: Route.localItem(id: book.id.uuidString)) {
+                        DownloadedItemRow(item: book, serverID: serverID)
+                    }
+                    .disabled(model.busy.contains(book.id))
+                    .swipeActions { deleteButton(.item(book)) }
                 }
             } header: {
                 Text(verbatim: L10n.string("LabelBooks"))
@@ -163,8 +165,10 @@ struct DownloadsList: View {
     /// One section per podcast: its summary row, then its episodes; only the first has a header.
     private func podcastSection(_ podcast: DownloadsListing.Item, isFirst: Bool) -> some View {
         Section {
-            DownloadedItemRow(item: podcast, serverID: serverID)
-                .swipeActions { deleteButton(.item(podcast)) }
+            NavigationLink(value: Route.localItem(id: podcast.id.uuidString)) {
+                DownloadedItemRow(item: podcast, serverID: serverID)
+            }
+            .swipeActions { deleteButton(.item(podcast)) }
             ForEach(podcast.episodes) { episode in
                 DownloadedEpisodeRow(episode: episode)
                     .swipeActions { deleteButton(.episode(podcast, episode)) }
