@@ -19,6 +19,25 @@ struct AudiobookshelfShortcuts: AppShortcutsProvider {
             systemImageName: "play.fill"
         )
         AppShortcut(
+            intent: PlayBookIntent(),
+            phrases: [
+                "Play \(\.$book) in \(.applicationName)",
+                "Listen to \(\.$book) in \(.applicationName)",
+                "Play a book in \(.applicationName)",
+            ],
+            shortTitle: LocalizedStringResource("IntentPlayBookTitle", table: "AppIntents"),
+            systemImageName: "book"
+        )
+        AppShortcut(
+            intent: PlayEpisodeIntent(),
+            phrases: [
+                "Play \(\.$episode) in \(.applicationName)",
+                "Play an episode in \(.applicationName)",
+            ],
+            shortTitle: LocalizedStringResource("IntentPlayEpisodeTitle", table: "AppIntents"),
+            systemImageName: "mic"
+        )
+        AppShortcut(
             intent: PauseIntent(),
             phrases: ["Pause \(.applicationName)"],
             shortTitle: LocalizedStringResource("IntentPauseTitle", table: "AppIntents"),

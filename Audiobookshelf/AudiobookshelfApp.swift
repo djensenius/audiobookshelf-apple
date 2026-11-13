@@ -21,7 +21,8 @@ struct AudiobookshelfApp: App {
 
     init() {
         // Here rather than in `AppEnvironment`, so the environments tests build don't replace it.
-        environment.playback.registerIntents(settings: settings, lifecycle: environment.lifecycle)
+        environment.playback.registerIntents(
+            settings: settings, lifecycle: environment.lifecycle, library: environment.library?.store)
     }
 
     var body: some Scene {
