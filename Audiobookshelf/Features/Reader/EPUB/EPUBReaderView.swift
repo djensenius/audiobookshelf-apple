@@ -65,8 +65,13 @@ struct EPUBReaderView: View {
             }
         }
         .onAppear {
-            if session == nil { session = EPUBReaderSession(model: model, fileURL: fileURL, payload: payload) }
+            if session?.isClosed ?? true {
+                session = EPUBReaderSession(model: model, fileURL: fileURL, payload: payload)
+            }
         }
+        // Dismissed, or replaced on an account switch (`ReaderContent`'s identity): as the
+        // container releases the file, the page is closed, so nothing it was doing keeps it alive.
+        .onDisappear { session?.close() }
         .onChange(of: payload) { _, payload in session?.apply(payload) }
     }
 }
@@ -125,6 +130,14 @@ final class EPUBReaderSession {
             ebookFileIno: "\(request.fileIno ?? "")\u{0}\(request.version)")
         controller = EPUBReaderController { _ in try await Self.read(fileURL) }
         controller.onEvent = { [weak self] data in self?.handle(data) }
+    }
+
+    var isClosed: Bool { controller.isClosed }
+
+    /// Ends the page (``EPUBReaderController/close()``); a closed session sends nothing more.
+    func close() {
+        isOpen = false
+        controller.close()
     }
 
     func turn(_ command: EPUBBridgeCommand) {
@@ -192,7 +205,7 @@ final class EPUBReaderSession {
     }
 
     private func open() async {
-        guard !isOpen else { return }
+        guard !isOpen, !isClosed else { return }
         let locations = await ReaderCaches.locations.locations(for: locationsKey)
         let location: String? = if case .cfi(let cfi) = model.resumePoint.location { cfi } else { nil }
         let opening = payload
@@ -201,6 +214,7 @@ final class EPUBReaderSession {
             try await controller.send(
                 EPUBBridgeCommand.open(url: Self.bookURL, location: location, locations: locations, settings: settings)
                     .jsonData())
+            guard !isClosed else { return }
             isOpen = true
             // Settings changed while the book opened.
             if payload != opening { apply(payload) }

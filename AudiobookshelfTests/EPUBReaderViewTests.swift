@@ -30,6 +30,23 @@ import WebKit
         init(_ model: ReaderContainerModel) { self.model = model }
     }
 
+    @MainActor @Observable
+    private final class ShownBox {
+        var isShown = true
+    }
+
+    /// `content` until `shown` turns off.
+    private struct Dismissable<Content: View>: View {
+        let shown: ShownBox
+        @ViewBuilder let content: () -> Content
+        var body: some View {
+            ZStack {
+                Color.black
+                if shown.isShown { content() }
+            }
+        }
+    }
+
     private struct SwappableReader: View {
         let box: ModelBox
         var body: some View {
@@ -137,6 +154,39 @@ import WebKit
                 session.show(entry)
                 #expect(!session.contents.isPresented)
             }
+        }
+
+        /// A reader that goes away (dismissed, or replaced on an account switch) closes its page,
+        /// so a command the page could never finish off screen doesn't keep it alive.
+        @Test func goingAwayClosesThePage() async throws {
+            let request = EbookFileRequest(
+                connectionID: UUID(), itemID: "book", fileIno: "1", fileExtension: "epub", version: "1")
+            let loader = EbookFileLoader(
+                directory: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString),
+                fetcher: NoEbookFetcher())
+            let model = ReaderContainerModel(
+                request: request, kind: .epub, loader: loader, progress: nil, serverProgress: nil)
+            let payload = ReaderSettingsPayload(settings: ReaderSettings(), resolvedAppearance: .light, layout: .single)
+            let shown = ShownBox()
+            let hosting = NSHostingView(
+                rootView: Dismissable(shown: shown) {
+                    EPUBReaderView(model: model, fileURL: URL(filePath: "/nonexistent/book.epub"), payload: payload)
+                })
+            let window = NSWindow(
+                contentRect: CGRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered,
+                defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = hosting
+            defer { window.close() }
+
+            let webView = try #require(try await Self.waitForWebView(in: hosting) { $0 != nil })
+            #expect(webView.url == EPUBSchemeHandler.readerURL)
+            shown.isShown = false
+            for _ in 0..<200 where webView.url?.absoluteString != "about:blank" {
+                hosting.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(webView.url?.absoluteString == "about:blank")
         }
 
         /// Lays the view out until `done` holds for its web view, or about two seconds pass.
