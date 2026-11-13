@@ -1,5 +1,6 @@
 import ABSCore
 import ABSData
+import ABSPlayback
 import Foundation
 import Testing
 
@@ -17,10 +18,16 @@ private func key(_ identity: SessionIdentity) -> LibraryConnectionKey {
     LibraryConnectionKey(connectionID: identity.connectionID, userID: identity.userID)
 }
 
-/// A service with one library, `books`, whose Continue Listening shelf holds `items`.
-private func service(_ items: [LibraryItem], fail: Locked<Bool>? = nil) -> FakeLibraryService {
+/// A service with one library, `books`, whose Continue Listening shelf holds `items`. `fail`
+/// fails the shelves, `failLibraries` the libraries.
+private func service(
+    _ items: [LibraryItem], fail: Locked<Bool>? = nil, failLibraries: Locked<Bool>? = nil
+) -> FakeLibraryService {
     var service = FakeLibraryService()
-    service.librariesHandler = { [makeLibrary("books")] }
+    service.librariesHandler = {
+        if failLibraries?.value == true { throw TestError.offline }
+        return [makeLibrary("books")]
+    }
     service.shelvesHandler = { _ in
         if fail?.value == true { throw TestError.offline }
         return [
@@ -40,6 +47,9 @@ private final class Harness {
     var canPlay = true
     var playing: MediaKey?
     let plays = Locked<[String]>([])
+    let playback = FakePlaybackControl()
+    /// The error a play leaves in ``playback``, as the coordinator's does: a metered block, say.
+    var playError: PlaybackCoordinatorError?
     let store: LibraryStore
 
     init(store: LibraryStore) {
@@ -54,9 +64,10 @@ private final class Harness {
                 return PlayItemAction { [plays = self.plays] itemID, episodeID, _ in
                     plays.value.append("\(identity.connectionID == carAccountA.connectionID ? "A" : "B"):\(itemID)")
                     _ = episodeID
+                    self.playback.error = self.playError
                 }
             },
-            playing: { self.playing }, labels: labels)
+            playing: { self.playing }, playback: playback, labels: labels)
     }
 }
 
@@ -190,7 +201,7 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
             await model.update()
             let row = try #require(tabRows(model.content).last)
 
-            await model.play(row)?.value
+            #expect(await model.play(row)?.value == .started)
             #expect(harness.plays.value == ["A:\(SampleLibrary.sherlock.id)"])
 
             // Negative controls: a row the tab doesn't show, a disabled row, a row that doesn't play,
@@ -208,6 +219,143 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
             #expect(model.play(row) == nil)
             #expect(harness.plays.value.count == 1)
         }
+    }
+
+    /// #544: a tap handler holds the row as it was rendered; progress saved since then (the
+    /// player's own sync, say) doesn't stop the tap from playing.
+    @Test func aTapPlaysTheRowAfterItsProgressChanged() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            let model = harness.model()
+            await model.update()
+            let rendered = try #require(tabRows(model.content).first)
+            #expect(rendered.progress == nil)
+
+            store.progress.apply(
+                MediaProgress(
+                    id: "p", libraryItemId: SampleLibrary.sherlock.id, progress: 0.5, isFinished: false,
+                    hideFromContinueListening: false, lastUpdate: 1))
+            #expect(tabRows(model.content).first?.progress == 0.5)
+
+            #expect(await model.play(rendered)?.value == .started)
+            #expect(harness.plays.value == ["A:\(SampleLibrary.sherlock.id)"])
+        }
+    }
+
+    /// #544: the libraries request failed with no saved or default library, so there was no
+    /// shelf to load; a refresh retries the libraries, then loads the shelves.
+    @Test func aRefreshRetriesAFailedLibrariesLoad() async throws {
+        try await withLibrarySettings { settings in
+            let failLibraries = Locked(true)
+            let store = LibraryStore(settings: settings)
+            await store.connect(
+                client: service([SampleLibrary.frankenstein], failLibraries: failLibraries),
+                connectionKey: key(carAccountA))
+            let model = Harness(store: store).model()
+            await model.update()
+            #expect(model.content == .failed)
+
+            failLibraries.value = false
+            await model.refresh()
+            #expect(tabRows(model.content).map(\.id) == [SampleLibrary.frankenstein.id])
+        }
+    }
+
+    /// #544: a play blocked by "ask" on a metered network is asked about on CarPlay; Stream plays
+    /// it, and the prompt goes.
+    @Test func aBlockedPlayAsksAndStreamPlaysIt() async throws {
+        try await withLibrarySettings { settings in
+            let (harness, model) = try await blockedHarness(settings: settings)
+            #expect(harness.playback.calls.isEmpty)
+
+            let confirm = try #require(model.confirmStreaming())
+            #expect(model.streamingPrompt == nil)
+            #expect(await confirm.value == .started)
+            #expect(harness.playback.calls == [.confirmMeteredStreaming])
+            #expect(harness.playback.error == nil)
+            // Negative control: with nothing blocked, there's nothing to confirm.
+            #expect(model.confirmStreaming() == nil)
+        }
+    }
+
+    /// #544: Cancel declines the block, which clears the player's error and the prompt.
+    @Test func aBlockedPlayDeclinedClearsThePrompt() async throws {
+        try await withLibrarySettings { settings in
+            let (harness, model) = try await blockedHarness(settings: settings)
+            model.declineStreaming()
+            #expect(model.streamingPrompt == nil)
+            #expect(harness.playback.calls == [.declineMeteredStreaming])
+            #expect(harness.playback.error == nil)
+        }
+    }
+
+    /// #544: the prompt follows the player's error: answered on the phone (or replaced by another
+    /// failure), it goes from CarPlay too.
+    @Test func thePromptGoesWhenThePlayersErrorChanges() async throws {
+        try await withLibrarySettings { settings in
+            let (harness, model) = try await blockedHarness(settings: settings)
+            harness.playback.error = .streamRejected
+            #expect(model.streamingPrompt == nil)
+            // The same block back (the phone played it again) asks again; cleared, it goes.
+            harness.playback.error = Self.needsConfirmation
+            #expect(model.streamingPrompt == .confirm)
+            harness.playback.error = nil
+            #expect(model.streamingPrompt == nil)
+            #expect(model.confirmStreaming() == nil)
+        }
+    }
+
+    /// #544: "never" blocks with its reason alone: nothing to stream, and OK only dismisses it.
+    @Test func aPlayStreamingNeverAllowsOffersNoConfirmation() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            harness.playError = .streamingNotAllowed(.cellular, key: Self.sherlockKey)
+            let model = harness.model()
+            await model.update()
+            let row = try #require(tabRows(model.content).first)
+
+            #expect(await model.play(row)?.value == .blocked)
+            #expect(model.streamingPrompt == .notAllowed)
+            #expect(model.confirmStreaming() == nil)
+            model.declineStreaming()
+            #expect(model.streamingPrompt == nil)
+            #expect(harness.playback.calls.isEmpty)
+
+            // Confirmed after the setting changed to "never": blocked again, with its reason.
+            harness.playError = Self.needsConfirmation
+            #expect(await model.play(row)?.value == .blocked)
+            harness.playback.confirmFailure = .streamingNotAllowed(.cellular, key: Self.sherlockKey)
+            #expect(await model.confirmStreaming()?.value == .blocked)
+            #expect(model.streamingPrompt == .notAllowed)
+        }
+    }
+
+    private static let sherlockKey = MediaKey(
+        serverConnectionID: carAccountA.connectionID, libraryItemId: SampleLibrary.sherlock.id)
+    private static let needsConfirmation = PlaybackCoordinatorError.streamingNeedsConfirmation(
+        .cellular, key: sherlockKey)
+
+    /// A model whose tapped row was blocked by "ask" on a metered network.
+    private func blockedHarness(
+        settings: AppSettings
+    ) async throws -> (Harness, CarPlayRootModel) {
+        let store = LibraryStore(settings: settings)
+        await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+        let harness = Harness(store: store)
+        harness.playError = Self.needsConfirmation
+        let model = harness.model()
+        await model.update()
+        let row = try #require(tabRows(model.content).first)
+        // Negative control: nothing to ask before the play.
+        #expect(model.streamingPrompt == nil)
+        #expect(await model.play(row)?.value == .blocked)
+        #expect(model.streamingPrompt == .confirm)
+        harness.playError = nil
+        return (harness, model)
     }
 
     @Test func theItemInThePlayerIsMarkedPlaying() async throws {
