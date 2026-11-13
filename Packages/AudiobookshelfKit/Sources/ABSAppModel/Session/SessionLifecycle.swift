@@ -387,6 +387,12 @@ public final class SessionLifecycle {
         return true
     }
 
+    /// Resolves a continued Handoff activity's account to a connection on this device through
+    /// the account source (``HandoffActivity/resolve(using:)``), before the scene opens its link.
+    public func resolve(_ activity: HandoffActivity) async -> HandoffResolution {
+        await activity.resolve(using: source)
+    }
+
     /// Flushes the running session when a scene goes to the background, for at most the flush
     /// timeout. It doesn't wait for, or hold up, other transitions. Called from a participant's
     /// task, its flush tasks carry that task's stale transition ID, which is harmless: they

@@ -13,8 +13,43 @@ struct SceneLinks {
     private(set) var isSwitching = false
     /// Whether a newer link replaced the confirmed one in ``afterSwitch``.
     private var replacedConfirmed = false
+    /// Counts the links received, so one resolved after it arrived (Handoff) doesn't replace a
+    /// link received while it resolved.
+    private var arrivals: UInt64 = 0
 
     mutating func receive(_ link: DeepLink, gate: AuthGate, epoch: UInt64) {
+        arrivals &+= 1
+        keep(link, gate: gate, epoch: epoch)
+    }
+
+    /// Takes the next arrival for a continued Handoff activity, before its account is resolved
+    /// (``receive(_:gate:epoch:arrival:)``).
+    mutating func reserveArrival() -> UInt64 {
+        arrivals &+= 1
+        return arrivals
+    }
+
+    /// A continued Handoff activity's resolution, with the gate, epoch and arrival from when it
+    /// arrived. Its link waits like any other, unless a link arrived while it resolved: the last
+    /// received wins. An activity whose account isn't signed in here opens nothing, on no account.
+    /// - Returns: That account, for the scene to say it isn't signed in on this device.
+    mutating func receive(
+        _ resolution: HandoffResolution, gate: AuthGate, epoch: UInt64, arrival: UInt64
+    ) -> HandoffAccount? {
+        switch resolution {
+        case .open(let link):
+            if arrival == arrivals {
+                keep(link, gate: gate, epoch: epoch)
+            } else {
+                Log.ui.notice("Dropped a Handoff link: a newer link arrived while it resolved")
+            }
+            return nil
+        case .accountNotSignedIn(let account):
+            return account
+        }
+    }
+
+    private mutating func keep(_ link: DeepLink, gate: AuthGate, epoch: UInt64) {
         if isSwitching {
             afterSwitch = link
             replacedConfirmed = true

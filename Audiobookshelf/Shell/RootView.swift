@@ -32,6 +32,8 @@ struct RootView: View {
     /// Why a switch ended signed out, kept after dismissal so the text doesn't blank.
     @State private var switchSignedOutMessage: String?
     @State private var showsSwitchSignedOut = false
+    /// A continued Handoff activity's account isn't signed in on this device.
+    @State private var showsHandoffAccountMissing = false
 
     var body: some View {
         content
@@ -65,7 +67,16 @@ struct RootView: View {
                 if let link = DeepLink(url: url) { receive(link) }
             }
             .onContinueUserActivity(DeepLink.handoffActivityType) { activity in
-                if let link = DeepLink(handoff: activity.userInfo) { receive(link) }
+                if let handoff = HandoffActivity(userInfo: activity.userInfo) { receive(handoff) }
+            }
+            .alert(
+                Text(verbatim: L10n.string("MessageHandoffAccountNotSignedIn")),
+                isPresented: $showsHandoffAccountMissing
+            ) {
+                Button(role: .cancel) {
+                } label: {
+                    Text(verbatim: L10n.string("ButtonOk"))
+                }
             }
             // A link or a continued activity goes to a window that exists instead of opening a new
             // one (macOS, and iPad windows).
@@ -104,6 +115,20 @@ struct RootView: View {
     /// switch's link (``SceneLinks``).
     private func receive(_ link: DeepLink) {
         links.receive(link, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
+    }
+
+    /// Resolves the activity's account to a connection here (ADR 0004, "Handoff"), then lets its
+    /// link wait as if it had arrived when the activity did; or, when that account isn't signed
+    /// in here, opens nothing and says so.
+    private func receive(_ handoff: HandoffActivity) {
+        let arrival = links.reserveArrival()
+        let (gate, epoch) = (lifecycle.gate, lifecycle.linkEpoch)
+        Task {
+            let resolution = await lifecycle.resolve(handoff)
+            if links.receive(resolution, gate: gate, epoch: epoch, arrival: arrival) != nil {
+                showsHandoffAccountMissing = true
+            }
+        }
     }
 
     /// Checked when the host reads it, not only when the epoch changes: SwiftUI orders a new
