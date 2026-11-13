@@ -224,8 +224,9 @@ import SwiftData
     /// saved with the state.
     /// `taskIdentifier` is set as given (`nil` clears it) and cleared from any other part that
     /// still has it, as task identifiers restart with each session. `error` becomes `lastError`
-    /// (`nil` clears it) and `lastErrorCode` is cleared: the caller that knows the failure's code
-    /// saves it with ``setFailureCode(_:partID:forError:now:)``. `hasResumeData` is kept when `nil`.
+    /// (`nil` clears it), and `errorCode` (a `DownloadFailureCode` raw value) becomes
+    /// `lastErrorCode` in the same write (`nil` clears it), so a stored failure never lacks the
+    /// code it was saved with. `hasResumeData` is kept when `nil`.
     ///
     /// - Returns: `false` when the part doesn't exist or the change was refused.
     /// - Throws: ``StoreError/completionNeedsFinalBytes`` when `state` is `.completed`.
@@ -235,6 +236,7 @@ import SwiftData
         partID: UUID,
         taskIdentifier: Int?,
         error: String? = nil,
+        errorCode: String? = nil,
         hasResumeData: Bool? = nil,
         retryCount: Int? = nil,
         requeue: Bool = false,
@@ -257,7 +259,7 @@ import SwiftData
             part.state = state.rawValue
             part.taskIdentifier = taskIdentifier
             part.lastError = error
-            part.lastErrorCode = nil
+            part.lastErrorCode = errorCode
             if let hasResumeData { part.hasResumeData = hasResumeData }
             part.record?.updatedAt = now
             return true
@@ -326,25 +328,6 @@ import SwiftData
             part.taskIdentifier = nil
             part.lastError = nil
             part.lastErrorCode = nil
-            part.record?.updatedAt = now
-            return true
-        }
-    }
-
-    /// Saves the stable code of a part's failure (a `DownloadFailureCode` raw value), so a
-    /// localised message can be shown from the stored part. Only while the part is still
-    /// `.failed` with `message` as its `lastError`: a code reported after the part was retried,
-    /// queued, completed or failed differently mustn't label that newer state.
-    ///
-    /// - Returns: whether it was saved.
-    @discardableResult
-    public func setFailureCode(_ code: String, partID: UUID, forError message: String, now: Date = .now) throws
-        -> Bool
-    {
-        try commit {
-            guard let part = try fetchPart(id: partID), part.stateValue == .failed, part.lastError == message
-            else { return false }
-            part.lastErrorCode = code
             part.record?.updatedAt = now
             return true
         }

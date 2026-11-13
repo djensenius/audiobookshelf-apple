@@ -612,10 +612,9 @@ import Testing
                 == .completed(recordID: recordID, itemID: itemID, key: fixture.key(item)))
     }
 
-    /// A failure's code is saved with the part (#73) before the record is announced, so the UI
-    /// can show a localised message from the stored record; a report about a part that isn't
-    /// failed with that message any more saves nothing.
-    @Test func aFailureSavesItsCodeBeforeItIsAnnounced() async throws {
+    /// The record announced for a failure carries the code the engine saved with it (#73), so
+    /// the UI can show a localised message from the stored record.
+    @Test func aFailureIsAnnouncedWithItsStoredCode() async throws {
         let fixture = try await ManagerFixture()
         let manager = fixture.makeManager()
         try await manager.start()
@@ -629,27 +628,21 @@ import Testing
         let parts = try #require(try await fixture.store.record(id: recordID)).parts
         let events = await manager.events()
 
-        // The engine saves the failure, then reports it.
-        try await fixture.store.setPartState(.failed, partID: parts[1].id, taskIdentifier: nil, error: "404")
+        // The engine saves the failure with its code, then reports it.
+        try await fixture.store.setPartState(
+            .failed, partID: parts[1].id, taskIdentifier: nil, error: "404", errorCode: "httpStatus")
         try await fixture.store.setState(.failed, forRecord: recordID)
         fixture.engine.updateContinuation.yield(
             .partFailed(partID: parts[1].id, recordID: recordID, code: .httpStatus, message: "404", willRetry: false))
-        // A stale report about a part that's queued again.
-        fixture.engine.updateContinuation.yield(
-            .partFailed(partID: parts[0].id, recordID: recordID, code: .transfer, message: "lost", willRetry: true))
 
         guard case .recordChanged(let failed) = await events.next(where: { _ in true }) else {
             Issue.record("Not a record change")
             return
         }
-        #expect(failed.parts[1].lastErrorCode == "httpStatus")
         #expect(failed.parts[1].failureCode == .httpStatus)
+        #expect(failed.parts[0].failureCode == nil)
         #expect(failed.failureCode == .httpStatus)
         #expect(await events.next { _ in true } == .failed(recordID: recordID, code: .httpStatus, message: "404"))
-        _ = await events.next { _ in true }
-        let stored = try #require(try await fixture.store.record(id: recordID))
-        #expect(stored.parts[0].lastErrorCode == nil && stored.parts[0].failureCode == nil)
-        #expect(stored.failureCode == .httpStatus)
     }
 
     /// Expected lengths too big to add up as `Int64` still make a progress fraction.

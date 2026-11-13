@@ -178,28 +178,27 @@ import Testing
         #expect(try await store.completePart(partID: UUID(), finalBytes: 1) == false)
     }
 
-    /// A failure's code (#73) is saved with the failure it labels, and read back with the part.
-    @Test func aFailureCodeIsSavedOnlyForTheFailureItLabels() async throws {
+    /// A failure's code (#73) is saved in the same write as its state and message, and read back
+    /// with the part; an error saved without a code (a queued part's sign-in retry) has none.
+    @Test func aFailureIsSavedWithItsCode() async throws {
         let (store, _) = try makeStore()
         let part = Self.part()
         let created = try await store.upsertRecord(Self.record(key: key, parts: [part]), now: now).record
-        // A part saved without one has none.
         #expect(try await store.part(id: part.id)?.lastErrorCode == nil)
-        #expect(try await store.setFailureCode("httpStatus", partID: part.id, forError: "404") == false)
-        // Queued again with its error (as the engine does before asking for a new token).
-        #expect(try await store.setPartState(.queued, partID: part.id, taskIdentifier: nil, error: "401"))
-        #expect(try await store.setFailureCode("unauthorized", partID: part.id, forError: "401") == false)
 
-        #expect(try await store.setPartState(.failed, partID: part.id, taskIdentifier: nil, error: "404"))
-        #expect(try await store.setFailureCode("transfer", partID: part.id, forError: "offline") == false)
-        #expect(try await store.setFailureCode("httpStatus", partID: UUID(), forError: "404") == false)
         let later = now.addingTimeInterval(5)
-        #expect(try await store.setFailureCode("httpStatus", partID: part.id, forError: "404", now: later))
+        #expect(
+            try await store.setPartState(
+                .failed, partID: part.id, taskIdentifier: nil, error: "404", errorCode: "httpStatus", now: later))
 
         let record = try #require(try await store.record(id: created.id))
         #expect(record.parts.first?.lastError == "404")
         #expect(record.parts.first?.lastErrorCode == "httpStatus")
         #expect(record.updatedAt == later)
+
+        #expect(try await store.setPartState(.queued, partID: part.id, taskIdentifier: nil, error: "401"))
+        let queued = try #require(try await store.part(id: part.id))
+        #expect(queued.lastError == "401" && queued.lastErrorCode == nil)
     }
 
     enum FailureCodeClearing: CaseIterable {
@@ -212,8 +211,8 @@ import Testing
         let (store, _) = try makeStore()
         let part = Self.part()
         _ = try await store.upsertRecord(Self.record(key: key, parts: [part]), now: now)
-        try await store.setPartState(.failed, partID: part.id, taskIdentifier: nil, error: "404")
-        try await store.setFailureCode("httpStatus", partID: part.id, forError: "404")
+        try await store.setPartState(
+            .failed, partID: part.id, taskIdentifier: nil, error: "404", errorCode: "httpStatus")
         #expect(try await store.part(id: part.id)?.lastErrorCode == "httpStatus")
 
         switch clearing {

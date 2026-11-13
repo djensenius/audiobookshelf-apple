@@ -1,7 +1,7 @@
 import ABSData
 
 // The stored failure code, typed. ABSData saves it as a raw string, since it can't see
-// `DownloadFailureCode`; the manager writes it when the engine reports a failure (#73).
+// `DownloadFailureCode`; the engine saves it in the same write as the failure (#73).
 
 extension DownloadPartDTO {
     /// The code of the part's saved failure, for a localised message; `nil` when it has none, or
