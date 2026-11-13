@@ -34,7 +34,7 @@ struct RemoteProgressOfferHost: ViewModifier {
                 Text(verbatim: L10n.string("ButtonJumpToLatestPosition"))
             }
             Button(role: .cancel) {
-                model?.dismiss()
+                model?.dismiss(offer)
             } label: {
                 Text(verbatim: L10n.string("ButtonKeepCurrentPosition"))
             }

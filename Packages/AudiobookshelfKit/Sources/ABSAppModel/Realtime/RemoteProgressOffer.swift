@@ -4,12 +4,13 @@ import ABSRealtime
 import Observation
 
 /// The "Jump to latest position" offer (#59): newer progress from another session for the item
-/// the player has open and paused, which ``RealtimeBridge/onRemoteProgress`` delivers. The player
+/// the player has loaded and paused, which ``RealtimeBridge/onRemoteProgress`` delivers. The player
 /// doesn't seek on its own, unlike the legacy `layouts/default.vue`; it seeks only if the user
 /// accepts.
 ///
 /// A newer offer replaces the pending one. The offer ends when the user accepts or dismisses it,
-/// and on its own once playback starts or the player's media changes.
+/// and on its own once playback starts, the player's media changes, or it's no longer loaded. A
+/// restored or unloaded item gets no offer: starting it resolves the newest progress anyway.
 @MainActor
 @Observable
 public final class RemoteProgressOffer {
@@ -29,10 +30,10 @@ public final class RemoteProgressOffer {
     }
 
     /// The offer, until it's accepted, dismissed or ends. It's cleared on the turn after playback
-    /// starts or the media changes; ``shown`` drops it at once.
+    /// starts, the media changes or it's unloaded; ``shown`` drops it at once.
     public private(set) var pending: Pending?
 
-    /// ``pending`` while the player still has its media open and paused; what to present.
+    /// ``pending`` while the player still has its media loaded and paused; what to present.
     public var shown: Pending? {
         guard let pending, stillApplies(pending) else { return nil }
         return pending
@@ -45,13 +46,15 @@ public final class RemoteProgressOffer {
         self.playback = playback
     }
 
-    /// Offers `update`'s position, if the player has its media open and paused.
+    /// Offers `update`'s position, if the player has its media loaded and paused.
     public func offer(_ update: UserItemProgressUpdate) {
         let progress = update.progress
         guard let key = playback.mediaKey, key.libraryItemId == progress.libraryItemId,
-            key.episodeId == progress.episodeId, !playback.isPlaybackRequested
+            key.episodeId == progress.episodeId
         else { return }
-        pending = Pending(key: key, position: progress.currentTime, deviceDescription: update.deviceDescription)
+        let offer = Pending(key: key, position: progress.currentTime, deviceDescription: update.deviceDescription)
+        guard stillApplies(offer) else { return }
+        pending = offer
         track()
     }
 
@@ -78,22 +81,25 @@ public final class RemoteProgressOffer {
         }
     }
 
-    /// Ends the offer without seeking.
-    public func dismiss() {
+    /// Declines `offer`, the one the user was shown, without seeking. A newer offer that replaced
+    /// it stays, to be shown next.
+    public func dismiss(_ offer: Pending) {
+        guard offer == pending else { return }
         pending = nil
     }
 
     private func stillApplies(_ offer: Pending) -> Bool {
-        playback.mediaKey == offer.key && !playback.isPlaybackRequested
+        playback.mediaKey == offer.key && playback.phase == .loaded && !playback.isPlaybackRequested
     }
 
-    /// Ends the offer once playback starts or the media changes. Observation reports a change
-    /// before it's made, so the new state is checked on the next turn.
+    /// Ends the offer once playback starts, the media changes or it's no longer loaded. Observation
+    /// reports a change before it's made, so the new state is checked on the next turn.
     private func track() {
         guard !isTracking else { return }
         isTracking = true
         withObservationTracking {
             _ = playback.mediaKey
+            _ = playback.phase
             _ = playback.isPlaybackRequested
         } onChange: { [weak self] in
             Task { @MainActor in

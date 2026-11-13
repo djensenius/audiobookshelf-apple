@@ -1,5 +1,7 @@
 import ABSCore
+import ABSPlayback
 import ABSRealtime
+import Foundation
 import Testing
 
 @testable import ABSAppModel
@@ -60,12 +62,41 @@ struct RemoteProgressOfferTests {
         #expect(offer.pending == nil)
     }
 
-    @Test func dismissClearsWithoutSeeking() {
+    @Test func dismissClearsWithoutSeeking() throws {
         offer.offer(update(at: 200))
-        offer.dismiss()
+        offer.dismiss(try #require(offer.shown))
 
         #expect(offer.pending == nil)
         #expect(offer.shown == nil)
+        #expect(playback.calls.isEmpty)
+    }
+
+    @Test func dismissingAReplacedOfferKeepsTheNewerOne() throws {
+        offer.offer(update(at: 200))
+        let displayed = try #require(offer.shown)
+        offer.offer(update(at: 260))
+
+        offer.dismiss(displayed)
+
+        #expect(offer.shown?.position == 260)
+    }
+
+    /// Starting a restored item resolves the newest progress anyway, so it gets no offer, and one
+    /// for a loaded item ends when the item is no longer loaded.
+    @Test func anUnloadedItemGetsNoOffer() async throws {
+        let record = LastPlayedRecord(
+            serverConnectionID: FakePlaybackControl.serverID, libraryItemID: "li_book", episodeID: nil, position: 30,
+            duration: 400, timestamp: .now)
+        playback.restore(record)
+        offer.offer(update(at: 200))
+        #expect(offer.pending == nil)
+
+        playback.load(FakePlaybackControl.bookSession(), at: 30)
+        offer.offer(update(at: 200))
+        let shown = try #require(offer.shown)
+        playback.restore(record)
+        #expect(offer.shown == nil)
+        await offer.accept(shown)?.value
         #expect(playback.calls.isEmpty)
     }
 
@@ -162,6 +193,26 @@ struct RemoteProgressOfferTests {
             await harness.send(progressUpdate("li_book", currentTime: 30, lastUpdate: 2_000), on: socket)
             #expect(offer.pending == nil)
             #expect(playback.calls.isEmpty)
+        }
+    }
+
+    /// A progress fetch seeds the cache at 30 between the offer at 200 and the socket event at 30
+    /// with the same time; that event still ends the offer.
+    @Test func anEventAsOldAsTheCacheAtItsPositionEndsTheOffer() async throws {
+        try await withLibrarySettings { settings in
+            let harness = BridgeHarness()
+            harness.bridge.route(
+                library: LibraryStore(settings: settings), accounts: nil, bookmarks: { nil }, playback: playback,
+                localProgress: nil, remoteProgressOffer: offer)
+            let socket = try await harness.start()
+
+            await harness.send(progressUpdate("li_book", currentTime: 200, lastUpdate: 1_000), on: socket)
+            #expect(offer.shown?.position == 200)
+
+            harness.cache.apply(
+                MediaProgress(id: "p-li_book", libraryItemId: "li_book", currentTime: 30, lastUpdate: 2_000))
+            await harness.send(progressUpdate("li_book", currentTime: 30, lastUpdate: 2_000), on: socket)
+            #expect(offer.pending == nil)
         }
     }
 }
