@@ -622,6 +622,33 @@ static, unauthenticated remote images (none are planned).
     run.
   - Files for snapshot items are exempt from LRU eviction while they are in the
     current snapshot.
+  - **Amendment (#143, `ensureCoverFile`):**
+    - The order is the file store, then a fresh downloaded cover, then the
+      network. The display order checks the downloaded cover first. Here the
+      stored file is the one the widget reads, so if it exists nothing else is
+      needed, whatever the network state.
+    - Offline, the order is: a stored file for the exact key is returned; a
+      fresh downloaded cover is downsampled and stored; anything else throws
+      `ImagePipelineError.offline` and stores nothing. No stale downloaded
+      cover is ever used.
+    - A fresh downloaded cover that won't decode or is over the input cap is
+      skipped, as on display, and the network is tried instead.
+    - A removed server throws `noRequest`, and the store's generation check
+      refuses a write started before a removal.
+    - If the store isn't writable, the bare download isn't the file the
+      widget needs, so it throws.
+    - `ensureCoverFile` doesn't take a decode slot or reserve memory: it
+      decodes one cover at 300 px per snapshot item.
+    - The exemption is
+      `ImagePipeline.exemptFromEviction(_ keys: Set<ImageKey>)`, which forwards
+      to `CoverFileStore`. Each call replaces the previous set, so the writer
+      passes the current snapshot's keys every time it writes one. Exempt
+      files are matched by stem, whatever their extension. They still count
+      towards the cap, and are still deleted when their server is removed,
+      replaced by a newer write, or discarded if damaged.
+    - Calling both from `WidgetSnapshotWriter` before each reload is a
+      follow-up (#89). Until then, the widget keeps its fallback to larger
+      cached buckets.
 - **Placeholders and palette:**
   - Port the legacy states: a generated title and author placeholder when there
     is no cover, a logo placeholder on failure, and a 0.3 s fade-in.
