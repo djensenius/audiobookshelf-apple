@@ -230,6 +230,32 @@ import Testing
         #expect(requester.requested.isEmpty)
     }
 
+    @Test func permissionLostWhileQueueingDropsTheRest() async {
+        @MainActor final class Permission { var granted = true }
+        let permission = Permission()
+        let requester = Requester()
+        var service = Service()
+        service.itemHandler = { id in
+            // The account reconnects without download permission while the book is fetched.
+            if id == "b" { await MainActor.run { permission.granted = false } }
+            return Self.book(id)
+        }
+        service.books.booksHandler = { _, _ in
+            PagedResults(results: ["a", "b", "c"].map { Self.book($0) }, total: 3, limit: 50, page: 0)
+        }
+        let model = SeriesDownloadModel(
+            seriesID: "ser_1", connectionID: connection, service: service,
+            access: DownloadAccess(requester: requester, status: Status()), permitted: { permission.granted })
+        await model.start(libraryID: "lib")
+        model.prompt = nil
+        await model.confirm()
+        #expect(requester.requested.map(\.id) == ["a"])
+        #expect(model.prompt == nil)
+        permission.granted = true
+        await model.confirm()  // the plan was dropped
+        #expect(requester.requested.map(\.id) == ["a"])
+    }
+
     @Test func overflowingCountsAndSizesSaturate() {
         let books = [Self.book("a", files: .max, size: .max), Self.book("b", files: 1, size: 1)]
         let plan = SeriesDownloadPlan(books: books + [Self.book("c", files: -5, size: -5)], skipping: [])
@@ -258,19 +284,19 @@ import Testing
     }
 
     @Test func anUndecodablePageFailsTheListing() async {
-        for undecodable in [0, 1] {
+        for (undecodable, decoded) in [(0, 0), (1, 0), (1, 1)] {
             var service = Service()
-            // The server filled the page, but none of its rows decoded.
+            // The server filled the page, but only `decoded` of its rows decoded.
             service.books.booksHandler = { _, query in
                 let page = query.page ?? 0
-                let books = page == undecodable ? [] : [Self.book("p\(page)a"), Self.book("p\(page)b")]
-                return PagedResults(results: books, total: 6, limit: 2, page: page, rawCount: 2)
+                let books = [Self.book("p\(page)a"), Self.book("p\(page)b")].prefix(page == undecodable ? decoded : 2)
+                return PagedResults(results: Array(books), total: 6, limit: 2, page: page, rawCount: 2)
             }
             let model = SeriesDownloadModel(
                 seriesID: "ser_1", connectionID: connection, service: service,
                 access: DownloadAccess(requester: Requester(), status: Status()), permitted: { true }, pageSize: 2)
             await model.start(libraryID: "lib")
-            #expect(model.prompt == .loadFailed, "undecodable page \(undecodable)")
+            #expect(model.prompt == .loadFailed, "page \(undecodable) with \(decoded) rows decoded")
         }
     }
 

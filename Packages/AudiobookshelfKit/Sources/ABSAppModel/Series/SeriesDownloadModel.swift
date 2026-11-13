@@ -97,9 +97,9 @@ public struct SeriesDownloadPlan: Sendable, Hashable {
 ///   ``Prompt/queueFailed(count:)``.
 /// - A `CancellationError` (the account signed out or switched), or cancelling the task that runs a
 ///   step, ends it without a prompt. Without the user's download permission, nothing is listed or
-///   queued.
-/// - Listing stops at a page that adds no new book, and fails past ``maxBooks`` rather than
-///   offering part of the series.
+///   queued, and losing it while queueing drops the rest of the plan.
+/// - Listing stops at a page that adds no new book, and fails past ``maxBooks``, or at a page with
+///   rows that didn't decode, rather than offering part of the series.
 ///
 /// A model belongs to one series and connection: views recreate it when either changes.
 @MainActor
@@ -202,9 +202,9 @@ public final class SeriesDownloadModel {
             try Task.checkCancellation()
             let query = LibraryQuery(filter: .series(id: seriesID), page: page, limit: pageSize)
             let results = try await service.filteredBooksPage(libraryID: libraryID, query: query)
-            // Rows decode lossily: a page the server filled but none of whose rows decoded can't be
-            // told from the end of the series, so the listing fails rather than offer part of it.
-            if results.results.isEmpty, results.rawCount > 0 { throw UndecodablePage() }
+            // Rows decode lossily: a page with rows that didn't decode would leave books out of the
+            // plan (or call the series downloaded), so the listing fails rather than offer part of it.
+            if results.results.count < results.rawCount { throw UndecodablePage() }
             let new = results.results.filter { ids.insert($0.id).inserted }
             if new.isEmpty { return books }
             books += new
@@ -232,6 +232,8 @@ public final class SeriesDownloadModel {
                 pending.removeFirst()
                 continue
             }
+            // The account may have reconnected without download permission during the fetch.
+            guard permitted() else { return cancel() }
             let outcome =
                 metered
                 ? await access.requester.confirmMeteredDownload(item: item, episodeID: nil, connectionID: connectionID)
