@@ -533,8 +533,10 @@ public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchSer
         self.connectionKey = connectionKey
     }
 
+    /// - Parameter keepsSuccess: Returns the response even after a clear or account switch: the
+    ///   request changed the server, which the caller must still know (#368).
     private func send<Service: Sendable, Response: Sendable>(
-        _ service: Service.Type, _ request: (Service) async throws -> Response
+        _ service: Service.Type, keepsSuccess: Bool = false, _ request: (Service) async throws -> Response
     ) async throws -> Response {
         guard let store else { throw CancellationError() }
         let (client, generation) = try await store.client(for: connectionKey, as: service)
@@ -547,7 +549,7 @@ public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchSer
             try await checkServing(generation: generation)
             throw error
         }
-        try await checkServing(generation: generation)
+        if !keepsSuccess { try await checkServing(generation: generation) }
         return response
     }
 
@@ -673,10 +675,11 @@ extension LibraryStoreServices: PlaylistEditingService {
 // MARK: ProgressWriting
 
 /// Lets ``LibraryStore/makeItemActions(localSync:)``'s actions write through the store's current
-/// client, so they follow a reconnect and stop at a clear or an account switch.
+/// client, so they follow a reconnect and stop at a clear or an account switch. A write the server
+/// accepted still succeeds after a clear or switch, so the actions' local sync runs for it (#368).
 extension LibraryStoreServices: ProgressWriting {
     public func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
-        try await send((any ProgressWriting).self) {
+        try await send((any ProgressWriting).self, keepsSuccess: true) {
             try await $0.writeProgress(itemID: itemID, episodeID: episodeID, update: update)
         }
     }
@@ -684,7 +687,7 @@ extension LibraryStoreServices: ProgressWriting {
         try await send((any ProgressWriting).self) { try await $0.progressID(itemID: itemID, episodeID: episodeID) }
     }
     public func deleteProgress(id: String) async throws {
-        try await send((any ProgressWriting).self) { try await $0.deleteProgress(id: id) }
+        try await send((any ProgressWriting).self, keepsSuccess: true) { try await $0.deleteProgress(id: id) }
     }
 }
 

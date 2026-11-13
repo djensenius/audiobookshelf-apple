@@ -231,6 +231,53 @@ struct PlaybackCoordinatorMediaLeaseTests {
         await coordinator.play(itemID: "A")
         #expect(h.service.starts == ["A"])
     }
+
+    /// An account end (here expiry) resolves a sent `/close`'s receipt and cancels its task at
+    /// once, but the request ignores the cancellation and still reaches the server: the media
+    /// stays held until it returns, so an action of the account's next session waits for it.
+    @Test func anAccountEndStillHoldsTheMediaUntilASentCloseReturns() async {
+        await coordinator.play(itemID: "A")
+        let gate = Gate()
+        h.service.state.withLock { $0.closeGates["A-1"] = gate }
+        coordinator.stop()
+        await yieldUntil { h.service.closes == ["A-1"] }
+
+        coordinator.stop(reason: .expired)
+        let action = Task { await leases.acquire(h.key("A"), for: .progressAction, after: .closingSession) }
+        for _ in 0..<50 { await Task.yield() }
+        #expect(leases.isHeld(h.key("A"), by: .closingSession))
+        #expect(!leases.isHeld(h.key("A"), by: .progressAction))
+
+        gate.open()
+        let lease = await action.value
+        #expect(h.service.state.withLock { $0.canceledCloses } == ["A-1"])
+        lease.release()
+    }
+
+    /// Playback moved from A to B and B's start failed, so the last-played record is still A's,
+    /// at its old position. Once A's progress is discarded and the action cleared A's record
+    /// (`LocalProgressItemActionSync`), replaying A starts over. Negative control: with the record
+    /// kept, the replay resumes at A's discarded position.
+    @Test(arguments: [true, false])
+    func aReplayAfterDiscardingTheOutgoingItemStartsOver(forgetsRecord: Bool) async throws {
+        setFetchedProgress("A", time: 2400)
+        await coordinator.play(itemID: "A")
+        #expect(h.engine.loads.last?.time == 2400)
+        h.service.state.withLock { $0.startError = .forbidden(message: nil) }
+        await coordinator.play(itemID: "B")
+        #expect(coordinator.mediaKey == h.key("B"))
+        #expect(h.lastPlayed.record?.key == h.key("A"))
+
+        h.service.state.withLock { $0.startError = nil }
+        // The discard's server side, then its local sync: the row goes, and the record if asked.
+        apply(.discard, to: "A")
+        await h.progressStore.supersedePlaybackPositions(for: h.key("A"))
+        try await h.progressStore.deleteProgress(for: h.key("A"))
+        if forgetsRecord, h.lastPlayed.load()?.key == h.key("A") { h.lastPlayed.clear() }
+        await coordinator.play(itemID: "A")
+        let time = h.engine.loads.last?.time ?? -1
+        #expect(forgetsRecord ? time == 0 : time > 0)
+    }
 }
 
 // MARK: - MediaLeases

@@ -1410,11 +1410,15 @@ public final class PlaybackCoordinator {
     /// the close sends or saves settles, whatever the outcome: its `/close`, the session's `/sync`
     /// in flight (which `/close` stops waiting for after ``closeWaitTimeout``), and its captured
     /// position write. Each resolves once its request returns or its save ends, so the hold ends.
+    /// An account end resolves the close's receipt at once and cancels its task, but a `/close`
+    /// already sent may still reach the server, so the hold also waits for that task to return.
     private func holdUntilSettled(_ key: MediaKey, operation: PlaybackCloseOperation) {
         guard let mediaLeases else { return }
         let lease = mediaLeases.acquire(key, for: .closingSession)
+        let close = operation.task
         Task { @MainActor in
             _ = try? await operation.transport.wait()
+            await close?.value
             _ = try? await operation.handoff?.sessionSync?.wait()
             if operation.wasLoaded { try? await operation.handoff?.waitForAudioPosition() }
             lease.release()

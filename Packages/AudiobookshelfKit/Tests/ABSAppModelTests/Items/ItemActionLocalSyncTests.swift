@@ -91,6 +91,14 @@ private struct RecordingSync: ItemActionLocalSync {
     }
 }
 
+@MainActor
+private final class LastPlayed: LastPlayedStoring {
+    var record: LastPlayedRecord?
+    func load() -> LastPlayedRecord? { record }
+    func save(_ record: LastPlayedRecord) { self.record = record }
+    func clear() { record = nil }
+}
+
 private let connection = UUID()
 private let key = MediaKey(serverConnectionID: connection, libraryItemId: "item")
 private let target = ItemActionTarget(libraryItemID: "item", duration: 600)
@@ -357,6 +365,42 @@ private func cachedProgress(finished: Bool = false) -> MediaProgress {
         // Hiding doesn't touch the position, so it takes no lease.
         try await actions.hideFromContinueListening(target)
         #expect(!leases.isHeld(key, by: .progressAction))
+    }
+
+    /// Each action clears the account's last-played record of the media: its position predates
+    /// the action, so after a discard it would be the newest progress a replay finds (#368). A
+    /// record of other media stays, and so does the record without the store.
+    @Test(arguments: ["finished", "notFinished", "discard"])
+    func actionsForgetOnlyTheMediasLastPlayedRecord(action: String) async throws {
+        let records = LastPlayed()
+        let sync = LocalProgressItemActionSync(store: store, connectionID: connection, lastPlayed: { records })
+        func run(_ sync: LocalProgressItemActionSync) async throws {
+            cache.apply(cachedProgress(finished: action == "notFinished"))
+            let actions = actions(sync)
+            switch action {
+            case "finished": try await actions.markFinished(target)
+            case "notFinished": try await actions.markNotFinished(target)
+            default: try await actions.discardProgress(target)
+            }
+        }
+        func record(_ itemID: String, connection: UUID = connection) -> LastPlayedRecord {
+            LastPlayedRecord(
+                serverConnectionID: connection, libraryItemID: itemID, episodeID: nil, position: 2400,
+                duration: 3600, timestamp: edited)
+        }
+
+        // Negative controls: another item, the same item ID on another connection, no store.
+        for other in [record("other"), record("item", connection: UUID())] {
+            records.record = other
+            try await run(sync)
+            #expect(records.record == other)
+        }
+        records.record = record("item")
+        try await run(LocalProgressItemActionSync(store: store, connectionID: connection))
+        #expect(records.record == record("item"))
+
+        try await run(sync)
+        #expect(records.record == nil)
     }
 
     /// The drain sends the old position before finished, so the server ends up finished.

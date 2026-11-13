@@ -1,6 +1,7 @@
 import ABSAppModel
 import ABSCore
 import ABSData
+import ABSPlayback
 
 extension AppEnvironment {
     /// Builds the library shared by every scene and CarPlay, and registers its participant as
@@ -15,7 +16,9 @@ extension AppEnvironment {
     /// the user can close the player instead. A closed session's final sync and close can still be
     /// in flight, and another window can start the item while an action runs, so the actions also
     /// share `playback`'s ``AppPlayback/mediaLeases`` with the coordinators: they wait for those
-    /// closes to settle, and a start of the item waits for them.
+    /// closes to settle, and a start of the item waits for them. They also clear the account's
+    /// last-played record of the media (the store the account's scope restores from), whose
+    /// position predates the action.
     static func makeLibrary(
         settings: AppSettings, accounts: AccountManager, lifecycle: SessionLifecycle, playback: AppPlayback
     ) -> LibraryParticipant {
@@ -24,7 +27,13 @@ extension AppEnvironment {
         let store = LibraryStore(
             settings: settings,
             itemActionLocalSync: { key in
-                writer.map { LocalProgressItemActionSync(store: $0, connectionID: key.connectionID) }
+                writer.map {
+                    LocalProgressItemActionSync(
+                        store: $0, connectionID: key.connectionID,
+                        lastPlayed: {
+                            PlaybackScope.lastPlayedStore(for: key.connectionID, defaults: settings.defaults)
+                        })
+                }
             },
             itemInPlayer: { [weak current] key, target in
                 current?.mediaKey

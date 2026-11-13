@@ -97,7 +97,8 @@ private struct WritingClient: LibraryService, ProgressWriting {
     func deleteProgress(id: String) async throws { writes.value.append("\(name):delete:\(id)") }
 }
 
-/// A ``WritingClient`` whose writes wait for the test to reply before they're recorded.
+/// A ``WritingClient`` whose writes and deletions wait for the test to reply before they're
+/// recorded; a deletion's call is `delete:id`.
 private struct GatedWritingClient: LibraryService, ProgressWriting {
     let gate: GatedCalls<String, Void>
     let client: WritingClient
@@ -112,8 +113,13 @@ private struct GatedWritingClient: LibraryService, ProgressWriting {
         try await gate.call(itemID)
         try await client.writeProgress(itemID: itemID, episodeID: episodeID, update: update)
     }
-    func progressID(itemID: String, episodeID: String?) async throws -> String? { nil }
-    func deleteProgress(id: String) async throws {}
+    func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        try await client.progressID(itemID: itemID, episodeID: episodeID)
+    }
+    func deleteProgress(id: String) async throws {
+        try await gate.call("delete:\(id)")
+        try await client.deleteProgress(id: id)
+    }
 }
 
 /// `task`'s result, or `nil` when it hasn't finished within `timeout`. Doesn't wait for a task
@@ -519,6 +525,62 @@ private let forwardings: [StoreServiceForwarding] = [
             _ = await finish.result
             try await reset.value
             #expect(writes.value == ["b:x", "a1:x", "a2:x"])
+        }
+    }
+}
+
+extension LibraryStoreServicesTests {
+    enum AcceptedAction: String, CaseIterable { case discard, finished, notFinished }
+
+    /// The server accepted an action while the account switched away: the action still updates
+    /// the account's local row, so its dirty position can't recreate discarded progress or undo
+    /// the change once the account is back, but leaves the ended session's cache alone.
+    @Test(arguments: AcceptedAction.allCases)
+    func aWriteAcceptedDuringASwitchStillSyncsLocally(action: AcceptedAction) async throws {
+        try await withLibrarySettings { settings in
+            let local = LocalProgressStore(modelContainer: try DataStack(location: .inMemory).container)
+            let store = LibraryStore(
+                settings: settings,
+                itemActionLocalSync: { LocalProgressItemActionSync(store: local, connectionID: $0.connectionID) })
+            let key = MediaKey(serverConnectionID: serverA.connectionID, libraryItemId: "li")
+            let audio = ProgressEdit.Audio(currentTime: 30, duration: 60, progress: 0.5)
+            try await local.recordEdit(ProgressEdit(audio: audio, isFinished: action == .notFinished), for: key)
+            let writes = Locked<[String]>([])
+            let gate = GatedCalls<String, Void>()
+            var calls = gate.calls.makeAsyncIterator()
+            let slow = GatedWritingClient(gate: gate, client: WritingClient(name: "a", writes: writes))
+            await store.connect(client: slow, connectionKey: serverA)
+            store.progress.apply(
+                MediaProgress(
+                    id: "progress-li", libraryItemId: "li", duration: 60, progress: 0.5, currentTime: 30,
+                    isFinished: action == .notFinished, lastUpdate: 1_000))
+            let window = try #require(store.sessionItemActions())
+            let target = ItemActionTarget(libraryItemID: "li", duration: 60)
+            let request = Task {
+                switch action {
+                case .discard: try await window.discardProgress(target)
+                case .finished: try await window.markFinished(target)
+                case .notFinished: try await window.markNotFinished(target)
+                }
+            }
+            let held = try #require(await calls.next())
+
+            // Switched to B and back to A while the request is held; then the server accepts it.
+            store.clear()
+            await store.connect(client: WritingClient(name: "b", writes: writes), connectionKey: serverB)
+            store.clear()
+            await store.connect(client: WritingClient(name: "a2", writes: writes), connectionKey: serverA)
+            held.reply.resume()
+            await #expect(throws: CancellationError.self) { try await request.value }
+            #expect(writes.value == [action == .discard ? "a:delete:progress-li" : "a:li"])
+            #expect(store.progress.progress(libraryItemID: "li") == nil)
+
+            let row = try await local.progress(for: key)
+            switch action {
+            case .discard: #expect(row == nil)
+            case .finished: #expect(row?.isFinished == true)
+            case .notFinished: #expect(row?.isFinished == false && row?.currentTime == 0)
+            }
         }
     }
 }

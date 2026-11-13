@@ -105,6 +105,9 @@ extension APIClient: ProgressWriting {
 ///   was committed, `localSync` (``ItemActionLocalSync``) updates the local playback database,
 ///   still in the key's queue, so the syncer's pending values can't undo the change. It isn't
 ///   called for a failed or rolled-back action, or for hiding; its errors are logged, not thrown.
+///   It also runs for a request the server accepted after the session ended (sign-out or account
+///   switch), since it's bound to the account's connection; the action then leaves the ended
+///   session's cache alone and throws `CancellationError`.
 /// - Marking finished or not finished and discarding are refused with
 ///   ``ItemActionError/itemInPlayer`` while `isInPlayer` says the item or episode is in the player
 ///   (playing, paused, or restored and not loaded yet), checked when the action's turn in the queue
@@ -196,6 +199,7 @@ public final class ProgressItemActions: ItemActionPerforming {
             defer { lease?.release() }
             guard try await self.discard(target, session: session) else { return }
             await self.syncLocally { try await $0.didDiscard(target) }
+            guard self.cache.isCurrent(session) else { throw CancellationError() }
         }
     }
 
@@ -230,6 +234,7 @@ public final class ProgressItemActions: ItemActionPerforming {
             defer { lease?.release() }
             try await self.perform(target, update: update, optimistic: optimistic, session: session)
             await self.syncLocally(local)
+            guard self.cache.isCurrent(session) else { throw CancellationError() }
         }
     }
 
@@ -297,11 +302,12 @@ public final class ProgressItemActions: ItemActionPerforming {
             if let applied { cache.rollbackOptimistic(applied, to: before, token: session) }
             throw error
         }
-        guard cache.isCurrent(session) else { throw CancellationError() }
-        if let applied { cache.commitOptimistic(applied, token: session) }
+        // Accepted: an ended session's cache isn't touched, but the caller still syncs locally.
+        if let applied, cache.isCurrent(session) { cache.commitOptimistic(applied, token: session) }
     }
 
-    /// Returns whether the server's progress is gone; `false` when there was nothing to discard.
+    /// Returns whether the server's progress is gone, also once the session ended during the
+    /// DELETE; `false` when there was nothing to discard.
     private func discard(_ target: ItemActionTarget, session: ProgressCache.SessionToken) async throws -> Bool {
         guard cache.isCurrent(session) else { throw CancellationError() }
         guard let before = cache.progress(libraryItemID: target.libraryItemID, episodeID: target.episodeID) else {
@@ -326,8 +332,7 @@ public final class ProgressItemActions: ItemActionPerforming {
             cache.rollbackOptimistic(removal, to: before, token: session)
             throw error
         }
-        guard cache.isCurrent(session) else { throw CancellationError() }
-        cache.commitOptimistic(removal, token: session)
+        if cache.isCurrent(session) { cache.commitOptimistic(removal, token: session) }
         return true
     }
 }
