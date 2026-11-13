@@ -169,8 +169,20 @@ struct QueueActionsTests {
         let queue = try #require(PlaybackQueueControl(scope: scope))
         scope.retire(reason: .signOut)
 
-        queue.add(item("b"), at: .next)
-        queue.add(item("c"), at: .end)
+        #expect(!queue.add(item("b"), at: .next))
+        #expect(!queue.add(item("c"), at: .end))
+        #expect(queue.items.map(\.id) == ["a|"])
+    }
+
+    /// A menu still showing after its session's scope was released reports nothing queued.
+    @Test func aReleasedSessionsQueueIsntChanged() throws {
+        var scope: QueueScope? = QueueScope(items: [item("a")])
+        let queue = try #require(scope.flatMap { PlaybackQueueControl(scope: $0) })
+        scope = nil
+        #expect(scope == nil)
+
+        #expect(!queue.add(item("b"), at: .next))
+        #expect(!queue.add(item("c"), at: .end))
         #expect(queue.items.map(\.id) == ["a|"])
     }
 }

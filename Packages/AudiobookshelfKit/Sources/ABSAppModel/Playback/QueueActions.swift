@@ -36,14 +36,16 @@ extension PlaybackQueueControl {
 
     /// Queues `item` at `placement`; an item already queued moves there.
     ///
-    /// - Returns: `false`, queueing nothing, when `item` is the current media (``isCurrent(_:)``).
+    /// - Returns: `false`, queueing nothing, when `item` is the current media (``isCurrent(_:)``)
+    ///   or the session's scope is gone or has retired.
     @discardableResult
     public func add(_ item: QueueItem, at placement: QueuePlacement) -> Bool {
         guard !isCurrent(item) else { return false }
-        switch placement {
-        case .next: playNext(item)
-        case .end: addToEnd(item)
+        return edit { queue in
+            switch placement {
+            case .next: queue.playNext(item)
+            case .end: queue.addToEnd(item)
+            }
         }
-        return true
     }
 }

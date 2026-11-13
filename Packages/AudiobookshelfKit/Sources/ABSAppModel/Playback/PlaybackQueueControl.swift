@@ -56,4 +56,15 @@ public final class PlaybackQueueControl: PlaybackQueueReading {
     public func clear() {
         scope?.editQueue { $0.clear() }
     }
+
+    /// Applies `change` through the scope; `false` when it wasn't applied, because the scope is
+    /// gone or has retired.
+    func edit(_ change: (PlaybackQueue) -> Void) -> Bool {
+        var applied = false
+        scope?.editQueue {
+            change($0)
+            applied = true
+        }
+        return applied
+    }
 }

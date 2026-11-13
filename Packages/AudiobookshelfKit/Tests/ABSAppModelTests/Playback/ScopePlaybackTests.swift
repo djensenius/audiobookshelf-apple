@@ -277,6 +277,22 @@ private struct ScopeHarness {
         #expect(harness.participant.queue == nil)
     }
 
+    /// A retired scope refuses the edit, so an add through a control kept from it reports nothing
+    /// queued, while the next session's control adds.
+    @Test func anAddThroughARetiredScopeReportsNothingQueued() async throws {
+        let harness = try ScopeHarness()
+        try await harness.started()
+        let ended = try #require(harness.participant.queue)
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        let queueB = try #require(harness.participant.queue)
+
+        #expect(!ended.add(QueueItem(libraryItemID: "x", title: "X"), at: .end))
+        #expect(ended.items.isEmpty)
+        #expect(queueB.add(QueueItem(libraryItemID: "y", title: "Y"), at: .end))
+        #expect(queueB.items.map(\.libraryItemID) == ["y"])
+    }
+
     /// Play Next and Add to Queue refuse the loaded media, which the advancer would skip: when it
     /// ends, the item queued after it plays and the queue is left empty, with no stale entry.
     @Test func theLoadedMediaIsntQueuedSoTheQueuedItemPlaysWhenItEnds() async throws {
