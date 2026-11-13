@@ -86,6 +86,29 @@ struct LocalItemDetailTests {
         #expect(detail.totalBytes == 37)
     }
 
+    @Test func blankTrackAndEpisodeTitlesFallBackToTheFilename() {
+        let book = Self.item(
+            media: LocalMediaSnapshot(
+                metadata: .init(title: "Walden"),
+                audioTracks: [
+                    .init(index: 1, title: "", duration: 60, startOffset: 0, mimeType: "audio/mpeg"),
+                    .init(index: 2, title: " \n\t", duration: 60, startOffset: 60, mimeType: "audio/mpeg"),
+                ]),
+            files: [Self.file("01.mp3", size: 1, trackIndex: 1), Self.file("02.mp3", size: 1, trackIndex: 2)])
+        #expect(LocalItemDetail(item: book, account: nil).tracks.map(\.title) == ["01.mp3", "02.mp3"])
+
+        let podcast = Self.item(
+            mediaType: .podcast,
+            media: LocalMediaSnapshot(
+                metadata: .init(title: "Radio"),
+                episodes: [
+                    .init(id: "e1", title: "  ", publishedAt: Date(timeIntervalSince1970: 2_000), duration: 60),
+                    .init(id: "e2", title: "", publishedAt: Date(timeIntervalSince1970: 1_000), duration: 60),
+                ]),
+            files: [Self.file("one.mp3", size: 1, episodeId: "e1")])
+        #expect(LocalItemDetail(item: podcast, account: nil).episodes.map(\.title) == ["one.mp3", "e2"])
+    }
+
     @Test func clampsNegativeSizes() {
         let detail = LocalItemDetail(item: Self.item(files: [Self.file("a.mp3", size: -5)]), account: nil)
         #expect(detail.totalBytes == 0)

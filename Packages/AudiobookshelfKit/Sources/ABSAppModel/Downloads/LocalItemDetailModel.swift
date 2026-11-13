@@ -27,6 +27,9 @@ public final class LocalItemDetailModel {
     public let itemID: UUID
     public private(set) var item: LocalLibraryItemDTO?
     public private(set) var isLoaded = false
+    /// Whether a read has returned the item, so a later empty read means it was deleted rather
+    /// than never found (a retry after a failed first read mustn't leave the screen).
+    private var wasFound = false
     public private(set) var loadError: (any Error)?
     /// The item is gone: deleted here, or elsewhere meanwhile.
     public private(set) var isDeleted = false
@@ -168,8 +171,11 @@ public final class LocalItemDetailModel {
         case .success(let fresh):
             item = fresh
             loadError = nil
-            if fresh == nil, isLoaded { isDeleted = true }
-            if fresh != nil { itemFound?.yield(.itemFound) }
+            if fresh == nil, wasFound { isDeleted = true }
+            if fresh != nil {
+                wasFound = true
+                itemFound?.yield(.itemFound)
+            }
         case .failure(let error):
             loadError = error
             Log.downloads.error(

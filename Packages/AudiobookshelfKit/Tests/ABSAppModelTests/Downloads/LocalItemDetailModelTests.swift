@@ -182,6 +182,23 @@ struct LocalItemDetailModelTests {
         #expect(!model.isDeleted)
     }
 
+    /// A retry that finds nothing after a failed first read shows "not found"; it doesn't leave
+    /// a screen that never showed the item.
+    @Test func aRetryThatFindsNothingAfterAFailedFirstReadStaysOnTheScreen() async throws {
+        let store = FakeLocalStore(item: nil)
+        await store.failReads(true)
+        let (model, cleanUp) = try await makeModel(store: store, itemID: UUID())
+        defer { cleanUp() }
+        #expect(model.loadError != nil)
+
+        await store.failReads(false)
+        await model.reload()
+
+        #expect(model.loadError == nil)
+        #expect(model.detail == nil)
+        #expect(!model.isDeleted)
+    }
+
     @Test func deletingAnEpisodeUpdatesTheEpisodesAndSizes() async throws {
         let item = Self.podcast(episodes: ["e1", "e2"])
         let store = FakeLocalStore(item: item)

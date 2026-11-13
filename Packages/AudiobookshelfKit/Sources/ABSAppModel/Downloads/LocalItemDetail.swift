@@ -12,7 +12,7 @@ public struct LocalItemDetail: Sendable, Equatable {
         public var id: UUID
         /// The track number, for audio tracks.
         public var index: Int?
-        /// The track's title from the snapshot, else the filename.
+        /// The track's title from the snapshot, else (also when blank) the filename.
         public var title: String
         public var filename: String
         public var mimeType: String
@@ -126,7 +126,7 @@ public struct LocalItemDetail: Sendable, Equatable {
                 let track = file.trackIndex.flatMap { tracksByIndex[$0] }
                 var row = Self.file(file)
                 row.index = file.trackIndex
-                row.title = track?.title ?? file.filename
+                row.title = Self.label(track?.title, else: file.filename)
                 row.duration = track?.duration
                 tracks.append(row)
             }
@@ -154,6 +154,12 @@ public struct LocalItemDetail: Sendable, Equatable {
         return address
     }
 
+    /// `title`, or `fallback` when it's missing, empty or only whitespace, so a row is never blank.
+    static func label(_ title: String?, else fallback: String) -> String {
+        guard let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return fallback }
+        return title
+    }
+
     /// `a + b`, or `Int64.max` if that overflows.
     private static func adding(_ a: Int64, _ b: Int64) -> Int64 {
         let (sum, overflow) = a.addingReportingOverflow(b)
@@ -175,7 +181,8 @@ public struct LocalItemDetail: Sendable, Equatable {
         func bytes(_ id: String) -> Int64 { sum(files[id, default: []].map { max($0.size, 0) }) }
         var episodes = snapshot.map {
             Episode(
-                id: $0.id, title: $0.title, publishedAt: $0.publishedAt, duration: $0.track?.duration ?? $0.duration,
+                id: $0.id, title: label($0.title, else: files[$0.id]?.first?.filename ?? $0.id),
+                publishedAt: $0.publishedAt, duration: $0.track?.duration ?? $0.duration,
                 byteCount: bytes($0.id))
         }
         let known = Set(episodes.map(\.id))
