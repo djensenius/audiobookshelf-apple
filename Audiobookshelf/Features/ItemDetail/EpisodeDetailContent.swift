@@ -5,7 +5,8 @@ import SwiftUI
 
 /// The loaded episode (legacy `pages/item/_id/_episode/index.vue`): the cover, a link to the
 /// podcast, when it was published and how long it is, the title and badges, Play, the user's
-/// progress, and the show notes.
+/// progress, and the show notes. Across a fold running down through it (iOS 27.1 and later), the
+/// show notes go on the other side of the fold (``DetailArrangement``).
 ///
 /// Play starts the episode through the environment's `playItem`, which is `nil` while signed
 /// out (and until the shell provides it), so it's disabled then, while a start is in progress,
@@ -28,22 +29,8 @@ struct EpisodeDetailContent: View {
             for: model, canPlay: playItem != nil && !isStarting, isGone: isGone)
         ScrollView {
             VStack(alignment: .leading, spacing: ABSSpacing.large) {
-                if let refreshFailure {
-                    ItemDetailRefreshFailedBanner(messageKey: refreshFailure.messageKey) {
-                        Task { await model.detail.load() }
-                    }
-                }
-                if dynamicTypeSize.isAccessibilitySize {
-                    VStack(alignment: .leading, spacing: ABSSpacing.medium) {
-                        cover
-                        header
-                    }
-                } else {
-                    HStack(alignment: .top, spacing: ABSSpacing.medium) {
-                        cover
-                        header
-                    }
-                }
+                refreshBanner(refreshFailure)
+                heading
                 playButton(play)
                 EpisodeDetailProgress(model: model)
                 EpisodeDetailShowNotes(html: model.showNotesHTML)
@@ -51,6 +38,15 @@ struct EpisodeDetailContent: View {
             .padding(ItemDetailLayout.padding)
             .frame(maxWidth: 800, alignment: .leading)
             .frame(maxWidth: .infinity)
+        }
+        // Across a fold running down through it (book pose), the show notes on the other side (#85).
+        .detailSplitAtFold {
+            refreshBanner(refreshFailure)
+            heading
+            playButton(play)
+            EpisodeDetailProgress(model: model)
+        } secondary: {
+            EpisodeDetailShowNotes(html: model.showNotesHTML)
         }
         .refreshable { await model.detail.load() }
         .absBackground()
@@ -66,6 +62,29 @@ struct EpisodeDetailContent: View {
         ) { _ in
         } message: { failure in
             Text(verbatim: failure.message)
+        }
+    }
+
+    @ViewBuilder private func refreshBanner(_ failure: ItemDetailRefreshFailure?) -> some View {
+        if let failure {
+            ItemDetailRefreshFailedBanner(messageKey: failure.messageKey) {
+                Task { await model.detail.load() }
+            }
+        }
+    }
+
+    /// The cover beside the header, or above it at accessibility sizes.
+    @ViewBuilder private var heading: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(alignment: .leading, spacing: ABSSpacing.medium) {
+                cover
+                header
+            }
+        } else {
+            HStack(alignment: .top, spacing: ABSSpacing.medium) {
+                cover
+                header
+            }
         }
     }
 
