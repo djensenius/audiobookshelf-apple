@@ -4,7 +4,8 @@ import PackageDescription
 
 // Every planned module is declared up front so parallel feature PRs add source files
 // without conflicting on this manifest. The app links the single `AudiobookshelfKit`
-// umbrella product and imports the individual modules it needs.
+// umbrella product and imports the individual modules it needs; the widget extension links
+// `AudiobookshelfWidgetKit`.
 let package = Package(
     name: "AudiobookshelfKit",
     defaultLocalization: "en",
@@ -19,7 +20,10 @@ let package = Package(
                 "ABSCore", "ABSAPI", "ABSRealtime", "ABSData", "ABSPlayback", "ABSDownloads", "ABSUI",
                 "ABSAppModel",
             ]
-        )
+        ),
+        // The widget extension's narrow product: only what it imports, so the extension doesn't
+        // carry (or have the privacy manifest scan) the networking, playback and download code.
+        .library(name: "AudiobookshelfWidgetKit", targets: ["ABSCore", "ABSUI"]),
     ],
     dependencies: [
         // CBZ comic archives (ADR 0008), the only approved third-party package. Pinned exactly.

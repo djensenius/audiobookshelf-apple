@@ -25,8 +25,6 @@ struct SeriesDetailView: View {
         Group {
             if let host, let model = host.model(for: key) {
                 SeriesDetailContent(model: model, download: canDownload(key) ? download : nil)
-                    // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
-                    .environment(\.itemProgressReader, host.progressReader)
             } else {
                 BrowsePlaceholder(libraryID: libraryID, messages: SeriesPresentation.detailMessages)
                     .navigationTitle(Text(verbatim: L10n.string("LabelSeries")))

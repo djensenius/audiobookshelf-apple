@@ -21,7 +21,8 @@ public enum PlaybackHistorySyncResult: Sendable, Hashable {
     case failed(message: String?)
 }
 
-/// Records playback history events. The playback coordinator (#52) owns the only instance.
+/// Records playback history events. The app gives the only instance to `ProgressSyncer`
+/// (ABSPlayback), which records the events of the sessions it follows (#384).
 ///
 /// Port of the legacy `MediaEventManager`. Record each event after it happened, with the
 /// playback position (seconds from the start of the media) at that moment:
@@ -43,7 +44,9 @@ public enum PlaybackHistorySyncResult: Sendable, Hashable {
 ///   saying where it came from. Ignored unless the media already has history, as in legacy.
 ///
 /// Recording never throws: history is best effort and must not interrupt playback, so failures
-/// are logged.
+/// are logged and the event is dropped. Each media keeps its own history, pruned by the store:
+/// at most `PlaybackHistoryStore.maxEventsPerMedia` events, the oldest saves and syncs evicted
+/// first, and none older than `PlaybackHistoryStore.retention`.
 public protocol PlaybackHistoryRecording: Sendable {
     func record(
         _ name: PlaybackHistoryEventName,

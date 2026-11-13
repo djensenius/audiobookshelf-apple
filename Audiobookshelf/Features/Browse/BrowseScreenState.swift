@@ -79,8 +79,6 @@ struct BrowseModelKey: Hashable {
 struct BrowseModelHost<Model: AnyObject> {
     let key: BrowseModelKey
     let model: Model
-    /// The store's progress for item cards, built once so cards don't re-render on every body.
-    let progressReader: ItemProgressReader
 
     /// Builds the model from the store's services; `nil` without an account or for another one than `key`'s.
     @MainActor
@@ -88,7 +86,6 @@ struct BrowseModelHost<Model: AnyObject> {
         guard let services = store.makeServices(), services.connectionKey == key.connection else { return nil }
         self.key = key
         model = make(services)
-        progressReader = BrowsePresentation.progressReader(store.progress)
     }
 
     /// The host a screen's task keeps for `key`: `host` when built for it (keeping what it loaded), else a new one;

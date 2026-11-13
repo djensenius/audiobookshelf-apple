@@ -4,8 +4,8 @@ import SwiftUI
 
 /// The environment values library screens read (Home, item detail and the other library screens),
 /// so a feature never edits the shell or another feature to get them. The shell only sets them:
-/// the signed-in account's values come from #180 (`serverID`), #181 (`libraryStore`,
-/// `itemActions`) and #183 (`playItem`).
+/// the signed-in account's values come from #180 (`serverID`), ``AccountShell`` (`libraryStore`,
+/// `itemProgressReader` and `itemActions`, once per session) and #183 (`playItem`).
 ///
 /// Every default is the signed-out value, so previews and app tests need no setup.
 ///
