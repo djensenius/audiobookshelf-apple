@@ -21,8 +21,10 @@ private struct HeldStartProgressReader: LocalProgressReading {
         try await store.captureStartProgress(for: key)
     }
 
-    func applyStartProgress(_ progress: MediaProgress, captured: PlaybackStartProgressCapture) async throws -> Bool {
-        try await store.applyStartProgress(progress, captured: captured)
+    func applyStartProgressChange(
+        _ progress: MediaProgress, captured: PlaybackStartProgressCapture
+    ) async throws -> ServerAudioPositionChange? {
+        try await store.applyStartProgressChange(progress, captured: captured)
     }
 }
 

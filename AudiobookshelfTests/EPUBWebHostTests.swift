@@ -118,17 +118,21 @@ private final class ReaderPage {
     /// Replaces epub.js with a stand-in whose sections fail to display with `displayError`, if
     /// given, or never finish displaying while `window.fakeOptions.displayHangs`; whose books never
     /// open while `window.fakeOptions.openedHangs`; and whose table of contents is `toc`, from a
-    /// navigation document at `navPath`, but never loads unless `navigation`. Its starting rendition takes the spread `true`, as
+    /// navigation document at `navPath`, but never loads unless `navigation`; whose spine is
+    /// `spineLength` long, with CFI bases `cfiBase` characters long; and whose locations never finish,
+    /// once one section's are parsed as `locationCharacters` characters, if given. Its starting rendition takes the spread `true`, as
     /// epub.js's does for a book whose metadata says `both`. The latest book and rendition are
     /// `window.fakeBook` and `window.fakeRendition`; the sections it shows, `window.fakeContents`.
     func fakeEPUBJS(
         displayError: String? = nil, displayHangs: Bool = false, openedHangs: Bool = false, navigation: Bool = true,
-        toc: [[String: Any]] = [], navPath: String? = nil, packageDirectory: String = "/", failTarget: String = ""
+        toc: [[String: Any]] = [], navPath: String? = nil, packageDirectory: String = "/", failTarget: String = "",
+        spineLength: Int = 0, cfiBase: Int = 0, locationCharacters: Int = 0
     ) async throws {
         let options = try JSONSerialization.data(withJSONObject: [
             "displayError": displayError ?? "", "displayHangs": displayHangs, "openedHangs": openedHangs,
             "navigation": navigation, "toc": toc, "navPath": navPath ?? "", "packageDirectory": packageDirectory,
-            "failTarget": failTarget,
+            "failTarget": failTarget, "spineLength": spineLength, "cfiBase": cfiBase,
+            "locationCharacters": locationCharacters,
         ])
         _ = try await controller.webView.evaluateJavaScript(
             "window.fakeOptions = \(String(decoding: options, as: UTF8.self));\n\(Self.fakeEPUBJS)")
@@ -204,13 +208,21 @@ private final class ReaderPage {
             path: { directory: options.packageDirectory },
             loaded: { navigation: options.navigation ? Promise.resolve({ toc: options.toc }) : never },
             spine: {
+              length: options.spineLength,
+              spineItems: [{ cfiBase: 'x'.repeat(options.cfiBase) }],
               get: function () { return null },
               hooks: { content: { register: function (hook) { window.fakeSpineHook = hook } } }
             },
             locations: {
               load: function (locations) { window.fakeLoadedLocations = locations },
               length: function () { return window.fakeLoadedLocations ? 1 : 0 },
-              generate: function () { window.fakeGenerated = true; return never },
+              parse: function () { return ['c'.repeat(options.locationCharacters)] },
+              generate: function () {
+                window.fakeGenerated = true
+                if (options.locationCharacters) window.fakeParsed = this.parse()
+                return never
+              },
+              q: { stop: function () { window.fakeStopped = true } },
               save: function () { return '' }
             },
             renderTo: function () { return rendition },
@@ -295,6 +307,15 @@ private final class ReaderPage {
         #expect(task.error is LoadFailed)
         #expect(task.response == nil)
         #expect(!task.finished)
+    }
+
+    @Test func aBookOverTheLimitFailsTheTask() async {
+        let task = await start(
+            "absreader://book/x.epub", on: EPUBSchemeHandler(maxBookBytes: 5) { _ in Data(count: 6) })
+
+        #expect((task.error as? URLError)?.code == .dataLengthExceedsMaximum)
+        #expect(task.response == nil)
+        #expect(task.body.isEmpty)
     }
 
     @Test func aStoppedBookLoadDeliversNothing() async {
@@ -808,8 +829,12 @@ private final class ReaderPage {
     }
 
     /// How the real epub.js, once the book opens, rewrites `text` as a style sheet and as a
-    /// section, for a book listing the assets `listed` and containing only `present`.
-    private func rewritten(_ text: String, listed: [String], present: [String]) async throws -> [String] {
+    /// section, for a book listing the assets `listed` and containing only `present`, within a
+    /// rewrite `budget` (characters) if given; then the style sheet a section linking to it gets.
+    /// A missing style sheet reads as empty.
+    private func rewritten(
+        _ text: String, listed: [String], present: [String], budget: Int = 0
+    ) async throws -> [String] {
         let manifest =
             listed.map { #"<item id="i\#($0)" href="\#($0)" media-type="image/png"/>"# }.joined()
             + #"<item id="css" href="style.css" media-type="text/css"/>"#
@@ -825,6 +850,7 @@ private final class ReaderPage {
             const create = URL.createObjectURL
             window.testBlobs = {}
             URL.createObjectURL = function (blob) { const url = create(blob); window.testBlobs[url] = blob; return url }
+            window.absReaderRewriteBudget = \(budget)
             1
             """)
         let opening = Task { try await page.open("assets") }
@@ -838,7 +864,11 @@ private final class ReaderPage {
             await window.testBook.opened
             const resources = window.testBook.resources
             const css = resources.replacementUrls[resources.urls.indexOf('style.css')]
-            return [await window.testBlobs[css].text(), resources.substitute(text, '/OEBPS/c1.xhtml')]
+            const linked = resources.substitute('style.css', '/OEBPS/c1.xhtml')
+            return [
+              css ? await window.testBlobs[css].text() : '', resources.substitute(text, '/OEBPS/c1.xhtml'),
+              window.testBlobs[linked] ? await window.testBlobs[linked].text() : linked
+            ]
             """, arguments: ["text": text], contentWorld: .page)
         return try #require(texts as? [String])
     }
@@ -849,7 +879,7 @@ private final class ReaderPage {
         let names = ["a", "b", "c", "d"]
         let texts = try await rewritten("a b c d", listed: names, present: names)
 
-        #expect(texts.map { $0.components(separatedBy: "blob:").count - 1 } == [4, 4])
+        #expect(texts.map { $0.components(separatedBy: "blob:").count - 1 } == [4, 4, 4])
     }
 
     /// An asset missing from the archive stays unresolved without shifting the others onto the
@@ -858,7 +888,59 @@ private final class ReaderPage {
         let texts = try await rewritten("a.png b.png", listed: ["a.png", "b.png"], present: ["b.png"])
 
         let blob = try Regex("blob:[^ ]+")
-        #expect(texts.map { $0.replacing(blob, with: "BLOB") } == ["a.png BLOB", "a.png BLOB"])
+        #expect(texts.map { $0.replacing(blob, with: "BLOB") } == ["a.png BLOB", "a.png BLOB", "a.png BLOB"])
+    }
+
+    /// A style sheet or section whose rewrite would grow past the budget is emptied (a style sheet,
+    /// so sections linking to it get the empty one, not the original) or left as it was (a section).
+    @Test(.timeLimit(.minutes(1))) func aRewriteOverTheBudgetIsSkipped() async throws {
+        let text = Array(repeating: "a.png", count: 100).joined(separator: " ")
+        let texts = try await rewritten(text, listed: ["a.png"], present: ["a.png"], budget: 1000)
+
+        #expect(texts == ["", text, ""])
+    }
+
+    /// What all a book's style sheets grow by is budgeted too, since the book keeps them until it
+    /// closes: past it, a sheet within its own budget is emptied all the same.
+    @Test(.timeLimit(.minutes(1)), arguments: [(3000, 2), (0, 5)])
+    func styleSheetsGrowingPastTheBooksBudgetAreEmptied(budget: Int, rewrittenSheets: Int) async throws {
+        let sheets = (0..<5).map { "s\($0).css" }
+        let manifest =
+            #"<item id="a" href="a.png" media-type="image/png"/>"#
+            + sheets.map { #"<item id="\#($0)" href="\#($0)" media-type="text/css"/>"# }.joined()
+        let text = Array(repeating: "a.png", count: 20).joined(separator: " ")
+        let extra =
+            [TinyEPUB.Entry(name: "OEBPS/a.png", body: Data(count: 16))]
+            + sheets.map { TinyEPUB.Entry(name: "OEBPS/\($0)", body: Data(text.utf8)) }
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(extra: extra, manifest: manifest) })
+        _ = try await page.controller.webView.evaluateJavaScript(
+            """
+            const ePub = window.ePub
+            window.ePub = function (data, options) { return (window.testBook = ePub(data, options)) }
+            const create = URL.createObjectURL
+            window.testBlobs = {}
+            URL.createObjectURL = function (blob) { const url = create(blob); window.testBlobs[url] = blob; return url }
+            window.absReaderSheetsRewriteBudget = \(budget)
+            1
+            """)
+        let opening = Task { try await page.open("sheets") }
+        defer { opening.cancel() }
+        while try await page.evaluate("window.testBook !== undefined") != "true" {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let texts = try await page.controller.webView.callAsyncJavaScript(
+            """
+            await window.testBook.opened
+            const resources = window.testBook.resources
+            return Promise.all(sheets.map(function (sheet) {
+              return window.testBlobs[resources.replacementUrls[resources.urls.indexOf(sheet)]].text()
+            }))
+            """, arguments: ["sheets": sheets], contentWorld: .page)
+
+        let rewritten = try #require(texts as? [String])
+        #expect(rewritten.filter { $0.contains("blob:") }.count == rewrittenSheets)
+        #expect(rewritten.filter(\.isEmpty).count == 5 - rewrittenSheets)
     }
 
     /// A relocation is posted whenever any of its fields changes, not only its start.
@@ -879,6 +961,169 @@ private final class ReaderPage {
         let relocations = page.events.filter { $0["type"] as? String == "relocated" }
         #expect(relocations.map { $0["endCfi"] as? String } == ["e1", "e2"])
         #expect(relocations.map { $0["atEnd"] as? Bool } == [false, true])
+    }
+
+    /// Emits a relocation ending on page 1 of 2 in spine section `index`, and returns the progress
+    /// the bridge posts for it.
+    private func progress(on page: ReaderPage, endingInSection index: Int) async throws -> Double? {
+        _ = try await page.evaluate(
+            """
+            window.fakeRendition.emit('relocated', {
+              start: { cfi: 's', href: 'c1.xhtml', index: \(index) },
+              end: { cfi: 'e', index: \(index), displayed: { page: 1, total: 2 }, percentage: 0 }
+            })
+            """)
+        return page.last("relocated")?["progress"] as? Double
+    }
+
+    /// A spine past the limit gets no locations, and progress by section instead.
+    @Test(.timeLimit(.minutes(1))) func aLongSpineGetsProgressBySection() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(spineLength: 2001)
+
+        try await page.open("tiny")
+
+        #expect(try await page.evaluate("window.fakeGenerated === undefined") == "true")
+        #expect(try await progress(on: page, endingInSection: 1000) == 0.5)
+    }
+
+    /// Locations still generating at the deadline stop, and progress goes by section instead.
+    @Test(.timeLimit(.minutes(1))) func slowLocationsFallBackToProgressBySection() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(spineLength: 4)
+        _ = try await page.evaluate("window.absReaderLocationsTimeoutMs = 50")
+
+        try await page.open("tiny")
+        while try await page.evaluate("window.fakeStopped") != "true" {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(try await progress(on: page, endingInSection: 1) == 0.375)
+        #expect(page.last("locationsReady") == nil)
+    }
+
+    /// A spine item whose CFI base (with its id) is past the limit gets no locations: every
+    /// location would repeat it.
+    @Test(.timeLimit(.minutes(1))) func aLongCFIBaseGetsProgressBySection() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(spineLength: 4, cfiBase: 513)
+
+        try await page.open("tiny")
+
+        #expect(try await page.evaluate("window.fakeGenerated === undefined") == "true")
+        #expect(try await progress(on: page, endingInSection: 1) == 0.375)
+    }
+
+    /// Location text past the limit stops generation and is dropped; progress goes by section, and
+    /// nothing is posted to cache.
+    @Test(.timeLimit(.minutes(1))) func locationsPastTheOutputLimitFallBackToProgressBySection() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(spineLength: 4, locationCharacters: 1001)
+        _ = try await page.evaluate("window.absReaderLocationsMaxCharacters = 1000")
+
+        try await page.open("tiny")
+
+        #expect(try await page.evaluate("window.fakeStopped") == "true")
+        #expect(try await page.evaluate("window.fakeParsed") == "[]")
+        #expect(try await progress(on: page, endingInSection: 1) == 0.375)
+        #expect(page.last("locationsReady") == nil)
+    }
+
+    /// Real epub.js builds a section's locations in one go, each repeating every ancestor's id at
+    /// its start and end. A chapter whose would pass the limit is skipped before that, and progress
+    /// goes by section: text under a long id, or ranges each starting under one and ending in a
+    /// short sibling. One with an ordinary id still gets its locations.
+    @Test(.timeLimit(.minutes(1)), arguments: ["longID", "spanning", "ordinary"])
+    func locationsRepeatingALongElementIDAreSkippedBeforeParsing(chapter: String) async throws {
+        let lorem = String(repeating: "Lorem ipsum dolor sit amet. ", count: 100)
+        let long = String(repeating: "x", count: chapter == "ordinary" ? 8 : 2000)
+        let body =
+            chapter == "spanning"
+            ? String(repeating: #"<div id="\#(long)">a</div><p>\#(String(repeating: "y", count: 150))</p>"#, count: 60)
+            : #"<div id="\#(String(repeating: long, count: 10))"><p>\#(lorem)</p></div>"#
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(chapterBody: body) })
+        _ = try await page.controller.webView.evaluateJavaScript(
+            """
+            window.absReaderLocationsMaxCharacters = 100000
+            const ePub = window.ePub
+            window.ePub = function (data, options) {
+              const book = ePub(data, options)
+              // Its queue waits for animation frames, which an off-screen page never gets.
+              book.locations.q.tick = function (task) { setTimeout(task, 0) }
+              const parse = book.locations.parse
+              book.locations.parse = function () { window.testParsed = true; return parse.apply(this, arguments) }
+              // epub.js can't lay pages out off screen, so a stand-in rendition displays at once.
+              book.renderTo = function () {
+                const nothing = function () {}
+                return {
+                  settings: {}, started: Promise.resolve(), on: nothing, off: nothing, spread: nothing,
+                  themes: { register: nothing, select: nothing, fontSize: nothing, font: nothing },
+                  getContents: function () { return [] },
+                  display: function () { return Promise.resolve() },
+                  currentLocation: function () {
+                    return { start: { cfi: 's', index: 0 }, end: { cfi: 'e', index: 0, displayed: { page: 1, total: 2 } } }
+                  }
+                }
+              }
+              return book
+            }
+            1
+            """)
+
+        try await page.open("long-id")
+
+        if chapter != "ordinary" {
+            while page.last("relocated")?["progress"] as? Double != 0.5 {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            #expect(try await page.evaluate("window.testParsed === undefined") == "true")
+            #expect(page.last("locationsReady") == nil)
+        } else {
+            _ = try await page.next("locationsReady")
+            #expect(try await page.evaluate("window.testParsed") == "true")
+        }
+    }
+
+    /// A table of contents link to a chapter the package lists as `./c1.xhtml` keeps that href,
+    /// which epub.js finds the section by.
+    @Test(.timeLimit(.minutes(1))) func tableOfContentsLinksUseTheSpinesHref() async throws {
+        let page = try await ReaderPage(loadBook: { _ in
+            TinyEPUB.data(chapterHref: "./c1.xhtml", chapterLink: "./c1.xhtml#p2")
+        })
+        _ = try await page.controller.webView.evaluateJavaScript(
+            """
+            const ePub = window.ePub
+            window.ePub = function (data, options) { return (window.testBook = ePub(data, options)) }
+            1
+            """)
+        let opening = Task { try await page.open("dotted") }
+        defer { opening.cancel() }
+
+        let items = try #require(try await page.next("toc")["items"] as? [[String: Any]])
+        let href = try #require(items.first?["href"] as? String)
+        #expect(href == "./c1.xhtml#p2")
+        #expect(try await page.evaluate("window.testBook.spine.get('\(href)') !== null") == "true")
+    }
+
+    /// A display epub.js starts itself (a link, say) that fails doesn't fail a display the bridge
+    /// asked for after it; its failure is posted.
+    @Test(.timeLimit(.minutes(1))) func epubJSsOwnDisplayFailsAlone() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS(displayError: "Bad link", failTarget: "link.xhtml")
+        try await page.open("tiny")
+
+        _ = try await page.evaluate("(window.fakeRendition.display('link.xhtml'), 1)")
+        while try await page.evaluate("typeof window.fakeFail") != #""function""# {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let good = Task { try await page.controller.send(Data(#"{"type":"display","target":"good.xhtml"}"#.utf8)) }
+        try await Task.sleep(for: .milliseconds(300))
+        _ = try await page.evaluate("window.fakeFail()")
+
+        await #expect(throws: Never.self) { try await good.value }
+        let error = try await page.next("error")
+        #expect(error["phase"] as? String == "display")
+        #expect(error["message"] as? String == "Bad link")
     }
 
     @Test func aCommandMustBeAJSONObject() async {

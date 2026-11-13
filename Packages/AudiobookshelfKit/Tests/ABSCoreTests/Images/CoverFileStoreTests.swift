@@ -70,6 +70,42 @@ import Testing
         #expect(await reopened.lookup(key("a")) == nil)
     }
 
+    @Test func cachedFileFindsTheKeysFileWithoutTouchingIt() async throws {
+        let images = directory.url.appending(path: "Images")
+        let store = CoverFileStore(directory: images, limit: 1 << 20)
+        let inserted = try await store.insert(
+            moving: temporaryFile(), for: key("a"), pathExtension: "jpg", generation: 0)
+        let old = Date(timeIntervalSince1970: 1_000)
+        try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: inserted.url.path)
+
+        let found = CoverFileStore.cachedFile(for: CoverLocator(key("a")), in: images)
+        #expect(found?.standardizedFileURL.path == inserted.url.standardizedFileURL.path)
+        #expect(CoverFileStore.cachedFile(for: CoverLocator(key("a").with(bucket: .small)), in: images) == nil)
+        #expect(CoverFileStore.cachedFile(for: CoverLocator(key("b")), in: images) == nil)
+        let modified = try FileManager.default.attributesOfItem(atPath: inserted.url.path)[.modificationDate] as? Date
+        #expect(modified == old)
+    }
+
+    @Test func aLocatorFindsAnExternalCoverWithoutItsURL() async throws {
+        let images = directory.url.appending(path: "Images")
+        let store = CoverFileStore(directory: images, limit: 1 << 20)
+        var external = key("a")
+        external.externalURL = URL(string: "https://covers.example/a.jpg?token=secret")
+        let inserted = try await store.insert(
+            moving: temporaryFile(), for: external, pathExtension: "jpg", generation: 0)
+
+        // Decoded from JSON, as the widget reads it, it still names the file.
+        let locator = try JSONDecoder().decode(
+            CoverLocator.self, from: JSONEncoder().encode(CoverLocator(external)))
+        let found = CoverFileStore.cachedFile(for: locator, in: images)
+        #expect(found?.standardizedFileURL.path == inserted.url.standardizedFileURL.path)
+        #expect(CoverFileStore.cachedFile(for: CoverLocator(key("a")), in: images) == nil)
+        // An identity that isn't the digest can't name a path outside the folder.
+        var hostile = locator
+        hostile.identity = "../../x"
+        #expect(!hostile.fileStem.contains("/"))
+    }
+
     @Test func writesStartedBeforeAServerRemovalAreRefused() async throws {
         let store = CoverFileStore(directory: directory.url.appending(path: "Images"), limit: 1 << 20)
         let generation = await store.generation(for: serverID)

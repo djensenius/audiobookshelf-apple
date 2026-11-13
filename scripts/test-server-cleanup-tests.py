@@ -306,10 +306,11 @@ set -euo pipefail
 base_url=http://127.0.0.1:1; username=root; password=synthetic; version=2.26.0
 search_token=search0123456789abcdef; search_root=/search-fixtures; search_provenance=synthetic
 search_only=0
-unset ABS_SEARCH_CONTRACT_MODE
+unset ABS_SEARCH_CONTRACT_MODE ABS_PODCAST_WRITE_CONTRACT
 log() { printf '%s\n' "$*"; }
 swift() {
-  printf 'STUB swift mode=%s args=%s\n' "${ABS_SEARCH_CONTRACT_MODE:-off}" "$*"
+  printf 'STUB swift mode=%s podcast=%s args=%s\n' "${ABS_SEARCH_CONTRACT_MODE:-off}" \
+    "${ABS_PODCAST_WRITE_CONTRACT:-off}" "$*"
   if [[ ${ABS_SEARCH_CONTRACT_MODE:-off} == 1 ]]; then return "$second"; else return "$first"; fi
 }
 '''
@@ -322,7 +323,12 @@ swift() {
                     capture_output=True, text=True, timeout=3
                 )
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                self.assertEqual(result.stdout.count("STUB swift"), 2 if full and not first else 1)
+                self.assertEqual(result.stdout.count("STUB swift"), 3 if full and not first else 1)
+                # Only the podcast write pass sees ABS_PODCAST_WRITE_CONTRACT=1 (#465).
+                self.assertEqual(result.stdout.count("podcast=1"), 1 if full and not first else 0)
+                if full and not first:
+                    self.assertIn("podcast=1 args=test --package-path Packages/AudiobookshelfKit "
+                                  "--scratch-path .build/swiftpm --filter PodcastCreationContractTests", result.stdout)
                 if not full:
                     self.assertIn("--filter LibraryContractTests/libraries", result.stdout)
                     self.assertNotIn("Owned search pass", result.stdout)

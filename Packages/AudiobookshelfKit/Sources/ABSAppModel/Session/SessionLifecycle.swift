@@ -84,6 +84,9 @@ public final class SessionLifecycle {
     public private(set) var signedOutSwitches = 0
     /// What the last of those threw, if it threw, such as an unreadable Keychain.
     public private(set) var signedOutSwitchError: (any Error)?
+    /// The connection the last of those tried to switch to, whose session was rejected or
+    /// unreadable; set before ``signedOutSwitches`` counts it.
+    public private(set) var signedOutSwitchConnectionID: UUID?
 
     /// The session the gate shows as ready, for a screen to name as a change's origin; `nil`
     /// unless the gate is ready.
@@ -278,6 +281,7 @@ public final class SessionLifecycle {
                 } else {
                     self.signedOutSwitchError = nil
                 }
+                self.signedOutSwitchConnectionID = connectionID
                 self.signedOutSwitches += 1
             }
             return result

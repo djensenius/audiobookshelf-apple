@@ -30,11 +30,13 @@ private final class StartBaselineProbe: LocalProgressReading {
         return try await store.progress(for: key)
     }
 
-    func applyStartProgress(_ progress: MediaProgress, captured: PlaybackStartProgressCapture) async throws -> Bool {
+    func applyStartProgressChange(
+        _ progress: MediaProgress, captured: PlaybackStartProgressCapture
+    ) async throws -> ServerAudioPositionChange? {
         submissions.withLock { $0 += 1 }
         entered.open()
         if holdIntake { await release.wait() }
-        return try await store.applyStartProgress(progress, captured: captured)
+        return try await store.applyStartProgressChange(progress, captured: captured)
     }
 }
 
@@ -207,6 +209,24 @@ struct PlaybackStartBaselineTests {
         await h.coordinator.waitForPendingCloses()
         #expect(probe.submissions.withLock { $0 } == 0)
         #expect(try await store.progress(for: h.key("a")) == nil)
+    }
+
+    @Test func supersededIntakeNeverPublishesItsPositionChange() async throws {
+        let store = try LocalProgressStore(modelContainer: DataStack(location: .inMemory).container)
+        let probe = StartBaselineProbe(store: store, holdIntake: true)
+        defer { probe.release.open() }
+        let h = try CoordinatorHarness(progressStore: store, progressReader: probe)
+        h.service.state.withLock { $0.progress["a"] = reply(h) }
+        let task = Task { await h.coordinator.play(itemID: "a") }
+        await probe.entered.wait()
+        h.coordinator.stop()
+        probe.release.open()
+        await task.value
+        await h.coordinator.waitForPendingCloses()
+
+        // The intake still applied, but a later start must not report it as its own.
+        #expect(try await store.progress(for: h.key("a"))?.currentTime == 900)
+        #expect(h.coordinator.startProgressChange == nil)
     }
 
     @Test(arguments: [false, true])

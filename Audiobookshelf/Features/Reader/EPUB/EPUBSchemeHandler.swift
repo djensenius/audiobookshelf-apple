@@ -26,8 +26,14 @@ final class EPUBSchemeHandler: NSObject, WKURLSchemeHandler {
         "jszip.min.js": "text/javascript; charset=utf-8",
     ]
 
+    /// The largest book served, in bytes: `reader.js`'s `MAX_BOOK_BYTES`, the most a book may
+    /// inflate to, which no bigger archive stays within. A bigger one fails its task before WebKit
+    /// copies it into the page.
+    nonisolated static let maxBookBytes = 512 * 1024 * 1024
+
     private let resourceURL: (String) -> URL?
     private let loadBook: BookLoader
+    private let maxBookBytes: Int
     /// Book loads in flight, by task. `webView(_:stop:)` removes its entry, so a load finishing
     /// after that delivers nothing (WebKit raises on a stopped task).
     private var loads: [ObjectIdentifier: Task<Void, Never>] = [:]
@@ -35,9 +41,14 @@ final class EPUBSchemeHandler: NSObject, WKURLSchemeHandler {
     /// - Parameters:
     ///   - resourceURL: The bundled file for an app file name; by default the app bundle's.
     ///   - loadBook: Fetches a book's bytes.
-    init(resourceURL: @escaping (String) -> URL? = EPUBSchemeHandler.bundledFile, loadBook: @escaping BookLoader) {
+    ///   - maxBookBytes: The largest book served.
+    init(
+        resourceURL: @escaping (String) -> URL? = EPUBSchemeHandler.bundledFile,
+        maxBookBytes: Int = EPUBSchemeHandler.maxBookBytes, loadBook: @escaping BookLoader
+    ) {
         self.resourceURL = resourceURL
         self.loadBook = loadBook
+        self.maxBookBytes = maxBookBytes
     }
 
     /// The bundled reader file: the synchronized `Web` folder's files are copied to the bundle's
@@ -85,6 +96,8 @@ final class EPUBSchemeHandler: NSObject, WKURLSchemeHandler {
             // Stopped (or the handler is gone): WebKit must not hear from this task again.
             guard let self, loads.removeValue(forKey: key) != nil, !Task.isCancelled else { return }
             switch result {
+            case .success(let data) where data.count > maxBookBytes:
+                urlSchemeTask.didFailWithError(URLError(.dataLengthExceedsMaximum))
             case .success(let data):
                 Self.respond(
                     urlSchemeTask, status: 200, url: url, data: data, mimeType: "application/epub+zip",
