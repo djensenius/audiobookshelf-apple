@@ -28,6 +28,12 @@ public protocol DownloadsLifecycleManager: Sendable {
     func pause(recordID: UUID) async throws(DownloadManagerError) -> Bool
     /// See ``DownloadManager/resume(recordID:unlessQuiescedSince:)``.
     func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws(DownloadManagerError) -> Bool
+    /// See ``DownloadManager/pause(recordID:owner:)``.
+    func pause(recordID: UUID, owner: UUID) async throws(DownloadManagerError) -> Bool
+    /// See ``DownloadManager/resume(recordID:owner:unlessQuiescedSince:)``.
+    func resume(
+        recordID: UUID, owner: UUID, unlessQuiescedSince generation: Int
+    ) async throws(DownloadManagerError) -> Bool
 }
 
 extension DownloadManager: DownloadsLifecycleManager {}
@@ -59,7 +65,12 @@ extension DownloadManager: DownloadsLifecycleManager {}
 ///   keeps them running: the other connection's credentials stay saved. A removal does the same
 ///   as a sign-out, but in ``connectionRemoved(_:)``, once the credentials are deleted. An
 ///   expiry does the same in ``connectionExpired(_:)``, whatever the session's end says (a
-///   switch can be under way, or there may be no session of it, during a restore).
+///   switch can be under way, or there may be no session of it, during a restore). A sign-in
+///   that replaces a connection's saved session does the same in ``credentialsReplaced(_:)``,
+///   then resumes the records it paused, with the new credentials: outside the cleanup, so their
+///   network calls don't hold up a new session or a later cleanup, whose quiesce cancels them.
+///   It pauses them for itself (``DownloadManager/pause(recordID:owner:)``), taking over those a
+///   policy restart has paused for now, so a user pause before or after its pause is kept.
 /// - A cleanup runs in its own task, so it outlives the session teardown's time budget; a new
 ///   session of the same connection waits for it in ``sessionDidStart(_:)``, so it can't pause
 ///   or discard what that session starts. A cleanup that couldn't stop the transfers (the engine
@@ -91,6 +102,8 @@ public final class DownloadsLifecycle: SessionParticipant {
     private var connectionID: UUID?
     /// Each connection's last cleanup; the next one, and a new session of it, waits for it.
     private var cleanups: [UUID: Task<Void, Never>] = [:]
+    /// The resumes after the last credential replacement's cleanup, which run outside it.
+    private(set) var pendingResumes: Task<Void, Never>?
     /// Connections whose cleanup couldn't stop their transfers; tried again after activating.
     private var unfinishedCleanups: Set<UUID> = []
     /// The running session's connection, until its paused cover refetches are resumed.
@@ -209,6 +222,15 @@ public final class DownloadsLifecycle: SessionParticipant {
         _ = startCleanup(of: connectionID)
     }
 
+    /// Stops a connection's downloads as ``connectionExpired(_:)`` does, then resumes the records
+    /// it paused, so they start again with the new credentials. Call it once a sign-in has saved
+    /// them over the connection's saved session (``AccountManager/credentialsReplaced``). None is
+    /// resumed if the cleanup didn't finish (its retry keeps them paused, for the user to resume)
+    /// or a quiesce of the connection began since.
+    public func credentialsReplaced(_ connectionID: UUID) {
+        _ = startCleanup(of: connectionID, resuming: true)
+    }
+
     public func sessionDidStart(_ context: SessionContext) async {
         let id = context.identity.connectionID
         connectionID = id
@@ -264,7 +286,7 @@ public final class DownloadsLifecycle: SessionParticipant {
 
     /// Starts the cleanup of `connectionID` after its previous one, registered before this
     /// returns, so a session of it that starts later waits for it.
-    private func startCleanup(of connectionID: UUID) -> Task<Void, Never> {
+    private func startCleanup(of connectionID: UUID, resuming: Bool = false) -> Task<Void, Never> {
         let records = records
         let manager = manager
         let engine = engine
@@ -275,19 +297,25 @@ public final class DownloadsLifecycle: SessionParticipant {
             // Paused within the quiesce, so a failure's replay can't queue a record again after
             // the read; pausing seals resume data with the old credentials, so it's discarded after.
             // A pause that isn't saved leaves a record the next activation would restart. One a
-            // policy restart has paused for now is skipped, but its resume is refused once this began.
-            // The pauses run at once, so a slow one doesn't keep the others' transfers running.
+            // policy restart has paused for now is skipped, but its resume is refused once this
+            // began; a resuming cleanup takes it over instead. The pauses run at once, so a slow
+            // one doesn't keep the others' transfers running.
             let paused = Mutex(true)
+            let pausedIDs = Mutex<[UUID]>([])
+            let owner = UUID()
+            let states: [DownloadState] = resuming ? [.queued, .downloading, .paused] : [.queued, .downloading]
             let quiesced = await engine.quiesce(connectionID: connectionID) {
                 do {
-                    let stopping = try await records(connectionID).filter {
-                        [.queued, .downloading].contains($0.state)
-                    }
+                    let stopping = try await records(connectionID).filter { states.contains($0.state) }
                     await withTaskGroup(of: Void.self) { group in
                         for record in stopping {
                             group.addTask {
                                 do {
-                                    _ = try await manager.pause(recordID: record.id)
+                                    let didPause =
+                                        resuming
+                                        ? try await manager.pause(recordID: record.id, owner: owner)
+                                        : try await manager.pause(recordID: record.id)
+                                    if didPause { pausedIDs.withLock { $0.append(record.id) } }
                                 } catch {
                                     paused.withLock { $0 = false }
                                     Log.downloads.error(
@@ -306,6 +334,14 @@ public final class DownloadsLifecycle: SessionParticipant {
             }
             if quiesced, paused.withLock({ $0 }) {
                 self.unfinishedCleanups.remove(connectionID)
+                if resuming {
+                    // Taken before the next cleanup can begin, so its quiesce refuses these.
+                    let generation = await engine.quiesceGeneration()
+                    let ids = pausedIDs.withLock { $0 }
+                    self.pendingResumes = Task {
+                        await Self.resume(ids, owner: owner, since: generation, manager: manager)
+                    }
+                }
             } else {
                 Log.downloads.error("Couldn't stop a signed-out server's downloads; will retry")
                 self.unfinishedCleanups.insert(connectionID)
@@ -317,6 +353,22 @@ public final class DownloadsLifecycle: SessionParticipant {
             if self.cleanups[connectionID] == cleanup { self.cleanups[connectionID] = nil }
         }
         return cleanup
+    }
+
+    /// Resumes the `recordIDs` that `owner` still holds paused, unless a quiesce of their
+    /// connection began since `generation`.
+    private static func resume(
+        _ recordIDs: [UUID], owner: UUID, since generation: Int, manager: any DownloadsLifecycleManager
+    ) async {
+        for id in recordIDs {
+            do {
+                _ = try await manager.resume(recordID: id, owner: owner, unlessQuiescedSince: generation)
+            } catch {
+                Log.downloads.error(
+                    "Couldn't resume a download after a new sign-in: \(Log.redact(String(describing: error)), privacy: .public)"
+                )
+            }
+        }
     }
 
     /// How long a wait for a cleanup lasts before it's logged.
