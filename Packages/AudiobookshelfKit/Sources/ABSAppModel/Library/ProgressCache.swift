@@ -6,7 +6,7 @@ import Observation
 /// (``MediaProgress/key(libraryItemID:episodeID:)``).
 ///
 /// Seed it with the user's `mediaProgress` (from `GET /api/me` or the login response) and feed
-/// it single updates with ``apply(_:)`` from local playback and, later, the socket. An update
+/// it single updates with ``apply(_:isLocalPlayback:)`` from local playback and, later, the socket. An update
 /// never replaces a newer one: the entry with the later `lastUpdate` wins, and an update without
 /// `lastUpdate` counts as older than any that has one. ``LibraryStore`` owns the cache and clears
 /// it on logout and account switches.
@@ -32,11 +32,21 @@ public final class ProgressCache {
     @MainActor
     @Observable
     final class Entry {
-        var value: MediaProgress?
+        var value: MediaProgress? {
+            didSet {
+                guard oldValue != value, let changed = value ?? oldValue else { return }
+                var kind = ProgressChangeKind(from: oldValue, to: value)
+                // Not confirmed until the action settles (``ProgressCache/reportSettled``).
+                if isOptimistic, kind == .finished { kind = .updated }
+                owner?.valueDidChange(changed, kind: kind)
+            }
+        }
+        /// The cache to tell of value changes (``ProgressCache/onChange``).
+        @ObservationIgnored weak var owner: ProgressCache?
         /// The cache ``ProgressCache/revision`` of the last update that stored a value here or
         /// ``ProgressCache/remove(libraryItemID:episodeID:)``, or 0.
         @ObservationIgnored var revision = 0
-        /// The `revision` this entry had before its last ``ProgressCache/apply(_:)``; restored by
+        /// The `revision` this entry had before its last ``ProgressCache/apply(_:isLocalPlayback:)``; restored by
         /// ``ProgressCache/rollback(_:to:)``.
         @ObservationIgnored var revisionBeforeApply = 0
         @ObservationIgnored var isOptimistic = false
@@ -77,6 +87,19 @@ public final class ProgressCache {
 
     /// Increases with every stored update and every ``remove(libraryItemID:episodeID:)``.
     public private(set) var revision = 0
+
+    /// Called after an entry's progress is stored, replaced or removed, however it changed (an
+    /// apply, a seed, an optimistic action or its rollback), with its item and episode and the
+    /// change's kind; not for ``clear()``, which ends the account's session. A change also
+    /// reports again once the server and the local database have it: an optimistic action that
+    /// succeeds, and a socket update once merged locally
+    /// (``reportSettled(_:episodeID:kind:token:)``). The app forwards it to playback's
+    /// auto-advance, which prepares the next item again when it concerns it (#160).
+    public var onChange:
+        (@MainActor (_ libraryItemID: String, _ episodeID: String?, _ kind: ProgressChangeKind) -> Void)?
+    private var isClearing = false
+    /// Set while ``apply(_:isLocalPlayback:)`` stores local playback's position.
+    private var isApplyingLocalPlayback = false
 
     public init() {}
 
@@ -193,16 +216,23 @@ public final class ProgressCache {
 
     /// Stores `progress` unless the cached entry for the same media is newer. Returns whether it
     /// was stored.
+    ///
+    /// - Parameter isLocalPlayback: `progress` is where this device's playback has reached, with
+    ///   the cached row's other fields: a finished flag it keeps is no confirmation from the
+    ///   server, so the change reports as ``ProgressChangeKind/updated``.
     @discardableResult
-    public func apply(_ progress: MediaProgress) -> Bool {
+    public func apply(_ progress: MediaProgress, isLocalPlayback: Bool = false) -> Bool {
         let entry = entry(for: progress.progressKey)
         if let existing = entry.value, !Self.isNewer(progress, than: existing) { return false }
+        isApplyingLocalPlayback = isLocalPlayback
+        defer { isApplyingLocalPlayback = false }
         revision += 1
         entry.revisionBeforeApply = entry.revision
         entry.revision = revision
-        entry.value = progress
+        // Before the value, so its report counts it as the server's.
         entry.isOptimistic = false
         entry.optimisticCommitSerial = nil
+        entry.value = progress
         return true
     }
 
@@ -319,9 +349,11 @@ public final class ProgressCache {
     }
 
     /// Empties every entry. The entry objects are kept, so views watching a key (even one that
-    /// had no progress) see the next ``apply(_:)`` or ``seed(_:token:)`` for it. Seed requests
+    /// had no progress) see the next ``apply(_:isLocalPlayback:)`` or ``seed(_:token:)`` for it. Seed requests
     /// started before it are dropped when they respond.
     public func clear() {
+        isClearing = true
+        defer { isClearing = false }
         generation += 1
         appliedSeedRequest = 0
         optimisticCommitSerial = 0
@@ -346,8 +378,26 @@ public final class ProgressCache {
     private func entry(for key: String) -> Entry {
         if let entry = entries[key] { return entry }
         let entry = Entry()
+        entry.owner = self
         entries[key] = entry
         return entry
+    }
+
+    /// Reports `libraryItemID` and `episodeID` to ``onChange`` again, with the `kind` of the
+    /// change first reported, once the server and the local database have it: after an action
+    /// that changed them optimistically (``ProgressItemActions``), or after a socket update's
+    /// local merge (``RealtimeBridge``). The first report came before either had it, so what it
+    /// prompted may have read the old progress, and neither step changes a value here. Nothing
+    /// once `token`'s session has ended.
+    func reportSettled(_ libraryItemID: String, episodeID: String?, kind: ProgressChangeKind, token: SessionToken) {
+        guard isCurrent(token) else { return }
+        onChange?(libraryItemID, episodeID, kind)
+    }
+
+    fileprivate func valueDidChange(_ progress: MediaProgress, kind: ProgressChangeKind) {
+        guard !isClearing else { return }
+        onChange?(
+            progress.libraryItemId, progress.episodeId, isApplyingLocalPlayback && kind == .finished ? .updated : kind)
     }
 
     /// Whether `candidate` may replace `existing`: it is at least as recent. Equal timestamps

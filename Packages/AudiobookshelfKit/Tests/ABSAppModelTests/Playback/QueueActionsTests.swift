@@ -43,6 +43,7 @@ private final class QueueScope: PlaybackScopeHandle {
     func start() -> Bool { false }
     func play(itemID: String, episodeID: String?, startTime: Double?) async {}
     func reconnect(client: APIClient?, features: ServerFeatures?) {}
+    func progressDidChange(for key: MediaKey, kind: ProgressChangeKind) {}
     func saveLocally() {}
     func syncWithServer(isFirstSync: Bool) {}
     func flush() async {}

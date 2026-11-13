@@ -118,6 +118,10 @@ extension APIClient: ProgressWriting {
 ///   shared with playback), which waits for a closed session's final `/close` and position write
 ///   to settle, and hold it through the server request and the local sync, so a playback start
 ///   of the same media waits for the action instead of starting from the old position.
+/// - After the local sync, an action that changed the cache reports its media to
+///   ``ProgressCache/onChange`` again (``ProgressCache/reportSettled(_:episodeID:kind:token:)``), so
+///   what the optimistic change prompted (auto-advance's preparation, #160) runs again against
+///   the server's and the local database's new progress.
 @MainActor
 public final class ProgressItemActions: ItemActionPerforming {
     private struct Tail {
@@ -200,6 +204,7 @@ public final class ProgressItemActions: ItemActionPerforming {
             guard try await self.discard(target, session: session) else { return }
             await self.syncLocally { try await $0.didDiscard(target) }
             guard self.cache.isCurrent(session) else { throw CancellationError() }
+            self.cache.reportSettled(target.libraryItemID, episodeID: target.episodeID, kind: .reset, token: session)
         }
     }
 
@@ -232,9 +237,13 @@ public final class ProgressItemActions: ItemActionPerforming {
             // An action with a local part changes the position the player's session writes.
             let lease = local != nil ? try await self.claim(target, session: session) : nil
             defer { lease?.release() }
-            try await self.perform(target, update: update, optimistic: optimistic, session: session)
+            let change = try await self.perform(target, update: update, optimistic: optimistic, session: session)
             await self.syncLocally(local)
             guard self.cache.isCurrent(session) else { throw CancellationError() }
+            if let change {
+                self.cache.reportSettled(
+                    target.libraryItemID, episodeID: target.episodeID, kind: change, token: session)
+            }
         }
     }
 
@@ -291,13 +300,15 @@ public final class ProgressItemActions: ItemActionPerforming {
         try result.get()
     }
 
+    /// Returns the kind of the optimistic change, or `nil` when the cache took none.
     private func perform(
         _ target: ItemActionTarget, update: MediaProgressUpdate,
         optimistic: (MediaProgress?, Date) -> MediaProgress?, session: ProgressCache.SessionToken
-    ) async throws {
+    ) async throws -> ProgressChangeKind? {
         guard cache.isCurrent(session) else { throw CancellationError() }
         let before = cache.progress(libraryItemID: target.libraryItemID, episodeID: target.episodeID)
-        let applied = optimistic(before, now()).flatMap { cache.applyOptimistic($0, token: session) }
+        let value = optimistic(before, now())
+        let applied = value.flatMap { cache.applyOptimistic($0, token: session) }
         guard cache.isCurrent(session) else { throw CancellationError() }
         do {
             try await writer.writeProgress(
@@ -309,6 +320,7 @@ public final class ProgressItemActions: ItemActionPerforming {
         }
         // Accepted: an ended session's cache isn't touched, but the caller still syncs locally.
         if let applied, cache.isCurrent(session) { cache.commitOptimistic(applied, token: session) }
+        return applied.map { _ in ProgressChangeKind(from: before, to: value) }
     }
 
     /// Returns whether the server's progress is gone, also once the session ended during the

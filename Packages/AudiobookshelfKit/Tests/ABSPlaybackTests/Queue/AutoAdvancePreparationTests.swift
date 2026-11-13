@@ -178,14 +178,14 @@ struct AutoAdvancePreparationTests {
         #expect(progressReads.last == a.key("P", episode: "e2"))
 
         a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e2"])
-        a.advancer.progressDidChange(for: a.key("P", episode: "e2"))
+        a.advancer.progressDidChange(for: a.key("P", episode: "e2"), kind: .updated)
         await a.advancer.waitForPreparation()
         #expect(a.episodes.fetches == 2)
         #expect(progressReads.last == a.key("P", episode: "e3"))
 
         // Unrelated progress, or the current episode's own, changes nothing.
-        a.advancer.progressDidChange(for: a.key("Other"))
-        a.advancer.progressDidChange(for: a.key("P", episode: "e1"))
+        a.advancer.progressDidChange(for: a.key("Other"), kind: .updated)
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .updated)
         await a.advancer.waitForPreparation()
         #expect(a.episodes.fetches == 2)
 
@@ -203,6 +203,23 @@ struct AutoAdvancePreparationTests {
 
         #expect(a.h.policy.checks == 3)
         #expect(progressReads == [a.key("A"), a.key("B"), a.key("B")])
+    }
+
+    /// #554: e2 was finished elsewhere while this device was offline. The connection change
+    /// fetches the podcast's episodes again, so the end advances to e3 on that preparation.
+    @Test func connectionChangeFetchesTheListingAgain() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e2"])
+        let listings = a.episodes.fetches
+
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+
+        #expect(a.episodes.fetches == listings + 1)
+        let before = a.fetches
+        #expect(await a.finish() == before)
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
     }
 
     /// A failed listing fetch prepares nothing; the end tries once more, then stays.

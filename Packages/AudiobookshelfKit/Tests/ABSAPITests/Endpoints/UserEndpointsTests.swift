@@ -5,12 +5,12 @@ import Testing
 @testable import ABSAPI
 
 @Suite struct UserEndpointsTests {
-    @Test func meDecodesOnlyFinishedFlagsLeniently() async throws {
+    @Test func meDecodesOnlyFinishedFlagsAndTimesLeniently() async throws {
         let stub = StubServer { _ in
             .json(
                 #"{"id":"u1","username":"me","bookmarks":[],"mediaProgress":["#
-                    + #"{"libraryItemId":"P","episodeId":"e1","isFinished":true,"currentTime":12},"#
-                    + #"{"libraryItemId":"B","episodeId":null,"isFinished":"yes"},"#
+                    + #"{"libraryItemId":"P","episodeId":"e1","isFinished":true,"finishedAt":1700000000000,"currentTime":12},"#
+                    + #"{"libraryItemId":"B","episodeId":null,"isFinished":"yes","finishedAt":"soon"},"#
                     + #"{"libraryItemId":"C"},{"episodeId":"orphan","isFinished":true}]}"#)
         }
         let client = APIClient(
@@ -21,7 +21,7 @@ import Testing
 
         #expect(
             response.mediaProgress == [
-                .init(libraryItemId: "P", episodeId: "e1", isFinished: true),
+                .init(libraryItemId: "P", episodeId: "e1", isFinished: true, finishedAt: 1_700_000_000_000),
                 .init(libraryItemId: "B", isFinished: false),
                 .init(libraryItemId: "C", isFinished: false),
             ])

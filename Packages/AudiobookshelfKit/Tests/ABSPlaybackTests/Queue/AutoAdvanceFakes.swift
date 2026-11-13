@@ -36,6 +36,8 @@ final class StubEpisodeSource: PodcastEpisodeSource {
     struct State {
         var listings: [String: PodcastEpisodeListing] = [:]
         var fetches = 0
+        /// Fetches that have returned (or thrown).
+        var returns = 0
         var gate: Gate?
         var error: APIError?
     }
@@ -52,6 +54,7 @@ final class StubEpisodeSource: PodcastEpisodeSource {
         }
         await gate?.wait()
         return try state.withLock { state in
+            state.returns += 1
             if let error = state.error { throw error }
             return state.listings[podcastItemID]
                 ?? PodcastEpisodeListing(
@@ -60,11 +63,17 @@ final class StubEpisodeSource: PodcastEpisodeSource {
     }
 
     /// Episodes `ids` of a serial podcast, in that order.
-    func set(_ podcastID: String, episodes ids: [String], finished: Set<String> = []) {
+    /// - Parameter serverFinishedAt: When the server finished episodes, without local unsynced
+    ///   flags.
+    func set(
+        _ podcastID: String, episodes ids: [String], finished: Set<String> = [],
+        serverFinishedAt: [String: Date] = [:]
+    ) {
         let episodes = ids.enumerated().map { PodcastEpisode(id: $0.element, publishedAt: $0.offset) }
         state.withLock {
             $0.listings[podcastID] = PodcastEpisodeListing(
-                isSerial: true, episodes: episodes, finishedEpisodeIDs: finished)
+                isSerial: true, episodes: episodes, finishedEpisodeIDs: finished,
+                serverFinishedAt: serverFinishedAt)
         }
     }
 }

@@ -156,6 +156,7 @@ final class AppEnvironment {
         self.player = playback.player
         self.downloads = downloads
         downloads?.lifecycle.launch()
+        if let library { playback.follow(library.store.progress) }
 
         // Realtime (#59), after playback: the socket stops before the playback scope retires.
         if realtime, let accounts, let library {
