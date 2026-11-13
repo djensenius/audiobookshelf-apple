@@ -2,6 +2,7 @@ import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSData
+import ABSDownloads
 import ABSUI
 import PDFKit
 import SwiftUI
@@ -27,6 +28,10 @@ extension EnvironmentValues {
     /// Finds an ebook's downloaded copy (``EbookFileLoader/downloadedFileLookup(items:locations:)``);
     /// `nil` without the on-device store.
     @Entry var downloadedEbookFile: (@Sendable (EbookFileRequest) async -> URL?)?
+    /// The generation-checked credentials ebook fetches use, shared with downloads
+    /// (``AccountDownloadCredentials`` over `AccountManager.downloadAccess(for:read:)`); `nil`
+    /// without an account manager, when the fetch uses the serving client.
+    @Entry var ebookCredentials: (any DownloadCredentialProviding)?
 }
 
 /// Where readers keep what they fetch and generate; the system may purge both.
@@ -51,6 +56,7 @@ struct ReaderContainer: View {
     @Environment(\.libraryStore) private var store
     @Environment(\.makeEbookProgress) private var makeEbookProgress
     @Environment(\.downloadedEbookFile) private var downloadedEbookFile
+    @Environment(\.ebookCredentials) private var ebookCredentials
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: ReaderContainerModel?
     /// The account ``model`` was built for.
@@ -119,16 +125,23 @@ struct ReaderContainer: View {
 
     private func makeModel() -> ReaderContainerModel? {
         guard let store, let client = servingClient else { return nil }
-        let fetcher = APIEbookFileFetcher(client: client)
+        let fetcher = APIEbookFileFetcher(
+            connectionID: presentation.connectionID,
+            credentials: ebookCredentials ?? AccountDownloadCredentials(client: { [client] _ in client }))
         let kind = presentation.kind
         let serverProgress = store.progress.progress(libraryItemID: presentation.itemID)
         let key = MediaKey(serverConnectionID: presentation.connectionID, libraryItemId: presentation.itemID)
         let loader = EbookFileLoader(
             directory: ReaderCaches.ebooks, fetcher: fetcher, downloadedFile: downloadedEbookFile ?? { _ in nil })
+        let itemID = presentation.itemID
+        // Restored with its window, the reader can start before the session's progress seed has
+        // arrived: each load waits for it (offline, the cache as it is).
         return ReaderContainerModel(
             request: presentation.request, kind: kind, loader: loader,
-            progress: ReaderContainerModel.opens(kind) ? makeEbookProgress?(key, kind, serverProgress) : nil,
-            serverProgress: serverProgress)
+            progress: ReaderContainerModel.opens(kind) ? makeEbookProgress?(key, kind, serverProgress) : nil
+        ) { [store] in
+            await store.seededProgress(libraryItemID: itemID)
+        }
     }
 
     /// Progress is flushed as the reader disappears.

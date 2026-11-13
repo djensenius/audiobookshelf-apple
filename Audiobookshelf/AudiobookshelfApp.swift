@@ -18,6 +18,10 @@ struct AudiobookshelfApp: App {
         EbookFileLoader.downloadedFileLookup(
             items: LocalItemStore(modelContainer: $0.container), locations: DownloadLocations())
     }
+    /// Readers fetch ebooks with the downloads' generation-checked credentials.
+    private let ebookCredentials = AppEnvironment.shared.accounts.map { accounts in
+        AccountDownloadCredentials { try await accounts.downloadAccess(for: $0, read: $1) }
+    }
 
     init() {
         // Here rather than in `AppEnvironment`, so the environments tests build don't replace it.
@@ -37,6 +41,7 @@ struct AudiobookshelfApp: App {
             .environment(settings)
             .environment(\.windowRoute, $windowRoute)
             .environment(\.downloadedEbookFile, downloadedEbookFile)
+            .environment(\.ebookCredentials, ebookCredentials)
             .environment(\.downloadAccess, environment.downloads?.access)
             .environment(\.currentPlayback, environment.playback.current)
             .modifier(AppThemeModifier(settings: settings))
@@ -83,6 +88,7 @@ struct AudiobookshelfApp: App {
                     .task { await environment.lifecycle.start() }
                     .environment(settings)
                     .environment(\.downloadedEbookFile, downloadedEbookFile)
+                    .environment(\.ebookCredentials, ebookCredentials)
                     .modifier(AppThemeModifier(settings: settings))
             }
 

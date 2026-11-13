@@ -20,18 +20,33 @@ public enum EbookFileLoadError: Error, Sendable, Equatable {
     case tooLarge
 }
 
-/// Streams ebooks with an account's `APIClient` credentials (ADR 0008 §1).
+/// Streams ebooks with an account's credentials (ADR 0008 §1).
 ///
 /// `APIClient` buffers whole responses, so this sends the request itself, like a download
-/// (``DownloadRequests``): the connection's custom headers and the client's access token, a
-/// refreshed token after one 401, no cookies, and no redirect off the server's origin.
+/// (``DownloadRequests``): the connection's custom headers and access token, a refreshed token
+/// after one 401, no cookies, and no redirect off the server's origin.
+///
+/// The configuration and token come together from the same credential access as downloads
+/// (``AccountDownloadCredentials``, generation-checked in the app), so a token is never sent with
+/// another sign-in's headers. A 401 isn't retried when the refreshed credentials have other
+/// headers or another server address: the account signed in again during the fetch, and the
+/// reader reopens the book for the new session.
 public final class APIEbookFileFetcher: EbookFileFetching {
-    private let client: APIClient
+    private let connectionID: UUID
+    private let credentials: any DownloadCredentialProviding
     private let session: URLSession
 
-    /// - Parameter sessionConfiguration: Tests pass a configuration with stub protocol classes.
-    public init(client: APIClient, sessionConfiguration: URLSessionConfiguration = .absConnection()) {
-        self.client = client
+    /// - Parameters:
+    ///   - connectionID: the connection the book is on.
+    ///   - credentials: the connection's credentials; the app passes the downloads'
+    ///     ``AccountDownloadCredentials``.
+    ///   - sessionConfiguration: Tests pass a configuration with stub protocol classes.
+    public init(
+        connectionID: UUID, credentials: any DownloadCredentialProviding,
+        sessionConfiguration: URLSessionConfiguration = .absConnection()
+    ) {
+        self.connectionID = connectionID
+        self.credentials = credentials
         let configuration = sessionConfiguration.copy() as? URLSessionConfiguration ?? .absConnection()
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
@@ -46,11 +61,11 @@ public final class APIEbookFileFetcher: EbookFileFetching {
 
     public func downloadEbook(itemID: String, fileIno: String?, to destination: URL, maxBytes: Int) async throws {
         let path = EbookFileLoader.endpoint(itemID: itemID, fileIno: fileIno).path
-        var token = try await client.accessToken(replacing: nil)
+        var current = try await credentials.credentials(for: connectionID, replacing: nil)
         var retried = false
         while true {
             let request = try DownloadRequests.request(
-                path: path, configuration: await client.configuration, accessToken: token)
+                path: path, configuration: current.configuration, accessToken: current.accessToken)
             let bytes: URLSession.AsyncBytes
             let response: URLResponse
             do {
@@ -65,7 +80,12 @@ public final class APIEbookFileFetcher: EbookFileFetching {
             if http.statusCode == 401, !retried {
                 retried = true
                 bytes.task.cancel()
-                token = try await client.accessToken(replacing: token)
+                let refreshed = try await credentials.credentials(for: connectionID, replacing: current.accessToken)
+                // Another sign-in's credentials: not sent for this one's request.
+                guard Self.isSameSession(refreshed.configuration, current.configuration) else {
+                    throw Self.error(status: 401)
+                }
+                current = refreshed
                 continue
             }
             guard (200..<300).contains(http.statusCode) else { throw Self.error(status: http.statusCode) }
@@ -73,6 +93,12 @@ public final class APIEbookFileFetcher: EbookFileFetching {
             try await EbookFileLoader.write(bytes, to: destination, maxBytes: maxBytes)
             return
         }
+    }
+
+    /// Whether credentials read for a retry still belong to the request's sign-in: the same server
+    /// address and custom headers. A refresh keeps both; a new sign-in may change the headers.
+    static func isSameSession(_ refreshed: APIClientConfiguration, _ original: APIClientConfiguration) -> Bool {
+        refreshed.baseURL == original.baseURL && refreshed.customHeaders == original.customHeaders
     }
 
     private static func error(status: Int) -> APIError {
