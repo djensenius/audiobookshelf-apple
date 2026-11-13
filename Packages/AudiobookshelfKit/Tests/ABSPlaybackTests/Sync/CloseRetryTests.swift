@@ -64,6 +64,21 @@ struct CloseRetryFixture {
             .timeListening
     }
 
+    /// The stub server's progress for "a", merged into the row as a fetch is; returns it.
+    @discardableResult
+    func mergeServerProgress() async throws -> MediaProgress {
+        let progress = try #require(try await model.fetchProgress(client, itemID: "a", episodeID: nil))
+        let server = ProgressBaseline(
+            currentTime: progress.currentTime, progress: progress.progress, duration: progress.duration,
+            isFinished: progress.isFinished,
+            finishedAt: progress.finishedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) },
+            ebookLocation: progress.ebookLocation, ebookProgress: progress.ebookProgress,
+            lastUpdate: Date(timeIntervalSince1970: Double(try #require(progress.lastUpdate)) / 1000))
+        let capture = await s.store.captureProgressFetch(for: key)
+        try await s.store.applyServerProgress([key: server], capturedAt: capture.generation, source: .fetch)
+        return progress
+    }
+
     /// Moves past the close's retry delay and drains.
     func drainWhenDue() async {
         s.h.clock.advance(by: s.syncer.reconcileDelay)
@@ -199,7 +214,8 @@ struct CloseRetryTests {
     /// The item is marked finished while session 1's close waits to be resent. A resend carries
     /// the old position, which un-finishes the item on the server unless the row's position
     /// PATCH and its finished PATCH reached the server first. So a pass whose PATCH for the row
-    /// fails leaves the close for the next drain, which sends both PATCHes before it.
+    /// fails leaves the close for the next drain, which sends both PATCHes before it. The close
+    /// then repeats the server's position, so the item stays finished there and locally.
     @Test(arguments: [false, true])
     func aResendWaitsForItsRowsPatches(patchFails: Bool) async throws {
         let f = try CloseRetryFixture()
@@ -225,6 +241,45 @@ struct CloseRetryTests {
         let patches = f.s.service.patches.suffix(2).map(\.update)
         #expect(patches.map(\.currentTime) == [20, nil] && patches.map(\.isFinished) == [nil, true])
         #expect(try await f.queued().isEmpty)
+        let closed = try await f.mergeServerProgress()
+        #expect(closed.isFinished && closed.currentTime == 20)
+        #expect(try await f.s.store.progress(for: f.key)?.isFinished == true)
+    }
+
+    /// A send for the row still in flight on the shared writer (a retiring scope's) while another
+    /// syncer drains: that drain can't send the row's edits, so it holds the close too, and sends
+    /// it once they reached the server.
+    @Test func aResendWaitsForASendInFlightOnTheSharedWriter() async throws {
+        let f = try CloseRetryFixture()
+        try await f.stopSessionOne(.unapplied)
+        try await f.model.update(f.client, itemID: "a", episodeID: nil, .finished(true))
+        try await f.s.store.recordEdit(ProgressEdit(isFinished: true), for: f.key, now: f.s.h.clock.now + 1)
+        let attempt = try #require(try await f.queued().first?.lastAttemptAt)
+        let patch = Gate()
+        let patchStarted = Gate()
+        f.s.service.state.withLock {
+            $0.patchGates = [patch]
+            $0.patchStarted = patchStarted
+        }
+        // The retiring scope's drain: its close isn't due, and its first PATCH is held.
+        let retiring = Task { await f.s.syncer.drainPendingProgress() }
+        await patchStarted.wait()
+
+        let r = try CloseRetryFixture(progressStore: f.s.store, connectionID: f.s.h.connectionID, model: f.model)
+        r.s.h.clock.advance(by: attempt.timeIntervalSince(r.s.h.clock.now) + r.s.syncer.reconcileDelay)
+        await r.s.syncer.drainPendingProgress()
+        #expect(r.s.service.patches.isEmpty)
+        #expect(r.s.service.closes.isEmpty)
+        #expect(try await f.model.fetchProgress(f.client, itemID: "a", episodeID: nil)?.isFinished == true)
+
+        patch.open()
+        await retiring.value
+        #expect(f.s.service.patches.suffix(2).map(\.update.isFinished) == [nil, true])
+        await r.s.syncer.drainPendingProgress()
+        #expect(r.s.service.closes.map(\.id) == ["session-1"])
+        let closed = try await f.mergeServerProgress()
+        #expect(closed.isFinished && closed.currentTime == 20)
+        #expect(try await f.s.store.progress(for: f.key)?.isFinished == true)
     }
 
     /// A resend's attempt time is saved before it reaches the server, as the coordinator's

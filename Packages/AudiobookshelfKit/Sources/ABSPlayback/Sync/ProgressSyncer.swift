@@ -1148,7 +1148,13 @@ public final class ProgressSyncer {
                     break
                 }
                 guard let patch else {
-                    unsent.remove(row.key)
+                    // Also `nil` while a send for the row is in flight (a retiring scope's on the
+                    // shared writer included): the row stays held unless it no longer needs a sync.
+                    do {
+                        if try await store.progress(for: row.key)?.needsServerSync != true { unsent.remove(row.key) }
+                    } catch {
+                        drainOutcome.failed = true
+                    }
                     break
                 }
                 guard !isDetached, !isTransportQuiesced else {
