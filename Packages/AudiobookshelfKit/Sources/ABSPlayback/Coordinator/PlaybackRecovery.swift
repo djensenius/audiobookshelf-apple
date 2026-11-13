@@ -130,6 +130,9 @@ final class PlaybackRecovery {
         var failedDuringAttempt = false
         /// A stream reset restarted the backoff; the episode takes no other.
         var streamReset = false
+        /// The run (its token) that chose a rebuild or token refresh, which a stream reset mustn't
+        /// replace while it waits for its backoff or refresh.
+        var escalatingRun: Int?
     }
 
     @ObservationIgnored var host: PlaybackRecoveryHost?
@@ -184,15 +187,15 @@ final class PlaybackRecovery {
     /// ADR 0007): re-seek to ``PlaybackRecoveryHost/target`` after the first segment-readiness
     /// delay, restarting that backoff, and play if `wasPlaying`. It supersedes a readiness run in
     /// flight; on a healthy item it starts an episode. Once per episode: ignored after one, after
-    /// a rebuild (the item is new, so recovery only rebuilds), and during a run for a network loss,
-    /// a 401 or a rebuild. Returns whether it applied.
+    /// a rebuild (the item is new, so recovery only rebuilds), during a run for a network loss,
+    /// a 401 or a rebuild, and during one whose session lookup (or spent retries) chose a rebuild
+    /// or token refresh. Returns whether it applied.
     @discardableResult
     func streamReset(generation: Int, wasPlaying: Bool) -> Bool {
         guard let host, generation != attemptGeneration else { return false }
         if var episode, episode.generation == generation {
-            guard !episode.streamReset, episode.rebuilds == 0, !isRunning || Self.isReadiness(episode.cause) else {
-                return false
-            }
+            let retryingReadiness = Self.isReadiness(episode.cause) && episode.escalatingRun != token
+            guard !episode.streamReset, episode.rebuilds == 0, !isRunning || retryingReadiness else { return false }
             episode.cause = .streamReset
             episode.retries = 0
             episode.streamReset = true
@@ -303,6 +306,8 @@ final class PlaybackRecovery {
                 guard episode.rebuilds < Self.rebuildDelays.count else { return giveUp(.recoveryExhausted, host) }
                 delay = Self.rebuildDelays[episode.rebuilds]
             }
+            // Before any await: a stream reset mustn't replace the rebuild or refresh chosen here.
+            self.episode?.escalatingRun = step == .reseek ? nil : run
             // Back online: retry at once.
             if !returned {
                 await wait(delay)

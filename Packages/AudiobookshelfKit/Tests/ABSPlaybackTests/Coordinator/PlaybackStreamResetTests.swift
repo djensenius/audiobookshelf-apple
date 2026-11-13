@@ -234,6 +234,90 @@ struct PlaybackStreamResetTests {
         #expect(coordinator.isPlaying)
     }
 
+    // MARK: - A rebuild or refresh the lookup chose
+
+    /// A readiness failure's session lookup picks the next attempt. A gone session takes a
+    /// rebuild and a rejected one a refresh (then a rebuild), which a reset during their backoff
+    /// mustn't replace with a re-seek. Control: an alive session retries readiness, and the reset
+    /// restarts that backoff.
+    @Test(arguments: [PlaybackSessionStatus.alive, .gone, .unauthorized])
+    func aResetDuringTheBackoffALookupChoseAppliesOnlyToAReseek(session: PlaybackSessionStatus) async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        let seeks = engine.seeks.count
+        service.state.withLock { $0.sessionStatus = session }
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        #expect(lookups == ["A-1"])
+
+        coordinator.handleStreamReset(sessionID: "A-1")
+        await drain()
+
+        if session == .alive {
+            #expect(h.recoverySleep.durations == [.milliseconds(500), .milliseconds(500)])
+            fireAll()
+            await settle { engine.seeks.count == seeks + 1 && engine.isPlaybackRequested }
+            await drain()
+            #expect(Array(engine.seeks.dropFirst(seeks)) == [600])
+            #expect(service.starts == ["A"])
+        } else {
+            // Ignored: the 1 s rebuild backoff is the only wait, and A-1 is never re-seeked.
+            #expect(h.recoverySleep.durations == [.seconds(1)])
+            #expect(h.recoverySleep.waitingCount == 1)
+            h.recoverySleep.fireOldest()
+            await settle { service.starts == ["A", "A"] && engine.isPlaybackRequested }
+            await drain()
+            #expect(coordinator.session?.id == "A-2")
+            #expect(engine.loads.last?.time == 600)
+            #expect(engine.seeks.count == seeks)
+            #expect(service.state.withLock { $0.refreshes } == (session == .unauthorized ? 1 : 0))
+        }
+        #expect(coordinator.error == nil)
+        #expect(coordinator.isPlaying)
+        #expect(h.recoverySleep.waitingCount == 0)
+    }
+
+    /// A reset while the refresh a rejected lookup chose is awaited is ignored, so that refresh's
+    /// rebuild still runs, or its error still surfaces.
+    @Test(arguments: [false, true])
+    func aResetDuringTheRefreshALookupChoseIsIgnored(refreshFails: Bool) async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        let seeks = engine.seeks.count
+        let gate = Gate()
+        service.state.withLock {
+            $0.sessionStatus = .unauthorized
+            $0.refreshGate = gate
+            $0.refreshError = refreshFails ? .sessionExpired : nil
+        }
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        h.recoverySleep.fireOldest()
+        await settle { service.state.withLock { $0.refreshes } == 1 }
+
+        coordinator.handleStreamReset(sessionID: "A-1")
+        await drain()
+        #expect(h.recoverySleep.durations == [.seconds(1)])
+        #expect(h.recoverySleep.waitingCount == 0)
+
+        gate.open()
+        if refreshFails {
+            await settle { coordinator.error != nil }
+            #expect(coordinator.error == .sessionStartFailed(.sessionExpired))
+            #expect(service.starts == ["A"])
+        } else {
+            await settle { service.starts == ["A", "A"] && engine.isPlaybackRequested }
+            #expect(coordinator.session?.id == "A-2")
+            #expect(engine.loads.last?.time == 600)
+            #expect(coordinator.error == nil)
+        }
+        await drain()
+        #expect(engine.seeks.count == seeks)
+        #expect(lookups == ["A-1"])
+        #expect(service.state.withLock { $0.refreshes } == 1)
+        #expect(h.recoverySleep.durations == [.seconds(1)])
+    }
+
     // MARK: - Ignored
 
     @Test func anotherSessionsResetIsIgnored() async {
