@@ -840,7 +840,7 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
             playback.error = .recoveryExhausted
             playback.clearCalls()
 
-            await model.respond(to: .streamingInterrupted, with: action)
+            await model.respond(to: try #require(model.failure), with: action)
 
             switch action {
             case .retry: #expect(playback.calls == [.resume(rewindingBy: nil)])
@@ -859,7 +859,7 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
             playback.error = .streamingNeedsConfirmation(.cellular, key: FakePlaybackControl.key())
             playback.clearCalls()
 
-            await model.respond(to: .streamingNeedsConfirmation, with: action)
+            await model.respond(to: try #require(model.failure), with: action)
 
             switch action {
             case .streamAnyway: #expect(playback.calls == [.confirmMeteredStreaming])
@@ -867,6 +867,12 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
             default: #expect(playback.calls.isEmpty)
             }
         }
+    }
+
+    /// The coordinator error behind each message with actions, for `item`.
+    private static func error(for message: PlayerErrorMessage, item: String = "li_book") -> PlaybackCoordinatorError {
+        message == .streamingNeedsConfirmation
+            ? .streamingNeedsConfirmation(.cellular, key: FakePlaybackControl.key(item: item)) : .recoveryExhausted
     }
 
     /// An alert left from an earlier failure acts on nothing: the item playing now stays.
@@ -877,12 +883,43 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
     func aStaleAlertsActionDoesNothing(message: PlayerErrorMessage, action: PlayerErrorAction) async throws {
         try await withPlayer { model, playback, _, _ in
             playback.load(FakePlaybackControl.bookSession(), at: 150)
+            playback.error = Self.error(for: message)
+            let stale = try #require(model.failure)
             playback.error = nil
             playback.clearCalls()
 
-            await model.respond(to: message, with: action)
+            await model.respond(to: stale, with: action)
 
             #expect(playback.calls.isEmpty)
+        }
+    }
+
+    /// #543: a newer failure with the same message (another item, or the same item failing again)
+    /// is a different occurrence: the earlier alert's buttons do nothing on it, and its own work.
+    @Test(arguments: [
+        (PlayerErrorMessage.streamingInterrupted, PlayerErrorAction.retry), (.streamingInterrupted, .cancel),
+        (.streamingNeedsConfirmation, .streamAnyway), (.streamingNeedsConfirmation, .cancel),
+    ])
+    func anEarlierAlertDoesNotActOnALaterFailureWithTheSameMessage(
+        message: PlayerErrorMessage, action: PlayerErrorAction
+    ) async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            playback.error = Self.error(for: message)
+            let earlier = try #require(model.failure)
+            // Directly to another item's confirmation; through no failure for recovery.
+            if message == .streamingInterrupted { playback.error = nil }
+            playback.error = Self.error(for: message, item: "li_other")
+            let current = try #require(model.failure)
+            #expect(current.message == earlier.message)
+            #expect(current != earlier)
+            playback.clearCalls()
+
+            await model.respond(to: earlier, with: action)
+            #expect(playback.calls.isEmpty)
+
+            await model.respond(to: current, with: action)
+            #expect(!playback.calls.isEmpty)
         }
     }
 

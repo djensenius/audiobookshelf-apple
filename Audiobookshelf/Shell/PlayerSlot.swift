@@ -13,8 +13,11 @@ protocol PlayerSlotState: AnyObject, Observable {
     var title: String { get }
     /// The failure to show, with or without a session; `nil` when there is none.
     var errorMessageKey: PlayerErrorMessage? { get }
+    /// The current failure's occurrence (with `errorMessageKey`'s message), which its alert passes
+    /// back to `respond(to:with:)`.
+    var failure: PlayerFailure? { get }
     /// Handles a button of the alert for `message` (its ``PlayerErrorMessage/actions``).
-    func respond(to message: PlayerErrorMessage, with action: PlayerErrorAction) async
+    func respond(to failure: PlayerFailure, with action: PlayerErrorAction) async
 }
 
 extension PlayerViewModel: PlayerSlotState {}
@@ -32,7 +35,9 @@ final class PlaceholderPlayerState: PlayerSlotState {
         self.errorMessageKey = errorMessageKey
     }
 
-    func respond(to message: PlayerErrorMessage, with action: PlayerErrorAction) async {}
+    var failure: PlayerFailure? { errorMessageKey.map { PlayerFailure(message: $0, occurrence: 0) } }
+
+    func respond(to failure: PlayerFailure, with action: PlayerErrorAction) async {}
 }
 
 /// Places the player around the tab shell (ADR 0004). Whether the full player and the queue
@@ -156,17 +161,18 @@ struct PlayerSlot: ViewModifier {
 
     /// ``shownError``'s alert on `view`, while `isEnabled`.
     private func errorAlert(_ view: some View, isEnabled: Bool) -> some View {
-        let error = isEnabled ? shownError : nil
+        // The occurrence it shows, so its buttons can't act on a later failure with the same message.
+        let failure = (isEnabled ? shownError : nil).flatMap { _ in player.failure }
         return view.alert(
-            Text(verbatim: error.map { L10n.string(Self.messageKey(for: $0)) } ?? ""),
+            Text(verbatim: failure.map { L10n.string(Self.messageKey(for: $0.message)) } ?? ""),
             isPresented: Binding(
-                get: { error != nil },
+                get: { failure != nil },
                 set: { if !$0 { dismissedError = player.errorMessageKey } }),
-            presenting: error
-        ) { error in
-            ForEach(error.actions, id: \.self) { action in
+            presenting: failure
+        ) { failure in
+            ForEach(failure.message.actions, id: \.self) { action in
                 Button(role: Self.role(for: action)) {
-                    Task { await player.respond(to: error, with: action) }
+                    Task { await player.respond(to: failure, with: action) }
                 } label: {
                     Text(verbatim: L10n.string(Self.labelKey(for: action)))
                 }

@@ -49,6 +49,20 @@ public enum PlayerErrorMessage: Sendable, Hashable {
     }
 }
 
+/// One occurrence of a playback failure, as an alert shows it: its message, and which failure it
+/// is, so an alert left from an earlier failure with the same message can't act on a newer one
+/// (another item, scope or account). See ``PlayerViewModel/failure``.
+public struct PlayerFailure: Sendable, Hashable {
+    public let message: PlayerErrorMessage
+    /// Changes with every change of the playback's failure.
+    public let occurrence: Int
+
+    public init(message: PlayerErrorMessage, occurrence: Int) {
+        self.message = message
+        self.occurrence = occurrence
+    }
+}
+
 /// A button on a playback failure's alert; see ``PlayerViewModel/respond(to:with:)``.
 public enum PlayerErrorAction: Sendable, Hashable {
     /// Closes the alert, leaving playback as it is ("OK").
@@ -117,6 +131,9 @@ public final class PlayerViewModel {
     /// Counts item changes and closes, so a finished scrub can tell that its item went away even
     /// if the same item is back by the time it seeks.
     @ObservationIgnored private var itemGeneration = 0
+    /// Counts changes of the playback's failure (and of the playback itself), so each occurrence
+    /// has its own ``failure``.
+    private var errorOccurrence = 0
 
     /// Identifies one scrubber (one view's gesture), so scrubbers in different windows can't move
     /// or end each other's scrub. Make one per scrubber and keep it for the view's lifetime.
@@ -180,6 +197,7 @@ public final class PlayerViewModel {
         self.settings = settings
         trackDisplay()
         trackItem()
+        trackError()
     }
 
     // MARK: Item
@@ -219,6 +237,12 @@ public final class PlayerViewModel {
     /// `false` (a play refused before any item was current), so the composition that starts playback
     /// must surface it too, not only the player bar.
     public var errorMessageKey: PlayerErrorMessage? { playback.error.map(PlayerErrorMessage.init) }
+
+    /// The current failure's occurrence, for its alert to pass back to ``respond(to:with:)``;
+    /// `nil` when there is none.
+    public var failure: PlayerFailure? {
+        errorMessageKey.map { PlayerFailure(message: $0, occurrence: errorOccurrence) }
+    }
 
     // MARK: Transport
 
@@ -461,11 +485,12 @@ public final class PlayerViewModel {
         playback.stop(reason: .user)
     }
 
-    /// Handles a button on the alert for `message`, while it is still the current failure; an
-    /// alert left from an earlier one (another item playing since) does nothing.
-    public func respond(to message: PlayerErrorMessage, with action: PlayerErrorAction) async {
-        guard errorMessageKey == message else { return }
-        switch (action, message) {
+    /// Handles a button on the alert for `failure`, while it is still the current ``failure``; an
+    /// alert left from an earlier one (another item, scope or account since, even with the same
+    /// message) does nothing.
+    public func respond(to failure: PlayerFailure, with action: PlayerErrorAction) async {
+        guard failure == self.failure else { return }
+        switch (action, failure.message) {
         case (.dismiss, _): break
         // The item stayed, unloaded where it stopped: playing it starts a new session there.
         case (.retry, _): await playback.resume(rewindingBy: nil)
@@ -528,6 +553,21 @@ public final class PlayerViewModel {
             // Safe: every conformer is `@MainActor` (the protocol is), so its properties change, and
             // `onChange` runs, on the main actor. This keeps the capture synchronous, before the change.
             MainActor.assumeIsolated { self?.trackDisplay() }
+        }
+    }
+
+    /// Starts a new failure occurrence whenever the playback's failure changes, also to an equal
+    /// one from another playback (a scope or account switch).
+    private func trackError() {
+        withObservationTracking {
+            _ = playback.error
+        } onChange: { [weak self] in
+            // Safe for the same reason as in `trackDisplay()`.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.errorOccurrence += 1
+                self.trackError()
+            }
         }
     }
 
