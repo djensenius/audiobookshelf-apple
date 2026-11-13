@@ -68,6 +68,66 @@ import Testing
         #expect(coverRequest.url?.query() == "width=1200&format=jpeg&ts=1700000000123")
     }
 
+    /// One part fails for good while the others download: the failure's code is stored with the
+    /// part (#73). The user's retry, through the manager, clears it as the part starts again,
+    /// fetches it again, and the record becomes the local item.
+    @Test func aRetryAfterAPartialFailureCompletesTheBook() async throws {
+        let failing = Mutex(true)
+        let retry = StubGate()
+        let harness = try await DownloadHarness { request in
+            let path = request.url?.path() ?? ""
+            if path.hasSuffix("/api/items/li_book/cover") {
+                return .status(200, body: Self.cover, contentType: "image/jpeg")
+            }
+            let ino = path.split(separator: "/").dropLast().last.map(String.init) ?? ""
+            guard let body = Self.bodies[ino] else { return .status(404) }
+            if ino == "102" {
+                if failing.withLock({ $0 }) { return .status(404, body: Data("Nope".utf8)) }
+                return .status(200, body: body, contentType: "audio/mpeg", gate: retry)
+            }
+            return .status(200, body: body, contentType: ino == "201" ? "application/epub+zip" : "audio/mpeg")
+        }
+        let manager = DownloadManager(
+            store: harness.store, localItems: harness.localItems, engine: harness.makeEngine(),
+            locations: harness.locations, capacity: FakeCapacity(), clock: harness.clock)
+        try await manager.start()
+        let events = await manager.events()
+
+        let result = try await manager.enqueue(
+            item: LibraryItemFixtures.book(), episodeID: nil, connectionID: harness.connectionID)
+
+        guard case .started(let recordID) = result else {
+            Issue.record("Unexpected \(result)")
+            return
+        }
+        let failure = await events.next { if case .failed = $0 { true } else { false } }
+        guard case .failed(recordID, .httpStatus, _) = failure else {
+            Issue.record("Unexpected \(String(describing: failure))")
+            return
+        }
+        let failed = try #require(try await harness.store.record(id: recordID))
+        let part = try #require(failed.parts.first { $0.serverIno == "102" })
+        #expect(failed.state == .failed)
+        #expect(part.state == .failed && part.failureCode == .httpStatus)
+        #expect(failed.failureCode == .httpStatus)
+
+        failing.withLock { $0 = false }
+        let requests = harness.requests.count
+        #expect(try await manager.retry(recordID: recordID))
+        #expect(try await harness.store.part(id: part.id)?.lastErrorCode == nil)
+        retry.open()
+
+        let completed = await events.next { if case .completed = $0 { true } else { false } }
+        guard case .completed(recordID, let itemID, _) = completed else {
+            Issue.record("Unexpected \(String(describing: completed))")
+            return
+        }
+        let local = try #require(try await harness.localItems.item(id: itemID))
+        #expect(local.files.map(\.size) == [1_000, 2_000, 3_000, 4_000])
+        // The failed part was fetched again (its siblings, stopped as it failed, resume as well).
+        #expect(harness.requests.dropFirst(requests).contains { $0.url?.path().contains("/file/102/") == true })
+    }
+
     /// Once a transfer starts, the record is reported downloading, before any part completes.
     @Test func aStartedTransferIsReportedDownloading() async throws {
         let gate = StubGate()

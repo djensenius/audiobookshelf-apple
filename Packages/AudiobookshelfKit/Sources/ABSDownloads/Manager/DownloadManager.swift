@@ -474,7 +474,8 @@ public actor DownloadManager {
         switch update {
         case .partCompleted(_, let recordID):
             await refresh(recordID, announce: true)
-        case .partFailed(_, let recordID, let code, let message, let willRetry):
+        case .partFailed(let partID, let recordID, let code, let message, let willRetry):
+            await saveFailureCode(code, partID: partID, message: message)
             await refresh(recordID, announce: true)
             // A record cancelled meanwhile isn't tracked any more, and isn't reported again.
             guard !willRetry, let record = tracked[recordID] else { break }
@@ -491,6 +492,17 @@ public actor DownloadManager {
             Log.downloads.error("Downloads are waiting for the session: \(code.rawValue, privacy: .public)")
         case .recordStarted(let recordID):
             await refresh(recordID, announce: true)
+        }
+    }
+
+    /// Saves a part's failure code with its stored error (the engine saves only the message), so
+    /// the record read back, and announced next, can show a localised message (#73). The store
+    /// refuses it once the part has left that failure; a failure to save is logged.
+    private func saveFailureCode(_ code: DownloadFailureCode, partID: UUID, message: String) async {
+        do {
+            try await store.setFailureCode(code.rawValue, partID: partID, forError: message)
+        } catch {
+            logError("Couldn't save a download's failure code", error)
         }
     }
 
