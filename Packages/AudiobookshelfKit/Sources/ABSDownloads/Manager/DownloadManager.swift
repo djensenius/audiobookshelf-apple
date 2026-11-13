@@ -110,7 +110,8 @@ public actor DownloadManager {
     ///   - store: the same actor the engine uses.
     ///   - capacity: ``VolumeStorageCapacity`` in the app.
     ///   - clock: paces progress events.
-    ///   - progressLinking: links local progress to downloaded media; `nil` until #74.
+    ///   - progressLinking: links local progress to downloaded media (``LocalProgressStoreLinker``
+    ///     in the app); `nil` keeps no links.
     public init(
         store: DownloadStore,
         localItems: LocalItemStore,
