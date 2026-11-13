@@ -39,6 +39,9 @@ struct EPUBReaderView: View {
                         .opacity(0)
                         .accessibilityHidden(true)
                     }
+            } else {
+                // Shown until the session exists: an empty `Group` has no child to run `onAppear`.
+                LoadingView()
             }
         }
         .onAppear {
