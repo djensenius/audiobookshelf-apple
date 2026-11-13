@@ -191,6 +191,28 @@ private final class Recorder: SessionParticipant {
         #expect(RootView.statsService(accounts, for: a) == nil)
     }
 
+    // MARK: Handoff
+
+    @Test func handoffNamesOnlyTheShownShellsActiveAccount() async throws {
+        let environment = try makeEnvironment()
+        let accounts = try #require(environment.accounts)
+        let (a, b, hosts) = try await twoServers(environment, recorder: Recorder())
+        defer { cleanUp(hosts) }
+        let active = try #require(accounts.activeConnection)
+        let account = try #require(HandoffAccount(connection: active))
+        #expect(HandoffPublishing.account(active: active, shown: .shell(b, opensLinks: true)) == account)
+        // The outgoing shell of a switch, still up for A after accounts moved to B, publishes nothing.
+        #expect(HandoffPublishing.account(active: active, shown: .shell(a, opensLinks: false)) == nil)
+        #expect(HandoffPublishing.account(active: active, shown: .shell(a, opensLinks: true)) == nil)
+        // Same connection, another user.
+        let otherUser = SessionIdentity(connectionID: b.connectionID, userID: "usr_someone_else")
+        #expect(HandoffPublishing.account(active: active, shown: .shell(otherUser, opensLinks: true)) == nil)
+        #expect(HandoffPublishing.account(active: nil, shown: .shell(b, opensLinks: true)) == nil)
+        for shown: SceneContent in [.loading, .signingOut, .connect, .storeUnavailable] {
+            #expect(HandoffPublishing.account(active: active, shown: shown) == nil, "\(shown)")
+        }
+    }
+
     // MARK: Account session adapter
 
     @Test func adapterReportsRestoringUntilTheServerAnswers() async throws {
