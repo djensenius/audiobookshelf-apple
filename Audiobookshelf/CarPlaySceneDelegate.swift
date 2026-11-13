@@ -29,6 +29,8 @@
         private var alerts = CarPlayAlertPresenter<PlayerErrorMessage>()
         /// The plays awaited to show Now Playing, by connection.
         private let nowPlayingWaiter = CarPlayNowPlayingWaiter()
+        /// Now Playing's buttons and lists (#81).
+        private var nowPlaying: CarPlayNowPlayingController?
         private var pixelBox = PixelBox(width: 1, height: 1)
         /// The covers the rows show, kept so the pipeline doesn't evict them (``CoverImage``).
         private var covers: [ImageKey: CoverImage] = [:]
@@ -62,6 +64,14 @@
                 labels: Self.labels,
                 imageBucket: ImageWidthBucket(pixelWidth: imageSize.width * scale))
             self.model = model
+            nowPlaying = CarPlayNowPlayingController(
+                interfaceController: interfaceController,
+                model: CarPlayNowPlayingModel(
+                    player: environment.playback.player,
+                    sleepTimer: { environment.playback.participant?.sleepTimer },
+                    queue: { environment.playback.participant?.queue },
+                    playItem: { environment.playback.participant?.playItem },
+                    chapterLimit: CPListTemplate.maximumItemCount))
 
             let list = CPListTemplate(title: Self.labels.continueListening, sections: [])
             list.tabImage = UIImage(systemName: "play.circle")
@@ -87,6 +97,8 @@
             hasShownContinue = false
             alerts = CarPlayAlertPresenter()
             nowPlayingWaiter.disconnect()
+            nowPlaying?.disconnect()
+            nowPlaying = nil
             self.interfaceController = nil
         }
 
