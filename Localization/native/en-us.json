@@ -1,5 +1,6 @@
 {
   "ButtonAddCustomHeader": "Add Custom Header",
+  "ButtonAddToQueue": "Add to Queue",
   "ButtonCancelAllDownloads": "Cancel All",
   "ButtonClearQueue": "Clear Queue",
   "ButtonConnectWithoutEncryption": "Connect Without Encryption",
@@ -29,6 +30,7 @@
   "ButtonOpenIn": "Open In…",
   "ButtonOpenInNewWindow": "Open in New Window",
   "ButtonOpenSettings": "Open Settings",
+  "ButtonPlayNext": "Play Next",
   "ButtonPodcastClearDownloadQueue": "Clear Download Queue",
   "ButtonPodcastDeselectAll": "Deselect All",
   "ButtonPodcastDownloadEpisodes": {
@@ -348,6 +350,8 @@
   "MessagePodcastRemoveEpisodeFailed": "Couldn't remove the episode from the server.",
   "MessagePodcastSearchFailed": "Couldn't search for podcasts.",
   "MessageQueueEmpty": "Nothing is queued",
+  "MessageQueuedAtEnd": "Added to the queue.",
+  "MessageQueuedToPlayNext": "Plays next.",
   "MessageRSSFeedInvalidOwnerEmail": "Enter an email address, such as owner@example.com, or leave it empty.",
   "MessageRSSFeedLoadFailed": "Couldn't check this RSS feed.",
   "MessageRSSFeedOpenFailed": "Couldn't open the RSS feed.",
