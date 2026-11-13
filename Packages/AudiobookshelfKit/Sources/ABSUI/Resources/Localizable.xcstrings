@@ -129522,6 +129522,251 @@
         }
       }
     },
+    "MessageConnectionRetryingIn" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Retrying in %1$@"
+          }
+        }
+      }
+    },
     "MessageCustomHeaderInvalid" : {
       "extractionState" : "manual",
       "localizations" : {
