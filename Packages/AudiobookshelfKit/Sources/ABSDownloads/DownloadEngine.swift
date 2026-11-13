@@ -40,10 +40,10 @@ public enum DownloadFailureCode: String, Sendable, Equatable {
     /// The background session kept disconnecting; downloads wait for the next
     /// ``DownloadEngine/activate()``.
     case sessionLost
-    /// The connection sends custom headers. A background session follows a redirect of the
-    /// transfer itself, or of a resumed transfer's `Range` request, without asking its delegate,
-    /// so the redirect check can't keep them on the server. Refused until such downloads run in
-    /// the foreground (follow-up #467).
+    /// The connection sends custom headers, and the engine has no foreground session for them.
+    /// A background session follows a redirect of the transfer itself, or of a resumed
+    /// transfer's `Range` request, without asking its delegate, so the redirect check can't keep
+    /// them on the server. With a foreground session (#467), the app's, they download there.
     case customHeadersUnsupported
 }
 
@@ -79,6 +79,9 @@ public struct DownloadProgress: Sendable, Equatable {
 /// Downloads the parts of ``DownloadStore`` records with one background `URLSession` task
 /// per part (#72).
 ///
+/// - A connection with custom headers uses a foreground session instead (#467), whose
+///   delegate refuses every redirect off the server; its tasks' `taskDescription` has the
+///   `foreground:` prefix, and they are paused on ``deactivate()``.
 /// - Each task's `taskDescription` is its part ID, which is how tasks are matched to parts
 ///   after a relaunch; the store's `taskIdentifier` is only a cache.
 /// - A task is only created once ``DownloadStore/beginRunning(partID:expecting:now:)`` has
@@ -134,6 +137,11 @@ public actor DownloadEngine {
         var expectedBytes: Int64
         var hasResumeData: Bool
         var maxBytes: Int64?
+        /// Until its transfer starts, the part may only start while the app is active (an
+        /// automatic resume's or an activation's launch): every later launch of it, after a
+        /// network wait or a retry's delay, leaves it queued after a ``deactivate()``. A started
+        /// transfer's retries aren't restricted, so they still run in the background.
+        var onlyWhileActive = false
     }
 
     /// Durable changes, for one consumer. Nothing is dropped.
@@ -156,6 +164,7 @@ public actor DownloadEngine {
     private let now: @Sendable () -> Date
     private let random: @Sendable () -> Double
     private let makeSession: DownloadSessionFactory
+    private let makeForegroundSession: DownloadSessionFactory?
     private let preflight: any DownloadRedirectPreflighting
     private let registry: DownloadEngineRegistry
     private let readRecords: @Sendable (DownloadStore) async throws -> [DownloadRecordDTO]
@@ -172,11 +181,23 @@ public actor DownloadEngine {
     private let beforeClearingResumeFlag: (@Sendable (UUID) async throws -> Void)?
     /// After a finalisation made a record a local item, before it deletes the record.
     private let afterUpsertingLocalItem: (@Sendable (UUID) async -> Void)?
+    /// After a network wait's, a retry delay's or a recreated session's continuation of a part's
+    /// launch returns.
+    private let launchContinued: (@Sendable (UUID) async -> Void)?
+    /// After a launch created its task, before it saves the part as running.
+    private let beforeSavingRunning: (@Sendable (UUID) async -> Void)?
+    /// Before a launch writes its part back as queued: one that may only start while active,
+    /// or one stopped while it saved the part as running.
+    private let beforeRequeueingInactive: (@Sendable (UUID) async -> Void)?
+    /// Before a launch waits for another launch's running save (``savingRunning``).
+    private let waitingForRunningSave: (@Sendable (UUID) async -> Void)?
     /// Internal so tests can post events.
     let delegate = DownloadSessionDelegate()
 
     private var activation: Task<Bool, Never>?
     private var session: (any DownloadSession)?
+    /// The session of connections with custom headers, created at their first transfer (#467).
+    private var foregroundSession: (any DownloadSession)?
     private var isEventLoopRunning = false
     private var isInvalidatingSession = false
     /// Set by ``activate()`` and cleared by ``deactivate()``: a part the user's force quit
@@ -215,6 +236,10 @@ public actor DownloadEngine {
     private var strandedRunning: Set<UUID> = []
     /// Stops under way: until one has queued its part, the store still has it `running`.
     private var stopping: [UUID: Task<Void, Never>] = [:]
+    /// Launches saving their part as running, with the launches waiting for them. A stop can
+    /// overtake that save, which the launch then repairs; until it has, another launch would
+    /// read the stop's `queued` and be refused once the save lands, so it waits.
+    private var savingRunning: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     /// The last resume-data sweep failed; the next ``activate()`` runs it again.
     private var isResumeDataSweepPending = false
     /// Parts sealed while a retried sweep reads the records, which it keeps; `nil` otherwise.
@@ -228,6 +253,10 @@ public actor DownloadEngine {
     /// Incremented synchronously when a resume begins, before its first store await. One `Int`
     /// per record that was ever resumed, kept until the engine goes away.
     private var resumeGenerations: [UUID: Int] = [:]
+    /// Records whose latest resume is an automatic one (``resume(recordID:unlessQuiescedSince:)``
+    /// with a generation), which starts nothing between a ``deactivate()`` and the next
+    /// ``activate()``; a failure's replay of it keeps that restriction.
+    private var guardedResumes: Set<UUID> = []
     /// A part gets one stale-failure replay per user resume; a replay's own failure stays final.
     /// One `Int` per part that was ever replayed, kept until the engine goes away.
     private var replayedResumeGenerationByPart: [UUID: Int] = [:]
@@ -240,6 +269,22 @@ public actor DownloadEngine {
     /// Records whose `failed` state couldn't be saved after a part failed for good. Their parts
     /// can't launch until ``reconcile()`` saves it.
     private var pendingRecordFailures: Set<UUID> = []
+    /// Records a ``resume(recordID:unlessQuiescedSince:)`` has queued but not yet checked against
+    /// the quiesce generation. Their parts can't launch (an activation's restart, a retry) until
+    /// the check passes and the resume starts them itself. A guarded resume that fails while the
+    /// record may still be queued leaves it here until it is known not to be: paused again (by
+    /// the resume's rollback, the next activation's restart, or a pause), deleted, or resumed; or
+    /// until the next activation finds no quiesce since the resume's generation, unless the
+    /// resume was a new record's (``resumeNewRecord(recordID:unlessQuiescedSince:)``).
+    private var validatingResumes: [UUID: GuardedResume] = [:]
+
+    /// A guarded resume in ``validatingResumes``.
+    private struct GuardedResume {
+        /// The `unlessQuiescedSince` generation.
+        let generation: Int
+        /// Whether it is ``resumeNewRecord(recordID:unlessQuiescedSince:)``'s.
+        let isNewRecord: Bool
+    }
     /// The connections of the failures for good under way, from the start of their handling
     /// until their replay has started, and the ``quiesce(connectionID:pausing:)`` calls waiting
     /// for them.
@@ -268,6 +313,9 @@ public actor DownloadEngine {
     private var undiscardedSignOuts: Set<UUID> = []
     /// The identifiers of the tasks this engine created, so they aren't taken for survivors.
     private var createdTasks: Set<Int> = []
+    /// The parts this engine marked a transfer start for, so a file a survivor moved isn't
+    /// taken for theirs (see ``performActivation()``).
+    private var markedTransfers: Set<UUID> = []
     /// Surviving transfers whose adoption ``reattach(_:partID:)`` is deciding, and the results
     /// they finished with meanwhile: those are handled only once the transfer is adopted.
     private var adopting: Set<Int> = []
@@ -297,6 +345,10 @@ public actor DownloadEngine {
     ///   - networkAccess: the request flags for the current download cellular policy, read
     ///     when each task is created.
     ///   - makeSession: ``backgroundSession()`` in the app.
+    ///   - makeForegroundSession: ``foregroundSession()`` in the app: the session for
+    ///     connections with custom headers, whose delegate refuses every redirect off the
+    ///     server. Without it their downloads fail with
+    ///     ``DownloadFailureCode/customHeadersUnsupported``.
     ///   - preflight: checks each request's redirects before its background task is made.
     ///   - sweepsOrphanedResumeData: whether activation deletes resume data no record
     ///     references; pass `true` only when `store` is the App Group store.
@@ -313,13 +365,15 @@ public actor DownloadEngine {
         now: @escaping @Sendable () -> Date = { .now },
         random: @escaping @Sendable () -> Double = { Double.random(in: 0...1) },
         makeSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession(),
+        makeForegroundSession: DownloadSessionFactory? = DownloadEngine.foregroundSession(),
         preflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight()
     ) {
         self.init(
             store: store, localItems: localItems, credentials: credentials, vault: vault,
             sweepsOrphanedResumeData: sweepsOrphanedResumeData, locations: locations,
             retryPolicy: retryPolicy, networkAccess: networkAccess, clock: clock, now: now, random: random,
-            makeSession: makeSession, registry: .shared, readRecords: { try await $0.allRecords() },
+            makeSession: makeSession, makeForegroundSession: makeForegroundSession, registry: .shared,
+            readRecords: { try await $0.allRecords() },
             readRecord: { try await $0.record(id: $1) },
             cancelKeepingResumeData: { await $0.cancelByProducingResumeData() }, preflight: preflight)
     }
@@ -337,6 +391,7 @@ public actor DownloadEngine {
         now: @escaping @Sendable () -> Date,
         random: @escaping @Sendable () -> Double,
         makeSession: @escaping DownloadSessionFactory,
+        makeForegroundSession: DownloadSessionFactory? = nil,
         registry: DownloadEngineRegistry,
         readRecords: @escaping @Sendable (DownloadStore) async throws -> [DownloadRecordDTO],
         readRecord: @escaping @Sendable (DownloadStore, UUID) async throws -> DownloadRecordDTO?,
@@ -348,6 +403,10 @@ public actor DownloadEngine {
         adoptionStarted: (@Sendable (UUID) async -> Void)? = nil,
         beforeClearingResumeFlag: (@Sendable (UUID) async throws -> Void)? = nil,
         afterUpsertingLocalItem: (@Sendable (UUID) async -> Void)? = nil,
+        launchContinued: (@Sendable (UUID) async -> Void)? = nil,
+        beforeSavingRunning: (@Sendable (UUID) async -> Void)? = nil,
+        beforeRequeueingInactive: (@Sendable (UUID) async -> Void)? = nil,
+        waitingForRunningSave: (@Sendable (UUID) async -> Void)? = nil,
         preflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight()
     ) {
         (updates, updateContinuation) = AsyncStream.makeStream()
@@ -364,6 +423,7 @@ public actor DownloadEngine {
         self.now = now
         self.random = random
         self.makeSession = makeSession
+        self.makeForegroundSession = makeForegroundSession
         self.preflight = preflight
         self.registry = registry
         self.readRecords = readRecords
@@ -376,6 +436,10 @@ public actor DownloadEngine {
         self.adoptionStarted = adoptionStarted
         self.beforeClearingResumeFlag = beforeClearingResumeFlag
         self.afterUpsertingLocalItem = afterUpsertingLocalItem
+        self.launchContinued = launchContinued
+        self.beforeSavingRunning = beforeSavingRunning
+        self.beforeRequeueingInactive = beforeRequeueingInactive
+        self.waitingForRunningSave = waitingForRunningSave
         registry.register(self)
     }
 
@@ -417,9 +481,17 @@ public actor DownloadEngine {
     /// Call when the app goes to the background: until the next ``activate()``, parts the
     /// system cancels are queued, not restarted, because a background wake can't start
     /// transfers reliably, and a retry's transfer is created at once, to begin after its delay.
-    public func deactivate() {
+    /// The foreground session's transfers (#467) stop, keeping their resume data, and their
+    /// parts stay queued in their records, so the next ``activate()`` continues them; until
+    /// then none of their parts gets a transfer.
+    public func deactivate() async {
         restartsQueuedParts = false
         isInBackground = true
+        // A task that has already finished is left to its completion event: its file may have
+        // moved, so queueing its part would download it again.
+        await stop(
+            partIDs: tasks.filter { $0.value.isForeground && $0.value.state != .completed }.map(\.key),
+            keepingResumeData: true)
     }
 
     /// ``deactivate()`` on the process's engine, if it has one.
@@ -442,12 +514,15 @@ public actor DownloadEngine {
         await start(partIDs: partIDs, resumingRecordID: nil, resettingBudgetOf: nil)
     }
 
-    /// - Parameter resettingBudgetOf: the parts whose retry budget starts over, if they aren't
-    ///   settling; `nil` for every part in `partIDs`. The replay of a failure that overlapped a
-    ///   start passes the failing part only: its siblings were reset when the start began.
+    /// - Parameters:
+    ///   - resettingBudgetOf: the parts whose retry budget starts over, if they aren't
+    ///     settling; `nil` for every part in `partIDs`. The replay of a failure that overlapped a
+    ///     start passes the failing part only: its siblings were reset when the start began.
+    ///   - onlyWhileActive: launches nothing after a ``deactivate()`` until the next
+    ///     ``activate()``, which starts the parts left queued, as ``restartQueuedParts()`` does.
     private func start(
         partIDs: [UUID], resumingRecordID: UUID?, resettingBudgetOf: Set<UUID>? = nil,
-        activationOwnsSession: Bool = false
+        activationOwnsSession: Bool = false, onlyWhileActive: Bool = false
     ) async {
         // A replay from a failure held during reattachment runs inside performActivation's task.
         // Waiting for ensureSession here would make that task wait for itself.
@@ -485,8 +560,11 @@ public actor DownloadEngine {
                 await persist { _ = try await $0.updatePart(partID: partID, retryCount: 0) }
             }
         }
-        for partID in partIDs where tasks[partID] == nil && !settlingParts.contains(partID) {
-            await launch(partID, activationOwnsSession: activationOwnsSession)
+        for partID in partIDs
+        where tasks[partID] == nil && !settlingParts.contains(partID) && (!onlyWhileActive || restartsQueuedParts) {
+            // A plain start lifts an earlier guarded launch's restriction.
+            contexts[partID]?.onlyWhileActive = onlyWhileActive
+            await launch(partID, activationOwnsSession: activationOwnsSession, onlyWhileActive: onlyWhileActive)
         }
     }
 
@@ -508,7 +586,7 @@ public actor DownloadEngine {
             authRetried.remove(partID)
             throttle.reset(partID)
             let task = tasks.removeValue(forKey: partID)
-            if let task { ignoredTasks.insert(task.taskIdentifier) }
+            if let task { ignoredTasks.insert(task.key) }
             // Until the cancellation returns, the store still has the part running: stops of a
             // part run in order, and its launches wait for them.
             let previous = stopping[partID]
@@ -559,6 +637,7 @@ public actor DownloadEngine {
         guard try await store.setState(.paused, forRecord: recordID, expecting: [.queued, .downloading, .paused])
         else { return false }
         pendingRecordFailures.remove(recordID)
+        validatingResumes[recordID] = nil
         await stop(partIDs: record.parts.filter { $0.state != .completed }.map(\.id), keepingResumeData: true)
         return true
     }
@@ -577,12 +656,26 @@ public actor DownloadEngine {
     /// (``DownloadManager/restartActiveTransfers()``): a quiesce of the record's server that is
     /// under way or began since `generation` (a ``quiesceGeneration()``) may have passed over
     /// the record while it was paused, so the resume pauses it instead and starts nothing: its
-    /// transfers would run with the old credentials.
+    /// transfers would run with the old credentials. Not one the user asked for, so between a
+    /// ``deactivate()`` and the next ``activate()`` it only queues the record, whose parts that
+    /// activation starts: background starts aren't reliable.
     ///
     /// - Returns: `false` when the record doesn't exist, or such a quiesce kept it paused.
     @discardableResult
     public func resume(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool {
         try await serialized(recordID) { try await $0.performResume(recordID, unlessQuiescedSince: generation) }
+    }
+
+    /// ``resume(recordID:unlessQuiescedSince:)`` for a record just saved for a request
+    /// (``DownloadManager/enqueue(item:episodeID:connectionID:replacingExisting:unlessQuiescedSince:)``),
+    /// which deletes it when this throws. A failure that may leave it queued keeps it
+    /// unlaunchable until it is paused again or deleted: an activation pauses it rather than
+    /// starting it, even without a quiesce, so no transfer outlives the failed request.
+    @discardableResult
+    public func resumeNewRecord(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool {
+        try await serialized(recordID) {
+            try await $0.performResume(recordID, unlessQuiescedSince: generation, isNewRecord: true)
+        }
     }
 
     /// The quiesce count now, for ``resume(recordID:unlessQuiescedSince:)`` and
@@ -597,21 +690,58 @@ public actor DownloadEngine {
         quiescingConnections.contains(connectionID) || lastQuiesces[connectionID, default: 0] > generation
     }
 
-    private func performResume(_ recordID: UUID, unlessQuiescedSince generation: Int?) async throws -> Bool {
+    private func performResume(
+        _ recordID: UUID, unlessQuiescedSince generation: Int?, isNewRecord: Bool = false
+    ) async throws -> Bool {
         resumeGenerations[recordID, default: 0] += 1
+        if generation != nil {
+            guardedResumes.insert(recordID)
+        } else {
+            guardedResumes.remove(recordID)
+        }
         resumingRecords.insert(recordID)
         defer { resumingRecords.remove(recordID) }
-        guard try await store.setState(.queued, forRecord: recordID),
-            let record = try await readRecord(store, recordID)
-        else { return false }
+        // Until the check below, nothing else may launch the queued record: a quiesce that already
+        // passed over it wouldn't stop the transfer. Nor after a failure that may leave it queued,
+        // until it is paused again.
+        if let generation {
+            validatingResumes[recordID] = GuardedResume(generation: generation, isNewRecord: isNewRecord)
+        }
+        let record: DownloadRecordDTO?
+        do {
+            record = try await store.setState(.queued, forRecord: recordID) ? readRecord(store, recordID) : nil
+        } catch {
+            if generation != nil { await rollBackGuardedResume(recordID) }
+            throw error
+        }
+        guard let record else {
+            // Gone: nothing is left to launch.
+            validatingResumes[recordID] = nil
+            return false
+        }
         // Checked once the record is queued: a quiesce that begins later finds it so and pauses it.
         if let generation, hasQuiesced(connectionID: record.key.serverConnectionID, since: generation) {
             Log.downloads.notice("Not resuming a download of a server whose downloads are being stopped")
             _ = try await store.setState(.paused, forRecord: recordID, expecting: [.queued])
+            validatingResumes[recordID] = nil
             return false
         }
-        await start(partIDs: record.parts.filter { $0.state != .completed }.map(\.id), resumingRecordID: recordID)
+        validatingResumes[recordID] = nil
+        await start(
+            partIDs: record.parts.filter { $0.state != .completed }.map(\.id), resumingRecordID: recordID,
+            onlyWhileActive: generation != nil)
         return true
+    }
+
+    /// Pauses the record a failed guarded resume may have queued. It stays unlaunchable (see
+    /// ``validatingResumes``) until this write, or a later one, succeeds.
+    private func rollBackGuardedResume(_ recordID: UUID) async {
+        do {
+            _ = try await store.setState(.paused, forRecord: recordID, expecting: [.queued])
+            validatingResumes[recordID] = nil
+        } catch {
+            logError("Couldn't pause a download whose resume failed; it stays stopped until it is", error)
+        }
     }
 
     /// Runs `operation` once the record's previous pause or resume has finished. Registered
@@ -750,11 +880,34 @@ public actor DownloadEngine {
         // another may still seal more, or fail to delete it.
         end()
         if discarded, !quiescingConnections.contains(connectionID) {
-            clearSurvivorsToStop(connectionID)
+            // Unless a rejected survivor's file still counts: its part stays running if the
+            // activation's requeue failed, so a relaunch could complete it from that file.
+            if let records, survivorFilesAreEnded(of: connectionID, in: records) {
+                clearSurvivorsToStop(connectionID)
+            }
             undiscardedSignOuts.remove(connectionID)
             await finaliseCompletedRecords()
         }
         return records != nil && discarded
+    }
+
+    /// Whether no file a rejected survivor of `connectionID` moved can still complete its part, so
+    /// its marker may go: each of its parts `records` has running without a transfer of this
+    /// engine's has its transfer marker removed (see ``movedFileSize(_:_:)``). Shared by
+    /// activation and ``quiesce(connectionID:pausing:)``, which both clear the marker.
+    ///
+    /// - Returns: `false` when a transfer marker may still be there.
+    private func survivorFilesAreEnded(of connectionID: UUID, in records: [DownloadRecordDTO]) -> Bool {
+        var isEnded = true
+        for record in records where record.key.serverConnectionID == connectionID {
+            for part in record.parts
+            where part.state == .running && tasks[part.id] == nil && launching[part.id] == nil
+                && !settling.contains(part.id) && !markedTransfers.contains(part.id)
+            {
+                if !locations.clearTransferMarker(partID: part.id) { isEnded = false }
+            }
+        }
+        return isEnded
     }
 
     /// Removes `connectionID`'s marker. A failure is logged; the next activation reads the
@@ -781,7 +934,7 @@ public actor DownloadEngine {
             preflights.removeValue(forKey: partID)?.cancel()
             let task = tasks.removeValue(forKey: partID)
             if let task {
-                ignoredTasks.insert(task.taskIdentifier)
+                ignoredTasks.insert(task.key)
                 task.cancel()
             }
             if retry != nil || launch != nil || task != nil { cancelled.insert(partID) }
@@ -815,6 +968,13 @@ public actor DownloadEngine {
             return
         }
         await withCheckedContinuation { backgroundWaiters.append($0) }
+    }
+
+    /// Gives up a background wake without creating the session, as ``handleBackgroundEvents()``
+    /// does when it can't read the downloads: the wake's events wait for a later session, and
+    /// their events-finished call doesn't release a later wake early.
+    public func abandonBackgroundEvents() {
+        registry.abandonWake()
     }
 
     /// ``handleBackgroundEvents()`` on the process's engine, waiting up to 10 seconds for the
@@ -878,43 +1038,50 @@ public actor DownloadEngine {
         let session = makeSession(delegate)
         self.session = session
         isInvalidatingSession = false
-        ignoredTasks.removeAll()
+        ignoredTasks = ignoredTasks.filter { $0 < 0 }
         startEventLoop()
         // A task that finished on the way is left to its completion, which adopts it first.
         for task in await session.allTasks where task.state != .completed {
             if let partID = task.partID, tasks[partID] === task { continue }
             if isSurvivorToStop(task) {
                 // Its part stays running, so it is queued below.
-                ignoredTasks.insert(task.taskIdentifier)
+                ignoredTasks.insert(task.key)
                 task.cancel()
                 continue
             }
             guard let partID = task.partID, contexts[partID] != nil, tasks[partID] == nil,
                 let download = task as? URLSessionDownloadTask
             else {
-                ignoredTasks.insert(task.taskIdentifier)
+                ignoredTasks.insert(task.key)
                 task.cancel()
                 continue
             }
             await reattach(download, partID: partID, activationOwnsSession: true)
         }
+        // The files their rejected survivors may have moved stop counting before the marker goes,
+        // so a relaunch before the parts are queued again below doesn't complete them from one.
+        let unended = survivorsToStop.filter { !survivorFilesAreEnded(of: $0, in: records) }
         // Their survivors are cancelled and their resume data deleted, unless a quiesce began
         // meanwhile, which may seal more and clears the marker itself.
-        for connectionID in discarded where !hasQuiesced(connectionID: connectionID, since: generation) {
+        for connectionID in discarded.subtracting(unended)
+        where !hasQuiesced(connectionID: connectionID, since: generation) {
             clearSurvivorsToStop(connectionID)
         }
         // A part left running without a transfer: either its transfer moved the file, but iOS
         // ended the process before the completion was saved, or the app ended before the system
         // kept the transfer. The first completes, but only while the store still has the part
         // running in a download that isn't stopped: a file moved by a survivor whose adoption
-        // was refused isn't used. The second is queued again, so a restart can begin it, but
-        // only while the store still has it running: a part that failed for good while the
-        // tasks were listed keeps its state.
+        // was refused isn't used, nor one a survivor to stop moved (its pause failed, so its
+        // download isn't stopped): only this engine's transfers of such a server count. The
+        // second is queued again, so a restart can begin it, but only while the store still has
+        // it running: a part that failed for good while the tasks were listed keeps its state.
         for part in records.flatMap(\.parts)
         where part.state == .running && tasks[part.id] == nil && launching[part.id] == nil
             && !settling.contains(part.id)
         {
-            if let context = contexts[part.id], let bytes = movedFileSize(part.id, context),
+            if let context = contexts[part.id],
+                !survivorsToStop.contains(context.connectionID) || markedTransfers.contains(part.id),
+                let bytes = movedFileSize(part.id, context),
                 await isStillRunning(part.id)
             {
                 Log.downloads.info("A download's file is already in place; completing it without a request")
@@ -972,11 +1139,11 @@ public actor DownloadEngine {
     /// the next transfer starts a new generation, so the file isn't reused (see
     /// ``movedFileSize(_:_:)``).
     private func reattach(_ task: URLSessionDownloadTask, partID: UUID, activationOwnsSession: Bool = false) async {
-        adopting.insert(task.taskIdentifier)
+        adopting.insert(task.key)
         if let adoptionStarted { await adoptionStarted(partID) }
         await decideAdoption(of: task, partID: partID)
-        adopting.remove(task.taskIdentifier)
-        if let result = heldResults.removeValue(forKey: task.taskIdentifier) {
+        adopting.remove(task.key)
+        if let result = heldResults.removeValue(forKey: task.key) {
             await handleCompletion(task, result, activationOwnsSession: activationOwnsSession)
         }
     }
@@ -987,7 +1154,7 @@ public actor DownloadEngine {
         if case .failed(let failure) = result, let data = failure.resumeData {
             contexts[partID]?.hasResumeData = seal(data, partID: partID, task: task)
         }
-        heldResults[task.taskIdentifier] = result
+        heldResults[task.key] = result
     }
 
     private func decideAdoption(of task: URLSessionDownloadTask, partID: UUID) async {
@@ -1011,7 +1178,7 @@ public actor DownloadEngine {
             guard tasks[partID] === task else { return }
             if isGone {
                 tasks[partID] = nil
-                ignoredTasks.insert(task.taskIdentifier)
+                ignoredTasks.insert(task.key)
                 task.cancel()
                 vault.delete(partID: partID)
                 locations.clearTransferMarker(partID: partID)
@@ -1021,7 +1188,10 @@ public actor DownloadEngine {
             }
             return
         }
-        await persist { try await $0.setPartState(.running, partID: partID, taskIdentifier: task.taskIdentifier) }
+        await persist {
+            try await $0.setPartState(
+                .running, partID: partID, taskIdentifier: task.isForeground ? nil : task.taskIdentifier)
+        }
         if task.state == .suspended, tasks[partID] === task { task.resume() }
     }
 
@@ -1029,7 +1199,7 @@ public actor DownloadEngine {
     /// credentials of before the sign-out (ADR 0003).
     private func isSurvivorToStop(_ task: URLSessionTask) -> Bool {
         guard let partID = task.partID, let context = contexts[partID] else { return false }
-        return survivorsToStop.contains(context.connectionID) && !createdTasks.contains(task.taskIdentifier)
+        return survivorsToStop.contains(context.connectionID) && !createdTasks.contains(task.key)
     }
 
     /// Lets the session's tasks finish, then creates it again (on ``sessionInvalidated()``).
@@ -1043,8 +1213,9 @@ public actor DownloadEngine {
         session = nil
         activation = nil
         isInvalidatingSession = false
-        tasks.removeAll()
-        ignoredTasks.removeAll()
+        // The foreground session's transfers go on.
+        tasks = tasks.filter { $0.value.isForeground }
+        ignoredTasks = ignoredTasks.filter { $0 < 0 }
         if !isSessionInUse { await recreateSession() }
         while backgroundFinishesAwaitingRecreation > 0 {
             backgroundFinishesAwaitingRecreation -= 1
@@ -1077,6 +1248,7 @@ public actor DownloadEngine {
         }
         for partID in deferred {
             await launch(partID, notBefore: notBefore)
+            if let launchContinued { await launchContinued(partID) }
         }
     }
 
@@ -1147,12 +1319,46 @@ public actor DownloadEngine {
             logError("Couldn't read downloads", error)
             return
         }
-        let candidates = records.filter { $0.state == .queued || $0.state == .downloading }
-            .flatMap(\.parts).filter { $0.state == .queued || $0.state == .failed || strandedRunning.contains($0.id) }
-            .map(\.id)
-        for partID in candidates where restartsQueuedParts {
-            await launch(partID)
+        let settled = await settleFailedResumes()
+        let candidates = records.filter {
+            ($0.state == .queued || $0.state == .downloading) && !settled.contains($0.id)
         }
+        .flatMap(\.parts).filter { $0.state == .queued || $0.state == .failed || strandedRunning.contains($0.id) }
+        .map(\.id)
+        for partID in candidates where restartsQueuedParts {
+            await launch(partID, onlyWhileActive: true)
+        }
+    }
+
+    /// Settles the records failed guarded resumes left unlaunchable, skipping those with a pause
+    /// or resume under way (it settles them, or the next activation does). One still queued with
+    /// a quiesce of its server since the resume's generation, or from a new record's resume (its
+    /// request failed, and the manager deletes it), is paused; otherwise it is
+    /// released to this restart, as an unguarded resume would leave it queued (and as
+    /// ``DownloadManager/restartActiveTransfers()`` leaves it after failed resumes). One not
+    /// queued is released. Returns the ones it paused.
+    private func settleFailedResumes() async -> Set<UUID> {
+        var paused: Set<UUID> = []
+        for recordID in validatingResumes.keys where recordOperations[recordID] == nil {
+            // Registered at once, as nothing runs before it: a pause or resume beginning
+            // meanwhile waits for it.
+            let didPause = try? await serialized(recordID) { engine in
+                guard let pending = engine.validatingResumes[recordID] else { return false }
+                // Read again: the activation's read may predate the failed resume.
+                let record = try await engine.readRecord(engine.store, recordID)
+                guard let record, record.state == .queued || record.state == .downloading,
+                    pending.isNewRecord
+                        || engine.hasQuiesced(connectionID: record.key.serverConnectionID, since: pending.generation)
+                else {
+                    engine.validatingResumes[recordID] = nil
+                    return false
+                }
+                await engine.rollBackGuardedResume(recordID)
+                return engine.validatingResumes[recordID] == nil
+            }
+            if didPause == true { paused.insert(recordID) }
+        }
+        return paused
     }
 
     // MARK: - Tasks
@@ -1166,14 +1372,26 @@ public actor DownloadEngine {
     /// - Parameters:
     ///   - rejectedAccessToken: after a 401, the token that was rejected.
     ///   - notBefore: the task's `earliestBeginDate`, for a retry created in the background.
+    ///   - onlyWhileActive: starts no transfer after a ``deactivate()`` that came while the launch
+    ///     was suspended (reading credentials, say): the part is left queued for the next
+    ///     ``activate()``. Kept in the part's context (``PartContext/onlyWhileActive``), so the
+    ///     launches after its network waits and retries are restricted too.
     private func launch(
         _ partID: UUID, rejectedAccessToken: String? = nil, notBefore: Date? = nil,
-        activationOwnsSession: Bool = false
+        activationOwnsSession: Bool = false, onlyWhileActive: Bool = false
     ) async {
         if let stop = stopping[partID] { await stop.value }
+        while savingRunning[partID] != nil {
+            if let waitingForRunningSave { await waitingForRunningSave(partID) }
+            if savingRunning[partID] == nil { break }
+            await withCheckedContinuation { savingRunning[partID, default: []].append($0) }
+        }
         guard let context = contexts[partID], tasks[partID] == nil, retries[partID] == nil, launching[partID] == nil,
-            !settling.contains(partID), !pendingRecordFailures.contains(context.recordID)
+            !settling.contains(partID), !pendingRecordFailures.contains(context.recordID),
+            validatingResumes[context.recordID] == nil
         else { return }
+        // Before any deferral: the launch that recreateSession() replays keeps the restriction.
+        if onlyWhileActive { contexts[partID]?.onlyWhileActive = true }
         guard session != nil, !isInvalidatingSession else {
             deferredLaunches.insert(partID)
             return
@@ -1211,16 +1429,21 @@ public actor DownloadEngine {
         }
         do {
             try locations.markTransferStart(partID: partID)
+            markedTransfers.insert(partID)
         } catch {
             logError("Couldn't mark a download's start; a file it moves is only kept once recorded", error)
         }
         let request: URLRequest
         var unchecked: URLRequest?
+        var isForeground = false
         do {
             let credentials = try await credentials.credentials(
                 for: context.connectionID, replacing: rejectedAccessToken)
-            // Before any request is made, so the headers never reach the preflight or a transfer.
-            guard credentials.configuration.customHeaders.isEmpty else { throw CustomHeadersRefused() }
+            // Custom headers only go to the foreground session, whose delegate refuses a redirect
+            // off the server. Without one they are refused before any request is made, so the
+            // headers never reach the preflight or a background transfer.
+            isForeground = !credentials.configuration.customHeaders.isEmpty
+            guard !isForeground || makeForegroundSession != nil else { throw CustomHeadersRefused() }
             var fresh = try DownloadRequests.request(
                 path: context.serverPath, configuration: credentials.configuration,
                 accessToken: credentials.accessToken)
@@ -1276,10 +1499,21 @@ public actor DownloadEngine {
         }
         guard launching[partID] == token, tasks[partID] == nil, contexts[partID] != nil, !settling.contains(partID)
         else { return }
-        guard let session, !isInvalidatingSession else {
+        guard self.session != nil, !isInvalidatingSession,
+            let session = isForeground ? foregroundSessionCreatingIt() : self.session
+        else {
             // The session went away meanwhile: start again once it is back.
             deferredLaunches.insert(partID)
             await persistIdle(partID) { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
+            return
+        }
+        // A foreground transfer can't run while the app is suspended, and a launch that may only
+        // start while active was deactivated while the credentials or the preflight were awaited:
+        // the part waits, queued, for the next activation.
+        if (isForeground && isInBackground) || (contexts[partID]?.onlyWhileActive == true && !restartsQueuedParts) {
+            if let beforeRequeueingInactive { await beforeRequeueingInactive(partID) }
+            await persistIdle(partID) { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
+            await restartIfReactivated(partID, token: token)
             return
         }
         var resumeData: Data?
@@ -1295,18 +1529,24 @@ public actor DownloadEngine {
             }
         }
         let task = resumeData.map(session.downloadTask(withResumeData:)) ?? session.downloadTask(with: request)
-        createdTasks.insert(task.taskIdentifier)
-        task.taskDescription = partID.uuidString
+        // Before its key is read: the prefix tells the sessions' identifiers apart.
+        task.taskDescription = (isForeground ? URLSessionTask.foregroundPrefix : "") + partID.uuidString
+        createdTasks.insert(task.key)
         if let notBefore { task.earliestBeginDate = notBefore }
         tasks[partID] = task
         delegate.setTarget(
             .init(destination: destination, expectedBytes: context.expectedBytes, maxBytes: context.maxBytes),
             for: partID)
         throttle.reset(partID)
+        savingRunning[partID] = savingRunning[partID] ?? []
+        var isSavingRunning = true
+        defer { if isSavingRunning { endSavingRunning(partID) } }
+        if let beforeSavingRunning { await beforeSavingRunning(partID) }
         let recorded: Bool
         do {
             recorded = try await store.setPartState(
-                .running, partID: partID, taskIdentifier: task.taskIdentifier, hasResumeData: keepsResumeData,
+                .running, partID: partID, taskIdentifier: isForeground ? nil : task.taskIdentifier,
+                hasResumeData: keepsResumeData,
                 now: now())
         } catch {
             logError("Couldn't update a download", error)
@@ -1315,11 +1555,32 @@ public actor DownloadEngine {
         guard recorded, tasks[partID] === task else {
             // The part was deleted or stopped meanwhile; the task never ran.
             if tasks[partID] === task { tasks[partID] = nil }
-            ignoredTasks.insert(task.taskIdentifier)
+            ignoredTasks.insert(task.key)
             task.cancel()
-            if !recorded { forget(partID) }
+            if !recorded {
+                forget(partID)
+                return
+            }
+            // Stopped (by a pause, or a deactivation stopping foreground transfers) while the
+            // part was saved as running: that save may have landed after the stop's, so once the
+            // stop is done the part is queued again with the resume-data flag the stop left,
+            // unless another launch or a completion has it. An activation that read the part as
+            // running meanwhile skipped it, so it starts now if the app is active.
+            await stopping[partID]?.value
+            if let beforeRequeueingInactive { await beforeRequeueingInactive(partID) }
+            guard tasks[partID] == nil, launching[partID] == nil, contexts[partID] != nil, !settling.contains(partID)
+            else { return }
+            let hasResumeData = contexts[partID]?.hasResumeData
+            await persistIdle(partID) {
+                try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
+            }
+            isSavingRunning = false
+            endSavingRunning(partID)
+            if restartsQueuedParts { await launch(partID, onlyWhileActive: true) }
             return
         }
+        isSavingRunning = false
+        endSavingRunning(partID)
         // The resume data now lives in the task.
         if resumeData != nil { vault.delete(partID: partID) }
         contexts[partID]?.hasResumeData = keepsResumeData
@@ -1329,7 +1590,51 @@ public actor DownloadEngine {
             }
         }
         guard tasks[partID] === task else { return }
+        // Deactivated while the part's state was saved: the task never ran, and the resume data
+        // it took is sealed again for the next activation's launch.
+        if contexts[partID]?.onlyWhileActive == true, !restartsQueuedParts {
+            tasks[partID] = nil
+            ignoredTasks.insert(task.key)
+            task.cancel()
+            var hasResumeData = keepsResumeData
+            if let resumeData {
+                do {
+                    try vault.seal(
+                        resumeData, partID: partID, credentialTag: ResumeDataVault.credentialTag(for: request))
+                    hasResumeData = true
+                } catch {
+                    logError("Couldn't keep a download's resume data; it starts from the beginning", error)
+                }
+            }
+            contexts[partID]?.hasResumeData = hasResumeData
+            if let beforeRequeueingInactive { await beforeRequeueingInactive(partID) }
+            await persistIdle(partID) {
+                try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil, hasResumeData: hasResumeData)
+            }
+            await restartIfReactivated(partID, token: token)
+            return
+        }
+        contexts[partID]?.onlyWhileActive = false
         task.resume()
+    }
+
+    /// Ends a launch's running save (``savingRunning``), resuming the launches waiting for it.
+    private func endSavingRunning(_ partID: UUID) {
+        for waiter in savingRunning.removeValue(forKey: partID) ?? [] { waiter.resume() }
+    }
+
+    /// Whether `partID` has a transfer, for tests.
+    func hasTransfer(_ partID: UUID) -> Bool {
+        tasks[partID] != nil
+    }
+
+    /// Ends a launch that wrote its part back as queued because the app was inactive. An
+    /// activation meanwhile skipped the part, as this launch still held it: the part restarts
+    /// now, as that activation's restart would have started it.
+    private func restartIfReactivated(_ partID: UUID, token: UUID) async {
+        guard launching[partID] == token else { return }
+        launching[partID] = nil
+        if restartsQueuedParts { await launch(partID, onlyWhileActive: true) }
     }
 
     // MARK: - Events
@@ -1405,12 +1710,12 @@ public actor DownloadEngine {
     private func handleProgress(_ task: URLSessionTask, bytesWritten: Int64, expectedBytes: Int64) async {
         // An error body (a 401 page, say) also reports progress.
         guard let partID = task.partID, let context = contexts[partID],
-            tasks[partID]?.taskIdentifier == task.taskIdentifier
+            tasks[partID]?.key == task.key
         else { return }
         // Before the check below: an error body over the limit (a large 404 page, say) is
         // stopped too, rather than written in full to temporary storage.
         if let limit = context.maxBytes, bytesWritten > limit || expectedBytes > limit {
-            ignoredTasks.insert(task.taskIdentifier)
+            ignoredTasks.insert(task.key)
             task.cancel()
             await failPermanently(partID, code: .tooLarge, message: Self.tooLargeMessage(limit))
             return
@@ -1437,7 +1742,7 @@ public actor DownloadEngine {
     private func handleCompletion(
         _ task: URLSessionTask, _ result: DownloadTaskResult, activationOwnsSession: Bool = false
     ) async {
-        if ignoredTasks.remove(task.taskIdentifier) != nil { return }
+        if ignoredTasks.remove(task.key) != nil { return }
         guard let partID = task.partID, contexts[partID] != nil else { return }
         let current = tasks[partID]
         // Finished before or while the session was created: neither its result nor its resume
@@ -1450,7 +1755,7 @@ public actor DownloadEngine {
         }
         // A surviving transfer's result waits for its adoption, so it can't complete or fail a
         // stopped record's part. One that finished before it was adopted is adopted first.
-        if adopting.contains(task.taskIdentifier) {
+        if adopting.contains(task.key) {
             hold(result, of: task, partID: partID)
             return
         }
@@ -1461,8 +1766,8 @@ public actor DownloadEngine {
         }
         if case .moved(let bytes) = result {
             // A finished file wins even from a stale task; drop any newer transfer.
-            if let current, current.taskIdentifier != task.taskIdentifier {
-                ignoredTasks.insert(current.taskIdentifier)
+            if let current, current.key != task.key {
+                ignoredTasks.insert(current.key)
                 current.cancel()
             }
             sessionRecreations = 0
@@ -1470,7 +1775,7 @@ public actor DownloadEngine {
             return
         }
         // A stale task's failure doesn't affect the transfer that replaced it.
-        guard current == nil || current?.taskIdentifier == task.taskIdentifier else { return }
+        guard current == nil || current?.key == task.key else { return }
         tasks[partID] = nil
         throttle.reset(partID)
         if let status = (task.response as? HTTPURLResponse)?.statusCode, status == 200 || status == 206 {
@@ -1809,11 +2114,13 @@ public actor DownloadEngine {
                 partID, code: .transfer, message: "Couldn't reach the server: \(URLError(code).localizedDescription)",
                 transferFailed: false)
         }
+        if let launchContinued { await launchContinued(partID) }
     }
 
     private func retryNow(_ partID: UUID) async {
         guard !Task.isCancelled, retries.removeValue(forKey: partID) != nil else { return }
         await launch(partID)
+        if let launchContinued { await launchContinued(partID) }
     }
 
     /// Fails the part and its record for good, and stops the record's other parts, keeping
@@ -1927,9 +2234,12 @@ public actor DownloadEngine {
             if let beforeReplayStart { await beforeReplayStart(partID) }
             // The replay carries the user's reset for the part it skipped: its budget was
             // persisted as used up by this failure, after any reset the start made.
+            // A replay of an automatic resume starts nothing while the app is in the background,
+            // as that resume wouldn't: the next activation starts the parts it leaves.
             await start(
                 partIDs: replayParts, resumingRecordID: nil, resettingBudgetOf: [partID],
-                activationOwnsSession: activationOwnsSession)
+                activationOwnsSession: activationOwnsSession,
+                onlyWhileActive: resumeNeedsReplay && guardedResumes.contains(context.recordID))
         }
         endFailingForGood(partID, recordID: context.recordID)
         if let afterPermanentFailure { await afterPermanentFailure(partID) }
@@ -2027,5 +2337,21 @@ extension DownloadEngine {
         { delegate in
             URLSession(configuration: .absDownloads(), delegate: delegate, delegateQueue: nil)
         }
+    }
+
+    /// The app's foreground session factory, for connections with custom headers (#467).
+    public static func foregroundSession() -> DownloadSessionFactory {
+        { delegate in
+            URLSession(configuration: .absForegroundDownloads(), delegate: delegate, delegateQueue: nil)
+        }
+    }
+
+    /// The foreground session, created on first use. It shares the engine's delegate, which
+    /// asks before each redirect in a session that isn't a background one.
+    private func foregroundSessionCreatingIt() -> (any DownloadSession)? {
+        if let foregroundSession { return foregroundSession }
+        let session = makeForegroundSession?(delegate)
+        foregroundSession = session
+        return session
     }
 }

@@ -2,6 +2,7 @@ import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSData
+import ABSDownloads
 import ABSUI
 import PDFKit
 import SwiftUI
@@ -27,6 +28,10 @@ extension EnvironmentValues {
     /// Finds an ebook's downloaded copy (``EbookFileLoader/downloadedFileLookup(items:locations:)``);
     /// `nil` without the on-device store.
     @Entry var downloadedEbookFile: (@Sendable (EbookFileRequest) async -> URL?)?
+    /// The generation-checked credentials ebook fetches use, shared with downloads
+    /// (``AccountDownloadCredentials`` over `AccountManager.downloadAccess(for:read:)`); `nil`
+    /// without an account manager, when the fetch uses the serving client.
+    @Entry var ebookCredentials: (any DownloadCredentialProviding)?
 }
 
 /// Where readers keep what they fetch and generate; the system may purge both.
@@ -37,7 +42,7 @@ enum ReaderCaches {
 }
 
 /// The reader for one ebook file (#101, ADR 0008, legacy `Reader.vue`): EPUB in the epub.js web
-/// host, PDF in PDFKit, and the unsupported state for other formats. A tap shows or hides the
+/// host, PDF in PDFKit, CBZ in the comic pager, and the unsupported state for other formats. A tap shows or hides the
 /// chrome (close, title and the reader settings). Full screen on iPhone and iPad, a window on Mac.
 ///
 /// It needs the scene's library store serving the presentation's connection, for the account's
@@ -51,6 +56,7 @@ struct ReaderContainer: View {
     @Environment(\.libraryStore) private var store
     @Environment(\.makeEbookProgress) private var makeEbookProgress
     @Environment(\.downloadedEbookFile) private var downloadedEbookFile
+    @Environment(\.ebookCredentials) private var ebookCredentials
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: ReaderContainerModel?
     /// The account ``model`` was built for.
@@ -119,16 +125,23 @@ struct ReaderContainer: View {
 
     private func makeModel() -> ReaderContainerModel? {
         guard let store, let client = servingClient else { return nil }
-        let fetcher = APIEbookFileFetcher(client: client)
+        let fetcher = APIEbookFileFetcher(
+            connectionID: presentation.connectionID,
+            credentials: ebookCredentials ?? AccountDownloadCredentials(client: { [client] _ in client }))
         let kind = presentation.kind
         let serverProgress = store.progress.progress(libraryItemID: presentation.itemID)
         let key = MediaKey(serverConnectionID: presentation.connectionID, libraryItemId: presentation.itemID)
         let loader = EbookFileLoader(
             directory: ReaderCaches.ebooks, fetcher: fetcher, downloadedFile: downloadedEbookFile ?? { _ in nil })
+        let itemID = presentation.itemID
+        // Restored with its window, the reader can start before the session's progress seed has
+        // arrived: each load waits for it (offline, the cache as it is).
         return ReaderContainerModel(
             request: presentation.request, kind: kind, loader: loader,
-            progress: ReaderContainerModel.opens(kind) ? makeEbookProgress?(key, kind, serverProgress) : nil,
-            serverProgress: serverProgress)
+            progress: ReaderContainerModel.opens(kind) ? makeEbookProgress?(key, kind, serverProgress) : nil
+        ) { [store] in
+            await store.seededProgress(libraryItemID: itemID)
+        }
     }
 
     /// Progress is flushed as the reader disappears.
@@ -181,7 +194,7 @@ struct ReaderContent: View {
 
     @ViewBuilder
     private func reader(settings: ReaderSettings, theme: ReaderTheme, layout: ReaderSpreadLayout) -> some View {
-        switch model.content {
+        switch model.display {
         case .loading:
             LoadingView()
         case .failed:
@@ -190,18 +203,23 @@ struct ReaderContent: View {
             }
         case .unsupported:
             ReaderUnsupportedView(model: model, serverURL: serverURL)
-        case .ready(let url):
-            switch model.kind {
-            case .pdf:
-                PDFReaderHost(model: model, url: url, isSpread: layout.isTwoUp, theme: theme)
-            case .epub:
-                EPUBReaderView(
-                    model: model, fileURL: url,
-                    payload: ReaderSettingsPayload(
-                        settings: settings, resolvedAppearance: colorScheme == .dark ? .dark : .light,
-                        layout: layout))
-            case .comic, .unsupported:
-                ReaderUnsupportedView(model: model, serverURL: serverURL)
+        case .pdf(let url):
+            PDFReaderHost(model: model, url: url, isSpread: layout.isTwoUp, theme: theme)
+        case .epub(let url):
+            EPUBReaderView(
+                model: model, fileURL: url,
+                payload: ReaderSettingsPayload(
+                    settings: settings, resolvedAppearance: colorScheme == .dark ? .dark : .light,
+                    layout: layout))
+        case .comic(let url):
+            ComicReaderView(
+                fileURL: url, startLocation: model.resumePoint.location, layout: layout,
+                background: theme.chromeBackground,
+                webURL: serverURL.map { ItemDetailModel.webURL(serverURL: $0, itemID: model.request.itemID) },
+                preferencesKey: "\(model.request.connectionID.uuidString)|\(model.request.itemID)",
+                showsControls: model.isChromeVisible, onTap: model.toggleChrome
+            ) { location, progress in
+                model.record(location, progress: progress)
             }
         }
     }
@@ -260,8 +278,8 @@ private struct ReaderCloseButton: View {
     }
 }
 
-/// A format the app doesn't open: CBZ until the comic reader (#105), and CBR, MOBI and AZW3 in v1
-/// (ADR 0008 §4). The web client reads it.
+/// A format the app doesn't open: CBR, MOBI and AZW3 in v1 (ADR 0008 §4 and §5). The web client
+/// reads it.
 private struct ReaderUnsupportedView: View {
     let model: ReaderContainerModel
     let serverURL: URL?

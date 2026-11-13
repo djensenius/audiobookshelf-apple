@@ -22,8 +22,20 @@ final class EPUBMessageHandler: NSObject, WKScriptMessageHandler {
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
-        guard let data = Self.json(from: message.body) else { return }
-        onEvent(data)
+        receive(message.body)
+    }
+
+    /// Hands on a message body as JSON. A message with a `type` that JSON can't hold (nested too
+    /// deeply, say) is handed on as an `error` event whose `phase` is that type, so whatever was
+    /// waiting for it (the contents sheet for `toc`) doesn't wait for good.
+    func receive(_ body: Any) {
+        if let data = Self.json(from: body) {
+            onEvent(data)
+        } else if let type = (body as? [String: Any])?["type"] as? String,
+            let data = Self.json(from: ["type": "error", "message": "The message couldn't be read", "phase": type])
+        {
+            onEvent(data)
+        }
     }
 
     /// The event as JSON, or `nil` when the body isn't a JSON object.

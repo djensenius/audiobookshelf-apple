@@ -1,3 +1,4 @@
+import ABSData
 import ABSPlayback
 import Foundation
 import Observation
@@ -25,6 +26,10 @@ public final class PlaybackQueueControl: PlaybackQueueReading {
 
     public var items: [QueueItem] { reader.items }
 
+    /// The media the scope's player has loaded (playing, paused or restored); `nil` once the scope
+    /// is gone.
+    public var currentMediaKey: MediaKey? { scope?.playback.mediaKey }
+
     /// Puts `item` first, so it plays after the current one; moves it if it's already queued.
     public func playNext(_ item: QueueItem) {
         scope?.editQueue { $0.playNext(item) }
@@ -50,5 +55,16 @@ public final class PlaybackQueueControl: PlaybackQueueReading {
 
     public func clear() {
         scope?.editQueue { $0.clear() }
+    }
+
+    /// Applies `change` through the scope; `false` when it wasn't applied, because the scope is
+    /// gone or has retired.
+    func edit(_ change: (PlaybackQueue) -> Void) -> Bool {
+        var applied = false
+        scope?.editQueue {
+            change($0)
+            applied = true
+        }
+        return applied
     }
 }

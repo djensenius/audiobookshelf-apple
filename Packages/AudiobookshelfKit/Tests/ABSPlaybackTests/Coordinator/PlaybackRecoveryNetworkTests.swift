@@ -116,6 +116,34 @@ struct PlaybackRecoveryNetworkTests {
         #expect(coordinator.error == nil)
     }
 
+    /// The player's "Waiting for network" state follows the wait: on while the path is unsatisfied,
+    /// off once it returns, and off when a stop or a seek takes the run over.
+    @Test(arguments: [WaitEnd.online, .stop, .seek])
+    func theWaitingStateFollowsTheNetworkWait(end: WaitEnd) async {
+        h.recoverySleep.isManual = true
+        setSession(.alive)
+        await playAt600()
+        #expect(!coordinator.isWaitingForNetwork)
+        paths.isOnline = false
+
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        #expect(coordinator.isWaitingForNetwork)
+
+        switch end {
+        case .online:
+            paths.isOnline = true
+            await settle { engine.isPlaybackRequested }
+        case .stop:
+            coordinator.stop()
+        case .seek:
+            await coordinator.seek(to: 1200)
+        }
+        #expect(!coordinator.isWaitingForNetwork)
+    }
+
+    enum WaitEnd: CaseIterable, Sendable { case online, stop, seek }
+
     @Test func fiveMinutesOfflineSurfacesTheError() async {
         h.recoverySleep.isManual = true
         await playAt600()
@@ -128,6 +156,7 @@ struct PlaybackRecoveryNetworkTests {
         await settle { coordinator.error != nil }
 
         #expect(coordinator.error == .recoveryExhausted)
+        #expect(!coordinator.isWaitingForNetwork)
         #expect(engine.seeks.count == seeks)
         #expect(service.starts == ["A"])
         #expect(coordinator.currentTime == 600)
@@ -345,6 +374,38 @@ struct PlaybackRecoveryNetworkTests {
         #expect(coordinator.error == nil)
     }
 
+    /// A decode error while the rebuild after the refresh waits for the path is weighed once it
+    /// returns: the HLS fallback, never the refresh's unforced rebuild, and no second refresh.
+    @Test func aDecodeErrorWhileTheRefreshsRebuildWaitsForThePathFallsBackToHLS() async {
+        h.recoverySleep.isManual = true
+        setSession(.gone)
+        await playAt600()
+        let refresh = Gate()
+        service.state.withLock { $0.refreshGate = refresh }
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 401))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        h.recoverySleep.fireOldest()
+        await settle { service.state.withLock { $0.refreshes } == 1 }
+        paths.isOnline = false
+        refresh.open()
+        await settle { h.recoverySleep.waitingCount == 1 }
+
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.decode)))
+        paths.isOnline = true
+        // The fallback's own backoff, after the lookup the path's return calls for.
+        await settle { h.recoverySleep.waitingCount == 1 && h.recoverySleep.durations.count == 3 }
+        #expect(service.starts == ["A"])
+        #expect(h.recoverySleep.durations == [.seconds(1), .seconds(300), .seconds(1)])
+        h.recoverySleep.fireOldest()
+        await settle { service.starts.count == 2 && engine.isPlaybackRequested }
+
+        #expect(service.forcedTranscodes == [false, true])
+        #expect(lookups == ["A-1"])
+        #expect(service.state.withLock { $0.refreshes } == 1)
+        #expect(engine.loads.last?.time == 600)
+        #expect(coordinator.error == nil)
+    }
+
     // MARK: - A user seek during recovery
 
     @Test func aSeekReplacingOneThatTookOverRecoveryStillPlays() async {
@@ -391,6 +452,46 @@ struct PlaybackRecoveryNetworkTests {
         #expect(engine.seeks.last == 1200)
         #expect(coordinator.currentTime == 1200)
         #expect(coordinator.error == nil)
+    }
+
+    /// An interrupted (not failed) seek reports no failure, so recovery doesn't run again: the
+    /// engine keeps the target pending and plays once it lands, as recovery would have.
+    @Test func anInterruptedSeekThatTookOverRecoveryKeepsItsPlay() async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        engine.seekResults = [.interrupted]
+
+        #expect(await coordinator.seek(to: 1200) == nil)
+        #expect(engine.pendingSeekTarget == 1200)
+        #expect(engine.isPlaybackRequested)
+        #expect(coordinator.isPlaybackRequested)
+
+        engine.landPendingSeek()
+        #expect(engine.state == .playing)
+        #expect(coordinator.currentTime == 1200)
+        #expect(service.starts == ["A"])
+        #expect(coordinator.error == nil)
+    }
+
+    /// A pause before the interrupted seek returns cancels its play.
+    @Test func aPauseCancelsTheInterruptedSeeksPlay() async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        let gate = Gate()
+        engine.seekGates = [gate]
+        engine.seekResults = [.interrupted]
+
+        let seek = Task { await coordinator.seek(to: 1200) }
+        await settle { engine.seeks.last == 1200 }
+        coordinator.pause()
+        gate.open()
+        #expect(await seek.value == nil)
+        #expect(!engine.isPlaybackRequested)
+        #expect(!coordinator.isPlaybackRequested)
     }
 
     // MARK: - Interruptions

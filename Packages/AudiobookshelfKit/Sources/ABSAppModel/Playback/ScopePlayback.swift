@@ -30,6 +30,7 @@ final class ScopePlayback: PlayerPlaybackControlling {
     var isPlaying: Bool { coordinator.isPlaying }
     var isBuffering: Bool { coordinator.isBuffering }
     var isPlaybackRequested: Bool { coordinator.isPlaybackRequested }
+    var isWaitingForNetwork: Bool { coordinator.isWaitingForNetwork }
     var timeline: PlaybackTimeline? { coordinator.timeline }
     var chapterIndex: Int? { coordinator.chapterIndex }
     var chapter: Chapter? { coordinator.chapter }
@@ -79,5 +80,9 @@ final class ScopePlayback: PlayerPlaybackControlling {
 
     func declineMeteredStreaming() {
         coordinator.declineMeteredStreaming()
+    }
+
+    func handleStreamReset(sessionID: String) {
+        coordinator.handleStreamReset(sessionID: sessionID)
     }
 }

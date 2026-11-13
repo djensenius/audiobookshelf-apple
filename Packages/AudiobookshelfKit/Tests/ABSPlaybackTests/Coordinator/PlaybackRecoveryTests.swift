@@ -116,6 +116,78 @@ struct PlaybackRecoveryTests {
         #expect(h.recoverySleep.durations == [.seconds(1)])
     }
 
+    /// A rebuild opens a new session, so the streaming policy decides it as it would a play.
+    @Test(arguments: [
+        NetworkDecision.denied(.cellular), .askUser(.cellular),
+    ])
+    func aRebuildTheStreamingPolicyBlocksSurfacesItsError(decision: NetworkDecision) async {
+        h.recoverySleep.elapsesImmediately = true
+        await playAt600()
+        h.policy.decision = decision
+
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { coordinator.error != nil }
+
+        let expected: PlaybackCoordinatorError =
+            switch decision {
+            case .askUser(let reason): .streamingNeedsConfirmation(reason, key: h.key("A"))
+            default: .streamingNotAllowed(.cellular, key: h.key("A"))
+            }
+        #expect(coordinator.error == expected)
+        #expect(service.starts == ["A"])
+        #expect(coordinator.phase == .unloaded)
+        #expect(coordinator.currentTime == 600)
+        #expect(!coordinator.isPlaybackRequested)
+    }
+
+    /// The user agreed to stream this item on a metered path ("Stream anyway", #376): its rebuilds
+    /// don't ask again, and "never" still wins.
+    @Test(arguments: [false, true])
+    func aRebuildKeepsTheUsersMeteredConsent(denied: Bool) async {
+        h.recoverySleep.elapsesImmediately = true
+        h.policy.decision = .askUser(.cellular)
+        await coordinator.play(itemID: "A", startTime: 600)
+        #expect(coordinator.error == .streamingNeedsConfirmation(.cellular, key: h.key("A")))
+        await coordinator.confirmMeteredStreaming()
+        #expect(coordinator.isPlaying)
+        if denied { h.policy.decision = .denied(.cellular) }
+
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { coordinator.error != nil || (service.starts.count == 2 && engine.isPlaybackRequested) }
+
+        if denied {
+            #expect(coordinator.error == .streamingNotAllowed(.cellular, key: h.key("A")))
+            #expect(service.starts == ["A"])
+        } else {
+            #expect(coordinator.error == nil)
+            #expect(service.starts == ["A", "A"])
+            #expect(engine.loads.last?.time == 600)
+        }
+    }
+
+    /// A rebuild "ask" blocked offers to stream anyway: confirming plays the item again where
+    /// recovery stopped, and its next rebuild doesn't ask again.
+    @Test func streamingAnywayAfterARebuildBlockResumesWhereRecoveryStopped() async {
+        h.recoverySleep.elapsesImmediately = true
+        await playAt600()
+        h.policy.decision = .askUser(.cellular)
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { coordinator.error != nil }
+        #expect(coordinator.error == .streamingNeedsConfirmation(.cellular, key: h.key("A")))
+
+        await coordinator.confirmMeteredStreaming()
+
+        #expect(coordinator.error == nil)
+        #expect(service.starts == ["A", "A"])
+        #expect(engine.loads.last?.time == 600)
+        #expect(coordinator.isPlaybackRequested)
+
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.network)))
+        await settle { coordinator.error != nil || (service.starts.count == 3 && engine.isPlaybackRequested) }
+        #expect(coordinator.error == nil)
+        #expect(service.starts == ["A", "A", "A"])
+    }
+
     @Test func aRebuiltItemFailingBeforeTheAttemptReturnsCountsAsAFailedAttempt() async {
         h.recoverySleep.elapsesImmediately = true
         await playAt600()
@@ -168,7 +240,7 @@ struct PlaybackRecoveryTests {
     // MARK: - Not recoverable
 
     @Test(arguments: [
-        PlaybackFailure.Kind.http(status: 403), .http(status: 400), .tls, .decode, .unsupported, .cancelled,
+        PlaybackFailure.Kind.http(status: 403), .http(status: 400), .tls, .cancelled,
     ])
     func unrecoverableFailuresSurfaceAtOnce(kind: PlaybackFailure.Kind) async {
         await playAt600()

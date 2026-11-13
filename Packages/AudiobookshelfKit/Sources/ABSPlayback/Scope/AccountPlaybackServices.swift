@@ -37,14 +37,17 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
 
     public let serverConnectionID: UUID
     private let deviceIdentifiers: any DeviceIdentifying
+    /// Rewrites each URL ``resolveStream(for:)`` returns; `nil` returns the server's.
+    private let trackURLOverride: (@Sendable (URL) -> URL)?
     private let state: Mutex<State>
 
     public init(
         serverConnectionID: UUID, client: APIClient?, features: ServerFeatures?,
-        deviceIdentifiers: any DeviceIdentifying
+        deviceIdentifiers: any DeviceIdentifying, trackURLOverride: (@Sendable (URL) -> URL)? = nil
     ) {
         self.serverConnectionID = serverConnectionID
         self.deviceIdentifiers = deviceIdentifiers
+        self.trackURLOverride = trackURLOverride
         state = Mutex(State(client: client, features: features))
     }
 
@@ -104,19 +107,27 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
     // MARK: PlaybackSessionService
 
     /// Throws ``APIError/notAuthenticated`` without a client or features.
-    public func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
+    public func startSession(itemID: String, episodeID: String?, forceTranscode: Bool) async throws
+        -> PlaybackSession
+    {
         guard let service = sessionService() else { throw APIError.notAuthenticated }
-        return try await service.startSession(itemID: itemID, episodeID: episodeID)
+        return try await service.startSession(itemID: itemID, episodeID: episodeID, forceTranscode: forceTranscode)
     }
 
     public func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
         try await client().mediaProgress(itemID: itemID, episodeID: episodeID)
     }
 
-    /// Throws ``StreamResolutionError/missingAccessToken`` without a client or features.
+    /// Throws ``StreamResolutionError/missingAccessToken`` without a client or features. The URLs
+    /// go through the track URL override, if there is one; the plan and transport don't (the
+    /// engine loads an overridden `file:` URL without the transport).
     public func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {
         guard let service = sessionService() else { throw StreamResolutionError.missingAccessToken }
-        return try await service.resolveStream(for: session)
+        let stream = try await service.resolveStream(for: session)
+        guard let trackURLOverride else { return stream }
+        return ResolvedStream(
+            plan: stream.plan, urls: stream.urls.map(trackURLOverride), transport: stream.transport,
+            accessToken: stream.accessToken)
     }
 
     public func closeSession(id: String, report: PlaybackSyncReport?) async throws {

@@ -5,8 +5,9 @@ import Observation
 /// The reader container's state for one ebook file (#101, ADR 0008): which reader opens it, the
 /// file on disk, where it opens, and whether the chrome shows.
 ///
-/// - **Formats.** EPUB and PDF open; CBZ waits for the comic reader (#105), and CBR, MOBI and
-///   AZW3 aren't opened in v1 (ADR 0008 §4): both show the unsupported state.
+/// - **Formats.** EPUB, PDF and CBZ open, each in its own reader (``display``); CBR, MOBI and AZW3
+///   aren't opened in v1 (ADR 0008 §4 and §5) and show the unsupported state. A `.cbz` that is
+///   really a RAR archive is found by the comic reader, which shows the same state.
 /// - **Progress.** With an ``EbookProgressModel``, the reader resumes from it and every page turn
 ///   goes through it (local first, then the debounced sync); ``flush()`` sends at once, for
 ///   closing and backgrounding. Without one (until the account's progress store and syncer are
@@ -28,6 +29,17 @@ public final class ReaderContainerModel {
         case failed
     }
 
+    /// What the container shows: ``content`` routed to the reader for ``kind`` once the file is
+    /// on disk.
+    public enum Display: Sendable, Equatable {
+        case loading
+        case failed
+        case unsupported
+        case epub(URL)
+        case pdf(URL)
+        case comic(URL)
+    }
+
     public let request: EbookFileRequest
     public let kind: ReaderKind
     public private(set) var content = Content.loading
@@ -45,7 +57,8 @@ public final class ReaderContainerModel {
     /// The reader has closed: a load finishing later releases its file at once.
     @ObservationIgnored private var isReleased = false
     @ObservationIgnored private let progressModel: EbookProgressModel?
-    @ObservationIgnored private let serverProgress: MediaProgress?
+    /// Resolves the progress known for the item when the book loads.
+    @ObservationIgnored private let serverProgress: @MainActor () async -> MediaProgress?
     /// Whether a location other than where the reader opened was reported.
     @ObservationIgnored private var turned = false
     /// Where the reader rendered the book on opening, if it said (``recordOpening(_:progress:)``).
@@ -54,9 +67,23 @@ public final class ReaderContainerModel {
     /// - Parameters:
     ///   - progress: The book's progress model; `nil` opens at `serverProgress` and saves nothing.
     ///   - serverProgress: The progress known for the item, used without `progress`.
-    public init(
+    public convenience init(
         request: EbookFileRequest, kind: ReaderKind, loader: EbookFileLoader, progress: EbookProgressModel?,
         serverProgress: MediaProgress?
+    ) {
+        self.init(request: request, kind: kind, loader: loader, progress: progress) { serverProgress }
+    }
+
+    /// - Parameters:
+    ///   - progress: The book's progress model; `nil` opens at `serverProgress` and saves nothing.
+    ///   - serverProgress: Resolves the progress known for the item, awaited by each ``load()``
+    ///     before the book shows (alongside the fetch): the app waits for the session's progress
+    ///     seed, so a reader restored before the seed arrived opens at the server's location
+    ///     (``LibraryStore/seededProgress(libraryItemID:timeout:)``). With `progress`, it's the
+    ///     model's fallback when the server can't be reached and there's no local row.
+    public init(
+        request: EbookFileRequest, kind: ReaderKind, loader: EbookFileLoader, progress: EbookProgressModel?,
+        serverProgress: @escaping @MainActor () async -> MediaProgress?
     ) {
         self.request = request
         self.kind = kind
@@ -65,15 +92,30 @@ public final class ReaderContainerModel {
         self.serverProgress = serverProgress
     }
 
-    /// Whether the container has a reader for `kind`: EPUB and PDF.
+    /// Whether the container has a reader for `kind`: EPUB, PDF and comics (CBZ).
     public static func opens(_ kind: ReaderKind) -> Bool {
         switch kind {
-        case .epub, .pdf: true
-        case .comic, .unsupported: false
+        case .epub, .pdf, .comic: true
+        case .unsupported: false
         }
     }
 
-    /// The format's name for the unsupported state, such as `CBZ` or `MOBI`.
+    public var display: Display {
+        switch content {
+        case .loading: .loading
+        case .failed: .failed
+        case .unsupported: .unsupported
+        case .ready(let url):
+            switch kind {
+            case .epub: .epub(url)
+            case .pdf: .pdf(url)
+            case .comic: .comic(url)
+            case .unsupported: .unsupported
+            }
+        }
+    }
+
+    /// The format's name for the unsupported state, such as `CBR` or `MOBI`.
     public var formatName: String {
         switch kind {
         case .epub: "EPUB"
@@ -120,8 +162,12 @@ public final class ReaderContainerModel {
     }
 
     private func resume() async -> EbookResumePoint {
-        if let progressModel { return await progressModel.resume() }
-        return EbookResumePoint.resolve(kind: kind, local: nil, server: serverProgress)
+        let server = await serverProgress()
+        if let progressModel {
+            if let server { progressModel.know(server) }
+            return await progressModel.resume()
+        }
+        return EbookResumePoint.resolve(kind: kind, local: nil, server: server)
     }
 
     /// Where the reader rendered the book on opening, before any turn: shown, but not saved, and

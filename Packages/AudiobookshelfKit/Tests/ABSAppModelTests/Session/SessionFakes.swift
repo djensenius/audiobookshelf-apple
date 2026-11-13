@@ -96,6 +96,12 @@ final class FakeAccountSource: AccountSessionSource {
         return URL(string: "https://idp.example/logout")
     }
 
+    func logout(connectionID: UUID) async -> URL? {
+        let user = [identityA, identityB].first { $0.connectionID == connectionID }?.userID ?? "?"
+        log.record("accounts.logout(\(user))")
+        return URL(string: "https://idp.example/logout/\(user)")
+    }
+
     func `switch`(to connectionID: UUID) async throws {
         let target = [identityA, identityB].first { $0.connectionID == connectionID }
         log.record("accounts.switch(\(target?.userID ?? "?"))")

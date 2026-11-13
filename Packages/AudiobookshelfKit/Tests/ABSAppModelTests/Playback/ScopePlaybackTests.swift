@@ -67,7 +67,7 @@ private final class InstantEngine: AudioEngineProtocol {
 private struct BookServer: PlaybackSessionService, ProgressSyncService {
     let serverConnectionID: UUID
 
-    func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
+    func startSession(itemID: String, episodeID: String?, forceTranscode: Bool) async throws -> PlaybackSession {
         PlaybackSession(
             id: "s-\(itemID)", libraryItemId: itemID, episodeId: episodeID, mediaType: .book,
             displayTitle: "Title \(itemID)", duration: 3600, currentTime: 0,
@@ -139,6 +139,12 @@ private struct ScopeHarness {
     let primary = PrimaryRequests()
     let queueStore: UserDefaultsPlaybackQueueStore
     let participant: PlaybackSessionParticipant
+    /// Each scope's engine, in the order the scopes were made.
+    let engines = Engines()
+
+    final class Engines {
+        var all: [InstantEngine] = []
+    }
 
     init() throws {
         let queueStore = UserDefaultsPlaybackQueueStore(
@@ -152,14 +158,17 @@ private struct ScopeHarness {
         settings.disableAutoRewind = true
         let policy = policy
         let primary = primary
+        let engines = engines
         participant = PlaybackSessionParticipant(
             current: current, writer: writer, deviceIdentifiers: Device(),
             features: { _ in ServerFeatures(version: ServerVersion(2, 37, 2)) },
             requestSignOut: { _ in },
             makeScope: { request in
                 let server = BookServer(serverConnectionID: request.connectionID)
+                let engine = InstantEngine()
+                engines.all.append(engine)
                 let coordinator = PlaybackCoordinator(
-                    engine: InstantEngine(), sessions: server, progressStore: writer, settings: settings,
+                    engine: engine, sessions: server, progressStore: writer, settings: settings,
                     policy: policy,
                     lastPlayedStore: LastPlayed(
                         LastPlayedRecord(
@@ -266,5 +275,43 @@ private struct ScopeHarness {
 
         await harness.lifecycle.signOut()
         #expect(harness.participant.queue == nil)
+    }
+
+    /// A retired scope refuses the edit, so an add through a control kept from it reports nothing
+    /// queued, while the next session's control adds.
+    @Test func anAddThroughARetiredScopeReportsNothingQueued() async throws {
+        let harness = try ScopeHarness()
+        try await harness.started()
+        let ended = try #require(harness.participant.queue)
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        let queueB = try #require(harness.participant.queue)
+
+        #expect(!ended.add(QueueItem(libraryItemID: "x", title: "X"), at: .end))
+        #expect(ended.items.isEmpty)
+        #expect(queueB.add(QueueItem(libraryItemID: "y", title: "Y"), at: .end))
+        #expect(queueB.items.map(\.libraryItemID) == ["y"])
+    }
+
+    /// Play Next and Add to Queue refuse the loaded media, which the advancer would skip: when it
+    /// ends, the item queued after it plays and the queue is left empty, with no stale entry.
+    @Test func theLoadedMediaIsntQueuedSoTheQueuedItemPlaysWhenItEnds() async throws {
+        let harness = try ScopeHarness()
+        try await harness.started()
+        let queue = try #require(harness.participant.queue)
+        await harness.current.resume(rewindingBy: nil)
+        #expect(await eventually { harness.current.session?.libraryItemId == "a" })
+
+        #expect(!queue.add(QueueItem(libraryItemID: "a", title: "A"), at: .next))
+        #expect(queue.add(QueueItem(libraryItemID: "b", title: "B"), at: .end))
+        #expect(!queue.add(QueueItem(libraryItemID: "a", title: "A"), at: .end))
+        #expect(queue.items.map(\.libraryItemID) == ["b"])
+
+        let engine = try #require(harness.engines.all.last)
+        engine.onEvent?(.endOfMedia)
+
+        // The queue drops "b" once its session starts, after it becomes the loaded media.
+        #expect(await eventually { harness.current.mediaKey?.libraryItemId == "b" && queue.items.isEmpty })
+        #expect(harness.current.session?.libraryItemId == "b")
     }
 }

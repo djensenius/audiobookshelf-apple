@@ -251,6 +251,7 @@ Cons:
      - **Budget:** exponential backoff of 0.5 s, 1 s, 2 s, 4 s, 8 s. That is at most 5 retries and about 15.5 s in total.
      - **Each retry depends on the item's state:**
        - **Item not failed** (stalled, `AVPlayerItem.status != .failed`): re-seek the current item to the saved position.
+         A stall that clears on its own (a time-observer tick while playing) before the re-seek ends the retry; it spends no budget.
        - **Item failed** (`AVPlayerItem.status == .failed`, which a seek cannot recover): create a new `AVURLAsset` and `AVPlayerItem` for the same playlist URL, replace the current item, and seek to the saved position.
        - **Player failed** (`AVPlayer.status == .failed`): also create a new player before inserting the item. Re-attach observers and the rate.
        - Re-seeks and item or player recreations all draw on the same budget.

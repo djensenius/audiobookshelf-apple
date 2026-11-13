@@ -68,17 +68,24 @@ struct AppPlayback {
             },
             makeScope: { Self.makeScope(for: $0, settings: settings, policy: policy, history: history) })
         lifecycle.register(participant, stage: .progressSource)
+        removesQueues(of: accounts, from: queueStore(settings: settings))
         return AppPlayback(current: current, player: player, writer: writer, participant: participant, history: history)
     }
 
     /// Hands the playback intents (widgets, controls, Shortcuts, Siri) to ``current``, so they
     /// share the player with the app's UI and CarPlay. Once per process. Each command first awaits
     /// `lifecycle.start()`: an intent can launch the app without a scene to start it.
-    func registerIntents(settings: AppSettings, lifecycle: SessionLifecycle) {
-        PlaybackIntentRouter.handler = PlaybackIntentHandler(
+    /// The play-item intents and entity queries (#87) use the same handler, with `library`'s
+    /// account and the participant's play action.
+    func registerIntents(settings: AppSettings, lifecycle: SessionLifecycle, library: LibraryStore?) {
+        let handler = PlaybackIntentHandler(
             playback: current, settings: settings,
             sleepTimer: { [weak participant] in participant?.sleepTimer },
-            ready: { [weak lifecycle] in await lifecycle?.start() })
+            ready: { [weak lifecycle] in await lifecycle?.start() },
+            playItem: { [weak participant] in participant?.playItem },
+            library: { [weak library] in library })
+        PlaybackIntentRouter.handler = handler
+        PlayableEntityRouter.handler = handler
     }
 
     /// Tells the running scope's auto-advance of each change to the library's progress (seeds,
@@ -92,7 +99,7 @@ struct AppPlayback {
 
     /// One account session's scope, over an engine of its own. The connection's last-played record
     /// and queue are kept in the settings' defaults, under keys of their own.
-    private static func makeScope(
+    static func makeScope(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
         history: (any PlaybackHistoryRecording)?
     ) -> PlaybackScope {
@@ -147,14 +154,15 @@ struct AppPlayback {
             deviceIdentifiers: request.deviceIdentifiers, writer: request.writer, settings: settings,
             policy: policy, engine: engine, tickInterval: tickInterval, backgroundActivity: backgroundActivity,
             lastPlayed: { PlaybackScope.lastPlayedStore(for: $0, defaults: settings.defaults) },
-            queueStore: UserDefaultsPlaybackQueueStore(defaults: settings.defaults))
+            queueStore: queueStore(settings: settings))
         configuration.networkPaths = SystemNetworkPathSource()
         configuration.history = history
+        configuration.trackURLOverride = fixtureTrackURL
         return configuration
     }
 }
 
-/// Sets `\.playItem`, `\.bookmarkStore` and `\.sleepTimer` from the running account session's
+/// Sets `\.playItem`, `\.bookmarkStore`, `\.sleepTimer` and `\.playbackQueue` from the running account session's
 /// playback, each `nil` between sessions; the sleep timer is `nil` until the scope has one (#185).
 /// A view modifier, so it follows the participant as each session starts and ends. The signed-in
 /// shell passes the participant only while it serves the shell's account
@@ -167,5 +175,6 @@ struct PlaybackEnvironment: ViewModifier {
             .environment(\.playItem, participant?.playItem)
             .environment(\.bookmarkStore, participant?.bookmarks)
             .environment(\.sleepTimer, participant?.sleepTimer)
+            .environment(\.playbackQueue, participant?.queue)
     }
 }

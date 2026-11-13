@@ -6,7 +6,8 @@ import SwiftUI
 
 /// An EPUB in the epub.js web host (ADR 0008 §1): opens the book at the resume CFI with its cached
 /// locations and the reader settings, records each `relocated` page, and turns pages on taps at
-/// the sides (a tap in the middle shows or hides the chrome) and with the arrow keys.
+/// the sides (a tap in the middle shows or hides the chrome) and with the arrow keys. With the
+/// chrome, a bar at the bottom opens the book's table of contents (``EPUBContentsSheet``).
 struct EPUBReaderView: View {
     let model: ReaderContainerModel
     let fileURL: URL
@@ -46,6 +47,18 @@ struct EPUBReaderView: View {
                         .opacity(0)
                         .accessibilityHidden(true)
                     }
+                    .overlay(alignment: .bottom) {
+                        if model.isChromeVisible {
+                            EPUBContentsBar(session: session)
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
+                        }
+                    }
+                    .animation(.default, value: model.isChromeVisible)
+                    .sheet(isPresented: Bindable(session.contents).isPresented) {
+                        EPUBContentsSheet(
+                            contents: session.contents.contents, currentEntryID: session.contents.currentEntryID,
+                            onSelect: session.show)
+                    }
             } else {
                 // Shown until the session exists: an empty `Group` has no child to run `onAppear`.
                 LoadingView()
@@ -63,15 +76,45 @@ struct EPUBReaderView: View {
     }
 }
 
+/// The bottom of the reader's chrome: the table of contents button.
+private struct EPUBContentsBar: View {
+    let session: EPUBReaderSession
+
+    var body: some View {
+        HStack {
+            Button {
+                session.contents.isPresented = true
+            } label: {
+                Label {
+                    Text(verbatim: L10n.string("HeaderTableOfContents"))
+                } icon: {
+                    Image(systemName: "list.bullet")
+                }
+                .labelStyle(.iconOnly)
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(.rect)
+            }
+            .buttonStyle(.plain)
+            Spacer()
+        }
+        .padding(.horizontal, ABSSpacing.medium)
+        .background(.bar)
+    }
+}
+
 /// One opened EPUB: the web view's controller and what the page's events change. The page's event
 /// closure holds the session weakly, so the controller doesn't keep it alive.
 @MainActor @Observable
 final class EPUBReaderSession {
     private(set) var failed = false
     let controller: EPUBReaderController
+    /// The table of contents sheet.
+    let contents = EPUBContentsModel()
     @ObservationIgnored private let model: ReaderContainerModel
     @ObservationIgnored private var payload: ReaderSettingsPayload
     @ObservationIgnored private var isOpen = false
+    /// A contents entry chosen before the book opened, shown once it has.
+    @ObservationIgnored private(set) var pendingDestination: EPUBBridgeCommand?
     /// Whether the next `relocated` is where the book rendered on opening rather than a turn.
     @ObservationIgnored private var awaitsOpeningLocation = true
     @ObservationIgnored private let locationsKey: EPUBLocationsKey
@@ -104,6 +147,17 @@ final class EPUBReaderSession {
         send(command)
     }
 
+    /// Shows a table of contents entry, closing the sheet. Chosen before the book has opened
+    /// (the page can list its contents first), it's shown once the book has.
+    func show(_ entry: EPUBContentsEntry) {
+        let command = contents.select(entry)
+        guard isOpen else {
+            pendingDestination = command
+            return
+        }
+        send(command)
+    }
+
     func apply(_ payload: ReaderSettingsPayload) {
         self.payload = payload
         guard isOpen, let settings = try? EPUBSettingsJSON(encoding: payload) else { return }
@@ -113,7 +167,7 @@ final class EPUBReaderSession {
     private func handle(_ data: Data) {
         let event: EPUBBridgeEvent
         do {
-            // The table of contents isn't shown yet, so its tree isn't decoded.
+            // The table of contents is decoded off the main actor (below).
             event = try EPUBBridgeEvent.decode(data, skipping: ["toc"])
         } catch {
             Self.log.error("Undecodable reader event: \(String(describing: error), privacy: .public)")
@@ -123,6 +177,7 @@ final class EPUBReaderSession {
         case .ready:
             Task { await open() }
         case .relocated(let relocation):
+            contents.relocated(to: relocation.href)
             if awaitsOpeningLocation {
                 awaitsOpeningLocation = false
                 model.recordOpening(.cfi(relocation.startCfi), progress: relocation.progress)
@@ -143,6 +198,13 @@ final class EPUBReaderSession {
         case .error(let message, let phase):
             Self.log.error("Reader \(phase ?? "?", privacy: .public) failed: \(message, privacy: .public)")
             if phase == "open" { failed = true }
+            // The sheet says the book has none rather than waiting for good.
+            if phase == "toc" { contents.receive(EPUBTableOfContents([])) }
+        case .unknown("toc"):
+            Task {
+                let decoded = await Self.decodeContents(data)
+                contents.receive(decoded ?? EPUBTableOfContents([]))
+            }
         case .toc, .unknown:
             break
         }
@@ -159,11 +221,20 @@ final class EPUBReaderSession {
                 EPUBBridgeCommand.open(url: Self.bookURL, location: location, locations: locations, settings: settings)
                     .jsonData())
             guard !isClosed else { return }
-            isOpen = true
+            didOpen()
             // Settings changed while the book opened.
             if payload != opening { apply(payload) }
         } catch {
             failed = true
+        }
+    }
+
+    /// The book is open: commands go to it, starting with a contents entry chosen while it opened.
+    func didOpen() {
+        isOpen = true
+        if let destination = pendingDestination {
+            pendingDestination = nil
+            send(destination)
         }
     }
 
@@ -175,6 +246,11 @@ final class EPUBReaderSession {
                 Self.log.error("Reader command failed: \(String(describing: error), privacy: .public)")
             }
         }
+    }
+
+    /// A book's table of contents can be large, so it's decoded off the main actor.
+    @concurrent private static func decodeContents(_ data: Data) async -> EPUBTableOfContents? {
+        EPUBTableOfContents.decode(data)
     }
 
     /// Reads the book off the main actor.

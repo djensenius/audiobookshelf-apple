@@ -118,6 +118,9 @@ public final class AccountManager {
     @ObservationIgnored private var credentials: [UUID: ConnectionCredentials] = [:]
     /// The credentials generation of each connection's latest sign-in in this process.
     @ObservationIgnored private var signInGenerations: [UUID: Int] = [:]
+    /// The call during which each connection last stopped being active by signing out locally,
+    /// for ``logout(connectionID:)``.
+    @ObservationIgnored private var leftAt: [UUID: Int] = [:]
     /// The credentials generation of each connection's latest expiry in this process.
     @ObservationIgnored private var expiredGenerations: [UUID: Int] = [:]
     @ObservationIgnored private var operation = 0
@@ -127,6 +130,9 @@ public final class AccountManager {
     /// The operation of the latest ``logout()``, so a sign-in can tell that it was signed out
     /// while running, and whether a sign-in that replaced its session started after that.
     @ObservationIgnored private var latestLogout = 0
+    /// The operation as of the latest sign-out that may return an end-session URL, from
+    /// ``logout()`` or ``logout(connectionID:)``, for ``hasBegunSinceLogout``.
+    @ObservationIgnored private var latestEndSession = 0
     /// Counts ``remove(_:)`` calls, and records the latest that removed each server user's
     /// connection, so a sign-in that started earlier doesn't save it again, even once deleted.
     @ObservationIgnored private var removals = 0
@@ -498,17 +504,51 @@ public final class AccountManager {
         let wasRestoring = state == .restoring
         let operation = begin()
         latestLogout = operation
+        latestEndSession = operation
         signOutLocally(error: nil)
         if id == nil, wasRestoring {
             // A restore that hasn't chosen its connection yet.
             id = try? await store.connectionToRestore()?.id
         }
         guard let id else { return nil }
+        // Not a session that a sign-in started after this call saved, whichever reached the
+        // credentials first.
+        return await signOut(of: id, savedBefore: operation, endSessionAt: operation, client: activeClient)
+    }
+
+    /// Signs out of the connection `id` after it stopped being active, as ``logout()`` does for
+    /// the active one: saves its sign-out, deletes its tokens, keeping the connection and its
+    /// custom headers, then ends the server session, best effort. For a sign-out the user asked
+    /// for while the connection was active, when the server signed it out first, as an
+    /// unsupported server version does, which keeps the tokens.
+    ///
+    /// Unlike ``logout()`` it doesn't supersede the running call. It does nothing while `id` is
+    /// active or being restored, switched or signed in to, once its sign-out is saved, or if it
+    /// hasn't been active in this process; and it keeps a session that a sign-in stored after
+    /// the connection stopped being active.
+    /// - Returns: The OpenID provider's end-session URL, as for ``logout()``: only if no call has
+    ///   begun since the connection stopped being active, as one may be waiting for the browser.
+    @discardableResult
+    public func logout(connectionID id: UUID) async -> URL? {
+        guard let left = leftAt[id], activeConnection?.id != id, pendingConnectionID != id,
+            connections.contains(where: { $0.id == id && $0.signedOutAt == nil }), !isRemoving(id)
+        else { return nil }
+        // Without superseding anything, the end-session URL stays current until a call begins.
+        let endSessionAt = left == operation ? left : nil
+        if let endSessionAt { latestEndSession = endSessionAt }
+        return await signOut(of: id, savedBefore: left + 1, endSessionAt: endSessionAt, client: nil)
+    }
+
+    /// The part of ``logout()`` after it chose the connection `id`: signs out of the session
+    /// unless a sign-in that started at `operation` or later stored it, ending the server
+    /// session through `client` or a client made for it. The end-session URL only with
+    /// `endSessionAt`, while no call after it has begun.
+    private func signOut(
+        of id: UUID, savedBefore operation: Int, endSessionAt: Int?, client activeClient: APIClient?
+    ) async -> URL? {
         forgetDownloadClient(id)
         let signedOutAt = await saveSignOut(of: id)
         let credentials = self.credentials(for: id)
-        // Not a session that a sign-in started after this call saved, whichever reached the
-        // credentials first.
         let signedOut = await credentials.signOut(savedBefore: operation)
         credentialsRevision += 1
         guard let signedOut else {
@@ -532,7 +572,7 @@ public final class AccountManager {
         guard let logoutClient else { return nil }
         let url = await serverLogout(ended, client: logoutClient)
         // Not once a sign-in has begun: the shared browser would end or interrupt it.
-        return isCurrent(operation) ? url : nil
+        return endSessionAt.map(isCurrent) == true ? url : nil
     }
 
     /// Forgets a saved connection: deletes its Keychain items and removes it from the store, then
@@ -606,6 +646,7 @@ public final class AccountManager {
             // Keyed like `LibraryConnectionKey`. Not if the store kept the connection listed:
             // removing it again retries.
             settings?.removeAccountData(serverID: id.uuidString, userID: connection.userId)
+            connectionRemoved?(id)
         } catch {
             // The session's already deleted here, so nothing could end it on the server later.
             storeError = error
@@ -649,9 +690,10 @@ public final class AccountManager {
         }
     }
 
-    /// Whether a sign-in, restore or switch began since the last ``logout()``: its end-session URL
-    /// would then end or interrupt that in the shared browser.
-    public var hasBegunSinceLogout: Bool { operation != latestLogout }
+    /// Whether a sign-in, restore or switch began since the last ``logout()`` or
+    /// ``logout(connectionID:)`` that may return an end-session URL: the URL would then end or
+    /// interrupt that in the shared browser.
+    public var hasBegunSinceLogout: Bool { operation != latestEndSession }
 
     // MARK: - Downloads
 
@@ -672,6 +714,12 @@ public final class AccountManager {
     /// the sign-in is then superseded: the transfers under way and the resume data still carry the
     /// old credentials, so the app stops them and discards it there, then resumes the downloads.
     @ObservationIgnored public var credentialsReplaced: (@MainActor (UUID) -> Void)?
+
+    /// Called by ``remove(_:)`` once the store has removed the connection, after
+    /// ``credentialsRemoved``: the app deletes the connection's other saved data there, such as
+    /// its play queue. Not called when the Keychain delete or the store's removal fails, so a
+    /// connection that stays listed keeps its data; removing it again retries.
+    @ObservationIgnored public var connectionRemoved: (@MainActor (UUID) -> Void)?
 
     /// Clients for download credentials of saved connections that aren't active, so a
     /// connection's download parts share one client, with the credentials' generation they were
@@ -982,6 +1030,7 @@ public final class AccountManager {
     }
 
     private func signOutLocally(error: AccountError?) {
+        if let id = activeConnection?.id { leftAt[id] = operation }
         activeConnection = nil
         client = nil
         authorization = nil

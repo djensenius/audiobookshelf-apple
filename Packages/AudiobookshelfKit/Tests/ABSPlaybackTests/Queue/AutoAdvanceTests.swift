@@ -301,6 +301,37 @@ struct AutoAdvanceTests {
         #expect(a.queue.items.isEmpty)
     }
 
+    /// #543: consent to stream A on a metered network is A's own play's. Auto-advancing A → B → A
+    /// on an allowed network drops it, so A's recovery rebuild on a metered network asks again.
+    @Test func anAutoAdvanceBackToAnItemDoesNotReuseItsMeteredConsent() async {
+        a.h.recoverySleep.elapsesImmediately = true
+        a.enqueue("B")
+        a.h.policy.decision = .askUser(.cellular)
+        await coordinator.play(itemID: "A")
+        await coordinator.confirmMeteredStreaming()
+        #expect(coordinator.isPlaying)
+        a.h.policy.decision = .allowed
+        await a.advancer.waitForPreparation()
+
+        await a.finish()
+        #expect(coordinator.mediaKey == a.key("B"))
+        a.enqueue("A")
+        await a.advancer.waitForPreparation()
+        await a.finish()
+        #expect(coordinator.mediaKey == a.key("A"))
+        #expect(a.service.starts == ["A", "B", "A"])
+
+        a.h.policy.decision = .askUser(.cellular)
+        a.h.engine.fail(.itemFailed(trackIndex: 0, Self.networkFailure))
+        for _ in 0..<20_000 where coordinator.error == nil && a.service.starts.count == 3 { await Task.yield() }
+
+        #expect(coordinator.error == .streamingNeedsConfirmation(.cellular, key: a.key("A")))
+        #expect(a.service.starts == ["A", "B", "A"])
+    }
+
+    private static let networkFailure = PlaybackFailure(
+        kind: .network, domain: "CoreMediaErrorDomain", code: -12938, description: "fixture")
+
     /// The prepared decision is stale: prepared on cellular ("ask"), allowed now (Wi-Fi joined).
     @Test func preparedAskUserAdvancesWhenNowAllowed() async {
         a.enqueue("B")

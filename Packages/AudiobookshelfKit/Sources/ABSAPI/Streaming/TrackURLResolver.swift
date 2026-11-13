@@ -11,6 +11,9 @@ public enum TrackAuthentication: Sendable, Hashable {
     /// before creating the player item. Only used for null-index podcast episode tracks on
     /// servers below 2.26.3; the URL stops working when the token expires (1 hour by default).
     case accessTokenQuery
+    /// The URL is a downloaded file on this device (ADR 0007, decision 7): no server, session or
+    /// credential is involved.
+    case localFile
 }
 
 /// One `AVURLAsset` to create, in play order.
@@ -56,6 +59,20 @@ public struct StreamPlan: Sendable, Hashable {
     public let kind: Kind
     public let transport: Transport
     public let tracks: [PlayableTrack]
+
+    /// A direct-play plan over downloaded files (ADR 0007, decision 7), one track per file in
+    /// session track order, each a plain `AVURLAsset` with ``TrackAuthentication/localFile``.
+    public static func localFiles(
+        _ files: [(url: URL, mimeType: String?, startOffset: Double, duration: Double)]
+    ) -> StreamPlan {
+        StreamPlan(
+            kind: .directPlay, transport: .urlAsset,
+            tracks: files.map {
+                PlayableTrack(
+                    url: $0.url, mimeType: $0.mimeType, startOffset: $0.startOffset, duration: $0.duration,
+                    authentication: .localFile)
+            })
+    }
 }
 
 public enum TrackURLResolutionError: Error, Sendable, Hashable {

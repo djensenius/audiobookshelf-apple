@@ -152,4 +152,32 @@ import Testing
             #expect(playback.rate == 10)
         }
     }
+
+    // MARK: Play item (#87)
+
+    /// A book entity on `connectionID`'s account.
+    func book(on connectionID: UUID) throws -> BookEntity {
+        let summary = ItemSummary(id: "li_1", itemID: "li_1", kind: .book, title: "Book")
+        return try #require(PlayableEntityRecord(summary: summary, connectionID: connectionID).flatMap(BookEntity.init))
+    }
+
+    @Test func playIntentsFailWithoutAPlayer() async throws {
+        PlayableEntityRouter.handler = nil
+        let book = try book(on: UUID())
+        await #expect(throws: PlaybackIntentError.playerUnavailable) {
+            _ = try await PlayBookIntent(book: book).perform()
+        }
+    }
+
+    @Test func playIntentsRefuseAnItemOffTheSignedInAccount() async throws {
+        // No library store: nobody is signed in, so no item is the signed-in account's.
+        PlayableEntityRouter.handler = PlaybackIntentHandler(
+            playback: playback, settings: settings, playItem: { PlayItemAction { _, _, _ in Issue.record("played") } })
+        defer { PlayableEntityRouter.handler = nil }
+        let book = try book(on: UUID())
+        await #expect(throws: PlaybackIntentError.itemUnavailable) {
+            _ = try await PlayBookIntent(book: book).perform()
+        }
+        #expect(await PlayableEntityRouter.entities(for: [book.id]).isEmpty)
+    }
 }

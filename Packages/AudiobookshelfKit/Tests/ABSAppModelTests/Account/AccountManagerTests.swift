@@ -20,6 +20,8 @@ private final class FakeServer: Sendable {
         var issued = 0
         /// Answers `/api/authorize` with this status, as a proxy might.
         var authorizeStatus: Int?
+        /// The version `/api/authorize` reports.
+        var version = "2.26.0"
         var logoutRedirect: String?
         /// A proxy in front of the server: it puts `lb=1` in this jar on `/status` and refuses
         /// anything else until the jar holds it. The stub transport doesn't use the client's jar,
@@ -119,7 +121,7 @@ private final class FakeServer: Sendable {
                 guard request.value(forHTTPHeaderField: "Authorization") == "Bearer \(state.accessToken)" else {
                     return .json("{}", status: 401)
                 }
-                return .json(Self.authJSON(userId: userId, tokens: nil))
+                return .json(Self.authJSON(userId: userId, tokens: nil, version: state.version))
             case "/abs/auth/refresh":
                 guard request.value(forHTTPHeaderField: "x-refresh-token") == state.refreshToken else {
                     return .json("{}", status: 401)
@@ -943,6 +945,230 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         let client = try #require(manager.client)
         await #expect(throws: APIError.sessionExpired) { try await client.send(AuthEndpoints.authorize()) }
         #expect(manager.state == .signedOut && manager.lastError == .server(.sessionExpired))
+    }
+    /// A reconnect is bound to its connection: while the offline account's server is back but a
+    /// cancelled sign-in has marked another connection used, reconnecting signs the offline one in
+    /// (control: `restoreSession()` takes the other account).
+    @Test(arguments: [true, false])
+    func reconnectRestoresTheOfflineConnection(bound: Bool) async throws {
+        let harness = try Harness()
+        let first = FakeServer()
+        let second = FakeServer(userId: "usr-2")
+        let firstID = try await signIn(harness.makeManager(), to: first)
+        first.update { $0.isOffline = true }
+        let readings = Mutex<Int?>(nil)
+        // The second reading after arming is the cancelled sign-in's, marking its connection used.
+        let relaunched = harness.makeManager {
+            let reading = readings.withLock { count -> Int? in
+                count = count.map { $0 + 1 }
+                return count
+            }
+            if reading == 2 { withUnsafeCurrentTask { $0?.cancel() } }
+        }
+        await relaunched.restoreSession()
+        let user = try #require(relaunched.state.user)
+        #expect(relaunched.state == .offline(user) && user.connectionID == firstID)
+
+        let validated = try await validate(second)
+        readings.withLock { $0 = 0 }
+        let signingIn = Task { try await relaunched.connect(local: validated, username: "david", password: "pw") }
+        await #expect(throws: CancellationError.self) { try await signingIn.value }
+        readings.withLock { $0 = nil }
+        let secondID = try #require(relaunched.connections.first { $0.id != firstID }?.id)
+        #expect(try await harness.store.connectionToRestore()?.id == secondID)
+        #expect(relaunched.state == .offline(user))
+
+        // Nothing for a connection that isn't the offline one.
+        let authorized = second.requests("/api/authorize").count
+        await relaunched.reconnect(secondID)
+        #expect(relaunched.state == .offline(user) && second.requests("/api/authorize").count == authorized)
+
+        first.update { $0.isOffline = false }
+        if bound {
+            await relaunched.reconnect(firstID)
+            #expect(relaunched.state == .signedIn(user) && relaunched.activeConnection?.id == firstID)
+        } else {
+            await relaunched.restoreSession()
+            #expect(relaunched.state.user?.connectionID == secondID)
+        }
+
+        // Signed in, a reconnect does nothing.
+        guard bound else { return }
+        let requests = first.requests("/api/authorize").count
+        await relaunched.reconnect(firstID)
+        #expect(relaunched.state == .signedIn(user) && first.requests("/api/authorize").count == requests)
+    }
+
+    /// Offline after a locked Keychain there's no client; once it unlocks, a reconnect reads the
+    /// saved session again and signs in with one (control: still locked, it stays offline).
+    @Test(arguments: [true, false])
+    func reconnectAfterALockedKeychain(unlocked: Bool) async throws {
+        let harness = try Harness()
+        let server = FakeServer()
+        let id = try await signIn(harness.makeManager(), to: server)
+        harness.keychain.failReads(with: errSecInteractionNotAllowed)
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        let user = try #require(relaunched.state.user)
+        #expect(relaunched.state == .offline(user) && relaunched.client == nil)
+
+        if unlocked { harness.keychain.failReads(with: nil) }
+        await relaunched.reconnect(id)
+        if unlocked {
+            #expect(relaunched.state == .signedIn(user) && relaunched.client != nil)
+        } else {
+            #expect(relaunched.state == .offline(user) && relaunched.client == nil)
+            #expect(server.requests("/api/authorize").isEmpty)
+        }
+    }
+
+    /// Signed in to `second`, then `first`, which a relaunch restores offline; then `first` comes
+    /// back with an unsupported version and a reconnect signs out of it, keeping its tokens.
+    private func unsupportedReconnect(
+        _ harness: Harness, first: FakeServer, second: FakeServer, oidc: Bool = false
+    ) async throws -> (manager: AccountManager, first: UUID, second: UUID) {
+        let manager = harness.makeManager()
+        let secondID = try await signIn(manager, to: second)
+        let firstID = try await signIn(manager, to: first, oidc: oidc)
+        first.update { $0.isOffline = true }
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        try #require(relaunched.state == .offline(try #require(relaunched.state.user)))
+        first.update {
+            $0.isOffline = false
+            $0.version = "2.25.0"
+        }
+        await relaunched.reconnect(firstID)
+        try #require(relaunched.state == .signedOut)
+        try #require(relaunched.lastError == .server(.unsupportedVersion("2.25.0")))
+        return (relaunched, firstID, secondID)
+    }
+
+    /// A sign-out of a connection an unsupported version signed out of: ``AccountManager/logout()``
+    /// has no connection to sign out of, so the tokens stay (control);
+    /// ``AccountManager/logout(connectionID:)`` saves the sign-out, deletes them and ends the
+    /// server session.
+    @Test func signingOutOfAConnectionAnUnsupportedVersionEndedDeletesItsTokens() async throws {
+        let harness = try Harness()
+        let first = FakeServer()
+        let (manager, id, _) = try await unsupportedReconnect(
+            harness, first: first, second: FakeServer(userId: "usr-2"))
+        #expect(try harness.session(id)?.refreshToken == "refresh-1")
+
+        await manager.logout()
+        #expect(try harness.session(id) != nil)
+        #expect(try await harness.store.connection(id: id)?.signedOutAt == nil)
+
+        await manager.logout(connectionID: id)
+        #expect(try harness.session(id) == nil)
+        #expect(try await harness.store.connection(id: id)?.signedOutAt != nil)
+        #expect(manager.connections.first { $0.id == id }?.signedOutAt != nil)
+        #expect(first.loggedOutRefreshTokens == ["refresh-1"])
+        #expect(manager.state == .signedOut)
+
+        // Once saved, signing out again does nothing.
+        await manager.logout(connectionID: id)
+        #expect(first.loggedOutRefreshTokens == ["refresh-1"])
+    }
+
+    /// An OpenID connection's end-session URL is returned, and opened (``AccountManager/hasBegunSinceLogout``
+    /// gates `AccountActions.open`), while no call has begun since the connection left.
+    @Test func signingOutOfAConnectionAnUnsupportedVersionEndedReturnsItsEndSessionURL() async throws {
+        let harness = try Harness()
+        let first = FakeServer()
+        let (manager, id, _) = try await unsupportedReconnect(
+            harness, first: first, second: FakeServer(userId: "usr-2"), oidc: true)
+        first.update { $0.logoutRedirect = "https://idp.example/end-session?id_token_hint=id.token.sig" }
+
+        let url = await manager.logout(connectionID: id)
+        #expect(url?.absoluteString == "https://idp.example/end-session?id_token_hint=id.token.sig")
+        #expect(!manager.hasBegunSinceLogout)
+        let logout = try #require(first.requests("/logout").first)
+        #expect(logout.value(forHTTPHeaderField: "Cookie") == "auth_method=openid-mobile; openid_id_token=id.token.sig")
+        #expect(try harness.session(id) == nil)
+    }
+
+    /// A call that begins while the server session ends, or began after the connection left,
+    /// drops the URL: the browser may be signing in.
+    @Test(arguments: [false, true])
+    func signingOutOfAnEndedConnectionDropsTheURLOnceACallBegins(during: Bool) async throws {
+        let harness = try Harness()
+        let first = FakeServer()
+        let second = FakeServer(userId: "usr-2")
+        let (manager, id, secondID) = try await unsupportedReconnect(harness, first: first, second: second, oidc: true)
+        first.update { $0.logoutRedirect = "https://idp.example/end-session" }
+
+        let url: URL?
+        if during {
+            let held = first.hold("/logout")
+            let logout = Task { await manager.logout(connectionID: id) }
+            await held.arrived()
+            #expect(try await signIn(manager, to: second) == secondID)
+            held.open()
+            url = await logout.value
+        } else {
+            try await manager.switch(to: secondID)
+            url = await manager.logout(connectionID: id)
+        }
+        #expect(url == nil && manager.hasBegunSinceLogout)
+        #expect(first.loggedOutRefreshTokens == ["refresh-1"])
+        #expect(try harness.session(id) == nil)
+        #expect(manager.state.user?.connectionID == secondID)
+    }
+
+    /// Another connection signed in to meanwhile is untouched.
+    @Test func signingOutOfAnEndedConnectionLeavesTheActiveOne() async throws {
+        let harness = try Harness()
+        let second = FakeServer(userId: "usr-2")
+        let (manager, firstID, secondID) = try await unsupportedReconnect(harness, first: FakeServer(), second: second)
+        try await manager.switch(to: secondID)
+        let user = try #require(manager.state.user)
+        try #require(manager.state == .signedIn(user) && user.connectionID == secondID)
+
+        await manager.logout(connectionID: firstID)
+        #expect(try harness.session(firstID) == nil)
+        #expect(manager.state == .signedIn(user) && manager.activeConnection?.id == secondID && manager.client != nil)
+        #expect(try harness.session(secondID)?.refreshToken == "refresh-1")
+        #expect(try await harness.store.connection(id: secondID)?.signedOutAt == nil)
+        #expect(second.loggedOutRefreshTokens.isEmpty)
+
+        // Nor does it sign out of the active connection.
+        await manager.logout(connectionID: secondID)
+        #expect(manager.state == .signedIn(user))
+        #expect(try harness.session(secondID) != nil)
+    }
+
+    /// The connection active again isn't signed out, nor a newer sign-in to it, while it's active
+    /// or after.
+    @Test func signingOutOfAnEndedConnectionKeepsANewerSignIn() async throws {
+        let harness = try Harness()
+        let first = FakeServer()
+        let (manager, firstID, secondID) = try await unsupportedReconnect(
+            harness, first: first, second: FakeServer(userId: "usr-2"))
+        first.update { $0.version = "2.26.0" }
+
+        // Switched back to with the session it kept, it's active, so stays signed in.
+        try await manager.switch(to: firstID)
+        await manager.logout(connectionID: firstID)
+        #expect(manager.state.user?.connectionID == firstID)
+        #expect(try harness.session(firstID)?.refreshToken == "refresh-1")
+        #expect(first.loggedOutRefreshTokens.isEmpty)
+
+        try #require(try await signIn(manager, to: first) == firstID)
+        let newer = try #require(try harness.session(firstID)?.refreshToken)
+        #expect(newer != "refresh-1")
+        // The sign-in ended the session it replaced.
+        let loggedOut = first.loggedOutRefreshTokens
+
+        await manager.logout(connectionID: firstID)
+        #expect(manager.state.user?.connectionID == firstID)
+        #expect(try harness.session(firstID)?.refreshToken == newer)
+
+        try await manager.switch(to: secondID)
+        await manager.logout(connectionID: firstID)
+        #expect(try harness.session(firstID)?.refreshToken == newer)
+        #expect(try await harness.store.connection(id: firstID)?.signedOutAt == nil)
+        #expect(first.loggedOutRefreshTokens == loggedOut)
     }
 }
 

@@ -1,5 +1,7 @@
 import ABSCore
+import ABSData
 import ABSPlayback
+import Foundation
 
 /// Why a playback intent (Siri, Shortcuts, the Action button) couldn't do what it was asked. The app
 /// shows each as a localized dialog.
@@ -17,6 +19,8 @@ public enum PlaybackIntentFailure: Error, Equatable, Sendable {
     /// Playback didn't start: the streaming policy blocked it or asks first, the session failed to
     /// start, or the audio session wouldn't activate. The player shows why when the app is opened.
     case playbackFailed
+    /// The book or episode to play isn't the signed-in account's, or nobody is signed in.
+    case itemUnavailable
 }
 
 /// The sleep timer command a playback intent needs. ``ABSPlayback/SleepTimer`` conforms; tests pass a fake.
@@ -139,5 +143,30 @@ public struct PlaybackIntentPerformer {
         let rate = PlaybackSpeed.normalized(rate)
         playback.setRate(rate)
         return rate
+    }
+
+    /// Plays a book or episode (an App Intents entity's ``MediaKey``) from its saved progress,
+    /// through `playItem`, the app's own play action (``PlaybackSessionParticipant/playItem``).
+    /// - Parameters:
+    ///   - activeConnectionID: The signed-in account's connection; `nil` while signed out.
+    ///   - playItem: The running session's play action; `nil` between sessions.
+    /// - Throws: ``PlaybackIntentFailure/itemUnavailable`` when `key` isn't the signed-in account's
+    ///   or there's no session to play it in, and ``PlaybackIntentFailure/playbackFailed`` when the
+    ///   player didn't start `key`: play isn't requested, as for ``resume()``, or another item is
+    ///   still the current one (a start the streaming setting blocked leaves it playing).
+    public func play(
+        _ key: MediaKey, activeConnectionID: UUID?, playItem: PlayItemAction?
+    ) async throws(PlaybackIntentFailure) {
+        guard let playItem, let activeConnectionID, key.serverConnectionID == activeConnectionID else {
+            throw .itemUnavailable
+        }
+        do {
+            try await playItem(itemID: key.libraryItemId, episodeID: key.episodeId)
+        } catch {
+            throw .playbackFailed
+        }
+        // A blocked start (the streaming setting) leaves the previous item playing: success only
+        // when this item is the one requested.
+        guard playback.isPlaybackRequested, playback.mediaKey == key else { throw .playbackFailed }
     }
 }

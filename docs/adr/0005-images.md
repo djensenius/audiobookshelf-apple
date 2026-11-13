@@ -576,12 +576,15 @@ static, unauthenticated remote images (none are planned).
     discarded. Like every download, its redirects are checked in the foreground
     first, so a hop off the origin is refused before the token reaches it (#145).
     A background transfer still follows a redirect the check didn't see, so
-    downloads from a server that needs custom headers are refused until they run
-    in the foreground (follow-up #467).
+    downloads from a server that needs custom headers run in a foreground
+    session instead, whose delegate refuses every hop off the origin (#467).
   - It stores the result as `cover.jpg` in the item's download folder, which is
     not a cache directory. It records the relative path and
     `LocalLibraryItem.coverUpdatedAt` in ABSData, which is what
-    `DownloadedCoverLookup` reads.
+    `DownloadedCoverLookup` reads. The app's pipeline gets ABSAppModel's
+    `LocalDownloadedCovers`, over the download stack's `LocalItemStore` and its
+    `DownloadLocations` root (#143); an app built without a download stack
+    (the test host) has no downloaded covers.
   - JPEG keeps exported or shared files portable. 1200 px is enough for the player
     on every device we target.
   - If a later fetch shows a newer `updatedAt`, the cover is refreshed in the

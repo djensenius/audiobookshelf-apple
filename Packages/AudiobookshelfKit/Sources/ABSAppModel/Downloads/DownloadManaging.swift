@@ -8,10 +8,13 @@ import Foundation
 public protocol DownloadManaging: Sendable {
     /// See ``DownloadManager/events()``.
     func events() async -> AsyncStream<DownloadManagerEvent>
-    /// See ``DownloadManager/enqueue(item:episodeID:connectionID:replacingExisting:)``.
+    /// See ``DownloadManager/enqueue(item:episodeID:connectionID:replacingExisting:unlessQuiescedSince:)``.
     func enqueue(
-        item: LibraryItem, episodeID: String?, connectionID: UUID, replacingExisting: Bool
+        item: LibraryItem, episodeID: String?, connectionID: UUID, replacingExisting: Bool,
+        unlessQuiescedSince generation: Int?
     ) async throws(DownloadManagerError) -> DownloadManager.EnqueueResult
+    /// See ``DownloadManager/quiesceGeneration()``.
+    func quiesceGeneration() async -> Int
     /// See ``DownloadManager/restartActiveTransfers()``.
     func restartActiveTransfers() async throws(DownloadManagerError)
 }

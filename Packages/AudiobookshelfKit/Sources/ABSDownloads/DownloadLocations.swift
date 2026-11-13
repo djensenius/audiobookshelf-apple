@@ -119,8 +119,19 @@ public struct DownloadLocations: Sendable {
     }
 
     /// Ends `partID`'s transfer generation, so no file at its destination counts as moved by it.
-    func clearTransferMarker(partID: UUID) {
-        try? FileManager.default.removeItem(at: transferMarker(partID: partID))
+    ///
+    /// - Returns: `false` when the marker may still be there: only a missing marker counts as
+    ///   removed, since a failure that also hides the marker's metadata doesn't prove it's gone.
+    @discardableResult
+    func clearTransferMarker(partID: UUID) -> Bool {
+        do {
+            try FileManager.default.removeItem(at: transferMarker(partID: partID))
+            return true
+        } catch  where Self.isMissingFile(error) {
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// When `partID`'s current transfer started, or `nil` without a marker.

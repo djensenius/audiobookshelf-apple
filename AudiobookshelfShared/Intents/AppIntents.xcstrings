@@ -1,6 +1,17 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "IntentErrorItemUnavailable" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "That book or episode isn't on the account signed in to Audiobookshelf."
+          }
+        }
+      }
+    },
     "IntentErrorJumpFailed" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -177,6 +188,72 @@
         }
       }
     },
+    "IntentPlayBookDescription" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Plays a book from where you left off."
+          }
+        }
+      }
+    },
+    "IntentPlayBookParameter" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Book"
+          }
+        }
+      }
+    },
+    "IntentPlayBookTitle" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Play Book"
+          }
+        }
+      }
+    },
+    "IntentPlayEpisodeDescription" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Plays a podcast episode from where you left off."
+          }
+        }
+      }
+    },
+    "IntentPlayEpisodeParameter" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Episode"
+          }
+        }
+      }
+    },
+    "IntentPlayEpisodeTitle" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Play Episode"
+          }
+        }
+      }
+    },
     "IntentPlaybackSpeed" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -195,6 +272,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Playing"
+          }
+        }
+      }
+    },
+    "IntentPodcastEpisodeEntity" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Podcast Episode"
           }
         }
       }

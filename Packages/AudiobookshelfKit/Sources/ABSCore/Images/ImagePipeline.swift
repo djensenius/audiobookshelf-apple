@@ -258,6 +258,10 @@ public actor ImagePipeline {
     var memoryCost: (lru: Int, combined: Int) { (memory.totalCost, ledger.total) }
     /// Decodes waiting for memory, for tests.
     var memoryWaiterCount: Int { ledger.waiterCount }
+    /// Decodes queued behind the decode cap, for tests.
+    var queuedDecodeCount: Int {
+        get async { await decodeSlots.waiterCount }
+    }
     /// The callers joined to `key`'s fetch (one per decode flight) and to its decode into `box`,
     /// for tests that must know every caller has joined before the result arrives.
     func waiterCounts(for key: ImageKey, box: PixelBox) -> (fetch: Int, decode: Int) {

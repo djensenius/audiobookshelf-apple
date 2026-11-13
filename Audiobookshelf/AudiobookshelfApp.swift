@@ -18,10 +18,15 @@ struct AudiobookshelfApp: App {
         EbookFileLoader.downloadedFileLookup(
             items: LocalItemStore(modelContainer: $0.container), locations: DownloadLocations())
     }
+    /// Readers fetch ebooks with the downloads' generation-checked credentials.
+    private let ebookCredentials = AppEnvironment.shared.accounts.map { accounts in
+        AccountDownloadCredentials { try await accounts.downloadAccess(for: $0, read: $1) }
+    }
 
     init() {
         // Here rather than in `AppEnvironment`, so the environments tests build don't replace it.
-        environment.playback.registerIntents(settings: settings, lifecycle: environment.lifecycle)
+        environment.playback.registerIntents(
+            settings: settings, lifecycle: environment.lifecycle, library: environment.library?.store)
     }
 
     var body: some Scene {
@@ -36,7 +41,9 @@ struct AudiobookshelfApp: App {
             .environment(settings)
             .environment(\.windowRoute, $windowRoute)
             .environment(\.downloadedEbookFile, downloadedEbookFile)
+            .environment(\.ebookCredentials, ebookCredentials)
             .environment(\.downloadAccess, environment.downloads?.access)
+            .environment(\.currentPlayback, environment.playback.current)
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {
@@ -44,11 +51,18 @@ struct AudiobookshelfApp: App {
             RefreshCommands()
             PlaybackCommands(player: environment.player, participant: environment.playback.participant)
             GoCommands()
+            // View > Show/Hide Inspector toggles the scene's queue inspector (ADR 0004).
+            InspectorCommands()
         }
         // The system relaunches the app for finished background downloads; this waits until
-        // the download engine has processed every event before the system suspends it again.
+        // the download engine has processed every event before the system suspends it again,
+        // once the download folders are prepared.
         .backgroundTask(.urlSession(DownloadEngine.sessionIdentifier)) {
-            await DownloadEngine.handleBackgroundEvents()
+            if let downloads = await environment.downloads {
+                await downloads.lifecycle.handleBackgroundEvents()
+            } else {
+                await DownloadEngine.handleBackgroundEvents()
+            }
         }
         // Every phase from launch on, in order: activating resumes transfers and sweeps orphaned
         // downloads; in the background, transfers the system cancels wait for the next
@@ -74,6 +88,7 @@ struct AudiobookshelfApp: App {
                     .task { await environment.lifecycle.start() }
                     .environment(settings)
                     .environment(\.downloadedEbookFile, downloadedEbookFile)
+                    .environment(\.ebookCredentials, ebookCredentials)
                     .modifier(AppThemeModifier(settings: settings))
             }
 

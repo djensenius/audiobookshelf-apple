@@ -1,6 +1,7 @@
 import ABSAPI
 import ABSAppModel
 import ABSCore
+import ABSData
 import ABSUI
 import Foundation
 import SwiftUI
@@ -42,8 +43,16 @@ private struct OnePath: NetworkPathSource {
 
 private let account = LibraryConnectionKey(connectionID: UUID(), userID: "user-1")
 
+/// How many times a ``ReconnectRestorer`` restored, or a ping recovered.
+@MainActor
+private final class Restores {
+    var count = 0
+}
+
 @MainActor
 @Suite(.timeLimit(.minutes(1))) struct ConnectionBannerHostTests {
+    private let keychain = ConnectTestKeychain()
+    private let downloads = TestDownloads()
     /// A store serving `account` through `client`, with settings in a throwaway defaults suite.
     private func withStore(client: any LibraryService, _ body: (LibraryStore) async throws -> Void) async throws {
         let suiteName = "ConnectionBannerHostTests.\(UUID().uuidString)"
@@ -104,6 +113,33 @@ private let account = LibraryConnectionKey(connectionID: UUID(), userID: "user-1
         }
     }
 
+    /// Without a client, as offline after a locked Keychain, the ping first recovers the account:
+    /// once that gives the store a client, the ping goes through it (control: a recovery that
+    /// gives none still fails, so the banner keeps retrying).
+    @Test(arguments: [true, false])
+    func pingRecoversAMissingClient(recovers: Bool) async throws {
+        let client = try fixtureClient()
+        try await withStore(client: NoLibraries()) { store in
+            let recoveries = Restores()
+            let ping = ConnectionBannerSession.ping(store: store, account: account) {
+                recoveries.count += 1
+                if recovers { store.attach(client: client, connectionKey: account) }
+            }
+            if recovers {
+                try await ping()
+            } else {
+                await #expect(throws: ConnectionBannerSession.PingError.self) { try await ping() }
+            }
+            #expect(recoveries.count == 1)
+
+            // With a client, the ping doesn't recover.
+            if recovers {
+                try await ping()
+                #expect(recoveries.count == 1)
+            }
+        }
+    }
+
     /// The shell's session follows its monitor and pings the store: no network shows offline; a
     /// network without a usable client shows the server as unreachable, with Retry.
     @Test func sessionFollowsTheNetworkAndThePing() async throws {
@@ -142,6 +178,111 @@ private let account = LibraryConnectionKey(connectionID: UUID(), userID: "user-1
             await incoming.value
             #expect(!monitor.isRunning)
         }
+    }
+
+    /// Polls `condition` until it holds, and returns whether it did.
+    private func until(_ condition: () -> Bool) async throws -> Bool {
+        for _ in 0..<500 {
+            if condition() { return true }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        return false
+    }
+
+    /// While it runs, the session hands its banner's states to its restorer: coming back online
+    /// restores the account once when the restorer may (control: never when it may not), and the
+    /// run's end stops following the banner.
+    @Test(arguments: [true, false])
+    func runningSessionRestoresWhenTheBannerComesBackOnline(mayRestore: Bool) async throws {
+        let (paths, send) = AsyncStream<NetworkPath>.makeStream()
+        let restores = Restores()
+        let model = ConnectionBannerModel(paths: { paths }, ping: {})
+        let session = ConnectionBannerSession(
+            model: model, monitor: NetworkMonitor(source: OnePath(path: .wifi)),
+            reconnect: ReconnectRestorer(
+                debounce: .zero, epoch: { mayRestore ? AnyHashable(account) : nil },
+                restore: { _ in restores.count += 1 }))
+        let run = Task { await session.run() }
+        #expect(try await until { model.stateDidChange != nil })
+
+        send.yield(.offline)
+        #expect(try await until { model.state == .offline(.noNetwork) })
+        send.yield(.wifi)
+        #expect(try await until { model.state == .online })
+        if mayRestore {
+            #expect(try await until { restores.count == 1 })
+        } else {
+            #expect(restores.count == 0)
+        }
+
+        run.cancel()
+        await run.value
+        #expect(model.stateDidChange == nil)
+    }
+
+    /// A restore is only for the offline account whose ready session the store serves: none while
+    /// it's signed in (control: one once a relaunch finds its server unreachable), none once the
+    /// store serves another account, and none after sign-out.
+    @Test func restoreEpochFollowsTheOfflineSession() async throws {
+        let suiteName = "ConnectionBannerHostTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        let online = "\(UUID().uuidString.lowercased()).connect-ui.test"
+        let host = "offline-\(UUID().uuidString.lowercased()).connect-ui.test"
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            downloads.cleanUp()
+            [online, host].forEach(ConnectTestProtocol.forget)
+        }
+        let environment = AppEnvironment(
+            settings: AppSettings(defaults: defaults), storeLocation: .inMemory, keychain: keychain,
+            sessionConfiguration: ConnectTestProtocol.configuration, downloadsRoot: downloads.root,
+            makeDownloadSession: downloads.makeSession)
+        let accounts = try #require(environment.accounts)
+        let validator = ServerValidator(sessionConfiguration: ConnectTestProtocol.configuration)
+        let store = LibraryStore(settings: AppSettings(defaults: defaults))
+        /// Signs in to `host` in the connect flow and points the store at it.
+        func signIn(to host: String) async throws -> LibraryConnectionKey {
+            let connect = ConnectViewModel(
+                accounts: accounts, validator: validator, localNetwork: PreviewLocalNetworkAccess(), lifecycle: nil)
+            connect.addServer()
+            connect.address = "https://\(host)"
+            await connect.submitAddress()
+            connect.username = "reader"
+            await connect.signIn()
+            try #require(connect.phase == .done)
+            let saved = try #require(accounts.activeConnection)
+            let key = LibraryConnectionKey(connectionID: saved.id, userID: saved.userId)
+            store.attach(client: try #require(accounts.client), connectionKey: key)
+            return key
+        }
+
+        let signedInKey = try await signIn(to: online)
+        let signedIn = SessionLifecycle(source: AccountSessionAdapter(accounts: accounts))
+        await signedIn.start()
+        #expect(signedIn.readySession != nil)
+        #expect(
+            ConnectionBannerSession.restoreEpoch(
+                accounts: accounts, lifecycle: signedIn, store: store, account: signedInKey)() == nil)
+
+        let key = try await signIn(to: host)
+        let stack = try #require(environment.dataStack)
+        let relaunched = AccountManager(
+            store: ServerConnectionStore(modelContainer: stack.container), keychain: keychain,
+            validator: validator, sessionConfiguration: ConnectTestProtocol.configuration)
+        let lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: relaunched))
+        await relaunched.restoreSession()
+        await lifecycle.start()
+        let epoch = ConnectionBannerSession.restoreEpoch(
+            accounts: relaunched, lifecycle: lifecycle, store: store, account: key)
+        let current = try #require(epoch())
+
+        store.attach(client: NoLibraries(), connectionKey: LibraryConnectionKey(connectionID: UUID(), userID: "user-2"))
+        #expect(epoch() == nil)
+        store.attach(client: try #require(relaunched.client), connectionKey: key)
+        #expect(epoch() == current)
+
+        _ = await relaunched.logout()
+        #expect(epoch() == nil)
     }
 
     /// The signed-in shell gives its screens its banner session; signed out there is none.

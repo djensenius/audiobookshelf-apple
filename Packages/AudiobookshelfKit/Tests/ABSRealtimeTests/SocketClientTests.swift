@@ -408,10 +408,12 @@ struct SocketClientTests {
         connection.push("x")
         connection.push(#"42["user_updated",{"id":"usr-1"}]"#)
         connection.push(#"42["author_added",{"id":"au-1","name":"No library"}]"#)
+        connection.push(#"42["stream_reset",{"startTime":1206}]"#)
         connection.push(#"42["item_updated",{"id":"li-1"}]"#)
         connection.push(#"42["user_updated",\#(RealtimeFixtures.user)]"#)
         connection.push(#"42["user_item_progress_updated",\#(RealtimeFixtures.progressUpdate)]"#)
         connection.push(#"42["playlist_added",\#(RealtimeFixtures.playlist)]"#)
+        connection.push(#"42["stream_reset",{"startTime":1206,"streamId":"ses-1"}]"#)
 
         guard case .userUpdated(let user) = await harness.nextEvent() else {
             Issue.record("Expected userUpdated")
@@ -428,6 +430,9 @@ struct SocketClientTests {
             return
         }
         #expect(playlist.name == "Road trip")
+        // The stream reset missing its ID was dropped; the whole one arrives.
+        let reset = await harness.nextEvent()
+        #expect(reset == .streamReset(StreamReset(streamId: "ses-1", startTime: 1206)))
         #expect(!connection.isClosed)
     }
 

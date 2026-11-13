@@ -211,6 +211,11 @@ public final class SessionLifecycle {
 
     /// Flushes and ends the session, then signs out. Does nothing when already signed out.
     /// From inside a transition, use ``requestSignOut(of:)`` instead.
+    ///
+    /// If the source signed out of the session by itself before the sign-out's turn, as when
+    /// a reconnect queued before it found the server version unsupported, which keeps the
+    /// tokens, the session ends as expired and the sign-out still signs out of its connection
+    /// (``AccountSessionSource/logout(connectionID:)``), unless something else ran since.
     /// - Parameter origin: The session chosen to sign out of. At its turn, the sign-out does
     ///   nothing unless that session still runs, and never signs out an account the source shows
     ///   instead while the session ends.
@@ -221,10 +226,23 @@ public final class SessionLifecycle {
             if let context = session?.context ?? beginning { requestSignOut(of: context) }
             return nil
         }
+        let chosen =
+            origin ?? session.map { ReadySession(identity: $0.context.identity, sessionID: $0.context.sessionID) }
         return await serialized {
-            guard await self.isStillRunning(origin, strictly: true) else { return nil }
-            return await self.performSignOut(expectedIdentity: self.session?.context.identity)
+            guard await self.isStillRunning(origin, strictly: true) else {
+                return await self.signOutAfterExpiry(of: chosen)
+            }
+            let url = await self.performSignOut(expectedIdentity: self.session?.context.identity)
+            return await self.signOutAfterExpiry(of: chosen) ?? url
         }
+    }
+
+    /// Signs out of `chosen`'s connection if the source signed out of that session by itself and
+    /// it was the last session to end, with nothing active since.
+    private func signOutAfterExpiry(of chosen: ReadySession?) async -> URL? {
+        guard let chosen, session == nil, lastExpiredSession == chosen.sessionID, source.phase == .signedOut
+        else { return nil }
+        return await source.logout(connectionID: chosen.identity.connectionID)
     }
 
     /// Queues a sign-out of the session `context` describes, after the transitions already
@@ -385,6 +403,26 @@ public final class SessionLifecycle {
         }
         await finishAccountChange()
         return true
+    }
+
+    /// Runs `body`, which reconnects `origin`'s offline account (``AccountManager/reconnect(_:)``),
+    /// in turn with the other transitions, so it never overlaps a sign-out's or a switch's
+    /// teardown: one queued before it leaves nothing to reconnect, and one queued after it waits
+    /// until the reconnect has signed in, stayed offline or signed out. At its turn it does
+    /// nothing unless `origin` still runs offline.
+    /// - Returns: Whether `body` ran.
+    @discardableResult
+    public func reconnect(_ origin: ReadySession, using body: @escaping @MainActor @Sendable () async -> Void) async
+        -> Bool
+    {
+        if rejectReentrant("reconnect(_:using:)") { return false }
+        return await serialized {
+            guard await self.isStillRunning(origin, strictly: true),
+                self.gate == .ready(origin.identity, isOffline: true)
+            else { return false }
+            await body()
+            return true
+        }
     }
 
     /// Resolves a continued Handoff activity's account to a connection on this device through
