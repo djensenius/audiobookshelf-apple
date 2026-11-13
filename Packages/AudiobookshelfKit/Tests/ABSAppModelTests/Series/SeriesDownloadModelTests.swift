@@ -11,6 +11,7 @@ import Testing
 @Suite(.timeLimit(.minutes(1))) struct SeriesDownloadModelTests {
     private struct Failure: Error {}
     private let connection = UUID()
+    private static let ticket = DownloadRequestTicket(connectionID: UUID(), sessionID: 3, generation: 5)
 
     /// The series endpoints of ``FakeSeriesAuthorsService`` plus an item endpoint.
     private struct Service: SeriesAuthorsService, ItemDetailService {
@@ -32,6 +33,8 @@ import Testing
     /// Records each request and answers with ``outcome``; ``canDownload`` answers `canRequest`.
     private final class Requester: DownloadRequesting {
         var requested: [(id: String, metered: Bool, connectionID: UUID)] = []
+        /// The ticket of each metered confirmation.
+        var tickets: [DownloadRequestTicket] = []
         var canDownload = true
         var outcome: (String, Bool) -> DownloadRequestOutcome = { _, _ in .started(.started(UUID())) }
 
@@ -40,9 +43,10 @@ import Testing
             return outcome(item.id, false)
         }
         func confirmMeteredDownload(
-            item: LibraryItem, episodeID: String?, connectionID: UUID
+            item: LibraryItem, episodeID: String?, ticket: DownloadRequestTicket
         ) async -> DownloadRequestOutcome {
-            requested.append((item.id, true, connectionID))
+            requested.append((item.id, true, ticket.connectionID))
+            tickets.append(ticket)
             return outcome(item.id, true)
         }
         func canRequest(connectionID: UUID) -> Bool { canDownload }
@@ -120,7 +124,9 @@ import Testing
 
     @Test func meteredPathAsksOnceThenQueuesTheRest() async {
         let requester = Requester()
-        requester.outcome = { _, metered in metered ? .started(.started(UUID())) : .needsConfirmation(.cellular) }
+        requester.outcome = { _, metered in
+            metered ? .started(.started(UUID())) : .needsConfirmation(.cellular, Self.ticket)
+        }
         let model = model(books: ["a", "b", "c"].map { Self.book($0) }, requester: requester)
         await model.start(libraryID: "lib")
         await model.confirm()
@@ -130,6 +136,8 @@ import Testing
         await model.confirmMetered()
         #expect(requester.requested.map(\.id) == ["a", "a", "b", "c"])
         #expect(requester.requested.dropFirst().allSatisfy { $0.metered })
+        // Every confirmation carries the ticket of the request that asked.
+        #expect(requester.tickets == [Self.ticket, Self.ticket, Self.ticket])
         #expect(model.prompt == nil)
     }
 

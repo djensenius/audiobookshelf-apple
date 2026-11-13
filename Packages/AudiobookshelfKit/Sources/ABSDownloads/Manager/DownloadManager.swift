@@ -272,10 +272,11 @@ public actor DownloadManager {
     /// when it began as `generation`: once a sign-out, expiry or removal has stopped the server's
     /// downloads (``DownloadEngine/quiesce(connectionID:pausing:)``) under way then or since, it
     /// throws ``DownloadManagerError/downloadsStopped(_:)`` and queues nothing. It checks before
-    /// its first write and again once the new record is saved, as
-    /// ``DownloadEngine/resume(recordID:unlessQuiescedSince:)`` does: a quiesce that begins later
-    /// finds the record queued and pauses it with the others. An existing paused or failed record
-    /// stays paused.
+    /// its first write; the new record is then saved paused, so no activation starts it, and
+    /// queued and started by ``DownloadEngine/resume(recordID:unlessQuiescedSince:)``, which
+    /// checks again once it is queued: a quiesce that begins later finds it queued and pauses it
+    /// with the others. A record that resume kept paused, or that failed, is deleted. An existing
+    /// paused or failed record stays paused, even when the guarded resume can't pause it again.
     ///
     /// - Parameter item: an expanded item (`ItemEndpoints.item(id:)`).
     /// - Throws: a ``DownloadManagerError``.
@@ -336,20 +337,55 @@ public actor DownloadManager {
             // of every part it stopped.
             _ = try await read { try await self.store.deleteRecord(existing.id) }
         }
-        let record = try await read { try await self.store.upsertRecord(plan).record }
-        if let generation, await engine.hasQuiesced(connectionID: connectionID, since: generation) {
-            // One that can't be deleted is paused instead, so no activation starts it.
-            do {
-                _ = try await read { try await self.store.deleteRecord(record.id) }
-            } catch {
-                _ = try? await read { try await self.store.setState(.paused, forRecord: record.id) }
-            }
-            throw .downloadsStopped(connectionID)
+        if let generation {
+            // Not startable until the engine's guarded resume has checked for a quiesce.
+            plan.state = .paused
+            return try await startGuarded(plan, since: generation)
         }
+        let record = try await read { try await self.store.upsertRecord(plan).record }
         track(record)
         emit(.recordChanged(record))
         await engine.start(partIDs: record.parts.map(\.id))
         return .started(record.id)
+    }
+
+    /// Saves a new paused `plan`, then queues and starts it with the engine's guarded resume;
+    /// deletes it when the resume keeps it paused for a quiesce since `generation`, or fails.
+    private func startGuarded(
+        _ plan: DownloadRecordDTO, since generation: Int
+    ) async throws(DownloadManagerError) -> EnqueueResult {
+        let connectionID = plan.key.serverConnectionID
+        let record = try await read { try await self.store.upsertRecord(plan).record }
+        track(record)
+        let resumed: Bool
+        do throws(DownloadManagerError) {
+            resumed = try await read {
+                try await self.engine.resume(recordID: record.id, unlessQuiescedSince: generation)
+            }
+        } catch {
+            await discardUnstarted(record.id)
+            try await ensureNotQuiesced(connectionID, since: generation)
+            throw error
+        }
+        guard resumed else {
+            await discardUnstarted(record.id)
+            try await ensureNotQuiesced(connectionID, since: generation)
+            // Deleted by something else before the resume read it.
+            throw .storeFailure
+        }
+        await refresh(record.id, announce: true)
+        return .started(record.id)
+    }
+
+    /// Deletes a new record nothing started; one that can't be deleted is paused instead, so no
+    /// activation starts it.
+    private func discardUnstarted(_ recordID: UUID) async {
+        forget(recordID)
+        do {
+            _ = try await read { try await self.store.deleteRecord(recordID) }
+        } catch {
+            _ = try? await read { try await self.store.setState(.paused, forRecord: recordID) }
+        }
     }
 
     /// The engine's quiesce count now, for the `unlessQuiescedSince` of
@@ -402,12 +438,27 @@ public actor DownloadManager {
         case .paused, .failed:
             // The disk may have filled since it was queued (it may have failed `outOfSpace`).
             try await checkCapacity(for: record, item: item)
-            let resumed = try await read {
-                if let generation {
-                    try await self.engine.resume(recordID: record.id, unlessQuiescedSince: generation)
-                } else {
-                    try await self.engine.resume(recordID: record.id)
+            let resumed: Bool
+            do throws(DownloadManagerError) {
+                resumed = try await read {
+                    if let generation {
+                        try await self.engine.resume(recordID: record.id, unlessQuiescedSince: generation)
+                    } else {
+                        try await self.engine.resume(recordID: record.id)
+                    }
                 }
+            } catch {
+                if let generation,
+                    await engine.hasQuiesced(connectionID: record.key.serverConnectionID, since: generation)
+                {
+                    // A guarded resume that queued the record but couldn't pause it again: paused,
+                    // as the quiesce leaves its other records (``restartActiveTransfers()``).
+                    _ = try? await read {
+                        try await self.store.setState(.paused, forRecord: record.id, expecting: [.queued])
+                    }
+                    throw .downloadsStopped(record.key.serverConnectionID)
+                }
+                throw error
             }
             guard resumed else {
                 // Kept paused by a quiesce, so it still exists; else finalised or deleted.

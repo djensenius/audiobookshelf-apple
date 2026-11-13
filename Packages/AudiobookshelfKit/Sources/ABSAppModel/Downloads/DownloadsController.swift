@@ -9,16 +9,18 @@ import Observation
 ///
 /// - ``request(item:episodeID:connectionID:)`` checks ``NetworkPolicy/canDownload(waitingUpTo:)``
 ///   first: on a metered path, ``CellularPolicy/ask`` returns
-///   ``DownloadRequestOutcome/needsConfirmation(_:)`` and ``CellularPolicy/never`` returns
+///   ``DownloadRequestOutcome/needsConfirmation(_:_:)`` and ``CellularPolicy/never`` returns
 ///   ``DownloadRequestOutcome/denied(_:)``, without queueing anything. After the user agrees,
-///   ``confirmMeteredDownload(item:episodeID:connectionID:)`` queues it, as the legacy confirm
+///   ``confirmMeteredDownload(item:episodeID:ticket:)`` queues it, as the legacy confirm
 ///   dialog did. Once approved, the download keeps going on the metered path.
-/// - Both belong to the account session running when they're called (``DownloadRequestSessions``):
-///   without one for the connection, or if its user may not download (`permissions.download`),
-///   they return ``DownloadRequestOutcome/rejected(_:)`` at once. If that session ends while the
-///   request waits for the path, or a sign-out, expiry or removal stops the connection's downloads
-///   before its record is saved (``DownloadManager/quiesceGeneration()``), nothing is queued and it
-///   returns ``DownloadRequestError/sessionEnded``. A switch away that comes later still saves the
+/// - A request belongs to the account session running when it's made (``DownloadRequestSessions``),
+///   and its metered confirmation to the same one (``DownloadRequestTicket``): without one for
+///   the connection, or if its user may not download (`permissions.download`), it returns
+///   ``DownloadRequestOutcome/rejected(_:)``. Checked again after the path wait, whatever the path,
+///   and before the record is saved. If that session ends meanwhile, or a sign-out, expiry or
+///   removal stops the connection's downloads before its record is queued
+///   (``DownloadManager/quiesceGeneration()``), nothing is queued and it returns
+///   ``DownloadRequestError/sessionEnded``. A switch away that comes later still saves the
 ///   record; a switch keeps the connection's downloads running anyway.
 /// - Under ``CellularPolicy/ask``, transfers the user didn't start now aren't asked about: the
 ///   engine's retries, resumes at relaunch, restarts, and new tasks after a path change all run
@@ -196,30 +198,32 @@ public final class DownloadsController {
     ///
     /// - Parameter item: an expanded item (`ItemEndpoints.item(id:)`) of the server `connectionID`.
     public func request(item: LibraryItem, episodeID: String?, connectionID: UUID) async -> DownloadRequestOutcome {
-        let begun: BegunRequest
+        let ticket: DownloadRequestTicket
         switch await begin(connectionID: connectionID) {
-        case .success(let request): begun = request
+        case .success(let begun): ticket = begun
         case .failure(let error): return .rejected(error)
         }
-        return switch await gate(waitingForPath: true) {
-        case .allowed: await enqueue(item: item, episodeID: episodeID, connectionID: connectionID, begun: begun)
-        case .askUser(let reason): .needsConfirmation(reason)
+        let decision = await gate(waitingForPath: true)
+        // The path wait may have outlasted the session or the permission: a stale request is
+        // dropped, whatever the path, rather than prompting.
+        if let error = check(ticket) { return .rejected(error) }
+        return switch decision {
+        case .allowed: await enqueue(item: item, episodeID: episodeID, ticket: ticket)
+        case .askUser(let reason): .needsConfirmation(reason, ticket)
         case .denied(let reason): .denied(reason)
         }
     }
 
-    /// Queues a download the user agreed to after ``DownloadRequestOutcome/needsConfirmation(_:)``.
-    /// Denied instead if the policy became ``CellularPolicy/never`` while they decided.
+    /// Queues a download the user agreed to after
+    /// ``DownloadRequestOutcome/needsConfirmation(_:_:)``, in the session of the request that
+    /// asked (`ticket`): rejected once that session has ended. Denied instead if the policy became
+    /// ``CellularPolicy/never`` while they decided.
     public func confirmMeteredDownload(
-        item: LibraryItem, episodeID: String?, connectionID: UUID
+        item: LibraryItem, episodeID: String?, ticket: DownloadRequestTicket
     ) async -> DownloadRequestOutcome {
-        let begun: BegunRequest
-        switch await begin(connectionID: connectionID) {
-        case .success(let request): begun = request
-        case .failure(let error): return .rejected(error)
-        }
+        if let error = check(ticket) { return .rejected(error) }
         if case .denied(let reason) = await gate(waitingForPath: false) { return .denied(reason) }
-        return await enqueue(item: item, episodeID: episodeID, connectionID: connectionID, begun: begun)
+        return await enqueue(item: item, episodeID: episodeID, ticket: ticket)
     }
 
     /// Whether a request for `connectionID` would be let through now: one of its sessions is
@@ -235,35 +239,40 @@ public final class DownloadsController {
         waitingForPath ? await policy.canDownload(waitingUpTo: pathTimeout) : policy.canDownload()
     }
 
-    /// The session a request began in, and the manager's quiesce generation then.
-    private struct BegunRequest {
-        let sessionID: UInt64
-        let generation: Int
-    }
-
-    /// The request's session, if one is running for `connectionID` and its user may download. The
-    /// generation is taken first, so a quiesce that began after it is caught when the record is
-    /// saved, whenever the session is seen to end.
-    private func begin(connectionID: UUID) async -> Result<BegunRequest, DownloadRequestError> {
-        let generation = await manager.quiesceGeneration()
+    /// The ticket of a request made now: the session running for `connectionID`, taken before
+    /// anything is awaited, and the manager's generation, taken next. The session is checked again
+    /// once the generation is known, so a session that ended meanwhile (a switch away and back,
+    /// which doesn't quiesce) isn't swapped for the next one; a quiesce that began after the
+    /// generation is caught when the record is saved.
+    private func begin(connectionID: UUID) async -> Result<DownloadRequestTicket, DownloadRequestError> {
         guard let session = sessions(connectionID) else { return .failure(.sessionEnded) }
         guard session.canDownload else { return .failure(.notPermitted) }
-        return .success(BegunRequest(sessionID: session.sessionID, generation: generation))
+        let generation = await manager.quiesceGeneration()
+        let ticket = DownloadRequestTicket(
+            connectionID: connectionID, sessionID: session.sessionID, generation: generation)
+        if let error = check(ticket) { return .failure(error) }
+        return .success(ticket)
+    }
+
+    /// Why `ticket`'s request may not go ahead now: its session ended, or its user may no
+    /// longer download; `nil` if it may.
+    private func check(_ ticket: DownloadRequestTicket) -> DownloadRequestError? {
+        guard let session = sessions(ticket.connectionID), session.sessionID == ticket.sessionID else {
+            return .sessionEnded
+        }
+        return session.canDownload ? nil : .notPermitted
     }
 
     private func enqueue(
-        item: LibraryItem, episodeID: String?, connectionID: UUID, begun: BegunRequest
+        item: LibraryItem, episodeID: String?, ticket: DownloadRequestTicket
     ) async -> DownloadRequestOutcome {
-        // The path wait, or the user's decision, may have outlasted the session or the permission.
-        guard let session = sessions(connectionID), session.sessionID == begun.sessionID else {
-            return .rejected(.sessionEnded)
-        }
-        guard session.canDownload else { return .rejected(.notPermitted) }
+        // The user's decision may have outlasted the session or the permission.
+        if let error = check(ticket) { return .rejected(error) }
         do {
             return .started(
                 try await manager.enqueue(
-                    item: item, episodeID: episodeID, connectionID: connectionID, replacingExisting: false,
-                    unlessQuiescedSince: begun.generation))
+                    item: item, episodeID: episodeID, connectionID: ticket.connectionID, replacingExisting: false,
+                    unlessQuiescedSince: ticket.generation))
         } catch {
             if case .downloadsStopped = error { return .rejected(.sessionEnded) }
             return .failed(error)

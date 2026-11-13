@@ -821,6 +821,7 @@ import Testing
         }
         #expect(try await fixture.store.allRecords().isEmpty)
         #expect(await fixture.engine.started.isEmpty)
+        #expect(await fixture.engine.resumed.isEmpty)
         // Nothing was reported, so the next event is the next enqueue's.
         let item = LibraryItemFixtures.book()
         _ = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
@@ -851,6 +852,73 @@ import Testing
         #expect(await fixture.engine.resumed.isEmpty)
     }
 
+    /// A new record is saved paused, so an activation before the guarded resume has checked for a
+    /// quiesce doesn't start it; the resume queues and starts it.
+    @Test func aGuardedRequestIsNotStartableUntilTheEngineResumesIt() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let events = await manager.events()
+        let store = fixture.store
+        let startable = Startable()
+        // What an activation in the interval would start: the queued and downloading records.
+        await fixture.engine.onGuardedResume { _ in
+            let queued = (try? await store.records(state: .queued)) ?? []
+            let downloading = (try? await store.records(state: .downloading)) ?? []
+            await startable.append((queued + downloading).map(\.id))
+        }
+        let item = LibraryItemFixtures.book()
+
+        let result = try await manager.enqueue(
+            item: item, episodeID: nil, connectionID: fixture.connectionID,
+            unlessQuiescedSince: await manager.quiesceGeneration())
+
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(await startable.records == [[]])
+        #expect(result == .started(record.id))
+        #expect(record.state == .queued)
+        #expect(await fixture.engine.resumed == [record.id])
+        #expect(await events.next { _ in true } == .recordChanged(record))
+    }
+
+    @Test func aGuardedRequestWhoseResumeFailsIsDeleted() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        await fixture.engine.failNextResumes(1, queueingFirst: true)
+
+        await #expect(throws: DownloadManagerError.storeFailure) {
+            try await manager.enqueue(
+                item: LibraryItemFixtures.book(), episodeID: nil, connectionID: fixture.connectionID,
+                unlessQuiescedSince: await manager.quiesceGeneration())
+        }
+        #expect(try await fixture.store.allRecords().isEmpty)
+        #expect(await fixture.engine.started.isEmpty)
+    }
+
+    /// A guarded resume that queued the paused record, then couldn't pause it again for the
+    /// quiesce: the record is paused, as the quiesce, which passed over it, leaves the others.
+    @Test func aPausedRecordStaysPausedWhenTheGuardedResumeFails() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        try await fixture.store.setState(.paused, forRecord: recordID)
+        let generation = await manager.quiesceGeneration()
+        await fixture.engine.quiesce(afterNextCheckSince: generation)
+        await fixture.engine.failNextResumes(1, queueingFirst: true)
+
+        await #expect(throws: DownloadManagerError.downloadsStopped(fixture.connectionID)) {
+            try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID, unlessQuiescedSince: generation)
+        }
+        #expect(try await fixture.store.record(id: recordID)?.state == .paused)
+    }
+
     /// The control: without a generation, a quiesce doesn't stop the enqueue (internal callers).
     @Test func withoutAGenerationAQuiesceIsIgnored() async throws {
         let fixture = try await ManagerFixture()
@@ -869,6 +937,15 @@ import Testing
         let root = FileManager.default.temporaryDirectory.appending(path: "capacity-\(UUID().uuidString)")
         // The downloads folder doesn't exist yet: its volume is still found.
         #expect(try VolumeStorageCapacity(locations: DownloadLocations(root: root)).availableCapacity() > 0)
+    }
+}
+
+/// The records an activation would have started, at each guarded resume.
+private actor Startable {
+    private(set) var records: [[UUID]] = []
+
+    func append(_ ids: [UUID]) {
+        records.append(ids)
     }
 }
 

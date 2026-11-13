@@ -9,8 +9,8 @@ import Observation
 public protocol DownloadRequesting: Sendable {
     /// See ``DownloadsController/request(item:episodeID:connectionID:)``.
     func request(item: LibraryItem, episodeID: String?, connectionID: UUID) async -> DownloadRequestOutcome
-    /// See ``DownloadsController/confirmMeteredDownload(item:episodeID:connectionID:)``.
-    func confirmMeteredDownload(item: LibraryItem, episodeID: String?, connectionID: UUID) async
+    /// See ``DownloadsController/confirmMeteredDownload(item:episodeID:ticket:)``.
+    func confirmMeteredDownload(item: LibraryItem, episodeID: String?, ticket: DownloadRequestTicket) async
         -> DownloadRequestOutcome
     /// See ``DownloadsController/canRequest(connectionID:)``.
     func canRequest(connectionID: UUID) -> Bool
@@ -139,6 +139,8 @@ public final class SeriesDownloadModel {
     /// The books still to queue once the user confirms.
     @ObservationIgnored private var pending: [String] = []
     @ObservationIgnored private var failures = 0
+    /// The request that asked for ``Prompt/meteredConfirmation``: the rest is queued in its session.
+    @ObservationIgnored private var meteredTicket: DownloadRequestTicket?
 
     public init(
         seriesID: String, connectionID: UUID, service: any SeriesAuthorsService & ItemDetailService,
@@ -190,6 +192,7 @@ public final class SeriesDownloadModel {
     public func cancel() {
         pending = []
         failures = 0
+        meteredTicket = nil
     }
 
     private struct TooManyBooks: Error {}
@@ -236,14 +239,19 @@ public final class SeriesDownloadModel {
             // The account may have reconnected without download permission during the fetch; the
             // requester checks again, and rejects the request if the session ended meanwhile.
             guard access.requester.canRequest(connectionID: connectionID) else { return cancel() }
-            let outcome =
-                metered
-                ? await access.requester.confirmMeteredDownload(item: item, episodeID: nil, connectionID: connectionID)
-                : await access.requester.request(item: item, episodeID: nil, connectionID: connectionID)
+            let outcome: DownloadRequestOutcome
+            if metered {
+                guard let meteredTicket else { return cancel() }
+                outcome = await access.requester.confirmMeteredDownload(
+                    item: item, episodeID: nil, ticket: meteredTicket)
+            } else {
+                outcome = await access.requester.request(item: item, episodeID: nil, connectionID: connectionID)
+            }
             switch outcome {
             case .started:
                 pending.removeFirst()
-            case .needsConfirmation:
+            case .needsConfirmation(_, let ticket):
+                meteredTicket = ticket
                 prompt = .meteredConfirmation
                 return
             case .denied:

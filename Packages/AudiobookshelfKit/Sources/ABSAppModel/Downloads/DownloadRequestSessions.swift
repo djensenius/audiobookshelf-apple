@@ -17,6 +17,16 @@ public struct DownloadRequestSession: Sendable, Hashable {
     }
 }
 
+/// The session a download request began in and the manager's quiesce generation then
+/// (``DownloadManager/quiesceGeneration()``). A metered confirmation carries the ticket of the
+/// request that asked for it, so it is refused once that session has ended, even if another
+/// session of the connection is running by then.
+public struct DownloadRequestTicket: Sendable, Hashable {
+    public let connectionID: UUID
+    let sessionID: UInt64
+    let generation: Int
+}
+
 /// Why ``DownloadsController`` refused a request before queueing anything.
 public enum DownloadRequestError: Error, Sendable, Hashable {
     /// The user of the request's session may not download.
