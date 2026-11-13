@@ -1,10 +1,11 @@
+import ABSAPI
 import ABSAppModel
 import ABSCore
-import ABSData
 import ABSPlayback
 import Foundation
 import Testing
 
+@testable import ABSData
 @testable import Audiobookshelf
 
 private struct QueueTestDevice: DeviceIdentifying {
@@ -18,7 +19,7 @@ private final class Removals {
 }
 
 /// The app's play-queue wiring (#156): each account scope's queue is saved in the settings'
-/// defaults, and removing a connection deletes its saved queue only.
+/// defaults, and a removal the store commits deletes that connection's saved queue only.
 @MainActor
 @Suite struct PlaybackQueueWiringTests {
     private let a = UUID()
@@ -44,14 +45,48 @@ private final class Removals {
             store.save([item("1"), item("2")], serverConnectionID: a)
             store.save([item("3")], serverConnectionID: b)
 
-            await accounts.credentialsRemoved?(a)
+            accounts.connectionRemoved?(a)
 
             #expect(store.load(serverConnectionID: a).isEmpty)
             #expect(store.load(serverConnectionID: b) == [item("3")])
         }
     }
 
-    /// The downloads' handler, set first, still runs, before the queue goes.
+    /// A removal whose database commit fails keeps the connection listed, so it keeps its saved
+    /// queue too; removing it again, which commits, deletes the queue. Through `remove(_:)` itself,
+    /// over the app's wiring.
+    @Test(arguments: [true, false])
+    func aRemovalKeepsTheQueueUnlessItCommits(commitFails: Bool) async throws {
+        try await withSettings { settings in
+            let host = "\(UUID().uuidString.lowercased()).connect-ui.test"
+            defer { ConnectTestProtocol.forget(host) }
+            let connections = ServerConnectionStore(modelContainer: try DataStack(location: .inMemory).container)
+            let accounts = AccountManager(
+                store: connections, keychain: ConnectTestKeychain(),
+                validator: ServerValidator(sessionConfiguration: ConnectTestProtocol.configuration),
+                sessionConfiguration: ConnectTestProtocol.configuration)
+            let queues = AppPlayback.queueStore(settings: settings)
+            AppPlayback.removesQueues(of: accounts, from: queues)
+            let validated = try await ServerValidator(sessionConfiguration: ConnectTestProtocol.configuration)
+                .validate(address: "https://\(host)")
+            try await accounts.connect(local: validated, username: "reader", password: "pw")
+            let id = try #require(accounts.activeConnection).id
+            queues.save([item("1")], serverConnectionID: id)
+
+            if commitFails {
+                await connections.failNextCommit(with: CocoaError(.fileWriteNoPermission))
+                await #expect(throws: CocoaError.self) { try await accounts.remove(id) }
+                #expect(accounts.connections.map(\.id) == [id])
+                #expect(queues.load(serverConnectionID: id) == [item("1")])
+            }
+
+            try await accounts.remove(id)
+            #expect(accounts.connections.isEmpty)
+            #expect(queues.load(serverConnectionID: id).isEmpty)
+        }
+    }
+
+    /// A handler already set still runs, before the queue goes.
     @Test func removalKeepsTheHandlerAlreadySet() async throws {
         try await withSettings { settings in
             let environment = AppEnvironment(
@@ -60,14 +95,14 @@ private final class Removals {
             let store = AppPlayback.queueStore(settings: settings)
             store.save([item("1")], serverConnectionID: a)
             let removals = Removals()
-            accounts.credentialsRemoved = { connectionID in
+            accounts.connectionRemoved = { connectionID in
                 // Not deleted yet: the earlier handler runs first.
                 #expect(!store.load(serverConnectionID: connectionID).isEmpty)
                 removals.connectionIDs.append(connectionID)
             }
 
             AppPlayback.removesQueues(of: accounts, from: store)
-            await accounts.credentialsRemoved?(a)
+            accounts.connectionRemoved?(a)
 
             #expect(removals.connectionIDs == [a])
             #expect(store.load(serverConnectionID: a).isEmpty)

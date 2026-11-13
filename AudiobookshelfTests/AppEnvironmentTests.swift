@@ -130,10 +130,9 @@ struct TestDownloads {
 
             #expect(environment.accounts != nil)
             #expect(environment.downloads == nil)
-            // Without downloads, a removal still deletes the saved play queue (PlaybackQueueWiringTests),
-            // and an expiry still clears the widget snapshot, so both handlers stay set.
-            #expect(environment.accounts?.credentialsRemoved != nil)
-            #expect(environment.accounts?.credentialsExpired != nil)
+            #expect(environment.accounts?.credentialsRemoved == nil)
+            // A committed removal still deletes the saved play queue (PlaybackQueueWiringTests).
+            #expect(environment.accounts?.connectionRemoved != nil)
 
             await environment.lifecycle.start()
 

@@ -10,15 +10,15 @@ extension AppPlayback {
         UserDefaultsPlaybackQueueStore(defaults: settings.defaults)
     }
 
-    /// Deletes a removed connection's saved queue, active or not, once its credentials are deleted
-    /// (``AccountManager/credentialsRemoved``), after whatever handler is already set: the
-    /// downloads', so call this after they're built. A removal that fails keeps the queue, along
+    /// Deletes a removed connection's saved queue, active or not, once the store has removed the
+    /// connection (``AccountManager/connectionRemoved``), after whatever handler is already set. A
+    /// removal that fails, deleting the credentials or saving the removal, keeps the queue along
     /// with the connection. Removing the active account ends its session first, which retires its
     /// scope and freezes its queue, so nothing saves it again.
     static func removesQueues(of accounts: AccountManager, from queues: UserDefaultsPlaybackQueueStore) {
-        let previous = accounts.credentialsRemoved
-        accounts.credentialsRemoved = { connectionID in
-            await previous?(connectionID)
+        let previous = accounts.connectionRemoved
+        accounts.connectionRemoved = { connectionID in
+            previous?(connectionID)
             queues.removeQueue(serverConnectionID: connectionID)
         }
     }
