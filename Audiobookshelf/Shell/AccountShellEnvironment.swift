@@ -5,17 +5,20 @@ import SwiftUI
 /// What the signed-in shell injects for one account session: the shared library store, the
 /// progress reader for item cards and rows, and item actions that run on the store's one
 /// ``ProgressItemActions`` for the session (``LibraryStore/itemActions(for:)``), so every screen
-/// and every window shares its per-item queue, and a restarted session gets fresh actions.
+/// and every window shares its per-item queue, and a restarted session gets fresh actions. Each
+/// shell also gets its own connection banner (``ConnectionBannerSession``).
 @MainActor
 final class AccountShellValues {
     let store: LibraryStore
     let progressReader: ItemProgressReader
     let itemActions: any ItemActionPerforming
+    let connectionBanner: ConnectionBannerSession
 
     init(store: LibraryStore) {
         self.store = store
         progressReader = BrowsePresentation.progressReader(store.progress)
         itemActions = store.sessionItemActions() ?? NoOpItemActions()
+        connectionBanner = ConnectionBannerSession(store: store)
     }
 }
 
@@ -61,5 +64,6 @@ struct AccountShellEnvironment: ViewModifier {
             .environment(\.libraryStore, values?.store)
             .environment(\.itemProgressReader, values?.progressReader ?? .none)
             .environment(\.itemActions, values?.itemActions ?? NoOpItemActions())
+            .environment(\.connectionBanner, values?.connectionBanner)
     }
 }
