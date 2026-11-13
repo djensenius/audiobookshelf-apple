@@ -13,7 +13,7 @@ protocol PlayerSlotState: AnyObject, Observable {
     var title: String { get }
     /// The failure to show, with or without a session; `nil` when there is none.
     var errorMessageKey: PlayerErrorMessage? { get }
-    /// "Stream anyway" for a `.streamingNeedsConfirmation` failure.
+    /// "Stream" for a `.streamingNeedsConfirmation` failure.
     func confirmMeteredStreaming() async
     /// "Cancel" for a `.streamingNeedsConfirmation` failure.
     func declineMeteredStreaming()
@@ -46,7 +46,7 @@ final class PlaceholderPlayerState: PlayerSlotState {
 /// What a playback failure's alert offers besides dismissing it; a failure without one shows OK
 /// alone, and one with it shows the action and Cancel.
 enum PlayerErrorAction: Equatable {
-    /// "Stream anyway", for a confirmation ("ask"), never for "never".
+    /// "Stream", for a confirmation ("ask"), never for "never".
     case streamAnyway
 
     init?(_ error: PlayerErrorMessage) {
@@ -58,7 +58,7 @@ enum PlayerErrorAction: Equatable {
 
     var titleKey: String {
         switch self {
-        case .streamAnyway: "ButtonStreamAnyway"
+        case .streamAnyway: "ButtonStream"
         }
     }
 }
