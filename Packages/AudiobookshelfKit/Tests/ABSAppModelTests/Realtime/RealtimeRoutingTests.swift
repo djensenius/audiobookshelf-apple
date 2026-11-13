@@ -183,6 +183,19 @@ struct RealtimeRoutingTests {
     }
 }
 
+/// The socket values the bridge merged into the local store, in merge order, each with the
+/// position the store held as its merge began.
+@MainActor
+private final class MergeLog {
+    struct Merge: Equatable {
+        let value: Double
+        let found: Double?
+    }
+
+    var merges: [Merge] = []
+    var values: [Double] { merges.map(\.value) }
+}
+
 /// Socket progress through the routed bridge into ``LocalProgressStore`` (#529): the store's
 /// `.socket` rules hold through the wiring, and the cache is updated first.
 @MainActor
@@ -209,24 +222,61 @@ struct RealtimeLocalProgressTests {
         return store
     }
 
+    /// The cache takes each event as it's handled, while the merge before it is still held; the
+    /// store gets the events' values in socket order, each merge after the one before it.
     @Test func socketProgressReachesTheStoreAfterTheCacheInEventOrder() async throws {
         try await withLibrarySettings { settings in
             let local = try await storeWithRow()
             let routed = RoutedBridge(settings: settings, localProgress: local)
             let socket = try await routed.start()
+            let hold = Gate()
+            let merged = MergeLog()
+            routed.bridge.willMerge = { key, server in
+                let found = try? await local.progress(for: key)?.currentTime
+                merged.merges.append(.init(value: server.currentTime, found: found))
+                if merged.merges.count == 1 { await hold.wait() }
+            }
 
-            await routed.send(progressUpdate("book", currentTime: 300, lastUpdate: Self.t0Millis + 5_000), on: socket)
-            // The cache takes it as the event is handled; the store's merge follows.
-            #expect(routed.store.progress.progress(libraryItemID: "book")?.currentTime == 300)
             await routed.send(progressUpdate("book", currentTime: 200, lastUpdate: Self.t0Millis + 4_000), on: socket)
-            await routed.bridge.mergeTask?.value
-
-            // Both keep the newer value: the older event, merged after it, changes neither.
+            #expect(await eventually { merged.values == [200] })
+            #expect(routed.store.progress.progress(libraryItemID: "book")?.currentTime == 200)
+            await routed.send(progressUpdate("book", currentTime: 300, lastUpdate: Self.t0Millis + 5_000), on: socket)
+            // The cache took the newer event while the first merge is held, and the second merge
+            // waits for the first.
             #expect(routed.store.progress.progress(libraryItemID: "book")?.currentTime == 300)
+            #expect(merged.values == [200])
+            #expect(try await local.progress(for: key)?.currentTime == 50)
+
+            hold.open()
+            await routed.bridge.mergeTask?.value
+            // Each merge began once the one before it was applied.
+            #expect(merged.merges == [.init(value: 200, found: 50), .init(value: 300, found: 200)])
             let row = try #require(try await local.progress(for: key))
             #expect(row.currentTime == 300)
             #expect(row.serverBaseline?.lastUpdate == Self.date(Self.t0Millis + 5_000))
             #expect(row.dirtyGroups.isEmpty)
+        }
+    }
+
+    /// An older event after a newer one is still merged in turn, and changes neither store.
+    @Test func anOlderEventMergedAfterANewerOneChangesNothing() async throws {
+        try await withLibrarySettings { settings in
+            let local = try await storeWithRow()
+            let routed = RoutedBridge(settings: settings, localProgress: local)
+            let socket = try await routed.start()
+            let merged = MergeLog()
+            routed.bridge.willMerge = { key, server in
+                let found = try? await local.progress(for: key)?.currentTime
+                merged.merges.append(.init(value: server.currentTime, found: found))
+            }
+
+            await routed.send(progressUpdate("book", currentTime: 300, lastUpdate: Self.t0Millis + 5_000), on: socket)
+            await routed.send(progressUpdate("book", currentTime: 200, lastUpdate: Self.t0Millis + 4_000), on: socket)
+            await routed.bridge.mergeTask?.value
+
+            #expect(merged.merges == [.init(value: 300, found: 50), .init(value: 200, found: 300)])
+            #expect(routed.store.progress.progress(libraryItemID: "book")?.currentTime == 300)
+            #expect(try await local.progress(for: key)?.currentTime == 300)
         }
     }
 

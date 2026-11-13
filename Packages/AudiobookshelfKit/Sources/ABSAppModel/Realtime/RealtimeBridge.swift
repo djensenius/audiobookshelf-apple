@@ -100,6 +100,9 @@ public final class RealtimeBridge: SessionParticipant {
     @ObservationIgnored var didHandle: (@MainActor (RealtimeEvent) -> Void)?
     /// Called as the bridge stops, before anything is cancelled; for tests.
     @ObservationIgnored var willDetach: (@MainActor () -> Void)?
+    /// Awaited by each merge into ``localProgress`` once the merges before it are done, just before
+    /// it applies its value; for tests to record and hold merges.
+    @ObservationIgnored var willMerge: (@MainActor (MediaKey, ProgressBaseline) async -> Void)?
 
     @ObservationIgnored private let progress: ProgressCache
     @ObservationIgnored private let makeSocket: SocketFactory
@@ -384,6 +387,8 @@ public final class RealtimeBridge: SessionParticipant {
             let capturedAt = await store.captureGeneration()
             await previous?.value
             guard let self, generation == self.generation else { return }
+            await self.willMerge?(key, server)
+            guard generation == self.generation else { return }
             do {
                 try await store.applyServerProgress([key: server], capturedAt: capturedAt, source: .socket)
             } catch {
