@@ -96,6 +96,8 @@ public actor LocalSessionUploader {
     /// The pass that runs after ``running``, shared by every caller that asked meanwhile.
     private var queued: Task<LocalSessionUploadReport, Never>?
     private var queuedIsFirstSync = false
+    /// Test seam: runs after each read of the pending sessions, before anything is sent.
+    private var afterPendingRead: (@Sendable () async -> Void)?
 
     public init(
         serverConnectionID: UUID, store: LocalProgressStore, service: any LocalSessionUploadService,
@@ -137,7 +139,8 @@ public actor LocalSessionUploader {
         return await pass.value
     }
 
-    /// Stops the running pass and the queued one; sessions they didn't settle stay pending.
+    /// Stops the running pass and the queued one; sessions they didn't settle stay pending. A
+    /// cancelled pass starts no other request; the answer to one already sent is still settled.
     public func cancel() {
         running?.cancel()
         queued?.cancel()
@@ -145,6 +148,11 @@ public actor LocalSessionUploader {
 
     /// Whether a pass waits for the running one (tests).
     var hasQueuedPass: Bool { queued != nil }
+
+    /// Sets ``afterPendingRead`` (tests).
+    func setAfterPendingRead(_ hook: (@Sendable () async -> Void)?) {
+        afterPendingRead = hook
+    }
 
     private func runQueuedPass() async -> LocalSessionUploadReport {
         running = queued
@@ -174,10 +182,14 @@ public actor LocalSessionUploader {
                 logger.error("Reading pending local sessions failed: \(String(describing: error), privacy: .public)")
                 break
             }
+            await afterPendingRead?()
             let pendingIDs = Set(pending.map(\.id))
             acknowledged = acknowledged.filter { pendingIDs.contains($0.key) }
             let due = pending.filter { !settled.contains($0.id) && !isAcknowledged($0, isFirstSync: isFirstSync) }
             guard !due.isEmpty else { return report }
+            // The pass may have been cancelled while the store was read, and a request needn't throw
+            // when cancelled, so check before sending; `uploadEach` checks between its requests.
+            guard !Task.isCancelled else { break }
 
             let attempt = await upload(Array(due.prefix(batchSize)), deviceInfo: deviceInfo)
             if !attempt.sent.isEmpty {

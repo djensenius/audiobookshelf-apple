@@ -335,6 +335,33 @@ struct LocalSessionUploaderTests {
         }
     }
 
+    /// A store read that returns normally after a cancel ends the pass before `local-all`: nothing
+    /// is sent or settled.
+    @Test func cancelDuringThePendingReadSendsNothing() async throws {
+        let first = try await save(minute: 0)
+        let second = try await save(minute: 1)
+        let entered = Gate()
+        let release = Gate()
+        let service = StubUploadService()
+        let uploader = uploader(service)
+        await uploader.setAfterPendingRead {
+            entered.open()
+            await release.wait()
+        }
+
+        let pass = Task { await uploader.sync() }
+        await entered.wait()
+        await uploader.cancel()
+        release.open()
+
+        let report = await pass.value
+        #expect(service.batches.isEmpty && service.singles.isEmpty)
+        #expect(!report.isComplete && report.results.isEmpty && report.deleted.isEmpty)
+        for session in [first, second] {
+            #expect(try await store.session(id: session.id)?.uploadAttempts == 0)
+        }
+    }
+
     // MARK: - Helpers
 
     private func uploader(_ service: StubUploadService, batchSize: Int = LocalSessionUploader.defaultBatchSize)
