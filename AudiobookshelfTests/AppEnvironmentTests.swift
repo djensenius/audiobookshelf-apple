@@ -62,6 +62,38 @@ struct TestDownloads {
         }
     }
 
+    /// A test or fixture environment settles signed out, which clears the widget's snapshot; only
+    /// the App Group store's may touch the shared snapshot and the user's widget.
+    @Test func anInMemoryEnvironmentLeavesTheWidgetAlone() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+
+            #expect(environment.widgetSnapshots.fileURL == nil)
+            #expect(environment.widgetSnapshots.reloader is NoWidgetReloads)
+        }
+    }
+
+    /// The writer's observers must not keep a released environment's lifecycle, and so the
+    /// writer itself, alive.
+    @Test func aReleasedEnvironmentReleasesItsWidgetWriter() async throws {
+        try await withSettings { settings in
+            weak var lifecycle: SessionLifecycle?
+            weak var writer: WidgetSnapshotWriter?
+            do {
+                let environment = AppEnvironment(
+                    settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+                lifecycle = environment.lifecycle
+                writer = environment.widgetSnapshots
+                for _ in 0..<100 { await Task.yield() }
+            }
+            for _ in 0..<100 { await Task.yield() }
+
+            #expect(writer == nil)
+            #expect(lifecycle == nil)
+        }
+    }
+
     /// Built with the environment and launched without a scene, so a CarPlay-only launch or a
     /// background wake has a running download stack.
     @Test func launchesTheDownloadStackInTheInjectedRoot() async throws {

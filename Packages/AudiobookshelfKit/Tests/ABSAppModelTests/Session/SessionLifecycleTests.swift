@@ -558,11 +558,14 @@ private func teardown(_ reason: String) -> [String] {
         #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
         #expect(harness.lifecycle.signedOutSwitches == 0)
 
+        #expect(harness.lifecycle.signedOutSwitchConnectionID == nil)
+
         harness.source.switchSignsOut = true
         try await harness.lifecycle.switchAccount(to: identityA.connectionID)
 
         #expect(harness.lifecycle.gate == .connect)
         #expect(harness.lifecycle.signedOutSwitches == 1)
+        #expect(harness.lifecycle.signedOutSwitchConnectionID == identityA.connectionID)
     }
 
     /// Two switches chosen from A; the first ends A, then fails as B rejects its session.

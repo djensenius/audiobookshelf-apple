@@ -45,6 +45,8 @@ final class AppEnvironment {
     let library: LibraryParticipant?
     /// The cover image pipeline and its session participant (#182).
     let images: ImageServices
+    /// Writes the Continue Listening widget's snapshot (#89).
+    let widgetSnapshots: WidgetSnapshotWriter
 
     /// - Parameters:
     ///   - settings: The settings every scene shares.
@@ -113,6 +115,12 @@ final class AppEnvironment {
             accounts: accounts, sweepsRemovedConnections: dataStack?.resolvedLocation == .appGroup, covers: covers)
         lifecycle.register(images.participant, stage: .connect)
         self.images = images
+
+        // Widgets (#89).
+        let widgetSnapshots = Self.makeWidgetSnapshotWriter(
+            accounts: accounts, lifecycle: lifecycle, storeLocation: storeLocation)
+        lifecycle.register(widgetSnapshots, stage: .connect)
+        self.widgetSnapshots = widgetSnapshots
     }
 }
 

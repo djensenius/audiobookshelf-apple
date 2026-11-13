@@ -49,6 +49,11 @@ with (root / "calls.jsonl").open("a") as out:
     out.write(json.dumps({"tool": tool, "args": args, "cwd": os.getcwd(),
                           "developerDir": os.environ.get("DEVELOPER_DIR")}) + "\n")
 faults = json.loads((root / "faults.json").read_text())
+if tool == "xcodebuild" and args == ["-list", "-json"]:
+    if faults.get("list"):
+        sys.exit(faults["list"])
+    print((root / "listing.json").read_text())
+    sys.exit(0)
 if tool == "xcodebuild":
     result = Path(args[args.index("-resultBundlePath") + 1])
     assert not result.exists(), "stale result bundle"
@@ -142,10 +147,13 @@ class RunnerTests(unittest.TestCase):
         self.tests = {"devices": [{"deviceId": FIRST}], "testNodes": [
             {"nodeType": "Test Plan", "name": "AudiobookshelfKit", "children": [self.bundle]},
         ]}
+        self.listing = {"workspace": {"name": "AudiobookshelfKit", "schemes": [
+            "AudiobookshelfKit", "AudiobookshelfKit-Package", "AudiobookshelfWidgetKit",
+        ]}}
         self.faults = {}
 
     def prepare(self):
-        for name in ("devices", "runtimes", "summary", "tests", "faults"):
+        for name in ("devices", "runtimes", "summary", "tests", "faults", "listing"):
             (self.root / f"{name}.json").write_text(json.dumps(getattr(self, name)))
 
     def calls(self):
@@ -166,13 +174,15 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("Verified 4/4", result.stdout)
         for name in METHODS:
             self.assertIn(f"Verified Passed: ABSPlaybackTests/ShakeDetectorTests/{name}", result.stdout)
-        call = next(call for call in self.calls() if call["tool"] == "xcodebuild")
+        listing, call = [call for call in self.calls() if call["tool"] == "xcodebuild"]
+        self.assertEqual(listing["args"], ["-list", "-json"])
+        self.assertEqual(listing["cwd"], str(self.package))
         args = call["args"]
         self.assertEqual(call["cwd"], str(self.package))
         self.assertEqual(call["developerDir"], "/Applications/Xcode.app/Contents/Developer")
         work = next((self.root / ".build/kit-ios").iterdir())
         self.assertEqual(args, [
-            "test", "-scheme", "AudiobookshelfKit",
+            "test", "-scheme", "AudiobookshelfKit-Package",
             "-destination", f"platform=iOS Simulator,id={FIRST}", "-destination-timeout", "60",
             "-only-testing:ABSPlaybackTests/ShakeDetectorTests",
             "-derivedDataPath", str(work / "DerivedData"), "-resultBundlePath", str(work / "Tests.xcresult"),
@@ -185,11 +195,29 @@ class RunnerTests(unittest.TestCase):
         self.run_case()  # A second invocation cannot reuse a stale result.
         self.assertEqual(len(list((self.root / ".build/kit-ios").iterdir())), 2)
 
+    def test_scheme_follows_the_manifests_products(self):
+        # One product: Xcode's scheme is named after it and has the test action.
+        self.listing["workspace"]["schemes"] = ["AudiobookshelfKit"]
+        self.run_case()
+        test = [call for call in self.calls() if call["tool"] == "xcodebuild"][-1]
+        self.assertEqual(test["args"][:3], ["test", "-scheme", "AudiobookshelfKit"])
+        # Neither scheme listed: fail before testing anything.
+        self.listing["workspace"]["schemes"] = ["AudiobookshelfWidgetKit"]
+        self.assertIn("No AudiobookshelfKit test scheme", self.run_case(expected=1).stderr)
+        self.assertEqual(self.calls()[-1]["args"], ["-list", "-json"])
+        self.faults = {"list": 66}
+        self.run_case(expected=66)
+        self.faults = {}
+        self.prepare()
+        (self.root / "listing.json").write_text("not JSON")
+        self.run_case(expected=1, prepare=False)
+        self.assertEqual(self.calls()[-1]["args"], ["-list", "-json"])
+
     def test_explicit_destination_and_ci_toolchain(self):
         self.env.update(IOS_SIMULATOR_ID=OLDER, DEVELOPER_DIR="/Applications/Xcode_27.2.app/Contents/Developer")
         self.tests["devices"] = [{"deviceId": OLDER}]
         self.run_case()
-        call = next(call for call in self.calls() if call["tool"] == "xcodebuild")
+        call = [call for call in self.calls() if call["tool"] == "xcodebuild"][-1]
         self.assertIn(f"platform=iOS Simulator,id={OLDER}", call["args"])
         self.assertEqual(call["developerDir"], self.env["DEVELOPER_DIR"])
 

@@ -318,6 +318,8 @@
   "MessageSwitchServerFailed": "Couldn't switch servers. Check that the server is reachable, then try again.",
   "MessageSwitchServerForLink": "This link is for {0} on {1}. Switch to that server to open it?",
   "MessageSwitchServerSignedOut": "The server signed you out while switching. Sign in to it again, or choose another server.",
+  "MessageWidgetContinueListeningDescription": "Shows what you were last listening to.",
+  "MessageWidgetNothingPlaying": "Play something in Audiobookshelf to see it here.",
   "MessageYearInReviewImageCopied": "Copied the image",
   "MessageYearInReviewLoadFailed": "Couldn't load the year in review.",
   "MessageYearInReviewPhotosDenied": "Allow Audiobookshelf to add photos in Settings to save the image.",
