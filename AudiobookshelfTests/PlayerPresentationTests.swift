@@ -71,8 +71,8 @@ import Testing
         .streamUnavailable, .streamingInterrupted, .streamRejected, .playbackFailed,
     ])
     func onlyAConfirmationOffersToStream(_ error: PlayerErrorMessage) {
-        #expect(PlayerSlot.offersStreaming(for: error) == (error == .streamingNeedsConfirmation))
-        #expect(L10n.string("ButtonStreamAnyway") != "ButtonStreamAnyway")
+        #expect(PlayerErrorAction(error) == (error == .streamingNeedsConfirmation ? .streamAnyway : nil))
+        #expect(L10n.string(PlayerErrorAction.streamAnyway.titleKey) != PlayerErrorAction.streamAnyway.titleKey)
     }
 
     /// A scene shows a failure until it's dismissed there, and a different failure after that.
