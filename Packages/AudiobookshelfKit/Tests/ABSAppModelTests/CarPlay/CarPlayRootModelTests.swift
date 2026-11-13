@@ -320,6 +320,45 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
             #expect(await confirm.value == .discarded)
             #expect(harness.playback.calls.isEmpty)
             #expect(model.alert == nil)
+
+            // The discarded confirmation isn't a play to join: a tap on its row starts afresh.
+            let row = try #require(tabRows(model.content).first)
+            let tap = try #require(model.play(row))
+            #expect(tap != confirm)
+            _ = await tap.value
+            #expect(harness.plays.value.count == 2)
+        }
+    }
+
+    /// #544: while the replay Stream started is starting, it's the blocked row's play: a tap on
+    /// that row joins it (the coordinator would return at once for the item it's loading) and gets
+    /// its outcome, here a failure, with one alert. Once it has ended, a tap plays again.
+    @Test func aTapDuringAConfirmedReplayJoinsItAndGetsItsFailure() async throws {
+        try await withLibrarySettings { settings in
+            let (harness, model) = try await blockedHarness(settings: settings)
+            let row = try #require(tabRows(model.content).first)
+            let (replayEnds, endReplay) = AsyncStream<Void>.makeStream()
+            harness.playback.confirmHold = {
+                for await _ in replayEnds {}
+            }
+            harness.playback.confirmFailure = .sessionStartFailed(.timedOut)
+
+            let confirm = try #require(model.confirmStreaming())
+            while harness.playback.calls.isEmpty { await Task.yield() }
+            let tap = try #require(model.play(row))
+            #expect(tap == confirm)
+            #expect(harness.plays.value.count == 1)
+
+            endReplay.finish()
+            #expect(await confirm.value == .failed)
+            #expect(await tap.value == .failed)
+            #expect(model.alert == .sessionStartFailed)
+
+            harness.playback.error = nil
+            let again = try #require(model.play(row))
+            #expect(again != confirm)
+            #expect(await again.value == .started)
+            #expect(harness.plays.value.count == 2)
         }
     }
 

@@ -200,12 +200,12 @@ public final class CarPlayRootModel {
             }),
             let identity, let playItem = playItem(identity)
         else { return nil }
-        if let pendingPlay, pendingPlay.action == row.action, pendingPlay.origin.operation == operation,
+        if let pendingPlay, pendingPlay.origin.action == row.action, pendingPlay.origin.operation == operation,
             isCurrent(pendingPlay.origin)
         {
             return pendingPlay.task
         }
-        let origin = begin(identity)
+        let origin = begin(identity, action: row.action)
         let task = Task {
             let threw: Bool
             do {
@@ -218,7 +218,7 @@ public final class CarPlayRootModel {
             if pendingPlay?.origin.operation == origin.operation { pendingPlay = nil }
             return finish(origin, threw: threw)
         }
-        pendingPlay = PendingPlay(action: row.action, origin: origin, task: task)
+        pendingPlay = PendingPlay(origin: origin, task: task)
         return task
     }
 
@@ -235,20 +235,25 @@ public final class CarPlayRootModel {
     /// metered network. The policy is checked again, so "never" still blocks. `nil` without that
     /// alert. The consent goes to the player only if, when the task runs, the block is still the
     /// one asked about, in the same session, with no later operation; otherwise it's discarded,
-    /// so it can't authorize another item's block or a rebound playback's.
+    /// so it can't authorize another item's block or a rebound playback's. While the replay starts,
+    /// it's the blocked row's play, which a tap on that row joins (``play(_:)``).
     @discardableResult
     public func confirmStreaming() -> Task<CarPlayPlayOutcome, Never>? {
         guard alert == .streamingNeedsConfirmation, let blocked = failedPlay, let playback, let identity else {
             return nil
         }
-        let origin = begin(identity)
-        return Task {
+        let origin = begin(identity, action: blocked.origin.action)
+        let task = Task {
+            // Once it ends, discarded or not, a tap starts afresh.
+            defer { if pendingPlay?.origin.operation == origin.operation { pendingPlay = nil } }
             guard origin.operation == operation, isCurrent(origin), isCurrent(blocked.origin),
                 playback.error == blocked.error
-            else { return .discarded }
+            else { return CarPlayPlayOutcome.discarded }
             await playback.confirmMeteredStreaming()
             return finish(origin, threw: false)
         }
+        pendingPlay = PendingPlay(origin: origin, task: task)
+        return task
     }
 
     /// Cancel or OK for ``alert``: a confirmation is declined, which clears the player's error;
@@ -259,9 +264,10 @@ public final class CarPlayRootModel {
         if alert == .streamingNeedsConfirmation { playback?.declineMeteredStreaming() }
     }
 
-    /// Where a play or confirmation started: the account, its playback session (held weakly, so a
-    /// later session at the same address isn't taken for it), and the operation.
+    /// Where a play or confirmation started: the row's action, the account, its playback session
+    /// (held weakly, so a later session at the same address isn't taken for it), and the operation.
     private struct Origin {
+        let action: CarPlayRow.Action
         let identity: SessionIdentity
         weak var session: AnyObject?
         let hadSession: Bool
@@ -270,7 +276,6 @@ public final class CarPlayRootModel {
 
     /// A play while it's starting.
     private struct PendingPlay {
-        let action: CarPlayRow.Action
         let origin: Origin
         let task: Task<CarPlayPlayOutcome, Never>
     }
@@ -283,11 +288,12 @@ public final class CarPlayRootModel {
     }
 
     /// Starts an operation, superseding the previous one and its alert.
-    private func begin(_ identity: SessionIdentity) -> Origin {
+    private func begin(_ identity: SessionIdentity, action: CarPlayRow.Action) -> Origin {
         operation += 1
         failedPlay = nil
         let session = playbackSession()
-        return Origin(identity: identity, session: session, hadSession: session != nil, operation: operation)
+        return Origin(
+            action: action, identity: identity, session: session, hadSession: session != nil, operation: operation)
     }
 
     /// Whether `origin`'s account and playback session are still the current ones. A play
