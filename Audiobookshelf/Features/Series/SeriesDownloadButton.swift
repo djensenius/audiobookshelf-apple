@@ -11,11 +11,13 @@ struct SeriesDownloadButton: View {
     /// The library the series' books are in (``SeriesDetailModel/booksLibraryID``); `nil` until the series loaded.
     let libraryID: String?
     @Environment(\.locale) private var locale
+    /// The listing under way, cancelled when the button leaves the screen.
+    @State private var listing: Task<Void, Never>?
 
     var body: some View {
         Button {
             guard let libraryID else { return }
-            Task { await model.start(libraryID: libraryID) }
+            listing = Task { await model.start(libraryID: libraryID) }
         } label: {
             Label {
                 Text(verbatim: L10n.string("ButtonDownloadSeries"))
@@ -25,6 +27,7 @@ struct SeriesDownloadButton: View {
         }
         .help(Text(verbatim: L10n.string("ButtonDownloadSeries")))
         .disabled(libraryID == nil || model.isWorking)
+        .onDisappear { listing?.cancel() }
         .alert(
             Text(verbatim: model.prompt.map { SeriesDownloadAlert($0, locale: locale).title } ?? ""),
             isPresented: Binding(get: { model.prompt != nil }, set: { if !$0 { model.prompt = nil } }),

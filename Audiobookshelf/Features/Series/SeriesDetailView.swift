@@ -14,6 +14,7 @@ struct SeriesDetailView: View {
     @Environment(Router.self) private var router: Router?
     @Environment(AppSettings.self) private var settings: AppSettings?
     @Environment(\.downloadAccess) private var downloadAccess
+    @Environment(AccountManager.self) private var accounts: AccountManager?
     @State private var host: BrowseModelHost<SeriesDetailModel>?
     @State private var download: SeriesDownloadModel?
 
@@ -23,7 +24,7 @@ struct SeriesDetailView: View {
         let key = BrowseModelKey(store: store, libraryID: libraryID, entityID: seriesID)
         Group {
             if let host, let model = host.model(for: key) {
-                SeriesDetailContent(model: model, download: download)
+                SeriesDetailContent(model: model, download: canDownload(key) ? download : nil)
                     // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
                     .environment(\.itemProgressReader, host.progressReader)
             } else {
@@ -48,17 +49,30 @@ struct SeriesDetailView: View {
         }
     }
 
+    /// Whether the signed-in user of `key`'s account may download (`permissions.download`).
+    private func canDownload(_ key: BrowseModelKey?) -> Bool {
+        guard let accounts, let id = key?.connection.connectionID, accounts.activeConnection?.id == id else {
+            return false
+        }
+        return accounts.authorization?.user.permissions.download ?? false
+    }
+
     /// The current download model while it serves `key`'s account, else a new one; `nil` when Download Series
-    /// isn't available (signed out, or no download stack).
+    /// isn't available (signed out, no download permission, or no download stack).
     private func makeDownload(for key: BrowseModelKey?) -> SeriesDownloadModel? {
         let availability = SeriesDownloadAvailability(
-            connectionID: key?.connection.connectionID, hasDownloads: downloadAccess != nil)
+            connectionID: key?.connection.connectionID, hasDownloads: downloadAccess != nil,
+            canDownload: canDownload(key))
         guard let connectionID = availability.connectionID, let downloadAccess,
             let services = store?.makeServices(), services.connectionKey == key?.connection
         else { return nil }
         if let download, download.connectionID == connectionID { return download }
         return SeriesDownloadModel(
-            seriesID: seriesID, connectionID: connectionID, service: services, access: downloadAccess)
+            seriesID: seriesID, connectionID: connectionID, service: services, access: downloadAccess,
+            permitted: { [accounts] in
+                accounts?.activeConnection?.id == connectionID
+                    && accounts?.authorization?.user.permissions.download == true
+            })
     }
 }
 

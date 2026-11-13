@@ -27,19 +27,21 @@ public struct DownloadAccess: Sendable {
 }
 
 /// Whether the series screen offers Download Series: only with a download stack and a signed-in
-/// account (legacy `BookshelfToolbar.vue` shows the button on every series page).
+/// account whose user may download (`permissions.download`, legacy `userCanDownload`).
 public enum SeriesDownloadAvailability: Sendable, Hashable {
     case available(connectionID: UUID)
     /// No account is signed in, so there is no connection to download from.
     case signedOut
     /// The app has no download stack (for example, its store couldn't open).
     case unsupported
+    /// The signed-in user may not download.
+    case notPermitted
 
-    public init(connectionID: UUID?, hasDownloads: Bool) {
+    public init(connectionID: UUID?, hasDownloads: Bool, canDownload: Bool) {
         if !hasDownloads {
             self = .unsupported
         } else if let connectionID {
-            self = .available(connectionID: connectionID)
+            self = canDownload ? .available(connectionID: connectionID) : .notPermitted
         } else {
             self = .signedOut
         }
@@ -65,13 +67,18 @@ public struct SeriesDownloadPlan: Sendable, Hashable {
         self.size = size
     }
 
-    /// The series' books that are neither downloaded nor have a download record (`skipping`).
+    /// The series' books that are neither downloaded nor have a download record (`skipping`). The
+    /// server's counts and sizes are clamped at 0 and summed saturating, as `DownloadManager` does.
     public init(books: [LibraryItem], skipping: Set<String>) {
         var seen = skipping
         let missing = books.filter { seen.insert($0.id).inserted }
+        func adding<T: FixedWidthInteger>(_ total: T, _ value: T?) -> T {
+            let (sum, overflow) = total.addingReportingOverflow(max(value ?? 0, 0))
+            return overflow ? .max : sum
+        }
         self.init(
-            itemIDs: missing.map(\.id), fileCount: missing.reduce(0) { $0 + ($1.numFiles ?? 0) },
-            size: missing.reduce(0) { $0 + Int64(max($1.size ?? 0, 0)) })
+            itemIDs: missing.map(\.id), fileCount: missing.reduce(0) { adding($0, $1.numFiles) },
+            size: missing.reduce(0) { adding($0, $1.size.map(Int64.init)) })
     }
 }
 
@@ -88,7 +95,11 @@ public struct SeriesDownloadPlan: Sendable, Hashable {
 ///   ``Prompt/meteredConfirmation`` once; ``confirmMetered()`` queues the rest. Denied, it stops
 ///   with ``Prompt/meteredDenied``. Books that couldn't be fetched or queued are counted in
 ///   ``Prompt/queueFailed(count:)``.
-/// - A `CancellationError` (the account signed out or switched) ends a step without a prompt.
+/// - A `CancellationError` (the account signed out or switched), or cancelling the task that runs a
+///   step, ends it without a prompt. Without the user's download permission, nothing is listed or
+///   queued.
+/// - Listing stops at a page that adds no new book, and fails past ``maxBooks`` rather than
+///   offering part of the series.
 ///
 /// A model belongs to one series and connection: views recreate it when either changes.
 @MainActor
@@ -104,7 +115,7 @@ public final class SeriesDownloadModel {
         case meteredConfirmation
         /// The download cellular policy doesn't allow it (`ToastDownloadNotAllowedOnCellular`).
         case meteredDenied
-        /// The series' books couldn't be listed.
+        /// The series' books couldn't be listed, or there were more than ``maxBooks``.
         case loadFailed
         /// This many books couldn't be queued.
         case queueFailed(count: Int)
@@ -120,24 +131,30 @@ public final class SeriesDownloadModel {
     @ObservationIgnored private let service: any SeriesAuthorsService & ItemDetailService
     @ObservationIgnored private let access: DownloadAccess
     @ObservationIgnored private let pageSize: Int
+    @ObservationIgnored private let maxBooks: Int
+    /// Whether the signed-in user may download, read at each step.
+    @ObservationIgnored private let permitted: @MainActor () -> Bool
     /// The books still to queue once the user confirms.
     @ObservationIgnored private var pending: [String] = []
     @ObservationIgnored private var failures = 0
 
     public init(
         seriesID: String, connectionID: UUID, service: any SeriesAuthorsService & ItemDetailService,
-        access: DownloadAccess, pageSize: Int = 50
+        access: DownloadAccess, permitted: @escaping @MainActor () -> Bool, pageSize: Int = 50,
+        maxBooks: Int = 10_000
     ) {
         self.seriesID = seriesID
         self.connectionID = connectionID
         self.service = service
         self.access = access
+        self.permitted = permitted
         self.pageSize = max(pageSize, 1)
+        self.maxBooks = max(maxBooks, 1)
     }
 
     /// Lists the series' books in `libraryID` that aren't downloaded or queued, and prompts.
     public func start(libraryID: String) async {
-        guard !isWorking else { return }
+        guard !isWorking, permitted() else { return }
         isWorking = true
         defer { isWorking = false }
         pending = []
@@ -148,6 +165,7 @@ public final class SeriesDownloadModel {
             pending = plan.itemIDs
             prompt = plan.itemIDs.isEmpty ? .alreadyDownloaded : .confirm(plan)
         } catch is CancellationError {
+        } catch  where Task.isCancelled {
         } catch {
             Log.downloads.error(
                 "Couldn't list a series' books to download: \(Log.redact(String(describing: error)), privacy: .public)")
@@ -172,13 +190,20 @@ public final class SeriesDownloadModel {
         failures = 0
     }
 
+    private struct TooManyBooks: Error {}
+
     private func allBooks(libraryID: String) async throws -> [LibraryItem] {
         var books: [LibraryItem] = []
+        var ids: Set<String> = []
         var page = 0
         while true {
+            try Task.checkCancellation()
             let query = LibraryQuery(filter: .series(id: seriesID), page: page, limit: pageSize)
             let results = try await service.filteredBooksPage(libraryID: libraryID, query: query)
-            books += results.results
+            let new = results.results.filter { ids.insert($0.id).inserted }
+            if new.isEmpty { return books }
+            books += new
+            if books.count > maxBooks { throw TooManyBooks() }
             page += 1
             let listed = page * pageSize
             if results.rawCount < pageSize || listed >= (results.total ?? listed) { return books }
@@ -187,6 +212,7 @@ public final class SeriesDownloadModel {
 
     private func queue(metered: Bool) async {
         guard !isWorking else { return }
+        guard permitted() else { return cancel() }
         isWorking = true
         defer { isWorking = false }
         while let id = pending.first {

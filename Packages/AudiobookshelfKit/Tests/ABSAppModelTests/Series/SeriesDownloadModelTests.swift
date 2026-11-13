@@ -51,7 +51,7 @@ import Testing
         func downloadedOrQueuedItemIDs(connectionID: UUID) async throws -> Set<String> { ids }
     }
 
-    nonisolated private static func book(_ id: String, files: Int = 2, size: Int = 100) -> LibraryItem {
+    nonisolated private static func book(_ id: String, files: Int? = 2, size: Int? = 100) -> LibraryItem {
         LibraryItem(id: id, libraryId: "lib", mediaType: .book, numFiles: files, size: size)
     }
 
@@ -68,7 +68,8 @@ import Testing
         }
         return SeriesDownloadModel(
             seriesID: "ser_1", connectionID: connection, service: service,
-            access: DownloadAccess(requester: requester, status: Status(ids: skipping)), pageSize: pageSize)
+            access: DownloadAccess(requester: requester, status: Status(ids: skipping)), permitted: { true },
+            pageSize: pageSize)
     }
 
     @Test func queuesOnlyBooksNotDownloadedOrQueued() async {
@@ -98,7 +99,7 @@ import Testing
         }
         let model = SeriesDownloadModel(
             seriesID: "ser_1", connectionID: connection, service: service,
-            access: DownloadAccess(requester: Requester(), status: Status()), pageSize: 2)
+            access: DownloadAccess(requester: Requester(), status: Status()), permitted: { true }, pageSize: 2)
         await model.start(libraryID: "lib")
         let sent = queries.values
         #expect(sent.map(\.page) == [0, 1, 2])
@@ -162,7 +163,7 @@ import Testing
         failing.books.booksHandler = { _, _ in throw Failure() }
         let failed = SeriesDownloadModel(
             seriesID: "ser_1", connectionID: connection, service: failing,
-            access: DownloadAccess(requester: Requester(), status: Status()))
+            access: DownloadAccess(requester: Requester(), status: Status()), permitted: { true })
         await failed.start(libraryID: "lib")
         #expect(failed.prompt == .loadFailed)
 
@@ -171,7 +172,7 @@ import Testing
         signedOut.books.booksHandler = { _, _ in throw CancellationError() }
         let cancelled = SeriesDownloadModel(
             seriesID: "ser_1", connectionID: connection, service: signedOut,
-            access: DownloadAccess(requester: Requester(), status: Status()))
+            access: DownloadAccess(requester: Requester(), status: Status()), permitted: { true })
         await cancelled.start(libraryID: "lib")
         #expect(cancelled.prompt == nil && !cancelled.isWorking)
     }
@@ -191,14 +192,108 @@ import Testing
         #expect(model.prompt == nil)
     }
 
-    @Test func availabilityNeedsDownloadsAndAnAccount() {
+    @Test func availabilityNeedsDownloadsAnAccountAndPermission() {
         let id = UUID()
-        #expect(SeriesDownloadAvailability(connectionID: id, hasDownloads: true) == .available(connectionID: id))
-        #expect(SeriesDownloadAvailability(connectionID: nil, hasDownloads: true) == .signedOut)
-        #expect(SeriesDownloadAvailability(connectionID: id, hasDownloads: false) == .unsupported)
-        #expect(SeriesDownloadAvailability(connectionID: nil, hasDownloads: false) == .unsupported)
-        #expect(SeriesDownloadAvailability(connectionID: nil, hasDownloads: true).connectionID == nil)
-        #expect(SeriesDownloadAvailability(connectionID: id, hasDownloads: false).connectionID == nil)
+        func availability(_ connectionID: UUID?, _ hasDownloads: Bool, _ canDownload: Bool = true)
+            -> SeriesDownloadAvailability
+        {
+            SeriesDownloadAvailability(connectionID: connectionID, hasDownloads: hasDownloads, canDownload: canDownload)
+        }
+        #expect(availability(id, true) == .available(connectionID: id))
+        #expect(availability(id, true, false) == .notPermitted)
+        #expect(availability(id, true, false).connectionID == nil)
+        #expect(availability(nil, true) == .signedOut)
+        #expect(availability(id, false) == .unsupported)
+        #expect(availability(nil, false) == .unsupported)
+        #expect(availability(nil, true).connectionID == nil)
+        #expect(availability(id, false).connectionID == nil)
+    }
+
+    @Test func withoutPermissionNothingIsListedOrQueued() async {
+        let requester = Requester()
+        let listed = Recorder<LibraryQuery>()
+        var permitted = false
+        var service = Service()
+        service.books.booksHandler = { _, query in
+            await listed.append(query)
+            return PagedResults(results: [Self.book("a")], total: 1, limit: 50, page: 0)
+        }
+        let model = SeriesDownloadModel(
+            seriesID: "ser_1", connectionID: connection, service: service,
+            access: DownloadAccess(requester: requester, status: Status()), permitted: { permitted })
+        await model.start(libraryID: "lib")
+        #expect(listed.values.isEmpty && model.prompt == nil)
+        permitted = true
+        await model.start(libraryID: "lib")
+        permitted = false  // revoked while the user decided
+        await model.confirm()
+        #expect(requester.requested.isEmpty)
+    }
+
+    @Test func overflowingCountsAndSizesSaturate() {
+        let books = [Self.book("a", files: .max, size: .max), Self.book("b", files: 1, size: 1)]
+        let plan = SeriesDownloadPlan(books: books + [Self.book("c", files: -5, size: -5)], skipping: [])
+        #expect(plan.fileCount == .max && plan.size == .max)
+        #expect(
+            SeriesDownloadPlan(
+                books: [Self.book("n", files: -5, size: -5), Self.book("m", files: nil, size: nil)], skipping: [])
+                == SeriesDownloadPlan(itemIDs: ["n", "m"], fileCount: 0, size: 0))
+    }
+
+    @Test func listingStopsAtAPageWithNoNewBooks() async {
+        let queries = Recorder<LibraryQuery>()
+        var service = Service()
+        // Claims a huge series but keeps returning the same full page.
+        service.books.booksHandler = { _, query in
+            await queries.append(query)
+            return PagedResults(
+                results: [Self.book("a"), Self.book("b")], total: 1_000_000, limit: 2, page: query.page ?? 0)
+        }
+        let model = SeriesDownloadModel(
+            seriesID: "ser_1", connectionID: connection, service: service,
+            access: DownloadAccess(requester: Requester(), status: Status()), permitted: { true }, pageSize: 2)
+        await model.start(libraryID: "lib")
+        #expect(queries.values.count == 2)
+        #expect(model.prompt == .confirm(SeriesDownloadPlan(itemIDs: ["a", "b"], fileCount: 4, size: 200)))
+    }
+
+    @Test func listingPastTheCapFails() async {
+        let queries = Recorder<LibraryQuery>()
+        var service = Service()
+        // Claims a huge series of distinct books.
+        service.books.booksHandler = { _, query in
+            await queries.append(query)
+            let page = query.page ?? 0
+            return PagedResults(
+                results: [Self.book("x\(page * 2)"), Self.book("x\(page * 2 + 1)")], total: 1_000_000, limit: 2,
+                page: page)
+        }
+        let model = SeriesDownloadModel(
+            seriesID: "ser_1", connectionID: connection, service: service,
+            access: DownloadAccess(requester: Requester(), status: Status()), permitted: { true }, pageSize: 2,
+            maxBooks: 5)
+        await model.start(libraryID: "lib")
+        #expect(queries.values.count == 3)
+        #expect(model.prompt == .loadFailed)
+    }
+
+    @Test func cancellingTheListingSaysNothing() async {
+        let (started, began) = AsyncStream.makeStream(of: Void.self)
+        var service = Service()
+        // URLSession reports a cancelled request as `URLError.cancelled`, not `CancellationError`.
+        service.books.booksHandler = { _, _ in
+            began.yield()
+            try? await Task.sleep(for: .seconds(30))
+            throw URLError(.cancelled)
+        }
+        let model = SeriesDownloadModel(
+            seriesID: "ser_1", connectionID: connection, service: service,
+            access: DownloadAccess(requester: Requester(), status: Status()), permitted: { true })
+        let task = Task { await model.start(libraryID: "lib") }
+        for await _ in started { break }
+        task.cancel()
+        await task.value
+        #expect(model.prompt == nil && !model.isWorking)
     }
 
     /// Through the real stores: downloaded books and book records count; cover-only and episode
