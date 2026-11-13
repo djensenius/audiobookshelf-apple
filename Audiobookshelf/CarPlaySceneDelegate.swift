@@ -35,6 +35,8 @@
         private var alerts = CarPlayAlertPresenter<PlayerErrorMessage>()
         /// The plays awaited to show Now Playing, by connection.
         private let nowPlayingWaiter = CarPlayNowPlayingWaiter()
+        /// Now Playing's buttons and lists (#81).
+        private var nowPlaying: CarPlayNowPlayingController?
         private var pixelBox = PixelBox(width: 1, height: 1)
         /// The covers the rows show, kept so the pipeline doesn't evict them (``CoverImage``).
         private var covers: [ImageKey: CoverImage] = [:]
@@ -82,6 +84,14 @@
                 playbackSession: { environment.playback.current.current },
                 limits: limits, labels: Self.labels, imageBucket: imageBucket)
             self.model = model
+            nowPlaying = CarPlayNowPlayingController(
+                interfaceController: interfaceController,
+                model: CarPlayNowPlayingModel(
+                    player: environment.playback.player,
+                    sleepTimer: { environment.playback.participant?.sleepTimer },
+                    queue: { environment.playback.participant?.queue },
+                    playQueued: { [weak model] in model?.playQueued($0) },
+                    chapterLimit: CPListTemplate.maximumItemCount))
 
             let list = CPListTemplate(title: Self.labels.continueListening, sections: [])
             list.tabImage = UIImage(systemName: "play.circle")
@@ -124,6 +134,8 @@
             latestTemplate = nil
             continueImages = []
             browseImages = []
+            nowPlaying?.disconnect()
+            nowPlaying = nil
             self.interfaceController = nil
         }
 
@@ -214,9 +226,10 @@
             showNowPlaying(after: play)
         }
 
-        /// Pushes Now Playing once `play` has started; a failed or blocked play shows its alert
-        /// instead, and a discarded one nothing. A play from a connection that has since
-        /// disconnected pushes nothing, even onto a newer connection: the waiter checks the
+        /// Shows Now Playing once `play` has started: pushes it from a browse list, or pops back to
+        /// it from a list over it, as after Stream on a queued play's alert. A failed or blocked
+        /// play shows its alert instead, and a discarded one nothing. A play from a connection that
+        /// has since disconnected pushes nothing, even onto a newer connection: the waiter checks the
         /// connection when the play ends, and the push checks it's still the controller the tap
         /// came from when it runs, which can be after a disconnect and reconnect.
         private func showNowPlaying(after play: Task<CarPlayPlayOutcome, Never>) {
@@ -224,8 +237,14 @@
             Task { [weak self] in
                 guard await wait.value, let self, self.interfaceController === interfaceController else { return }
                 let nowPlaying = CPNowPlayingTemplate.shared
-                guard !interfaceController.templates.contains(where: { $0 === nowPlaying }) else { return }
-                interfaceController.pushTemplate(nowPlaying, animated: true, completion: nil)
+                let templates = interfaceController.templates
+                switch CarPlayNowPlayingControls.nowPlayingNavigation(
+                    index: templates.firstIndex { $0 === nowPlaying }, count: templates.count)
+                {
+                case .push: interfaceController.pushTemplate(nowPlaying, animated: true, completion: nil)
+                case .pop: interfaceController.pop(to: nowPlaying, animated: true, completion: nil)
+                case .none: break
+                }
             }
         }
 

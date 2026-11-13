@@ -1110,9 +1110,12 @@ public final class ProgressSyncer {
         var attemptedConfirmations: [MediaKey: UUID] = [:]
         // A GET attempt suppresses only the extra active refresh, never a genuinely new ACK.
         var attemptedKeys: Set<MediaKey> = []
+        // Rows whose edits didn't all reach the server in this pass: their retained closes wait.
+        var unsent: Set<MediaKey> = []
         for row in rows {
             await waitForPendingWrites()
             guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
+            unsent.insert(row.key)
             do {
                 guard
                     try await fetchProgress(
@@ -1131,7 +1134,10 @@ public final class ProgressSyncer {
                 do {
                     // Intake may have cleaned the row; edits made during suspension belong to
                     // the current row, never the pre-fetch pendingSync snapshot.
-                    guard try await store.progress(for: row.key)?.needsServerSync == true else { break }
+                    guard try await store.progress(for: row.key)?.needsServerSync == true else {
+                        unsent.remove(row.key)
+                        break
+                    }
                     guard !isDetached, !isTransportQuiesced, pendingPositions.isEmpty else { return }
                     sendPositionRevision = positionRevision
                     patch = try await store.beginSend(for: row.key, now: clock.now())
@@ -1141,7 +1147,16 @@ public final class ProgressSyncer {
                     drainOutcome.failed = true
                     break
                 }
-                guard let patch else { break }
+                guard let patch else {
+                    // Also `nil` while a send for the row is in flight (a retiring scope's on the
+                    // shared writer included): the row stays held unless it no longer needs a sync.
+                    do {
+                        if try await store.progress(for: row.key)?.needsServerSync != true { unsent.remove(row.key) }
+                    } catch {
+                        drainOutcome.failed = true
+                    }
+                    break
+                }
                 guard !isDetached, !isTransportQuiesced else {
                     _ = await settle(patch, error: "accountEnded")
                     return
@@ -1213,7 +1228,7 @@ public final class ProgressSyncer {
                 return
             }
         }
-        guard await retryRetainedCloses() else { return }
+        guard await retryRetainedCloses(holding: unsent) else { return }
         // Updates during both GETs leave a request the bound skipped: drain again after a backoff.
         if await store.needsEbookFetch.contains(where: { $0.serverConnectionID == service.serverConnectionID }) {
             drainOutcome.failed = true

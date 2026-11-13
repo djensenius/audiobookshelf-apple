@@ -36,12 +36,24 @@ public protocol PlaybackScopeHandle: AnyObject, Sendable {
     func retire(reason: PlaybackStopReason)
     /// Waits, at most `timeout`, for the retirement's closes, then releases the scope.
     func finishRetirement(timeout: Duration) async -> Result<PlaybackCloseOutcome, any Error>
+    /// The server read and syncer for the session's readers (``EbookProgressFactory``); `nil`
+    /// when the scope has none.
+    var ebookProgressSources: EbookProgressSources? { get }
+}
+
+extension PlaybackScopeHandle {
+    public var ebookProgressSources: EbookProgressSources? { nil }
 }
 
 extension PlaybackScope: PlaybackScopeHandle {
     /// The coordinator, with user resumes routed through the scope (``ScopePlayback``). A new
     /// adapter on each read; the participant reads it once per session.
     public var playback: any PlayerPlaybackControlling { ScopePlayback(scope: self) }
+
+    /// The scope's services and syncer; `nil` for a scope built without services (tests).
+    public var ebookProgressSources: EbookProgressSources? {
+        services.map { EbookProgressSources(service: $0, syncer: syncer) }
+    }
 }
 
 /// What the app builds a session's ``PlaybackScopeHandle`` from.
@@ -73,7 +85,7 @@ public struct PlaybackScopeRequest: Sendable {
 ///
 /// - **Start** builds the scope, binds ``CurrentPlayback`` to its coordinator, publishes its
 ///   ``queue`` and ``sleepTimer``, restores the account's last-played item, publishes
-///   ``playItem``, and starts the session's own ``bookmarks``. Online, it then syncs the scope
+///   ``playItem`` and the session's ``ebookProgress``, and starts the session's own ``bookmarks``. Online, it then syncs the scope
 ///   with the server (#184): drains pending progress and uploads pending local sessions, as the
 ///   first sync after login.
 /// - **Reconnect** swaps the client and features into the same scope, and reconnects the same
@@ -103,6 +115,10 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     /// between sessions. The app's `RealtimeBridge` replaces its list on the socket's `user_updated`
     /// (``RealtimeBridge/route(library:accounts:bookmarks:playback:localProgress:)``).
     public private(set) var bookmarks: BookmarkStore?
+    /// Builds the current account's ebook progress models, over the shared writer and the scope's
+    /// syncer; `nil` between sessions and for a scope without sources. It refuses another
+    /// connection's books.
+    public private(set) var ebookProgress: EbookProgressFactory?
     /// The latest ended session's close outcome, or why it isn't durable; `nil` until it finishes.
     /// A retirement the lifecycle cancelled can finish after a later session ended; its result is
     /// dropped rather than replacing that session's.
@@ -196,6 +212,9 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         current.bind(scope.playback)
         queue = PlaybackQueueControl(scope: scope)
         sleepTimer = scope.sleepTimer
+        ebookProgress = scope.ebookProgressSources.map {
+            EbookProgressFactory(serverConnectionID: context.identity.connectionID, store: writer, sources: $0)
+        }
         let bookmarks = makeBookmarks()
         self.bookmarks = bookmarks
         scope.start()
@@ -241,6 +260,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         playItem = nil
         queue = nil
         sleepTimer = nil
+        ebookProgress = nil
         self.bookmarks = nil
         scope.onSessionRejected = nil
         scope.onProgress = nil

@@ -20,7 +20,7 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   either applied (the server then answers the resend with 404, because a close removes the
 ///   session) or never will.
 ///
-/// The drain's ``ProgressSyncer/retryRetainedCloses()`` resends each close that is due, oldest
+/// The drain's ``ProgressSyncer/retryRetainedCloses(holding:)`` resends each close that is due, oldest
 /// first, once ``ProgressSyncer/admitDeferredReport(sessionID:key:currentTime:editedAt:)``
 /// admits it. A resend answered 404, and a close skipped for a newer session or position, which
 /// is never resent, are decided from the session's stored record
@@ -220,7 +220,12 @@ extension ProgressSyncer {
 
     /// The drain's close step: resends each retained close that is due and admitted, settling
     /// it by the result. Returns `false` when the drain should stop.
-    func retryRetainedCloses() async -> Bool {
+    ///
+    /// A close of a media in `held` waits for a later drain: its row's edits didn't all reach the
+    /// server in this pass. A resend carries an older position, so it must follow them: after a
+    /// mark as finished, the position alone would un-finish the item on the server, which then
+    /// wins the next merge (the finished PATCH that would restore it is still pending).
+    func retryRetainedCloses(holding held: Set<MediaKey>) async -> Bool {
         // A close being captured when the queue is read, or whose capture begins during this
         // pass, may settle while the pass is suspended on an earlier one, so the copy read here
         // is stale: the whole pass leaves it alone. A settlement that keeps the close schedules
@@ -249,6 +254,10 @@ extension ProgressSyncer {
                 // The server answered 404 and the lookup failed, or the session must have ended:
                 // its stored record decides, and nothing is resent (admission can't hold it).
                 guard await reconcileMissingClose(close) else { return false }
+                continue
+            }
+            guard !held.contains(close.key) else {
+                drainOutcome.failed = true
                 continue
             }
             var verdict = await admitDeferredReport(
