@@ -83,7 +83,8 @@ private struct HomeScreen: View {
             of: downloaded, libraryKind: router?.libraryKind, isConnected: connection == nil)
         let state = HomeScreenState.resolve(
             store: store, model: model, libraryID: libraryID, sections: serverSections, connection: connection,
-            downloads: downloads, downloadsLoaded: downloaded?.isLoaded ?? true)
+            downloads: downloads, downloadsLoaded: downloaded?.isLoaded ?? true,
+            downloadsFailed: downloaded?.loadError != nil)
         HomeContent(
             state: state,
             sections: HomePresentation.sections(
@@ -96,22 +97,22 @@ private struct HomeScreen: View {
         // With the client, the online revision and the connection too: a reconnect, whether it
         // attaches a client after an offline start without one or keeps the offline session's,
         // or the server answering again, loads again even when the library is unchanged, and
-        // retries a failed load or refresh even while the shelves are fresh.
+        // retries a failed load or refresh even while the shelves are fresh. Losing the
+        // connection runs it too, and makes no request.
         .task(
             id: HomeLoadTrigger(
                 libraryID: libraryID, connection: store.connectedKey, onlineRevision: store.onlineRevision,
                 isConnected: connection == nil)
         ) {
             model.libraryID = libraryID
-            await update(
-                force: HomeRefreshSchedule.forcesReload(isConnected: connection == nil, hasError: model.error != nil))
+            await update(.loadTrigger)
         }
         // The downloads follow the store live, online and offline.
         .task(id: store.connectionKey?.connectionID) {
             await downloaded?.observe(connectionID: store.connectionKey?.connectionID)
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { Task { await update() } }
+            if phase == .active { Task { await update(.sceneActivation) } }
         }
         .refreshCommand(.root(.home), isDisabled: store.isLoading || model.isLoading) { Task { await refresh() } }
         .alert(
@@ -122,11 +123,13 @@ private struct HomeScreen: View {
         }
     }
 
-    /// Loads the shelves if needed, or reloads them when `force` or stale.
-    private func update(force: Bool = false) async {
+    /// Loads the shelves, or reloads them, as ``HomeRefreshSchedule`` decides for `trigger`:
+    /// nothing without the server.
+    private func update(_ trigger: HomeRefreshSchedule.Trigger) async {
         guard let libraryID = model.libraryID,
             let request = schedule.request(
-                libraryID: libraryID, hasLoaded: model.hasLoaded, now: .now, force: force)
+                for: trigger, libraryID: libraryID, hasLoaded: model.hasLoaded, hasError: model.error != nil,
+                isConnected: connectionStatus == nil, now: .now)
         else { return }
         switch request {
         case .load: await model.load()
@@ -141,14 +144,16 @@ private struct HomeScreen: View {
     }
 
     /// Pull to refresh, the Refresh command and Retry: the libraries while none is selected,
-    /// otherwise the shelves. Without the server, it checks the server again instead.
+    /// otherwise the shelves. Without the server, it checks the server again instead. Downloads
+    /// that couldn't be read are read again either way.
     private func refresh() async {
+        downloaded?.retry()
         if let connectionBanner, connectionStatus != nil {
             connectionBanner.model.retry()
         } else if model.libraryID == nil {
             await store.refresh()
         } else {
-            await update(force: true)
+            await update(.userRefresh)
         }
     }
 

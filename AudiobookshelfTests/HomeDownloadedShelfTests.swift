@@ -150,15 +150,97 @@ private struct EmptyLibraryService: LibraryService {
         let reconnected = start.addingTimeInterval(120)
         #expect(reconnected.timeIntervalSince(start) < HomeRefreshSchedule.maxAge)
 
-        func request(isConnected: Bool, hasError: Bool) -> HomeRefreshSchedule.Request? {
+        func request(_ trigger: HomeRefreshSchedule.Trigger, hasError: Bool) -> HomeRefreshSchedule.Request? {
             schedule.request(
-                libraryID: "lib", hasLoaded: true, now: reconnected,
-                force: HomeRefreshSchedule.forcesReload(isConnected: isConnected, hasError: hasError))
+                for: trigger, libraryID: "lib", hasLoaded: true, hasError: hasError, isConnected: true, now: reconnected
+            )
         }
-        #expect(request(isConnected: true, hasError: true) == .refresh)
-        #expect(request(isConnected: true, hasError: false) == nil)
-        #expect(request(isConnected: false, hasError: true) == nil)
-        #expect(request(isConnected: false, hasError: false) == nil)
+        #expect(request(.loadTrigger, hasError: true) == .refresh)
+        #expect(request(.loadTrigger, hasError: false) == nil)
+        #expect(request(.sceneActivation, hasError: true) == nil)
+        #expect(request(.userRefresh, hasError: false) == .refresh)
+    }
+
+    /// Losing the connection runs Home's load trigger again: no trigger, not even pull to refresh,
+    /// loads or refreshes the shelves without the server, whether they're loaded, stale or failed.
+    @Test func offlineNoTriggerLoadsOrRefreshesTheShelves() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var schedule = HomeRefreshSchedule()
+        schedule.markLoaded(libraryID: "lib", at: start)
+        let fresh = start.addingTimeInterval(60)
+        let stale = start.addingTimeInterval(HomeRefreshSchedule.maxAge + 1)
+
+        for trigger in HomeRefreshSchedule.Trigger.allCases {
+            func request(
+                hasLoaded: Bool, hasError: Bool, isConnected: Bool, at now: Date, libraryID: String = "lib"
+            ) -> HomeRefreshSchedule.Request? {
+                schedule.request(
+                    for: trigger, libraryID: libraryID, hasLoaded: hasLoaded, hasError: hasError,
+                    isConnected: isConnected, now: now)
+            }
+            for hasLoaded in [false, true] {
+                for hasError in [false, true] {
+                    for now in [fresh, stale] {
+                        #expect(
+                            request(hasLoaded: hasLoaded, hasError: hasError, isConnected: false, at: now) == nil,
+                            "\(trigger), loaded \(hasLoaded), error \(hasError), stale \(now == stale)")
+                    }
+                }
+            }
+            #expect(request(hasLoaded: true, hasError: false, isConnected: false, at: fresh, libraryID: "other") == nil)
+            // With the server, the same trigger asks for what's missing or stale.
+            #expect(request(hasLoaded: false, hasError: false, isConnected: true, at: fresh) == .load)
+            #expect(request(hasLoaded: true, hasError: false, isConnected: true, at: stale) == .refresh)
+        }
+    }
+
+    /// The downloads couldn't be read: Home says its shelves couldn't load rather than that
+    /// nothing is downloaded, offline and online, and Retry reads them again and shows them.
+    @Test func aDownloadReadErrorShowsAndRetryShowsTheDownloads() async throws {
+        for connection in [ConnectionBannerStatus.offline, .checking, unreachable] {
+            #expect(HomeScreenState.resolve(Inputs(connection: connection, downloadsFailed: true)) == .failed)
+        }
+        #expect(HomeScreenState.resolve(Inputs(hasLoaded: true, downloadsFailed: true)) == .failed)
+        #expect(
+            HomeScreenState.resolve(Inputs(librariesLoaded: true, libraryID: nil, downloadsFailed: true)) == .failed)
+        #expect(
+            HomeScreenState.resolve(Inputs(hasLoaded: true, isEmpty: false, downloadsFailed: true))
+                == .shelves(refreshFailed: true))
+        #expect(
+            HomeScreenState.resolve(Inputs(connection: .offline, hasDownloads: true, downloadsFailed: true))
+                == .shelves(refreshFailed: true))
+
+        struct ReadFailed: Error {}
+        @MainActor final class Reads {
+            var count = 0
+        }
+        let reads = Reads()
+        let (stream, continuation) = AsyncStream.makeStream(of: [LocalLibraryItemDTO].self)
+        let model = DownloadedShelfModel { @MainActor _ in
+            reads.count += 1
+            if reads.count == 1 { throw ReadFailed() }
+            return stream
+        }
+        func state() -> HomeScreenState {
+            let downloads = HomePresentation.downloadedSections(of: model, libraryKind: nil, isConnected: false)
+            return HomeScreenState.resolve(
+                Inputs(
+                    connection: .offline, hasDownloads: !downloads.isEmpty, downloadsLoaded: model.isLoaded,
+                    downloadsFailed: model.loadError != nil))
+        }
+        let task = Task { await model.observe(connectionID: connectionID) }
+        defer { task.cancel() }
+        while model.loadError == nil, !Task.isCancelled { await Task.yield() }
+        #expect(state() == .failed)
+
+        continuation.yield([item("Book")])
+        model.retry()
+        while model.books.isEmpty, !Task.isCancelled { await Task.yield() }
+        #expect(state() == .shelves(refreshFailed: false))
+        #expect(
+            ids(HomePresentation.downloadedSections(of: model, libraryKind: nil, isConnected: false)) == ["local-books"]
+        )
+        #expect(reads.count == 2)
     }
 
     @Test func homeWaitsForTheDownloadsBeforeSayingThereAreNone() {

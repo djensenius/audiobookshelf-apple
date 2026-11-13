@@ -11,7 +11,8 @@ enum HomeScreenState: Equatable {
     case loading
     /// Loading the libraries list failed before a library was selected; Retry refreshes the store.
     case librariesFailed
-    /// The first load failed, or a reload failed with nothing to show; Retry reloads the shelves.
+    /// The first load failed, or a reload failed with nothing to show, or the downloads couldn't
+    /// be read with nothing else to show; Retry loads again.
     case failed
     /// The libraries loaded but none is selected, or the library has no shelves, and nothing is
     /// downloaded.
@@ -19,8 +20,8 @@ enum HomeScreenState: Equatable {
     /// The network or the server is unavailable and nothing is downloaded: why, with Retry while
     /// the server is unreachable (legacy `pages/bookshelf/index.vue`).
     case disconnected(ConnectionBannerStatus)
-    /// The sections; `refreshFailed` when the last reload failed and older shelves are shown.
-    /// Disconnected, only the downloaded shelves (ADR 0004).
+    /// The sections; `refreshFailed` when the last reload failed and older shelves are shown, or
+    /// the downloads couldn't be read. Disconnected, only the downloaded shelves (ADR 0004).
     case shelves(refreshFailed: Bool)
 
     /// What ``resolve(_:)`` decides from.
@@ -47,6 +48,8 @@ enum HomeScreenState: Equatable {
         var hasDownloads = false
         /// The downloaded items have been read, so ``hasDownloads`` can be trusted.
         var downloadsLoaded = true
+        /// The downloaded items couldn't be read (``DownloadedShelfModel/loadError``).
+        var downloadsFailed = false
     }
 
     static func resolve(_ inputs: Inputs) -> HomeScreenState {
@@ -60,14 +63,16 @@ enum HomeScreenState: Equatable {
         }
         guard inputs.hasLoaded else { return inputs.hasError && !inputs.isLoading ? .failed : .loading }
         if inputs.isEmpty { return inputs.hasError ? .failed : downloadsOr(.empty, inputs) }
-        return .shelves(refreshFailed: inputs.hasError)
+        return .shelves(refreshFailed: inputs.hasError || inputs.downloadsFailed)
     }
 
     /// The downloaded shelves when there are some, otherwise `state`; loading until the downloads
-    /// have been read, so `state` doesn't flash first.
+    /// have been read, so `state` doesn't flash first, and failed when they couldn't be, so Home
+    /// doesn't say there are none and Retry reads them again.
     private static func downloadsOr(_ state: HomeScreenState, _ inputs: Inputs) -> HomeScreenState {
         guard inputs.downloadsLoaded else { return .loading }
-        return inputs.hasDownloads ? .shelves(refreshFailed: false) : state
+        if inputs.hasDownloads { return .shelves(refreshFailed: inputs.downloadsFailed) }
+        return inputs.downloadsFailed ? .failed : state
     }
 
     /// The state for `store` and `model` while the router shows `libraryID`.
@@ -81,10 +86,12 @@ enum HomeScreenState: Equatable {
     ///   - downloads: The downloaded shelves Home would show
     ///     (``HomePresentation/downloadedSections(of:libraryKind:isConnected:)``).
     ///   - downloadsLoaded: The downloaded items have been read; `true` without a download stack.
+    ///   - downloadsFailed: The downloaded items couldn't be read.
     @MainActor
     static func resolve(
         store: LibraryStore?, model: HomeModel?, libraryID: String?, sections: [HomeSection],
-        connection: ConnectionBannerStatus? = nil, downloads: [HomeSection] = [], downloadsLoaded: Bool = true
+        connection: ConnectionBannerStatus? = nil, downloads: [HomeSection] = [], downloadsLoaded: Bool = true,
+        downloadsFailed: Bool = false
     ) -> HomeScreenState {
         guard let store, let model else { return .signedOut }
         let isCurrent = model.libraryID == libraryID
@@ -94,7 +101,8 @@ enum HomeScreenState: Equatable {
                 librariesLoading: store.isLoading, librariesFailed: store.error != nil, libraryID: libraryID,
                 hasLoaded: isCurrent && model.hasLoaded, isLoading: isCurrent && model.isLoading,
                 hasError: isCurrent && model.error != nil, isEmpty: !isCurrent || sections.isEmpty,
-                connection: connection, hasDownloads: !downloads.isEmpty, downloadsLoaded: downloadsLoaded))
+                connection: connection, hasDownloads: !downloads.isEmpty, downloadsLoaded: downloadsLoaded,
+                downloadsFailed: downloadsFailed))
     }
 }
 
@@ -115,7 +123,8 @@ struct HomeRefreshSchedule {
     /// The library whose shelves last loaded successfully, and when.
     private(set) var loaded: (libraryID: String, date: Date)?
 
-    /// The request to make for `libraryID` at `now`; `nil` when the shelves are fresh.
+    /// The request to make for `libraryID` at `now`; `nil` when the shelves are fresh. It doesn't
+    /// consider the connection: Home asks ``request(for:libraryID:hasLoaded:hasError:isConnected:now:)``.
     ///
     /// - Parameters:
     ///   - hasLoaded: The model has shelves for `libraryID`.
@@ -127,12 +136,38 @@ struct HomeRefreshSchedule {
         return now.timeIntervalSince(loaded.date) >= Self.maxAge ? .refresh : nil
     }
 
-    /// Whether Home's load trigger forces its request: when the server can be used and the last
-    /// load or refresh failed, so a reconnect retries it at once rather than leaving its error up
-    /// until the shelves are older than ``maxAge``. Fresh shelves without an error aren't fetched
-    /// again, and nothing is retried without the server.
-    static func forcesReload(isConnected: Bool, hasError: Bool) -> Bool {
-        isConnected && hasError
+    /// What asks Home for its shelves.
+    enum Trigger: CaseIterable {
+        /// Home appeared, or its library, client, online revision or connection changed.
+        case loadTrigger
+        /// The scene became active.
+        case sceneActivation
+        /// Pull to refresh, the Refresh command or Retry.
+        case userRefresh
+    }
+
+    /// The request `trigger` makes for `libraryID` at `now`, or `nil`.
+    ///
+    /// None without the server, whatever the trigger, so losing the connection never starts a
+    /// server request. Otherwise ``request(libraryID:hasLoaded:now:force:)``, forced for the
+    /// user's refresh, and for the load trigger after a failed load or refresh, so a reconnect
+    /// retries it at once rather than leaving its error up until the shelves are older than
+    /// ``maxAge``. Fresh shelves without an error aren't fetched again.
+    ///
+    /// - Parameters:
+    ///   - hasError: The model's last load or refresh failed.
+    ///   - isConnected: The server can be used (no connection banner).
+    func request(
+        for trigger: Trigger, libraryID: String, hasLoaded: Bool, hasError: Bool, isConnected: Bool, now: Date
+    ) -> Request? {
+        guard isConnected else { return nil }
+        let force =
+            switch trigger {
+            case .loadTrigger: hasError
+            case .sceneActivation: false
+            case .userRefresh: true
+            }
+        return request(libraryID: libraryID, hasLoaded: hasLoaded, now: now, force: force)
     }
 
     /// The model's state when a request it made finished.
