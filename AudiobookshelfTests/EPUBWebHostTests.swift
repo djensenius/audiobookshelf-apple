@@ -799,12 +799,51 @@ private final class ReaderPage {
         #expect(contents.entries == [EPUBContentsEntry(id: 0, label: "One", href: "c1.xhtml", level: 0)])
     }
 
+    /// How a table of contents is too large: in bytes or in entries, both found while its entries
+    /// are made, or only once serialised (control characters, escaped to six bytes each).
+    enum OversizedTOC: String, CaseIterable {
+        case bytes, entries, escaped
+
+        var toc: [[String: Any]] {
+            switch self {
+            case .bytes:
+                (0..<200).map { ["id": "\($0)", "label": "Chapter \($0)", "href": "c1.xhtml"] }
+            case .entries:
+                (0..<5).map { ["id": "\($0)", "label": "Chapter \($0)", "href": "c1.xhtml"] }
+            case .escaped:
+                [["id": "one", "label": "One" + String(repeating: "\u{1}", count: 40), "href": "c1.xhtml"]]
+            }
+        }
+
+        var limits: String {
+            switch self {
+            case .bytes: "window.absReaderTOCMaxBytes = 1000"
+            case .entries: "window.absReaderTOCMaxEntries = 3"
+            case .escaped: "window.absReaderTOCMaxBytes = 250"
+            }
+        }
+    }
+
     /// A table of contents too large for the bridge is reported as failing rather than posted
-    /// (Swift would drop it), so the contents sheet doesn't wait for it for good.
-    @Test(.timeLimit(.minutes(1))) func anOversizedTableOfContentsIsReported() async throws {
+    /// (Swift would drop it), so the contents sheet doesn't wait for it for good; one over its
+    /// budget is refused before it's serialised, so a crafted book can't exhaust the page's memory.
+    @Test(.timeLimit(.minutes(1)), arguments: OversizedTOC.allCases)
+    func anOversizedTableOfContentsIsReported(_ oversized: OversizedTOC) async throws {
         let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
-        try await page.fakeEPUBJS(toc: [["id": "one", "label": "One", "href": "c1.xhtml"]])
-        _ = try await page.evaluate("window.absReaderTOCMaxBytes = 40")
+        try await page.fakeEPUBJS(toc: oversized.toc)
+        _ = try await page.evaluate(oversized.limits)
+        _ = try await page.evaluate(
+            """
+            (function () {
+              const stringify = JSON.stringify
+              window.tocSerialized = 0
+              JSON.stringify = function (value) {
+                if (value && value.type === 'toc') window.tocSerialized += 1
+                return stringify.apply(JSON, arguments)
+              }
+              return 1
+            })()
+            """)
 
         try await page.open("tiny")
         let error = try await page.next("error")
@@ -812,6 +851,7 @@ private final class ReaderPage {
         #expect(error["phase"] as? String == "toc")
         #expect(error["message"] as? String == "The table of contents is too large")
         #expect(page.last("toc") == nil)
+        #expect(try await page.evaluate("window.tocSerialized") == (oversized == .escaped ? "1" : "0"))
     }
 
     /// epub.js's `displayerror` doesn't say whose display failed, so a display queued behind one
