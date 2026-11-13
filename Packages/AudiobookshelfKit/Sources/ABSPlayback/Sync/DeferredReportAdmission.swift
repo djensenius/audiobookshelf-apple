@@ -51,8 +51,9 @@ extension ProgressSyncer {
     ///
     /// The report's position is identified by the audio edit time it committed with
     /// (`editedAt`), not by its `PlaybackPositionToken`, which doesn't survive a relaunch. A
-    /// skip never loses the position: its row stays dirty and the drain PATCHes it. The skipped
-    /// report's listening time is #383's.
+    /// skip never loses the position: its row stays dirty and the drain PATCHes it. A close
+    /// skipped for a newer session or position is settled by its session's stored record, which
+    /// carries its listening time if it never counted (#383).
     func admitDeferredReport(
         sessionID: String, key: MediaKey, currentTime: Double, editedAt: Date?
     ) async -> DeferredReportAdmission {
