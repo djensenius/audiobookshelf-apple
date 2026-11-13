@@ -75,6 +75,9 @@ public final class PlaybackCoordinator {
     public private(set) var restoredRecord: LastPlayedRecord?
     /// The media a play is checking the streaming policy for, before it commits (a loading hint).
     public private(set) var pendingPlayKey: MediaKey?
+    /// The play that ``error``'s `.streamingNeedsConfirmation` blocked, which
+    /// ``confirmMeteredStreaming()`` replays.
+    private var blockedPlay: (key: MediaKey, startTime: Double?)?
     private var unloadedPosition: Double = 0
     private var unloadedDuration: Double = 0
     /// Where playback is or is going. An interrupted seek leaves the engine's own time behind
@@ -335,6 +338,7 @@ public final class PlaybackCoordinator {
         policyCheck += 1
         let check = policyCheck
         pendingPlayKey = nil
+        blockedPlay = nil
         if key == mediaKey {
             switch phase {
             case .loaded where isFinishingLoad:
@@ -374,10 +378,34 @@ public final class PlaybackCoordinator {
         case .allowed: break
         case .askUser(let reason) where allowingMeteredNetwork:
             logger.info("Streaming on a metered path (\(String(describing: reason), privacy: .public))")
-        case .askUser(let reason): return block(.streamingNeedsConfirmation(reason, key: key))
+        case .askUser(let reason):
+            return block(.streamingNeedsConfirmation(reason, key: key), startTime: startTime)
         case .denied(let reason): return block(.streamingNotAllowed(reason, key: key))
         }
         await start(key: key, startTime: startTime, prepared: nil)
+    }
+
+    /// The user agreed to stream on a metered network: replays the play (or queue advance) that
+    /// ``error``'s ``PlaybackCoordinatorError/streamingNeedsConfirmation(_:key:)`` blocked, with
+    /// its item, episode and start time, allowing the metered path. Does nothing unless that is
+    /// still the error, so a confirmation shown for another failure, an earlier block or a
+    /// stopped (or retired) coordinator plays nothing. The policy is checked again: "never"
+    /// still blocks.
+    public func confirmMeteredStreaming() async {
+        guard case .streamingNeedsConfirmation(_, let key) = error, let blockedPlay, blockedPlay.key == key
+        else { return }
+        await play(
+            itemID: key.libraryItemId, episodeID: key.episodeId, startTime: blockedPlay.startTime,
+            allowingMeteredNetwork: true)
+    }
+
+    /// The user declined to stream on a metered network: clears the
+    /// ``PlaybackCoordinatorError/streamingNeedsConfirmation(_:key:)`` error and forgets the
+    /// blocked play. The current item, if any, carries on as the block left it.
+    public func declineMeteredStreaming() {
+        guard case .streamingNeedsConfirmation = error else { return }
+        blockedPlay = nil
+        error = nil
     }
 
     /// Everything after a play passed the streaming policy. A `prepared` start (an auto-advance)
@@ -1135,7 +1163,8 @@ public final class PlaybackCoordinator {
         // The path and setting now decide, not the prepared (possibly stale) decision; no waiting.
         switch policy.currentStreamingDecision() {
         case .allowed: break
-        // Nobody can agree to a metered network at the lock screen; the item stays queued.
+        // Nobody can agree to a metered network at the lock screen; the item stays queued, and
+        // ``confirmMeteredStreaming()`` plays it.
         case .askUser(let reason): return block(.streamingNeedsConfirmation(reason, key: next.key))
         case .denied(let reason): return block(.streamingNotAllowed(reason, key: next.key))
         }
@@ -1307,7 +1336,14 @@ public final class PlaybackCoordinator {
     }
 
     /// A streaming-policy block: the current item, and anything in flight for it, carries on.
-    private func block(_ error: PlaybackCoordinatorError) {
+    /// A confirmation block keeps the blocked play, with its `startTime`, for
+    /// ``confirmMeteredStreaming()``.
+    private func block(_ error: PlaybackCoordinatorError, startTime: Double? = nil) {
+        if case .streamingNeedsConfirmation(_, let key) = error {
+            blockedPlay = (key, startTime)
+        } else {
+            blockedPlay = nil
+        }
         self.error = error
         emit(.failed(error))
     }

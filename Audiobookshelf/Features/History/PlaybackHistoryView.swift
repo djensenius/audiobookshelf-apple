@@ -56,7 +56,9 @@ struct PlaybackHistoryView: View {
                 ForEach(model.sections) { section in
                     Section {
                         ForEach(section.rows) { row in
-                            PlaybackHistoryRow(row: row, isDisabled: model.isStartingPlayback) {
+                            PlaybackHistoryRow(
+                                row: row, canPlay: model.canPlay(row), isDisabled: model.isStartingPlayback
+                            ) {
                                 tapCount += 1
                                 Task { await model.play(from: row) }
                             }
@@ -81,6 +83,8 @@ struct PlaybackHistoryView: View {
 /// One event: time of day, event, sync outcome, collapsed count and position.
 private struct PlaybackHistoryRow: View {
     let row: PlaybackHistoryModel.Row
+    /// The row has a position and there is a player; otherwise it is disabled, without a play hint.
+    let canPlay: Bool
     let isDisabled: Bool
     let play: () -> Void
     @Environment(\.locale) private var locale
@@ -117,12 +121,12 @@ private struct PlaybackHistoryRow: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
-        .disabled(row.position == nil || isDisabled)
+        .disabled(!canPlay || isDisabled)
         // Set on the button itself so VoiceOver keeps its action; the label replaces the
         // children's text.
         .accessibilityLabel(Text(verbatim: accessibilityLabel))
         .accessibilityValue(Text(verbatim: accessibilityValue))
-        .accessibilityHint(Text(verbatim: row.position == nil ? "" : L10n.string("LabelHistoryPlayFromHint")))
+        .accessibilityHint(Text(verbatim: canPlay ? L10n.string("LabelHistoryPlayFromHint") : ""))
     }
 
     private var accessibilityLabel: String {
