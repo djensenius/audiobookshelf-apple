@@ -242,6 +242,8 @@ final class DownloadHarness: Sendable {
     let clock = RecordingClock()
     let registry = DownloadEngineRegistry()
     let sessions = Mutex<[StubDownloadSession]>([])
+    /// The engine's foreground sessions, for connections with custom headers (#467).
+    let foregroundSessions = Mutex<[StubDownloadSession]>([])
     /// Each request the stub sees, in order.
     let requestStream: AsyncStream<URLRequest>
     /// How many tasks have completed; ``completionStream`` yields after each.
@@ -336,9 +338,12 @@ final class DownloadHarness: Sendable {
         launchContinued: (@Sendable (UUID) async -> Void)? = nil,
         beforeSavingRunning: (@Sendable (UUID) async -> Void)? = nil,
         beforeRequeueingInactive: (@Sendable (UUID) async -> Void)? = nil,
+        waitingForRunningSave: (@Sendable (UUID) async -> Void)? = nil,
         preflight: any DownloadRedirectPreflighting = StubPreflight(),
+        hasForegroundSession: Bool = false,
         sweepsOrphanedResumeData: Bool = true,
-        prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
+        prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in },
+        prepareForeground: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadEngine {
         let stubFactory = sessionFactory(prepare: prepare)
         var factory = stubFactory
@@ -350,6 +355,8 @@ final class DownloadHarness: Sendable {
             sweepsOrphanedResumeData: sweepsOrphanedResumeData, locations: locations,
             retryPolicy: retryPolicy, networkAccess: { NetworkAccess(policy: .always) }, clock: clock ?? self.clock,
             now: { .now }, random: { 0.5 }, makeSession: factory,
+            makeForegroundSession: hasForegroundSession
+                ? sessionFactory(isForeground: true, prepare: prepareForeground) : nil,
             registry: registry ?? self.registry, readRecords: readRecords ?? { try await $0.allRecords() },
             readRecord: readRecord ?? { try await $0.record(id: $1) },
             cancelKeepingResumeData: cancel ?? { await $0.cancelByProducingResumeData() },
@@ -358,10 +365,12 @@ final class DownloadHarness: Sendable {
             adoptionStarted: adoptionStarted, beforeClearingResumeFlag: beforeClearingResumeFlag,
             afterUpsertingLocalItem: afterUpsertingLocalItem, launchContinued: launchContinued,
             beforeSavingRunning: beforeSavingRunning, beforeRequeueingInactive: beforeRequeueingInactive,
+            waitingForRunningSave: waitingForRunningSave,
             preflight: preflight)
     }
 
     func sessionFactory(
+        isForeground: Bool = false,
         prepare: @escaping @Sendable (StubDownloadSession) -> Void = { _ in }
     ) -> DownloadSessionFactory {
         { [self] delegate in
@@ -371,7 +380,11 @@ final class DownloadHarness: Sendable {
                 self?.completionContinuation.yield()
             }
             prepare(session)
-            sessions.withLock { $0.append(session) }
+            if isForeground {
+                foregroundSessions.withLock { $0.append(session) }
+            } else {
+                sessions.withLock { $0.append(session) }
+            }
             return session
         }
     }

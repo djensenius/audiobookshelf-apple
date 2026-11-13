@@ -323,3 +323,14 @@ iOS.
   final response comes from a different origin, the engine fails the part for good and
   never moves the body into `Downloads/`. A 401 after a redirect fails the part as
   "redirected, credentials not forwarded" without a token refresh.
+- A connection with custom headers downloads in a separate foreground session
+  (#467), never the background one. Its delegate is asked before every redirect, of
+  the transfer and of a resumed transfer's `Range` request: a hop on the server's
+  origin gets the headers again, and a hop off it is refused before anything is sent
+  there, so the part fails for good with the `offOrigin` code. Those transfers only
+  run while the app is open: going to the background pauses them, keeping their
+  resume data, nothing starts one until the app is active again, and the next
+  activation continues them. Check with a header-gated proxy (for example Cloudflare
+  Access): a download completes in the foreground, pauses when the app is sent to the
+  background, and continues when it comes back; a redirect to another host fails the
+  download without a request reaching that host.
