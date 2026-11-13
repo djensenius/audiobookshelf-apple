@@ -54,6 +54,11 @@ public final class ConnectionBannerModel {
     /// What the banner shows.
     public var state: ConnectionBannerState { reachability.state }
 
+    /// Bumped when a ping confirms the server answers after a network change or a failure
+    /// (``ConnectionReachability/verifiedRevision``): a screen whose load failed while
+    /// ``state`` was assumed online retries on it.
+    public var verifiedRevision: UInt64 { reachability.verifiedRevision }
+
     /// Checks the server, then follows the network path until the calling task is cancelled.
     /// Any change of online path (another interface, or an `onlineEpoch` showing an offline path
     /// the stream coalesced away) checks the server again: the new route may not reach it.

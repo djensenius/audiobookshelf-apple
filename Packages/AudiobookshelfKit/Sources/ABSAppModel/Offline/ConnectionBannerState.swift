@@ -45,6 +45,10 @@ public enum OfflineReason: Sendable, Hashable {
 /// - A failed ping: ``ConnectionBannerState/serverUnreachable(retryAt:)``, pinging again after
 ///   ``delay(afterFailures:)``: 5 seconds, doubling up to a minute.
 /// - A ping that succeeds: ``ConnectionBannerState/online``, with the backoff reset.
+/// - The first ping to succeed after a network change, a failed ping or ``init()`` bumps
+///   ``verifiedRevision``; later successes don't. The network coming back shows
+///   ``ConnectionBannerState/online`` before its ping, so a screen whose request failed in that
+///   window keys a retry on the revision (#570).
 /// - Every ping has an attempt number; a result for any attempt but the latest is stale and
 ///   ignored.
 public struct ConnectionReachability: Sendable, Hashable {
@@ -78,8 +82,13 @@ public struct ConnectionReachability: Sendable, Hashable {
     public private(set) var failures = 0
     /// The latest ping's attempt number.
     public private(set) var attempt: UInt64 = 0
+    /// Bumped when a ping confirms the server answers after a network change, a failed ping, or
+    /// none yet: not by later successes while it stays confirmed.
+    public private(set) var verifiedRevision: UInt64 = 0
     /// Whether the network path is usable; assumed until a path is reported, as `NetworkMonitor` does.
     private var isNetworkOnline = true
+    /// Whether a ping succeeded since the last network change or failed ping.
+    private var isVerified = false
 
     public init() {}
 
@@ -95,6 +104,7 @@ public struct ConnectionReachability: Sendable, Hashable {
         case .pathChanged(let isOnline):
             guard isOnline != isNetworkOnline else { return .none }
             isNetworkOnline = isOnline
+            isVerified = false
             failures = 0
             attempt += 1
             guard isOnline else {
@@ -117,11 +127,16 @@ public struct ConnectionReachability: Sendable, Hashable {
             guard succeeded == attempt else { return .none }
             failures = 0
             state = .online
+            if !isVerified {
+                isVerified = true
+                verifiedRevision &+= 1
+            }
             return .none
         case .pingFailed(let failed, let date):
             guard failed == attempt else { return .none }
             failures += 1
             attempt += 1
+            isVerified = false
             let delay = Self.delay(afterFailures: failures)
             let (seconds, attoseconds) = delay.components
             state = .serverUnreachable(retryAt: date.addingTimeInterval(Double(seconds) + Double(attoseconds) / 1e18))

@@ -75,6 +75,35 @@ import Testing
         #expect(reachability.state == .serverUnreachable(retryAt: date.addingTimeInterval(5)))
     }
 
+    /// The network coming back shows online before its ping; the ping succeeding bumps the
+    /// verified revision once, so a load that failed in between is retried (#570).
+    @Test func aPingConfirmingTheNetworkBumpsTheVerifiedRevisionOnce() {
+        var reachability = ConnectionReachability()
+        _ = reachability.reduce(.retry)
+        _ = reachability.reduce(.pingSucceeded(attempt: 1))
+        #expect(reachability.verifiedRevision == 1)
+
+        _ = reachability.reduce(.pathChanged(isOnline: false))
+        #expect(reachability.reduce(.pathChanged(isOnline: true)) == .ping(attempt: 3, delay: .zero))
+        #expect(reachability.state == .online && reachability.verifiedRevision == 1)
+        _ = reachability.reduce(.pingSucceeded(attempt: 3))
+        #expect(reachability.state == .online && reachability.verifiedRevision == 2)
+
+        // Further successes while confirmed, and stale ones, don't bump it.
+        _ = reachability.reduce(.pingSucceeded(attempt: 3))
+        #expect(reachability.reduce(.retry) == .ping(attempt: 4, delay: .zero))
+        _ = reachability.reduce(.pingSucceeded(attempt: 4))
+        _ = reachability.reduce(.pingSucceeded(attempt: 1))
+        #expect(reachability.verifiedRevision == 2)
+
+        // A failure, then a success, bumps it again.
+        _ = reachability.reduce(.retry)
+        _ = reachability.reduce(.pingFailed(attempt: 5, at: date))
+        #expect(reachability.verifiedRevision == 2)
+        _ = reachability.reduce(.pingSucceeded(attempt: 6))
+        #expect(reachability.state == .online && reachability.verifiedRevision == 3)
+    }
+
     @Test func statesExplainThemselves() {
         #expect(ConnectionBannerState.online.messageKey == nil)
         #expect(ConnectionBannerState.offline(.noNetwork).messageKey == "MessageNoNetworkConnection")

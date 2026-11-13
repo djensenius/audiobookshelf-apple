@@ -195,4 +195,19 @@ private final class Account {
         run.cancel()
         await run.value
     }
+
+    /// The banner model's verified revision follows the pings that confirm the network (#570).
+    @Test func theBannerBumpsItsVerifiedRevisionWhenAPingConfirmsTheNetwork() async {
+        let (paths, feed) = AsyncStream.makeStream(of: NetworkPath.self)
+        let model = ConnectionBannerModel(paths: { paths }, ping: {}, clock: ManualClock())
+        let run = Task { await model.run() }
+        #expect(await eventually { model.verifiedRevision == 1 })
+        feed.yield(.offline)
+        #expect(await eventually { model.state == .offline(.noNetwork) })
+        feed.yield(.wifi)
+        #expect(await eventually { model.verifiedRevision == 2 })
+        #expect(model.state == .online)
+        run.cancel()
+        await run.value
+    }
 }

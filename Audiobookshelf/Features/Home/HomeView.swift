@@ -40,12 +40,23 @@ private struct HomeModelIdentity: Hashable {
 }
 
 /// What Home's load runs again on.
-private struct HomeLoadTrigger: Hashable {
+struct HomeLoadTrigger: Hashable {
     let libraryID: String?
     let connection: LibraryConnectionKey?
     let onlineRevision: Int
     /// The server answers, so a load that failed while it didn't runs again.
     let isConnected: Bool
+    /// The connection banner's ``ConnectionBannerModel/verifiedRevision``; 0 without a banner.
+    let verifiedRevision: UInt64
+
+    /// Whether only ``verifiedRevision`` changed since `previous`, so the load runs only if it
+    /// failed (``HomeRefreshSchedule/retriesOnVerification(libraryID:hasLoaded:isLoading:hasError:librariesFailed:librariesLoading:)``).
+    /// Not on the first run, nor when Home appears again with the same trigger.
+    func onlyVerifies(after previous: HomeLoadTrigger?) -> Bool {
+        guard let previous, previous.verifiedRevision != verifiedRevision else { return false }
+        return previous.libraryID == libraryID && previous.connection == connection
+            && previous.onlineRevision == onlineRevision && previous.isConnected == isConnected
+    }
 }
 
 /// Home while signed in: owns the ``HomeModel`` and the ``DownloadedShelfModel``, loads the
@@ -57,6 +68,8 @@ private struct HomeScreen: View {
     /// `nil` without a download stack.
     @State private var downloaded: DownloadedShelfModel?
     @State private var schedule = HomeRefreshSchedule()
+    /// The load trigger the last load ran for.
+    @State private var lastLoadTrigger: HomeLoadTrigger?
     /// The key of the message for the last failed action, kept while the alert is dismissed.
     @State private var failureKey: String?
     @State private var showsFailure = false
@@ -85,6 +98,9 @@ private struct HomeScreen: View {
             store: store, model: model, libraryID: libraryID, sections: serverSections, connection: connection,
             downloads: downloads, downloadsLoaded: downloaded?.isLoaded ?? true,
             downloadsFailed: downloaded?.loadError != nil)
+        let loadTrigger = HomeLoadTrigger(
+            libraryID: libraryID, connection: store.connectedKey, onlineRevision: store.onlineRevision,
+            isConnected: connection == nil, verifiedRevision: connectionBanner?.model.verifiedRevision ?? 0)
         HomeContent(
             state: state,
             sections: HomePresentation.sections(
@@ -99,13 +115,20 @@ private struct HomeScreen: View {
         // or the server answering again, loads again even when the library is unchanged, and
         // retries a failed load or refresh even while the shelves are fresh, and a failed
         // libraries list, waiting for either in flight. Losing the connection runs it too, and
-        // makes no request.
-        .task(
-            id: HomeLoadTrigger(
-                libraryID: libraryID, connection: store.connectedKey, onlineRevision: store.onlineRevision,
-                isConnected: connection == nil)
-        ) {
+        // makes no request. A ping confirming the server after the banner assumed it online
+        // (the verified revision) runs it only to retry a load that failed or hasn't ended.
+        .task(id: loadTrigger) {
+            let previous = lastLoadTrigger
+            lastLoadTrigger = loadTrigger
             model.libraryID = libraryID
+            if loadTrigger.onlyVerifies(after: previous),
+                !HomeRefreshSchedule.retriesOnVerification(
+                    libraryID: libraryID, hasLoaded: model.hasLoaded, isLoading: model.isLoading,
+                    hasError: model.error != nil, librariesFailed: store.error != nil,
+                    librariesLoading: store.isLoading)
+            {
+                return
+            }
             await update(.loadTrigger)
         }
         // The downloads follow the store live, online and offline.

@@ -466,6 +466,104 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
         }
     }
 
+    /// Only a change of the banner's verified revision alone is a verification; with any other
+    /// change, the first run or Home appearing again, the load trigger runs as before.
+    @Test func onlyAVerifiedRevisionChangeAloneIsAVerification() {
+        func trigger(
+            libraryID: String? = "lib", onlineRevision: Int = 1, isConnected: Bool = true, verified: UInt64 = 1
+        ) -> HomeLoadTrigger {
+            HomeLoadTrigger(
+                libraryID: libraryID, connection: nil, onlineRevision: onlineRevision, isConnected: isConnected,
+                verifiedRevision: verified)
+        }
+        let previous = trigger()
+        #expect(trigger(verified: 2).onlyVerifies(after: previous))
+        #expect(!trigger().onlyVerifies(after: previous))
+        #expect(!trigger(verified: 2).onlyVerifies(after: nil))
+        #expect(!trigger(libraryID: "other", verified: 2).onlyVerifies(after: previous))
+        #expect(!trigger(onlineRevision: 2, verified: 2).onlyVerifies(after: previous))
+        #expect(!trigger(isConnected: false, verified: 2).onlyVerifies(after: previous))
+    }
+
+    /// A verification retries a load or libraries request that failed, or waits for one that
+    /// hasn't ended, and leaves shelves that loaded alone (#570).
+    @Test func aVerificationRetriesOnlyWhatFailedOrHasntEnded() {
+        func retries(
+            libraryID: String? = "lib", loaded: Bool = true, loading: Bool = false, error: Bool = false,
+            librariesFailed: Bool = false, librariesLoading: Bool = false
+        ) -> Bool {
+            HomeRefreshSchedule.retriesOnVerification(
+                libraryID: libraryID, hasLoaded: loaded, isLoading: loading, hasError: error,
+                librariesFailed: librariesFailed, librariesLoading: librariesLoading)
+        }
+        #expect(!retries())
+        #expect(!retries(librariesLoading: true))
+        #expect(retries(error: true))
+        #expect(retries(loaded: false))
+        #expect(retries(loading: true))
+        #expect(retries(librariesFailed: true))
+        #expect(!retries(libraryID: nil, loaded: false))
+        #expect(retries(libraryID: nil, librariesFailed: true))
+        #expect(retries(libraryID: nil, librariesLoading: true))
+    }
+
+    /// The shelves requests made in all when Home's first load ends with `firstLoad`, then the
+    /// banner's verified revision bumps twice as Home's load trigger handles it, each once the
+    /// shelves are older than ``HomeRefreshSchedule/maxAge``, so only the verification's own
+    /// check keeps shelves that loaded from being reloaded.
+    private func shelvesRequestsAfterVerifications(firstLoad: ScriptedLibraries.Outcome) async throws -> Int {
+        let service = ScriptedLibraries(shelves: [firstLoad, .succeeds, .succeeds])
+        let suiteName = "HomeDownloadedShelfTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = LibraryStore(settings: AppSettings(defaults: defaults))
+        store.attach(client: service, connectionKey: LibraryConnectionKey(connectionID: connectionID, userID: "u"))
+        let model = HomeModel(store: store, libraryID: "lib")
+        var schedule = HomeRefreshSchedule()
+        var previous: HomeLoadTrigger?
+        // As Home's load trigger task does.
+        func run(verified: UInt64) async {
+            let now = Date(timeIntervalSince1970: 1_000_000 + Double(verified) * (HomeRefreshSchedule.maxAge + 1))
+            let trigger = HomeLoadTrigger(
+                libraryID: "lib", connection: nil, onlineRevision: 0, isConnected: true, verifiedRevision: verified)
+            defer { previous = trigger }
+            if trigger.onlyVerifies(after: previous),
+                !HomeRefreshSchedule.retriesOnVerification(
+                    libraryID: "lib", hasLoaded: model.hasLoaded, isLoading: model.isLoading,
+                    hasError: model.error != nil, librariesFailed: false, librariesLoading: false)
+            {
+                return
+            }
+            switch schedule.request(
+                for: .loadTrigger, libraryID: "lib", hasLoaded: model.hasLoaded, hasError: model.error != nil,
+                isConnected: true, now: now)
+            {
+            case .load: await model.load()
+            case .refresh: await model.refresh()
+            case nil: return
+            }
+            schedule.recordCompletion(
+                of: "lib",
+                model: .init(
+                    libraryID: "lib", hasLoaded: model.hasLoaded, isLoading: model.isLoading,
+                    hasError: model.error != nil),
+                isCancelled: false, at: now)
+        }
+        await run(verified: 0)
+        await run(verified: 1)
+        await run(verified: 2)
+        #expect(model.hasLoaded && model.error == nil)
+        return await service.shelvesRequests
+    }
+
+    @Test func aLoadThatFailedBeforeThePingConfirmedIsRetriedOnce() async throws {
+        #expect(try await shelvesRequestsAfterVerifications(firstLoad: .fails) == 2)
+    }
+
+    @Test func aLoadThatSucceededIsntReloadedOnAVerification() async throws {
+        #expect(try await shelvesRequestsAfterVerifications(firstLoad: .succeeds) == 1)
+    }
+
     /// The downloads couldn't be read: Home says its shelves couldn't load rather than that
     /// nothing is downloaded, offline and online, and Retry reads them again and shows them.
     @Test func aDownloadReadErrorShowsAndRetryShowsTheDownloads() async throws {

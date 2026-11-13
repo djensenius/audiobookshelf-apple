@@ -355,6 +355,28 @@ struct HomeRefreshSchedule {
         ) { await model.refresh() }
     }
 
+    /// Whether Home's load trigger runs when only the connection banner's verified revision
+    /// changed (``ConnectionBannerModel/verifiedRevision``): the server answered a ping after the
+    /// network came back or a ping failed, and Home may have started a request in between while
+    /// the banner assumed it online (#570). Only when that request failed or hasn't ended (the
+    /// trigger then retries it once, or waits for it), or the shelves never loaded, never for
+    /// shelves that loaded, even stale ones.
+    ///
+    /// - Parameters:
+    ///   - libraryID: The selected library; without one, only the libraries list counts.
+    ///   - hasLoaded: The model has shelves for `libraryID`.
+    ///   - isLoading: The model is loading them.
+    ///   - hasError: The model's last load or refresh failed.
+    ///   - librariesFailed: The store's last libraries request failed.
+    ///   - librariesLoading: The store is loading the libraries.
+    static func retriesOnVerification(
+        libraryID: String?, hasLoaded: Bool, isLoading: Bool, hasError: Bool, librariesFailed: Bool,
+        librariesLoading: Bool
+    ) -> Bool {
+        guard libraryID != nil else { return librariesFailed || librariesLoading }
+        return !hasLoaded || isLoading || hasError || librariesFailed
+    }
+
     /// The model's state when a request it made finished.
     struct ModelState {
         var libraryID: String?
