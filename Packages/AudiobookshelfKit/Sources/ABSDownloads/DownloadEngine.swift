@@ -661,8 +661,9 @@ public actor DownloadEngine {
     /// failed for good, whose sibling stops and replays could otherwise run after the discard.
     ///
     /// - Parameter pausing: sets the connection's records' state (for example `paused`), so
-    ///   nothing starts them again. It runs first; from then until this returns, a failure's
-    ///   replay doesn't queue a record of the connection again (one left `failed` stays so).
+    ///   nothing starts them again. It runs first; from then until its resume data is deleted, a
+    ///   failure's replay doesn't queue a record of the connection again (one left `failed`
+    ///   stays so).
     /// - Returns: `false` when there is no session (the downloads couldn't be read, or another
     ///   process holds it), the downloads couldn't be read at any step, or resume data couldn't
     ///   be deleted. The transfers the engine knows of are still stopped, the resume data is
@@ -685,7 +686,12 @@ public actor DownloadEngine {
         // The pauses can wait on each other (the manager holds a podcast's item for each of its
         // episodes), so every transfer stops with the old credentials first, without a wait.
         let cancelled = cancelTransfers(of: connectionID)
-        defer {
+        var isUnderWay = true
+        // Ends this call's registration once, before its finalisation awaits, so a quiesce that
+        // begins meanwhile sees itself as the last under way and clears the marker and hold.
+        func end() {
+            guard isUnderWay else { return }
+            isUnderWay = false
             if let index = quiescingConnections.firstIndex(of: connectionID) {
                 quiescingConnections.remove(at: index)
             }
@@ -693,6 +699,7 @@ public actor DownloadEngine {
             quiesceCount += 1
             lastQuiesces[connectionID] = quiesceCount
         }
+        defer { end() }
         await pausing()
         guard await ensureSession() else {
             await discardResumeData(connectionID: connectionID)
@@ -721,7 +728,8 @@ public actor DownloadEngine {
         // cancelled them above; the marker stays until the resume data is gone too. Only the
         // last quiesce under way clears it, releases the hold and finalises the records it held:
         // another may still seal more, or fail to delete it.
-        if discarded, quiescingConnections.count(where: { $0 == connectionID }) == 1 {
+        end()
+        if discarded, !quiescingConnections.contains(connectionID) {
             clearSurvivorsToStop(connectionID)
             undiscardedSignOuts.remove(connectionID)
             await finaliseCompletedRecords()

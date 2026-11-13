@@ -1053,6 +1053,31 @@ import Testing
         #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
     }
 
+    /// A quiesce that begins while an earlier one of the same connection finalises the records
+    /// it released is the last one under way: it clears the marker and releases the hold, so
+    /// the record the earlier one is finalising isn't held and no stale marker is left.
+    @Test func aQuiesceDuringAnEarlierOnesFinalisationClearsTheMarker() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let (upserted, upsertedContinuation) = AsyncStream.makeStream(of: Void.self)
+        let (release, releaseContinuation) = AsyncStream.makeStream(of: Void.self)
+        let engine = harness.makeEngine(afterUpsertingLocalItem: { _ in
+            upsertedContinuation.yield()
+            for await _ in release {}
+        })
+        #expect(await engine.activate())
+        // The activation's own finalisation is done first, so only the quiesce's reaches the hook.
+        await engine.waitForRestart()
+        let record = try await harness.addRecord(parts: [UUID()], state: .downloading, partState: .completed)
+        let first = Task { await engine.quiesce(connectionID: harness.connectionID) }
+        for await _ in upserted { break }
+
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        releaseContinuation.finish()
+        #expect(await first.value)
+        #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
+        #expect(try await harness.store.record(id: record.id) == nil)
+    }
+
     /// A quiesce that begins while a finalisation writes the local item holds that record too, so
     /// resume data the quiesce can't delete keeps the part that leads to it, and a relaunch,
     /// which the marker sends to it, deletes it before finalising the record.
