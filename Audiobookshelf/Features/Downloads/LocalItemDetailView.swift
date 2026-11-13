@@ -155,8 +155,11 @@ private struct LocalItemHeader: View {
         VStack(alignment: .leading, spacing: ABSSpacing.medium) {
             HStack(alignment: .top, spacing: ABSSpacing.medium) {
                 CoverView(
-                    key: CoverRef(entityID: detail.libraryItemId, updatedAt: updatedAt)
-                        .key(serverID: detail.serverConnectionID),
+                    key: CoverRef(
+                        entityID: detail.libraryItemId,
+                        updatedAt: LocalDownloadedCovers.version(of: detail.coverUpdatedAt)
+                    )
+                    .key(serverID: detail.serverConnectionID),
                     title: detail.title, author: detail.author, shape: detail.isPodcast ? .square : .book,
                     accessibility: .hidden
                 )
@@ -185,10 +188,6 @@ private struct LocalItemHeader: View {
             }
             LocalItemLinkView(link: detail.link)
         }
-    }
-
-    private var updatedAt: Int? {
-        detail.coverUpdatedAt.map { Int($0.timeIntervalSince1970 * 1000) }
     }
 }
 
