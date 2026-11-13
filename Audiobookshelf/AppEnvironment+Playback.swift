@@ -26,19 +26,19 @@ struct AppPlayback {
     static let tickInterval: TimeInterval = 0.5
 
     /// - Parameters:
-    ///   - dataStack: The store; without it (or without `accounts`) there is no participant, and
-    ///     the player stays idle.
+    ///   - writer: The data environment's one ``LocalProgressStore``, which downloads link through
+    ///     too (ADR 0003); without it (or without `accounts`) there is no participant, and the
+    ///     player stays idle.
     ///   - deviceIdentifiers: The process-wide device ID for playback sessions (ADR 0007).
     static func make(
-        dataStack: DataStack?, accounts: AccountManager?, lifecycle: SessionLifecycle, settings: AppSettings,
+        writer: LocalProgressStore?, accounts: AccountManager?, lifecycle: SessionLifecycle, settings: AppSettings,
         deviceIdentifiers: any DeviceIdentifying
     ) -> AppPlayback {
         let current = CurrentPlayback()
         let player = PlayerViewModel(playback: current, settings: settings)
-        guard let dataStack, let accounts else {
+        guard let writer, let accounts else {
             return AppPlayback(current: current, player: player, writer: nil, participant: nil)
         }
-        let writer = LocalProgressStore(modelContainer: dataStack.container)
         let monitor = NetworkMonitor()
         monitor.start()
         let policy = NetworkPolicy(monitor: monitor, settings: settings)
@@ -80,22 +80,50 @@ struct AppPlayback {
         #if os(iOS)
             let engine = AudioEngine(timeObserverInterval: tickInterval)
             // The engine holds the controller, which holds the engine weakly.
-            engine.audioSession = AudioSessionController(engine: engine)
+            let audioSession = AudioSessionController(engine: engine)
+            engine.audioSession = audioSession
+            let interruptions: AudioInterruptionHandler? = audioSession.interruptionHandler
         #else
             let engine = AudioEngine(audioSession: nil, timeObserverInterval: tickInterval)
+            let interruptions: AudioInterruptionHandler? = nil
         #endif
-        let configuration = PlaybackScope.Configuration(
-            connectionID: request.connectionID, client: request.client, features: request.features,
-            deviceIdentifiers: request.deviceIdentifiers, writer: request.writer, settings: settings,
-            policy: policy, engine: engine, tickInterval: tickInterval,
-            lastPlayed: { PlaybackScope.lastPlayedStore(for: $0, defaults: settings.defaults) },
-            queueStore: UserDefaultsPlaybackQueueStore(defaults: settings.defaults))
-        return PlaybackScope.make(configuration) { coordinator in
+        return makeScope(for: request, settings: settings, policy: policy, engine: engine, interruptions: interruptions)
+    }
+
+    /// The scope over `engine`. An interruption also cancels a play the coordinator holds outside
+    /// the engine (recovery's restart, the initial load, a pending streaming-policy check), so
+    /// `interruptions` (the audio session's, on iOS) gets the coordinator; it holds it weakly, and
+    /// the scope owns it.
+    static func makeScope(
+        for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
+        engine: any AudioEngineProtocol, interruptions: AudioInterruptionHandler?
+    ) -> PlaybackScope {
+        let scope = PlaybackScope.make(configuration(for: request, settings: settings, policy: policy, engine: engine))
+        {
+            coordinator in
             // No artwork or App Intents entities yet.
             NowPlayingBridge(
                 coordinator: coordinator, settings: settings, coverProvider: { _ in nil },
                 entityIdentifiers: { _ in [] })
         }
+        interruptions?.heldPlayIntent = scope.coordinator
+        return scope
+    }
+
+    /// The scope's configuration. Recovery waits on the system's network path; without one it
+    /// would treat the device as always online.
+    static func configuration(
+        for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
+        engine: any AudioEngineProtocol
+    ) -> PlaybackScope.Configuration {
+        var configuration = PlaybackScope.Configuration(
+            connectionID: request.connectionID, client: request.client, features: request.features,
+            deviceIdentifiers: request.deviceIdentifiers, writer: request.writer, settings: settings,
+            policy: policy, engine: engine, tickInterval: tickInterval,
+            lastPlayed: { PlaybackScope.lastPlayedStore(for: $0, defaults: settings.defaults) },
+            queueStore: UserDefaultsPlaybackQueueStore(defaults: settings.defaults))
+        configuration.networkPaths = SystemNetworkPathSource()
+        return configuration
     }
 }
 
