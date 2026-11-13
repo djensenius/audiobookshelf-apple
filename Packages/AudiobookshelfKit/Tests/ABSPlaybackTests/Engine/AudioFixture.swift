@@ -1,4 +1,5 @@
 import ABSCore
+import ABSTestSupport
 import AVFoundation
 import Foundation
 import Testing
@@ -54,13 +55,15 @@ final class AudioFixture: Sendable {
 
 /// Polls `condition` on the main actor every 10 ms until it holds, `timeout` passes or the task
 /// is cancelled (both return `false`). The timeout is generous so a busy machine (parallel test
-/// runs) does not fail a passing test; it only bounds a failing one.
+/// runs) does not fail a passing test; it only bounds a failing one, and a stall of the process
+/// doesn't spend it (``WaitBudget``, whose time source `now` is).
 @MainActor
-func eventually(timeout: Duration = .seconds(10), _ condition: () -> Bool) async -> Bool {
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: timeout)
+func eventually(
+    timeout: Duration = .seconds(10), now: @escaping WaitBudget.Now = { ContinuousClock.now }, _ condition: () -> Bool
+) async -> Bool {
+    var budget = WaitBudget(timeout, now: now)
     while !condition() {
-        guard clock.now < deadline else { return false }
+        guard budget.hasTimeLeft() else { return false }
         do { try await Task.sleep(for: .milliseconds(10)) } catch { return false }
     }
     return true
@@ -69,17 +72,18 @@ func eventually(timeout: Duration = .seconds(10), _ condition: () -> Bool) async
 struct WaitTimedOut: Error {}
 
 /// Yields to other main-actor work until `condition` holds, checking it between every job so a
-/// short-lived state is not missed. Records an issue and throws after `timeout`; throws
+/// short-lived state is not missed. Records an issue and throws after `timeout` (a ``WaitBudget``,
+/// so a stall of the process doesn't spend it); throws
 /// `CancellationError` if the task is cancelled.
 @MainActor
 func waitUntil(
-    timeout: Duration = .seconds(10), sourceLocation: SourceLocation = #_sourceLocation, _ condition: () -> Bool
+    timeout: Duration = .seconds(10), now: @escaping WaitBudget.Now = { ContinuousClock.now },
+    sourceLocation: SourceLocation = #_sourceLocation, _ condition: () -> Bool
 ) async throws {
-    let clock = ContinuousClock()
-    let deadline = clock.now.advanced(by: timeout)
+    var budget = WaitBudget(timeout, now: now)
     while !condition() {
         try Task.checkCancellation()
-        guard clock.now < deadline else {
+        guard budget.hasTimeLeft() else {
             Issue.record("Timed out after \(timeout)", sourceLocation: sourceLocation)
             throw WaitTimedOut()
         }

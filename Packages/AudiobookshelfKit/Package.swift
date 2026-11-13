@@ -46,9 +46,13 @@ let package = Package(
         .target(name: "ABSData", dependencies: ["ABSCore"]),
         .testTarget(name: "ABSDataTests", dependencies: ["ABSData"]),
 
+        // Helpers shared by test targets (stall-tolerant waits); not in any product.
+        .target(name: "ABSTestSupport", path: "Tests/ABSTestSupport"),
+
         // Audio playback and progress sync.
         .target(name: "ABSPlayback", dependencies: ["ABSCore", "ABSAPI", "ABSData"]),
-        .testTarget(name: "ABSPlaybackTests", dependencies: ["ABSPlayback"], resources: [.copy("Fixtures")]),
+        .testTarget(
+            name: "ABSPlaybackTests", dependencies: ["ABSPlayback", "ABSTestSupport"], resources: [.copy("Fixtures")]),
 
         // Offline downloads.
         .target(name: "ABSDownloads", dependencies: ["ABSCore", "ABSAPI", "ABSData"]),
@@ -74,7 +78,9 @@ let package = Package(
         // ZIPFoundation builds fixture comic archives at test time.
         .testTarget(
             name: "ABSAppModelTests",
-            dependencies: ["ABSAppModel", .product(name: "ZIPFoundation", package: "ZIPFoundation")]
+            dependencies: [
+                "ABSAppModel", "ABSTestSupport", .product(name: "ZIPFoundation", package: "ZIPFoundation"),
+            ]
         ),
     ],
     swiftLanguageModes: [.v6]

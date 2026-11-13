@@ -18,8 +18,6 @@ struct GroupDetailView<Kind: GroupScreenKind>: View {
         Group {
             if let host, let model = host.model(for: key) {
                 GroupDetailContent(model: model, libraryID: host.key.libraryID, editing: editing(for: host))
-                    // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
-                    .environment(\.itemProgressReader, host.progressReader)
             } else {
                 BrowsePlaceholder(libraryID: libraryID, messages: GroupPresentation.detailMessages(Kind.summaryKind))
                     .navigationTitle(Text(verbatim: L10n.string(GroupPresentation.detailTitleKey(Kind.summaryKind))))

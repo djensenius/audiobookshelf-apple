@@ -6,7 +6,9 @@ import SwiftUI
 /// The loaded book: cover, title, actions, progress, metadata and description (legacy
 /// `index.vue`), then the chapters, tracks and ebook files full width. Compact width, or any
 /// width too narrow for two columns (``ItemDetailLayout``), stacks everything; otherwise the
-/// cover, actions and progress sit beside the title, metadata and description.
+/// cover, actions and progress sit beside the title, metadata and description. Across a fold
+/// running down through it (iOS 27.1 and later), it splits at the fold instead
+/// (``DetailArrangement``).
 ///
 /// Play and chapters start playback through the environment's `playItem`, which is `nil` while
 /// signed out (and until the shell provides it), so both are disabled then, while a start is in
@@ -40,11 +42,7 @@ struct ItemDetailContent: View {
         }
         ScrollView {
             VStack(alignment: .leading, spacing: ABSSpacing.large) {
-                if let refreshFailure {
-                    ItemDetailRefreshFailedBanner(messageKey: refreshFailure.messageKey) {
-                        Task { await model.load() }
-                    }
-                }
+                refreshBanner(refreshFailure)
                 if ItemDetailLayout.usesStackedLayout(width: width, sizeClass: horizontalSizeClass) {
                     cover(maxWidth: 240)
                         .frame(maxWidth: .infinity)
@@ -69,13 +67,7 @@ struct ItemDetailContent: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                ItemDetailTables(
-                    model: model, bookTitle: details.title, canPlayChapters: model.canPlayChapters && canPlay
-                ) { chapter, presentation in
-                    pendingChapter = PendingChapter(
-                        chapter: chapter, startTime: model.startTime(for: chapter),
-                        message: presentation.confirmMessage)
-                }
+                tables(canPlay: canPlay)
             }
             .padding(ItemDetailLayout.padding)
             .frame(maxWidth: 1_000)
@@ -85,6 +77,20 @@ struct ItemDetailContent: View {
             $0.size.width
         } action: {
             width = $0
+        }
+        // Across a fold running down through it (book pose), the cover, title, actions, progress and metadata on one
+        // side, the description and tables on the other (#85).
+        .detailSplitAtFold {
+            refreshBanner(refreshFailure)
+            cover(maxWidth: ItemDetailLayout.sideColumnWidth)
+                .frame(maxWidth: .infinity)
+            ItemDetailHeader(details: details)
+            actions
+            ItemDetailProgress(model: model)
+            ItemDetailMetadata(details: details)
+        } secondary: {
+            description
+            tables(canPlay: canPlay)
         }
         .refreshable { await model.load() }
         .absBackground()
@@ -157,6 +163,23 @@ struct ItemDetailContent: View {
                     "Couldn't play \(itemID, privacy: .private(mask: .hash)): \(failure.message, privacy: .private)")
                 playFailure = failure
             }
+        }
+    }
+
+    @ViewBuilder private func refreshBanner(_ failure: ItemDetailRefreshFailure?) -> some View {
+        if let failure {
+            ItemDetailRefreshFailedBanner(messageKey: failure.messageKey) {
+                Task { await model.load() }
+            }
+        }
+    }
+
+    /// The chapters, tracks and ebook files; a chapter asks before it plays.
+    private func tables(canPlay: Bool) -> some View {
+        ItemDetailTables(model: model, bookTitle: details.title, canPlayChapters: model.canPlayChapters && canPlay) {
+            chapter, presentation in
+            pendingChapter = PendingChapter(
+                chapter: chapter, startTime: model.startTime(for: chapter), message: presentation.confirmMessage)
         }
     }
 
