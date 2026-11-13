@@ -47,7 +47,8 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
             ])
     }
 
-    /// Only a change back to unfinished is a reset: a finish, a new position or hiding isn't.
+    /// Only a change back to unfinished is a reset; a finished value from the server, even
+    /// hidden, is a finish; a new position on an unfinished one is an update.
     @Test func onlyUnfinishingIsAReset() {
         let cache = ProgressCache()
         let recorder = recording(cache)
@@ -63,7 +64,7 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
         value.lastUpdate = 40
         cache.apply(value)
 
-        #expect(recorder.changes.map(\.kind) == [.updated, .updated, .updated, .reset])
+        #expect(recorder.changes.map(\.kind) == [.updated, .finished, .finished, .reset])
     }
 
     /// An update the cache keeps out, a read, or removing nothing changes no value.
@@ -141,7 +142,8 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
         #expect(log.value == ["change podcast e2", "change podcast e2", "write", "change podcast e2"])
     }
 
-    /// Each action's settled report carries the kind of its change: hiding a finished episode is
+    /// Each action's settled report carries the kind of its change: a finish only once the
+    /// server accepted it, the optimistic report being an update; hiding a finished episode is
     /// no reset, so auto-advance keeps it skipped; marking it not finished or discarding it is.
     @Test func settledReportsCarryTheActionsKind() async throws {
         let cache = ProgressCache()
@@ -153,7 +155,7 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
 
         try await actions.markFinished(target)
         try await actions.hideFromContinueListening(target)
-        #expect(log.value == ["updated", "updated", "updated", "updated"])
+        #expect(log.value == ["updated", "finished", "updated", "finished"])
 
         log.value = []
         try await actions.markNotFinished(target)

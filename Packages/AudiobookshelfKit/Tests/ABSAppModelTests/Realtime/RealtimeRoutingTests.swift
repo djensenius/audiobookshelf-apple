@@ -168,8 +168,8 @@ struct RealtimeRoutingTests {
     }
 
     /// The cache reports a socket update before its local merge, which waits for the merges
-    /// before it; once merged it reports again, with the same kind, so auto-advance prepares from
-    /// the merged local progress (#554).
+    /// before it; once merged it reports again, as an update, so auto-advance prepares from the
+    /// merged local progress (#554).
     @Test func socketProgressReportsAgainOnceMergedLocally() async throws {
         try await withLibrarySettings { settings in
             let container = try DataStack(location: .inMemory).container
@@ -198,7 +198,7 @@ struct RealtimeRoutingTests {
 
             let e2 = MediaKey(serverConnectionID: identityA.connectionID, libraryItemId: "podcast", episodeId: "e2")
             #expect(try await local.progress(for: e2)?.isFinished == true)
-            #expect(changes.values.filter { $0.hasPrefix("e2") } == ["e2 updated", "e2 updated"])
+            #expect(changes.values.filter { $0.hasPrefix("e2") } == ["e2 finished", "e2 updated"])
             #expect(changes.values.last == "e2 updated")
         }
     }

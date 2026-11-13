@@ -113,6 +113,7 @@ struct AutoAdvanceTests {
         await a.finish()
         await a.advancer.waitForPreparation()
 
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .finished)
         a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
         await a.advancer.waitForPreparation()
         await a.finish()
@@ -142,11 +143,51 @@ struct AutoAdvanceTests {
         await a.finish()
         coordinator.stop()
 
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .finished)
         a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
         await a.play("P", episode: "e2")
         await a.finish()
 
         #expect(coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
+    /// A reset before the server has shown the finish of an episode that ended here keeps it
+    /// skipped: a seed dropping progress never synced, a stale socket update or a rolled-back
+    /// action resets it while the listing still lacks the finish (#554).
+    @Test func resetBeforeTheFinishIsConfirmedKeepsTheEpisodeSkipped() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        await a.advancer.waitForPreparation()
+
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
+    }
+
+    /// The server can show the finish while the episode is still loaded; a later reset counts.
+    /// Ending it here again makes the finish unconfirmed again.
+    @Test func finishConfirmedWhileLoadedCountsUntilItEndsAgain() async {
+        a.episodes.set("P", episodes: ["e1", "e2"], finished: ["e2"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        #expect(coordinator.mediaKey == a.key("P", episode: "e1"))
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .finished)
+        coordinator.stop()
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.play("P", episode: "e2")
+        await a.finish()
+        #expect(coordinator.mediaKey == a.key("P", episode: "e1"))
+
+        await a.finish()
+        coordinator.stop()
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.play("P", episode: "e2")
+        await a.finish()
+
+        #expect(coordinator.mediaKey != a.key("P", episode: "e1"))
     }
 
     @Test func advanceStaysAtEndWhenAllEpisodesFinished() async {

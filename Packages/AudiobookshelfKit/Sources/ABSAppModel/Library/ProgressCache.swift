@@ -35,7 +35,10 @@ public final class ProgressCache {
         var value: MediaProgress? {
             didSet {
                 guard oldValue != value, let changed = value ?? oldValue else { return }
-                owner?.valueDidChange(changed, kind: ProgressChangeKind(from: oldValue, to: value))
+                var kind = ProgressChangeKind(from: oldValue, to: value)
+                // Not confirmed until the action settles (``ProgressCache/reportSettled``).
+                if isOptimistic, kind == .finished { kind = .updated }
+                owner?.valueDidChange(changed, kind: kind)
             }
         }
         /// The cache to tell of value changes (``ProgressCache/onChange``).
@@ -218,9 +221,10 @@ public final class ProgressCache {
         revision += 1
         entry.revisionBeforeApply = entry.revision
         entry.revision = revision
-        entry.value = progress
+        // Before the value, so its report counts it as the server's.
         entry.isOptimistic = false
         entry.optimisticCommitSerial = nil
+        entry.value = progress
         return true
     }
 

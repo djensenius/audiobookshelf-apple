@@ -34,6 +34,8 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     private var listing: (podcastItemID: String, listing: PodcastEpisodeListing)?
     /// Episodes that ended while attached, whose finish may not have reached the server yet.
     private var endedEpisodes: Set<MediaKey> = []
+    /// The `endedEpisodes` the server has since shown finished, so a reset from then on is real.
+    private var confirmedEndings: Set<MediaKey> = []
     /// When the last preparation finished, with or without a next item.
     private var preparedAt: TimeInterval = 0
     /// Near-end refreshes done since the load, a resume or a seek out of them.
@@ -92,6 +94,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         }
         self.coordinator = nil
         endedEpisodes = []
+        confirmedEndings = []
         advancingFromQueue = nil
         reset()
     }
@@ -99,12 +102,18 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     /// Progress changed for `key` (synced, or from another device): prepares again when it is the
     /// next item, or an episode of the current podcast (finishing one changes which is next).
     /// The current item's own progress changes nothing. An episode that ended here is no longer
-    /// assumed finished once its progress is reset (marked not finished or discarded); a new
-    /// position or hiding it keeps it skipped, as its finish may not have reached the server.
+    /// assumed finished once the server has shown it finished and its progress is then reset
+    /// (marked not finished or discarded). Until the server shows the finish, every change keeps
+    /// it skipped: a reset from before it (a seed that drops progress never synced, a stale
+    /// socket update, a rolled-back action) would otherwise let a listing without the finish
+    /// pick it again.
     public func progressDidChange(for key: MediaKey, kind: ProgressChangeKind) {
-        guard key != current, key.serverConnectionID == queue.serverConnectionID else { return }
+        guard key.serverConnectionID == queue.serverConnectionID else { return }
+        // Also while it is still loaded: the server may report the finish before the advance.
+        if kind == .finished, endedEpisodes.contains(key) { confirmedEndings.insert(key) }
+        guard key != current else { return }
         // Even with nothing loaded: playing again later must not skip it.
-        if kind == .reset { endedEpisodes.remove(key) }
+        if kind == .reset, confirmedEndings.remove(key) != nil { endedEpisodes.remove(key) }
         guard let current else { return }
         let samePodcast =
             current.episodeId != nil && key.episodeId != nil && key.libraryItemId == current.libraryItemId
@@ -185,7 +194,11 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         case .tick(let time):
             refreshIfNearEnd(at: time)
         case .ended:
-            if let current, current.episodeId != nil { endedEpisodes.insert(current) }
+            if let current, current.episodeId != nil {
+                endedEpisodes.insert(current)
+                // This end's finish is unconfirmed again, even if an earlier one was.
+                confirmedEndings.remove(current)
+            }
         case .failed, .sessionWillClose:
             break
         }
