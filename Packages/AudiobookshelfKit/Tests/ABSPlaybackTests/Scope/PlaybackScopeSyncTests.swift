@@ -9,14 +9,16 @@ import Testing
 @testable import ABSPlayback
 
 /// A scope over a ``SyncHarness``, with a local-session uploader over the harness's store and
-/// ``uploads``.
+/// ``uploads``, following `paths` when given.
 @MainActor
 private struct SyncScope {
     let s: SyncHarness
     let uploads: RecordingUploads
     let scope: PlaybackScope
+    /// The paths the scope handled, and whether each asked for a server sync.
+    private var handled: AsyncStream<(NetworkPath, Bool)>.Iterator
 
-    init() throws {
+    init(paths: (any NetworkPathSource)? = nil) throws {
         s = try SyncHarness()
         let service = s.service
         // Each upload notes how many PATCHes had been sent by then.
@@ -26,7 +28,18 @@ private struct SyncScope {
             sleep: { _ in })
         scope = PlaybackScope(
             coordinator: s.coordinator, syncer: s.syncer, services: nil, nowPlaying: RecordingNowPlaying(),
-            uploader: uploader)
+            uploader: uploader, paths: paths)
+        // Set before the scope's path task first runs: nothing here suspends.
+        let (stream, continuation) = AsyncStream.makeStream(of: (NetworkPath, Bool).self)
+        scope.pathHandled = { continuation.yield(($0, $1)) }
+        handled = stream.makeAsyncIterator()
+    }
+
+    /// Whether the next path the scope handled asked for a server sync.
+    mutating func nextPath() async -> Bool? {
+        var iterator = handled
+        defer { handled = iterator }
+        return await iterator.next(isolation: #isolation)?.1
     }
 
     /// Saves a pending local session for the harness's connection.
@@ -61,19 +74,23 @@ struct PlaybackScopeSyncTests {
     // MARK: Make
 
     @Test func makeWiresTheSyncerToTheNetworkPathAndTheServicesToTheScope() throws {
-        let scope = try madeScope(networkPaths: StubNetworkPathSource())
+        let scope = try madeScope(networkPaths: RecoveryPathSource())
 
         #expect(scope.syncer.pathTask != nil)
+        #expect(scope.pathTask != nil)
         #expect(scope.services?.hasSessionGoneHandler == true)
         #expect(scope.uploader != nil)
 
         scope.retire(reason: .accountSwitch)
         #expect(scope.services?.hasSessionGoneHandler == false)
+        #expect(scope.pathTask == nil)
     }
 
-    /// The negative control: without a network path, the syncer has nothing to follow.
+    /// The negative control: without a network path, neither the syncer nor the scope follows one.
     @Test func makeWithoutANetworkPathLeavesTheSyncerWithout() throws {
-        #expect(try madeScope(networkPaths: nil).syncer.pathTask == nil)
+        let scope = try madeScope(networkPaths: nil)
+        #expect(scope.syncer.pathTask == nil)
+        #expect(scope.pathTask == nil)
     }
 
     // MARK: Server sync
@@ -119,6 +136,77 @@ struct PlaybackScopeSyncTests {
         #expect(t.uploads.batches.isEmpty)
         // Nor does a sync asked for after.
         t.scope.syncWithServer(isFirstSync: false)
+        await t.scope.waitForServerSync()
+        #expect(t.uploads.batches.isEmpty)
+    }
+
+    // MARK: Network path
+
+    /// A reconnect the session doesn't see (the same account and client): the path coming back
+    /// online retries the uploads the start's sync couldn't send.
+    @Test func aPathReconnectRetriesTheUploadsAFailedSyncLeft() async throws {
+        let paths = RecoveryPathSource()
+        var t = try SyncScope(paths: paths)
+        let session = try await t.saveSession()
+        // The first path, online, asks for nothing.
+        #expect(await t.nextPath() == false)
+        t.uploads.isUnreachable = true
+        t.scope.syncWithServer(isFirstSync: true)
+        await t.scope.waitForServerSync()
+        #expect(try await t.s.store.session(id: session.id) != nil)
+
+        t.uploads.isUnreachable = false
+        paths.isOnline = false
+        #expect(await t.nextPath() == false)
+        paths.isOnline = true
+        #expect(await t.nextPath() == true)
+        await t.scope.waitForServerSync()
+
+        #expect(t.uploads.batches == [[session.id]])
+        #expect(try await t.s.store.session(id: session.id) == nil)
+    }
+
+    /// A path that flaps while a sync runs queues one sync behind it, not one per reconnect.
+    @Test func aFlappingPathQueuesOneServerSyncBehindTheRunningOne() async throws {
+        let paths = RecoveryPathSource()
+        var t = try SyncScope(paths: paths)
+        // With nothing pending, each upload pass reads the store once.
+        let passes = PassCount()
+        let held = Gate()
+        let started = Gate()
+        await t.scope.uploader?.setAfterPendingRead {
+            guard passes.increment() == 1 else { return }
+            started.open()
+            await held.wait()
+        }
+        #expect(await t.nextPath() == false)
+
+        for _ in 0..<3 {
+            paths.isOnline = false
+            #expect(await t.nextPath() == false)
+            paths.isOnline = true
+            #expect(await t.nextPath() == true)
+            // The first reconnect's sync is under way before the others arrive.
+            await started.wait()
+        }
+        held.open()
+        await t.scope.waitForServerSync()
+
+        #expect(passes.value == 2)
+    }
+
+    /// Retiring stops following the path, so a later reconnect asks for nothing.
+    @Test func aRetiredScopeStopsFollowingThePath() async throws {
+        let paths = RecoveryPathSource()
+        var t = try SyncScope(paths: paths)
+        try await t.saveSession()
+        #expect(await t.nextPath() == false)
+
+        t.scope.retire(reason: .accountSwitch)
+        #expect(t.scope.pathTask == nil)
+        #expect(await eventually { paths.openStreams == 0 })
+        paths.isOnline = false
+        paths.isOnline = true
         await t.scope.waitForServerSync()
         #expect(t.uploads.batches.isEmpty)
     }
@@ -318,10 +406,25 @@ private final class UpdateLog {
     var updates: [PlaybackProgressUpdate] = []
 }
 
+/// Counts the uploader's passes.
+private final class PassCount: Sendable {
+    private let count = Mutex(0)
+
+    var value: Int { count.withLock { $0 } }
+
+    /// Counts one more pass, and returns the count.
+    func increment() -> Int {
+        count.withLock {
+            $0 += 1
+            return $0
+        }
+    }
+}
+
 /// Acknowledges every `local-all` upload, recording each batch's session IDs and how many PATCHes
-/// had been sent when it arrived.
+/// had been sent when it arrived; while ``isUnreachable``, answers none (no connection).
 private final class RecordingUploads: LocalSessionUploadService {
-    private let state = Mutex<(batches: [[String]], patchCounts: [Int])>(([], []))
+    private let state = Mutex<(batches: [[String]], patchCounts: [Int], isUnreachable: Bool)>(([], [], false))
     private let patchCount: @Sendable () -> Int
 
     init(patchCount: @escaping @Sendable () -> Int) {
@@ -330,13 +433,20 @@ private final class RecordingUploads: LocalSessionUploadService {
 
     var batches: [[String]] { state.withLock { $0.batches } }
     var patchCounts: [Int] { state.withLock { $0.patchCounts } }
+    var isUnreachable: Bool {
+        get { state.withLock { $0.isUnreachable } }
+        set { state.withLock { $0.isUnreachable = newValue } }
+    }
 
     func uploadAll(_ batch: LocalPlaybackSessionBatch) async throws -> LocalSessionSyncResponse {
         let patches = patchCount()
-        state.withLock {
-            $0.batches.append(batch.sessions.map(\.id))
-            $0.patchCounts.append(patches)
+        let isUnreachable = state.withLock { state in
+            guard !state.isUnreachable else { return true }
+            state.batches.append(batch.sessions.map(\.id))
+            state.patchCounts.append(patches)
+            return false
         }
+        if isUnreachable { throw APIError.network(.notConnectedToInternet) }
         return LocalSessionSyncResponse(
             results: batch.sessions.map { .init(id: $0.id, success: true, progressSynced: true, error: nil) })
     }

@@ -363,7 +363,7 @@ Cons:
      - `mediaPlayer: "AVPlayer"`
      - the server's `libraryItemId` and `episodeId`
    - **Online:** report with `POST /api/session/local` while playing.
-   - **After reconnecting:** batch unsent sessions with `POST /api/session/local-all`. Each account's `PlaybackScope` does it in `syncWithServer(isFirstSync:)` (`LocalSessionUploader`), after draining pending progress, at an online session start and after each reconnect (#184).
+   - **After reconnecting:** batch unsent sessions with `POST /api/session/local-all`. Each account's `PlaybackScope` does it in `syncWithServer(isFirstSync:)` (`LocalSessionUploader`), after draining pending progress, at an online session start and after each reconnect: the session's, and the network path coming back online, even with the same account and client (#184).
    - Before a session starts, server progress that is newer than local progress wins, as in the legacy flow (`ApiClient.swift:532-591`).
      - Newer means saved later. An unsent edit is dated by its edit time, a synced group by the later of its edit time and the server's `lastUpdate`. That date covers the whole row, so for a synced group it is only an upper bound on when the group last changed. Equal dates go to the server, as in the sync merge (ADR 0003).
      - An unsent audio edit is kept when the server's audio still equals what the row last saw, however new its `lastUpdate`: another device changed something else, such as the ebook position or the finished flag.

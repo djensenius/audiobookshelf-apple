@@ -67,7 +67,9 @@ public struct PlaybackProgressUpdate: Sendable, Equatable {
 ///   ticks send `/sync`, and a successful sync drains pending progress. It follows the configured
 ///   network path, so it drains whenever the device comes back online. ``syncWithServer(isFirstSync:)``
 ///   drains it and then uploads the connection's pending local sessions (``LocalSessionUploader``),
-///   at the session's start and on each reconnect, online. ``flush()`` reports and drains for the
+///   at the session's start and on each reconnect, online: the session's, and the network path's,
+///   which the scope follows too, so uploads a failed sync left are retried even when the account
+///   and its client stay the same. ``flush()`` reports and drains for the
 ///   lifecycle's bounded flush, on background and before sign-out or a switch. A `/sync` the
 ///   server answers with 404 for the loaded session replaces that session at the same position
 ///   (``PlaybackCoordinator/replaceGoneSession(_:)``). Switch cleanup keeps the services usable
@@ -103,9 +105,10 @@ public final class PlaybackScope {
         /// `{ SleepTimerAttachment(coordinator: $0, settings: settings) }` with the settings every
         /// scene shares. `nil` leaves the scope without one.
         public var makeSleepTimer: (@MainActor (PlaybackCoordinator) -> SleepTimerAttachment)?
-        /// The network path recovery waits on, and the syncer drains on when it comes back online;
-        /// the app sets `SystemNetworkPathSource()`. `nil` treats it as always satisfied, and leaves
-        /// reconnect draining to ``PlaybackScope/syncWithServer(isFirstSync:)``.
+        /// The network path recovery waits on, and the syncer drains on when it comes back online,
+        /// as the scope runs ``PlaybackScope/syncWithServer(isFirstSync:)`` then; the app sets
+        /// `SystemNetworkPathSource()`. `nil` treats it as always satisfied, and leaves reconnect
+        /// syncing to the session's reconnects.
         public var networkPaths: (any NetworkPathSource)?
         /// Records the scope's playback history (``ProgressSyncer``'s `history`); the app sets a
         /// `PlaybackHistoryRecorder` over its one history store. `nil` records none.
@@ -171,6 +174,13 @@ public final class PlaybackScope {
     private var pendingPrimaryClaim: Task<Void, Never>?
     /// The latest ``syncWithServer(isFirstSync:)``; each waits for the one before it.
     private var serverSync: Task<Void, Never>?
+    /// The `isFirstSync` of the server sync that waits to start; `nil` when none waits.
+    private var queuedServerSync: Bool?
+    /// Follows the network path, for ``syncWithServer(isFirstSync:)`` on reconnects, until
+    /// ``retire(reason:)``.
+    private(set) var pathTask: Task<Void, Never>?
+    /// Hears each path the scope handled, and whether it asked for a server sync (tests).
+    var pathHandled: (@MainActor (NetworkPath, Bool) -> Void)?
     /// The last update ``onProgress`` heard, to space out ticks.
     private var lastProgress: PlaybackProgressUpdate?
     /// The latest replacement of a session the server no longer has (tests wait for it).
@@ -219,17 +229,19 @@ public final class PlaybackScope {
             deviceIdentifiers: configuration.deviceIdentifiers)
         return PlaybackScope(
             coordinator: coordinator, syncer: syncer, services: services, nowPlaying: makeNowPlaying(coordinator),
-            queue: queue, episodes: episodes, sleepTimer: sleepTimer, uploader: uploader)
+            queue: queue, episodes: episodes, sleepTimer: sleepTimer, uploader: uploader,
+            paths: configuration.networkPaths)
     }
 
     /// Test seam: a scope over a coordinator and a syncer already attached to it, an advancer
     /// over `queue`, when one is given, attached to the coordinator, `sleepTimer`, detached
-    /// when the scope retires, and again when it's released, and `uploader`, sending through any
-    /// services.
+    /// when the scope retires, and again when it's released, `uploader`, sending through any
+    /// services, and `paths`, followed for reconnects.
     init(
         coordinator: PlaybackCoordinator, syncer: ProgressSyncer, services: AccountPlaybackServices?,
         nowPlaying: any NowPlayingHandle, queue: PlaybackQueue? = nil, episodes: (any PodcastEpisodeSource)? = nil,
-        sleepTimer: SleepTimerAttachment? = nil, uploader: LocalSessionUploader? = nil
+        sleepTimer: SleepTimerAttachment? = nil, uploader: LocalSessionUploader? = nil,
+        paths: (any NetworkPathSource)? = nil
     ) {
         self.coordinator = coordinator
         self.syncer = syncer
@@ -244,6 +256,7 @@ public final class PlaybackScope {
             Task { @MainActor [weak self] in self?.sessionGone(sessionID) }
         }
         if let sleepTimer { onRelease { sleepTimer.detach() } }
+        if let paths { watch(paths.paths()) }
     }
 
     private func handle(_ event: PlaybackCoordinatorEvent) {
@@ -379,19 +392,52 @@ public final class PlaybackScope {
     /// Drains the syncer's pending progress, then uploads the connection's pending local sessions
     /// (``LocalSessionUploader``), in a task the scope owns. Call it while the account is online:
     /// at the session's start with `isFirstSync` (the first sync after login, which also deletes
-    /// acknowledged active sessions, ADR 0003), and after each reconnect. A call while one runs
-    /// goes after it. Nothing once retired, and retirement stops one under way: it starts no
-    /// request after.
+    /// acknowledged active sessions, ADR 0003), and after each reconnect. The scope calls it too
+    /// when the network path comes back online. A call while one runs waits for it, and calls
+    /// while one waits join that one, so a flapping path never stacks syncs. Nothing once
+    /// retired, and retirement stops one under way: it starts no request after.
     public func syncWithServer(isFirstSync: Bool) {
         guard !isRetired else { return }
+        if let queued = queuedServerSync {
+            queuedServerSync = queued || isFirstSync
+            return
+        }
+        queuedServerSync = isFirstSync
         let previous = serverSync
         let (syncer, uploader) = (syncer, uploader)
         serverSync = Task { [weak self] in
             await previous?.value
-            guard self?.isRetired == false, !Task.isCancelled else { return }
+            guard let isFirstSync = self?.startQueuedServerSync() else { return }
             await syncer.drainPendingProgress()
             guard self?.isRetired == false, !Task.isCancelled, let uploader else { return }
             await uploader.sync(isFirstSync: isFirstSync)
+        }
+    }
+
+    /// Starts the server sync that waited: its `isFirstSync`, or `nil` once retired or cancelled.
+    private func startQueuedServerSync() -> Bool? {
+        let isFirstSync = queuedServerSync ?? false
+        queuedServerSync = nil
+        guard !isRetired, !Task.isCancelled else { return nil }
+        return isFirstSync
+    }
+
+    /// Runs ``syncWithServer(isFirstSync:)`` on each offline-to-online transition, by the
+    /// syncer's rule: not on repeated or initial online paths, but on an online path whose
+    /// `onlineEpoch` grew (the offline one between was dropped). The syncer drains on the same
+    /// transition by itself; this also retries the pending uploads, which the session's
+    /// reconnects miss when the account and its client stay the same.
+    private func watch(_ paths: AsyncStream<NetworkPath>) {
+        pathTask = Task { [weak self] in
+            var previous: NetworkPath?
+            for await path in paths {
+                guard let self, !self.isRetired else { return }
+                let reconnected =
+                    previous.map { path.isOnline && (!$0.isOnline || path.onlineEpoch != $0.onlineEpoch) } ?? false
+                previous = path
+                if reconnected { self.syncWithServer(isFirstSync: false) }
+                self.pathHandled?(path, reconnected)
+            }
         }
     }
 
@@ -452,14 +498,16 @@ public final class PlaybackScope {
     /// Cancels the sleep timer and stops the coordinator for good, synchronously: call it before
     /// the teardown first suspends. It captures the final position; expiry, sign-out and removal
     /// also drop the client, so nothing reaches the server after. It cuts off ``onProgress`` first,
-    /// so the next account's library never hears this one's playback, and stops the server sync
-    /// and the uploader. Pass an account-ending reason, never `.user`.
+    /// so the next account's library never hears this one's playback, and stops the server sync,
+    /// the uploader and following the network path. Pass an account-ending reason, never `.user`.
     public func retire(reason: PlaybackStopReason) {
         assert(reason != .user, "A scope retires only for an account-ending reason")
         revokePrimaryClaim()
         // Cut off before the stop: the next account's library must not hear its close.
         onProgress = nil
         serverSync?.cancel()
+        pathTask?.cancel()
+        pathTask = nil
         services?.setSessionGoneHandler(nil)
         if let uploader { Task { await uploader.cancel() } }
         // Detached before the stop, so nothing it triggers can advance or change the queue, and
