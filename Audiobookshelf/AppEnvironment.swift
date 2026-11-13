@@ -145,7 +145,8 @@ final class AppEnvironment {
 
         // Images (#182).
         let images = ImageServices(
-            accounts: accounts, sweepsRemovedConnections: dataStack?.resolvedLocation == .appGroup, covers: covers)
+            accounts: accounts, sweepsRemovedConnections: dataStack?.resolvedLocation == .appGroup, covers: covers,
+            downloadedCovers: downloads?.covers)
         lifecycle.register(images.participant, stage: .connect)
         self.images = images
 

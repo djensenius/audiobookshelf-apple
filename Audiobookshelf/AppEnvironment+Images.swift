@@ -31,6 +31,8 @@ final class ImageServices {
     /// Whether the launch maintenance deletes the covers of connections the store no longer
     /// saves; see ``init(accounts:sweepsRemovedConnections:trim:notifications:)``.
     let sweepsRemovedConnections: Bool
+    /// What the pipeline reads downloaded items' covers from, if there is a download stack.
+    let downloadedCovers: (any DownloadedCoverLookup)?
     /// The running disk maintenance, so another isn't started meanwhile.
     private var maintenance: Task<Void, Never>?
     #if os(iOS)
@@ -56,10 +58,13 @@ final class ImageServices {
     /// - Parameter notifications: Where memory warnings arrive on iOS; tests pass their own, so
     ///   one test's warning doesn't reach another's services.
     /// - Parameter covers: Where covers are fetched and cached; ``CoverSource/app`` by default.
+    /// - Parameter downloadedCovers: The downloaded items' cover files (``AppDownloads/covers``),
+    ///   which load with no network; `nil` without a download stack.
     init(
         accounts: AccountManager?,
         sweepsRemovedConnections: Bool = false,
         covers: CoverSource = .app,
+        downloadedCovers: (any DownloadedCoverLookup)? = nil,
         trim: (@Sendable (_ fraction: Double) async -> Void)? = nil,
         notifications: NotificationCenter = .default
     ) {
@@ -69,12 +74,11 @@ final class ImageServices {
             directory: covers.directory ?? CoverFileStore.defaultDirectory(), limit: limits.diskBytes)
         self.fileStore = fileStore
         self.sweepsRemovedConnections = sweepsRemovedConnections
+        self.downloadedCovers = downloadedCovers
         let pipeline = ImagePipeline(
             limits: limits,
             fileStore: fileStore,
-            // TODO(#143): pass the downloads' `DownloadedCoverLookup`, so downloaded items' covers
-            // load from their files.
-            downloadedCovers: nil, sessionConfiguration: covers.sessionConfiguration,
+            downloadedCovers: downloadedCovers, sessionConfiguration: covers.sessionConfiguration,
             isOnline: covers.isOnline ?? { online.isOnline })
         self.pipeline = pipeline
         participant = ImageParticipant(sink: pipeline)
