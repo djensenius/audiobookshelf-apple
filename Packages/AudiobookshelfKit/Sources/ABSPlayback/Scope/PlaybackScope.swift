@@ -110,6 +110,9 @@ public final class PlaybackScope {
         /// `SystemNetworkPathSource()`. `nil` treats it as always satisfied, and leaves reconnect
         /// syncing to the session's reconnects.
         public var networkPaths: (any NetworkPathSource)?
+        /// The per-media exclusion shared with the progress actions (``MediaLeases``), one for
+        /// every scope, like ``writer``; `nil` holds nothing.
+        public var mediaLeases: MediaLeases?
         /// Records the scope's playback history (``ProgressSyncer``'s `history`); the app sets a
         /// `PlaybackHistoryRecorder` over its one history store. `nil` records none.
         public var history: (any PlaybackHistoryRecording)?
@@ -219,7 +222,8 @@ public final class PlaybackScope {
             engine: configuration.engine, sessions: services, progressStore: configuration.writer,
             settings: configuration.settings, policy: configuration.policy,
             lastPlayedStore: configuration.lastPlayed(configuration.connectionID),
-            backgroundActivity: configuration.backgroundActivity, networkPaths: configuration.networkPaths)
+            backgroundActivity: configuration.backgroundActivity, networkPaths: configuration.networkPaths,
+            mediaLeases: configuration.mediaLeases)
         let syncer = ProgressSyncer(
             source: coordinator, service: services, store: configuration.writer,
             tickInterval: configuration.tickInterval, paths: configuration.networkPaths, history: configuration.history)

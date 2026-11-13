@@ -1,5 +1,7 @@
 import ABSAPI
 import ABSCore
+import ABSData
+import ABSPlayback
 import Foundation
 import Testing
 
@@ -95,7 +97,8 @@ private struct WritingClient: LibraryService, ProgressWriting {
     func deleteProgress(id: String) async throws { writes.value.append("\(name):delete:\(id)") }
 }
 
-/// A ``WritingClient`` whose writes wait for the test to reply before they're recorded.
+/// A ``WritingClient`` whose writes and deletions wait for the test to reply before they're
+/// recorded; a deletion's call is `delete:id`.
 private struct GatedWritingClient: LibraryService, ProgressWriting {
     let gate: GatedCalls<String, Void>
     let client: WritingClient
@@ -110,8 +113,13 @@ private struct GatedWritingClient: LibraryService, ProgressWriting {
         try await gate.call(itemID)
         try await client.writeProgress(itemID: itemID, episodeID: episodeID, update: update)
     }
-    func progressID(itemID: String, episodeID: String?) async throws -> String? { nil }
-    func deleteProgress(id: String) async throws {}
+    func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        try await client.progressID(itemID: itemID, episodeID: episodeID)
+    }
+    func deleteProgress(id: String) async throws {
+        try await gate.call("delete:\(id)")
+        try await client.deleteProgress(id: id)
+    }
 }
 
 /// `task`'s result, or `nil` when it hasn't finished within `timeout`. Doesn't wait for a task
@@ -343,6 +351,49 @@ private let forwardings: [StoreServiceForwarding] = [
         }
     }
 
+    /// The shared actions are built with the account's local sync, and ask whether that account's
+    /// item is in the player.
+    @Test func sharedItemActionsUseTheAccountsHooks() async throws {
+        try await withLibrarySettings { settings in
+            let syncs = Locked<[UUID]>([])
+            let asked = Locked<[String]>([])
+            let leases = MediaLeases()
+            let store = LibraryStore(
+                settings: settings,
+                itemActionLocalSync: { key in
+                    syncs.value.append(key.connectionID)
+                    return NoLocalSync()
+                },
+                itemInPlayer: { key, target in
+                    asked.value.append("\(key.userID):\(target.libraryItemID)")
+                    return target.libraryItemID == "playing"
+                },
+                mediaLeases: leases)
+            let writes = Locked<[String]>([])
+            await store.connect(client: WritingClient(name: "a", writes: writes), connectionKey: serverA)
+            let shared = try #require(store.itemActions(for: serverA))
+            #expect(shared.localSync is NoLocalSync)
+            #expect(syncs.value == [serverA.connectionID])
+
+            await #expect(throws: ItemActionError.itemInPlayer) {
+                try await shared.markFinished(ItemActionTarget(libraryItemID: "playing"))
+            }
+            try await shared.markFinished(ItemActionTarget(libraryItemID: "li"))
+            #expect(asked.value == ["\(serverA.userID):playing", "\(serverA.userID):li"])
+            #expect(writes.value == ["a:li"])
+
+            // The account's media in the shared leases: a closing session holds its action.
+            let closing = leases.acquire(
+                MediaKey(serverConnectionID: serverA.connectionID, libraryItemId: "li"), for: .closingSession)
+            let action = Task { try await shared.markFinished(ItemActionTarget(libraryItemID: "li")) }
+            for _ in 0..<50 { await Task.yield() }
+            #expect(writes.value == ["a:li"])
+            closing.release()
+            try await action.value
+            #expect(writes.value == ["a:li", "a:li"])
+        }
+    }
+
     /// A failed switch clears the store and restarts the same account's session: the windows'
     /// actions then act through a fresh instance, not the dead session's stale token.
     @Test func aRestartedSessionGetsFreshItemActions() async throws {
@@ -476,4 +527,78 @@ private let forwardings: [StoreServiceForwarding] = [
             #expect(writes.value == ["b:x", "a1:x", "a2:x"])
         }
     }
+}
+
+extension LibraryStoreServicesTests {
+    /// `discardNotFound`: the server answers the DELETE with 404, as the progress is already gone.
+    enum AcceptedAction: String, CaseIterable { case discard, discardNotFound, finished, notFinished }
+
+    /// The server accepted an action while the account switched away: the action still updates
+    /// the account's local row, so its dirty position can't recreate discarded progress or undo
+    /// the change once the account is back, but leaves the ended session's cache alone.
+    @Test(arguments: AcceptedAction.allCases)
+    func aWriteAcceptedDuringASwitchStillSyncsLocally(action: AcceptedAction) async throws {
+        try await withLibrarySettings { settings in
+            let local = LocalProgressStore(modelContainer: try DataStack(location: .inMemory).container)
+            let store = LibraryStore(
+                settings: settings,
+                itemActionLocalSync: { LocalProgressItemActionSync(store: local, connectionID: $0.connectionID) })
+            let key = MediaKey(serverConnectionID: serverA.connectionID, libraryItemId: "li")
+            let audio = ProgressEdit.Audio(currentTime: 30, duration: 60, progress: 0.5)
+            try await local.recordEdit(ProgressEdit(audio: audio, isFinished: action == .notFinished), for: key)
+            let writes = Locked<[String]>([])
+            let gate = GatedCalls<String, Void>()
+            var calls = gate.calls.makeAsyncIterator()
+            let slow = GatedWritingClient(gate: gate, client: WritingClient(name: "a", writes: writes))
+            await store.connect(client: slow, connectionKey: serverA)
+            store.progress.apply(
+                MediaProgress(
+                    id: "progress-li", libraryItemId: "li", duration: 60, progress: 0.5, currentTime: 30,
+                    isFinished: action == .notFinished, lastUpdate: 1_000))
+            let window = try #require(store.sessionItemActions())
+            let target = ItemActionTarget(libraryItemID: "li", duration: 60)
+            let request = Task {
+                switch action {
+                case .discard, .discardNotFound: try await window.discardProgress(target)
+                case .finished: try await window.markFinished(target)
+                case .notFinished: try await window.markNotFinished(target)
+                }
+            }
+            let held = try #require(await calls.next())
+
+            // Switched to B and back to A while the request is held; then the server accepts it.
+            store.clear()
+            await store.connect(client: WritingClient(name: "b", writes: writes), connectionKey: serverB)
+            store.clear()
+            await store.connect(client: WritingClient(name: "a2", writes: writes), connectionKey: serverA)
+            if action == .discardNotFound {
+                held.reply.resume(throwing: APIError.notFound)
+            } else {
+                held.reply.resume()
+            }
+            await #expect(throws: CancellationError.self) { try await request.value }
+            let expectedWrites: [String] =
+                switch action {
+                case .discard: ["a:delete:progress-li"]
+                case .discardNotFound: []
+                case .finished, .notFinished: ["a:li"]
+                }
+            #expect(writes.value == expectedWrites)
+            #expect(store.progress.progress(libraryItemID: "li") == nil)
+
+            let row = try await local.progress(for: key)
+            switch action {
+            case .discard, .discardNotFound: #expect(row == nil)
+            case .finished: #expect(row?.isFinished == true)
+            case .notFinished: #expect(row?.isFinished == false && row?.currentTime == 0)
+            }
+        }
+    }
+}
+
+/// A local sync that does nothing.
+private struct NoLocalSync: ItemActionLocalSync {
+    func didMarkFinished(_ target: ItemActionTarget) async throws {}
+    func didMarkNotFinished(_ target: ItemActionTarget) async throws {}
+    func didDiscard(_ target: ItemActionTarget) async throws {}
 }

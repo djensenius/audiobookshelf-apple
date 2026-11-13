@@ -190,7 +190,7 @@ struct FixtureServerTests {
         let configuration = AppPlayback.configuration(
             for: request, settings: environment.settings,
             policy: NetworkPolicy(monitor: NetworkMonitor(), settings: environment.settings),
-            engine: AudioEngine(audioSession: nil))
+            engine: AudioEngine(audioSession: nil), mediaLeases: nil)
         let hasOverride = configuration.trackURLOverride != nil
         #expect(!hasOverride)
     }

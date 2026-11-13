@@ -74,10 +74,15 @@ enum ItemCardActions {
             return nil
         } catch is CancellationError {
             return nil
+        } catch ItemActionError.itemInPlayer {
+            return itemInPlayerMessageKey
         } catch {
             return failureMessageKey(for: kind)
         }
     }
+
+    /// The key of the message shown when a progress action is refused for the item in the player.
+    static let itemInPlayerMessageKey = "MessageItemActionItemInPlayer"
 
     /// The key of the message shown when an action on an item fails.
     static func failureMessageKey(for kind: ItemActionKind) -> String? {

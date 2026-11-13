@@ -1,5 +1,7 @@
 import ABSAPI
 import ABSCore
+import ABSData
+import ABSPlayback
 import Foundation
 import Observation
 
@@ -71,13 +73,36 @@ public final class LibraryStore {
     /// Each account's latest shared item actions; see ``itemActions(for:)``. Kept after the
     /// account's session ends, so its next session continues its pending queue.
     @ObservationIgnored private var sharedItemActions: [LibraryConnectionKey: ProgressItemActions] = [:]
+    /// The local sync of each account's shared item actions; see ``init(settings:itemActionLocalSync:itemInPlayer:mediaLeases:)``.
+    @ObservationIgnored private let itemActionLocalSync: @MainActor (LibraryConnectionKey) -> (any ItemActionLocalSync)?
+    /// Whether an account's item or episode is in the player; see ``init(settings:itemActionLocalSync:itemInPlayer:mediaLeases:)``.
+    @ObservationIgnored private let itemInPlayer: @MainActor (LibraryConnectionKey, ItemActionTarget) -> Bool
+    /// Shared with playback; see ``init(settings:itemActionLocalSync:itemInPlayer:mediaLeases:)``.
+    @ObservationIgnored private let mediaLeases: MediaLeases?
     /// Told of each view preferences save (``observeViewPreferences(connectionKey:owner:_:)``).
     @ObservationIgnored private var viewPreferencesObservers: [ViewPreferencesObserver] = []
     /// Told of each socket change (``observeLibraryChanges(connectionKey:owner:_:)``).
     @ObservationIgnored private var libraryChangeObservers: [LibraryChangeObserver] = []
 
-    public init(settings: AppSettings) {
+    /// - Parameters:
+    ///   - itemActionLocalSync: The ``ItemActionLocalSync`` an account's shared
+    ///     ``itemActions(for:)`` update the local playback database with; `nil` (the default) for
+    ///     none.
+    ///   - itemInPlayer: Whether the account's item or episode is in the player, so its progress
+    ///     actions are refused (``ProgressItemActions``); the default says none is.
+    ///   - mediaLeases: The playback coordinators' ``MediaLeases``: the progress actions wait for a
+    ///     closing session of their media to settle and hold the media against a start until
+    ///     they're done; `nil` (the default) for none.
+    public init(
+        settings: AppSettings,
+        itemActionLocalSync: @escaping @MainActor (LibraryConnectionKey) -> (any ItemActionLocalSync)? = { _ in nil },
+        itemInPlayer: @escaping @MainActor (LibraryConnectionKey, ItemActionTarget) -> Bool = { _, _ in false },
+        mediaLeases: MediaLeases? = nil
+    ) {
         self.settings = settings
+        self.mediaLeases = mediaLeases
+        self.itemActionLocalSync = itemActionLocalSync
+        self.itemInPlayer = itemInPlayer
     }
 
     // MARK: Lifecycle
@@ -327,11 +352,21 @@ public final class LibraryStore {
     ///
     /// Its per-item queue keeps actions on the same item in order only within one instance, so
     /// screens and windows share the session's ``itemActions(for:)`` instead of building their own.
+    /// They refuse the progress actions on the account's item in the player (`itemInPlayer`), and
+    /// hold its media in `mediaLeases` while they run.
     public func makeItemActions(localSync: (any ItemActionLocalSync)? = nil) -> ProgressItemActions? {
         guard let connectionKey else { return nil }
+        let itemInPlayer = itemInPlayer
+        let mediaLeases = mediaLeases
         return ProgressItemActions(
             cache: progress, writer: LibraryStoreServices(store: self, connectionKey: connectionKey),
-            localSync: localSync)
+            localSync: localSync, isInPlayer: { itemInPlayer(connectionKey, $0) },
+            lease: { target in
+                let key = MediaKey(
+                    serverConnectionID: connectionKey.connectionID, libraryItemId: target.libraryItemID,
+                    episodeId: target.episodeID)
+                return await mediaLeases?.acquire(key, for: .progressAction, after: .closingSession)
+            })
     }
 
     /// The one ``ProgressItemActions`` of the account session `connectionKey`, shared by every
@@ -339,12 +374,13 @@ public final class LibraryStore {
     /// once its progress session ended (a ``clear()``, so also a switch or a failed switch's
     /// restart), so a restarted session never acts through the previous one's stale token; an
     /// ordinary reconnect keeps it. A replacement continues the per-item queue of the same
-    /// account's previous actions only: another account's progress is independent.
+    /// account's previous actions only: another account's progress is independent. Each is built
+    /// with the account's `itemActionLocalSync`.
     public func itemActions(for connectionKey: LibraryConnectionKey) -> ProgressItemActions? {
         guard self.connectionKey == connectionKey else { return nil }
         let previous = sharedItemActions[connectionKey]
         if let previous, previous.isCurrentSession { return previous }
-        let actions = makeItemActions()
+        let actions = makeItemActions(localSync: itemActionLocalSync(connectionKey))
         // A write of the account's ended session may still be in flight: the new actions run after it.
         if let previous { actions?.continueQueue(of: previous) }
         sharedItemActions[connectionKey] = actions
@@ -557,8 +593,10 @@ public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchSer
         self.connectionKey = connectionKey
     }
 
+    /// - Parameter keepsSuccess: Returns the response even after a clear or account switch: the
+    ///   request changed the server, which the caller must still know (#368).
     private func send<Service: Sendable, Response: Sendable>(
-        _ service: Service.Type, _ request: (Service) async throws -> Response
+        _ service: Service.Type, keepsSuccess: Bool = false, _ request: (Service) async throws -> Response
     ) async throws -> Response {
         guard let store else { throw CancellationError() }
         let (client, generation) = try await store.client(for: connectionKey, as: service)
@@ -571,7 +609,7 @@ public struct LibraryStoreServices: LibraryService, ItemDetailService, SearchSer
             try await checkServing(generation: generation)
             throw error
         }
-        try await checkServing(generation: generation)
+        if !keepsSuccess { try await checkServing(generation: generation) }
         return response
     }
 
@@ -697,18 +735,25 @@ extension LibraryStoreServices: PlaylistEditingService {
 // MARK: ProgressWriting
 
 /// Lets ``LibraryStore/makeItemActions(localSync:)``'s actions write through the store's current
-/// client, so they follow a reconnect and stop at a clear or an account switch.
+/// client, so they follow a reconnect and stop at a clear or an account switch. A write the server
+/// accepted still succeeds after a clear or switch, so the actions' local sync runs for it (#368).
 extension LibraryStoreServices: ProgressWriting {
     public func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
-        try await send((any ProgressWriting).self) {
+        try await send((any ProgressWriting).self, keepsSuccess: true) {
             try await $0.writeProgress(itemID: itemID, episodeID: episodeID, update: update)
         }
     }
     public func progressID(itemID: String, episodeID: String?) async throws -> String? {
         try await send((any ProgressWriting).self) { try await $0.progressID(itemID: itemID, episodeID: episodeID) }
     }
+    /// A 404 means the progress is already gone, so it succeeds here, before a clear or switch
+    /// would turn the failure into cancellation and skip the local sync.
     public func deleteProgress(id: String) async throws {
-        try await send((any ProgressWriting).self) { try await $0.deleteProgress(id: id) }
+        try await send((any ProgressWriting).self, keepsSuccess: true) {
+            do {
+                try await $0.deleteProgress(id: id)
+            } catch APIError.notFound {}
+        }
     }
 }
 

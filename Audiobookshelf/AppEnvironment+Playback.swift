@@ -21,6 +21,8 @@ struct AppPlayback {
     let writer: LocalProgressStore?
     /// Registered with the lifecycle at ``SessionStage/progressSource``; `nil` without a store.
     let participant: PlaybackSessionParticipant?
+    /// Shared by every scope's coordinator and the item actions (#368), like ``writer``.
+    let mediaLeases: MediaLeases
     /// Records every scope's playback history; `nil` without a store.
     let history: (any PlaybackHistoryRecording)?
 
@@ -35,15 +37,20 @@ struct AppPlayback {
     ///   - library: Hears each session's playback progress, for its progress cache (#184).
     ///   - history: Records every scope's playback history, over the data environment's one
     ///     history store (#184).
+    ///   - current: The player's binding, which the library's item actions (#368) also read; made
+    ///     before the library, which playback's progress reaches.
+    ///   - mediaLeases: Shared by every scope's coordinator and the library's item actions (#368).
     static func make(
         writer: LocalProgressStore?, accounts: AccountManager?, lifecycle: SessionLifecycle, settings: AppSettings,
         deviceIdentifiers: any DeviceIdentifying, library: LibraryParticipant? = nil,
-        history: (any PlaybackHistoryRecording)? = nil
+        history: (any PlaybackHistoryRecording)? = nil, current: CurrentPlayback = CurrentPlayback(),
+        mediaLeases: MediaLeases = MediaLeases()
     ) -> AppPlayback {
-        let current = CurrentPlayback()
         let player = PlayerViewModel(playback: current, settings: settings)
         guard let writer, let accounts else {
-            return AppPlayback(current: current, player: player, writer: nil, participant: nil, history: nil)
+            return AppPlayback(
+                current: current, player: player, writer: nil, participant: nil, mediaLeases: mediaLeases,
+                history: nil)
         }
         let monitor = NetworkMonitor()
         monitor.start()
@@ -66,10 +73,14 @@ struct AppPlayback {
             progressSink: { [weak library] update, context in
                 library?.applyPlaybackProgress(update, sessionID: context.sessionID)
             },
-            makeScope: { Self.makeScope(for: $0, settings: settings, policy: policy, history: history) })
+            makeScope: {
+                Self.makeScope(for: $0, settings: settings, policy: policy, mediaLeases: mediaLeases, history: history)
+            })
         lifecycle.register(participant, stage: .progressSource)
         removesQueues(of: accounts, from: queueStore(settings: settings))
-        return AppPlayback(current: current, player: player, writer: writer, participant: participant, history: history)
+        return AppPlayback(
+            current: current, player: player, writer: writer, participant: participant, mediaLeases: mediaLeases,
+            history: history)
     }
 
     /// Hands the playback intents (widgets, controls, Shortcuts, Siri) to ``current``, so they
@@ -92,6 +103,7 @@ struct AppPlayback {
     /// and queue are kept in the settings' defaults, under keys of their own.
     static func makeScope(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
+        mediaLeases: MediaLeases?,
         history: (any PlaybackHistoryRecording)?
     ) -> PlaybackScope {
         #if os(iOS)
@@ -106,7 +118,7 @@ struct AppPlayback {
         #endif
         return makeScope(
             for: request, settings: settings, policy: policy, engine: engine, interruptions: interruptions,
-            history: history)
+            mediaLeases: mediaLeases, history: history)
     }
 
     /// The scope over `engine`. An interruption also cancels a play the coordinator holds outside
@@ -115,11 +127,12 @@ struct AppPlayback {
     /// the scope owns it.
     static func makeScope(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
-        engine: any AudioEngineProtocol, interruptions: AudioInterruptionHandler?,
+        engine: any AudioEngineProtocol, interruptions: AudioInterruptionHandler?, mediaLeases: MediaLeases?,
         history: (any PlaybackHistoryRecording)? = nil
     ) -> PlaybackScope {
         let scopeConfiguration = Self.configuration(
-            for: request, settings: settings, policy: policy, engine: engine, history: history)
+            for: request, settings: settings, policy: policy, engine: engine, mediaLeases: mediaLeases,
+            history: history)
         let scope = PlaybackScope.make(scopeConfiguration) {
             coordinator in
             // No artwork or App Intents entities yet.
@@ -132,10 +145,13 @@ struct AppPlayback {
     }
 
     /// The scope's configuration. Recovery waits on the system's network path; without one it
-    /// would treat the device as always online. The syncer records `history`.
+    /// would treat the device as always online. Its coordinator shares `mediaLeases` with the
+    /// item actions (`nil` holds nothing, so every caller passes it explicitly), and the syncer
+    /// records `history`.
     static func configuration(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
-        engine: any AudioEngineProtocol, history: (any PlaybackHistoryRecording)? = nil
+        engine: any AudioEngineProtocol, mediaLeases: MediaLeases?,
+        history: (any PlaybackHistoryRecording)? = nil
     ) -> PlaybackScope.Configuration {
         var configuration = PlaybackScope.Configuration(
             connectionID: request.connectionID, client: request.client, features: request.features,
@@ -144,6 +160,7 @@ struct AppPlayback {
             lastPlayed: { PlaybackScope.lastPlayedStore(for: $0, defaults: settings.defaults) },
             queueStore: queueStore(settings: settings))
         configuration.networkPaths = SystemNetworkPathSource()
+        configuration.mediaLeases = mediaLeases
         configuration.history = history
         configuration.trackURLOverride = fixtureTrackURL
         return configuration

@@ -14,7 +14,8 @@ public struct PlaybackPositionToken: Sendable, Equatable {
 
 public enum PlaybackPositionCommitResult: Sendable, Equatable {
     case committed
-    /// A strictly newer token already committed. This call made no write.
+    /// A strictly newer token already committed, or a progress action superseded the token
+    /// (``LocalProgressStore/supersedePlaybackPositions(for:)``). This call made no write.
     case supersededByCommittedPosition
 }
 
@@ -132,6 +133,8 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// One successful watermark per key, never pending reservations or a history of tokens.
     private var committedPlaybackPositions:
         [MediaKey: (sequence: UInt64, row: PersistentIdentifier, audio: ProgressSend.Audio)] = [:]
+    /// Per key, the last playback reservation a progress action superseded.
+    private var supersededPlaybackPositions: [MediaKey: UInt64] = [:]
     /// Writer-owned settlement survives syncer retirement. A failed save retains this precise
     /// outcome; a process reopen instead retains the conservative prepared evidence on disk.
     private var sessionAudioSends:
@@ -307,6 +310,9 @@ public enum SessionUploadResult: Sendable, Equatable {
     ) throws -> PlaybackPositionCommitResult {
         guard token.writer == playbackWriterID else { throw PlaybackPositionCommitError.wrongWriter }
         guard token.key == key else { throw PlaybackPositionCommitError.wrongKey }
+        if let superseded = supersededPlaybackPositions[key], token.sequence <= superseded {
+            return .supersededByCommittedPosition
+        }
         if let committed = committedPlaybackPositions[key] {
             if token.sequence < committed.sequence { return .supersededByCommittedPosition }
             if token.sequence == committed.sequence { throw PlaybackPositionCommitError.tokenAlreadyCommitted }
@@ -315,6 +321,16 @@ public enum SessionUploadResult: Sendable, Equatable {
             ProgressEdit(audio: audio), for: key, serverProgress: nil, localLibraryItemID: nil,
             now: now, playbackToken: token)
         return .committed
+    }
+
+    /// Supersedes every playback position reserved for `key` so far, for a progress action the
+    /// server accepted (#368): a save of one still pending, or retried after it failed, returns
+    /// ``PlaybackPositionCommitResult/supersededByCommittedPosition`` without writing, and none is
+    /// the latest committed position any more (``committedPlaybackEdit(_:for:)``). Positions
+    /// reserved afterwards commit as usual.
+    public func supersedePlaybackPositions(for key: MediaKey) {
+        supersededPlaybackPositions[key] = playbackSequence.withLock { $0 }
+        committedPlaybackPositions[key] = nil
     }
 
     /// Reserves an ebook edit's order synchronously, when the page is turned, not when its write
