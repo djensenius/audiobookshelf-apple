@@ -944,6 +944,78 @@ import Testing
         #expect(try harness.locations.connectionsWithSurvivorsToStop().isEmpty)
     }
 
+    /// The last part of a held connection's record completing doesn't finalise it either, which
+    /// would drop the completed part that leads to the resume data still there. Whether an
+    /// activation or a quiesce couldn't delete that data, a quiesce that later does finalises it.
+    @Test(arguments: [false, true])
+    func aHeldConnectionsRecordIsFinalisedOnlyOnceItsCleanupSucceeds(heldByQuiesce: Bool) async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let (completedID, partID) = (UUID(), UUID())
+        let record = try await harness.addRecord(parts: [completedID, partID], state: .paused)
+        _ = try await harness.store.completePart(partID: completedID, finalBytes: 11)
+        try harness.vault.seal(Data("resume".utf8), partID: completedID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: completedID).path(percentEncoded: false)
+        let folder = harness.vault.fileURL(partID: completedID).deletingLastPathComponent().path(percentEncoded: false)
+        let engine = harness.makeEngine()
+        if heldByQuiesce {
+            #expect(await engine.activate())
+        } else {
+            try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder) }
+        if heldByQuiesce {
+            #expect(await engine.quiesce(connectionID: harness.connectionID) == false)
+        } else {
+            #expect(await engine.activate())
+        }
+
+        try await engine.resume(recordID: record.id)
+        #expect(
+            await engine.next {
+                if case .partCompleted = $0 { true } else { false }
+            } != nil)
+        await engine.processPendingEvents()
+        #expect(try await harness.store.record(id: record.id)?.isComplete == true)
+        #expect(FileManager.default.fileExists(atPath: blob))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder)
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+        #expect(!FileManager.default.fileExists(atPath: blob))
+        #expect(try await harness.store.record(id: record.id) == nil)
+        let item = try await harness.localItems.item(serverConnectionID: harness.connectionID, libraryItemId: "li_1")
+        #expect(item?.files.map(\.size) == [11, 11])
+    }
+
+    /// A quiesce holds its connection's complete records from before it first suspends, so an
+    /// activation while it pauses doesn't finalise one before the quiesce has deleted the
+    /// resume data its parts lead to; the quiesce finalises it then.
+    @Test func aQuiesceHoldsItsConnectionsCompleteRecordsThroughAnActivation() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .downloading, partState: .completed)
+        try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("previous".utf8))
+        let blob = harness.vault.fileURL(partID: partID).path(percentEncoded: false)
+        let engine = harness.makeEngine()
+        let (entered, enteredContinuation) = AsyncStream.makeStream(of: Void.self)
+        let (release, releaseContinuation) = AsyncStream.makeStream(of: Void.self)
+        let quiescing = Task {
+            await engine.quiesce(connectionID: harness.connectionID) {
+                enteredContinuation.yield()
+                for await _ in release {}
+            }
+        }
+        for await _ in entered { break }
+
+        #expect(await engine.activate())
+        #expect(try await harness.store.record(id: record.id) != nil)
+
+        releaseContinuation.finish()
+        #expect(await quiescing.value)
+        #expect(!FileManager.default.fileExists(atPath: blob))
+        #expect(try await harness.store.record(id: record.id) == nil)
+    }
+
     /// Resume data that couldn't be deleted, because the downloads couldn't be read, leaves the
     /// quiesce unfinished, so it's tried again.
     @Test func quiesceThatCouldNotDeleteTheResumeDataReportsItDidNotFinish() async throws {

@@ -253,8 +253,9 @@ public actor DownloadEngine {
     /// cancelled its survivors and its resume data is deleted, so a relaunch before that still
     /// does both; each activation reads the markers again before it lists the session's tasks.
     private var survivorsToStop: Set<UUID> = []
-    /// Marked connections whose resume data an activation couldn't delete: their complete
-    /// records aren't finalised, so the parts that lead to the blobs stay for the next try.
+    /// Connections whose resume data isn't known to be deleted: being quiesced, or a quiesce or
+    /// activation couldn't delete it. ``finalise(_:)`` leaves their complete records, so the
+    /// parts that lead to the blobs stay for the next try.
     private var undiscardedSignOuts: Set<UUID> = []
     /// The identifiers of the tasks this engine created, so they aren't taken for survivors.
     private var createdTasks: Set<Int> = []
@@ -669,6 +670,9 @@ public actor DownloadEngine {
         // adopts one meanwhile, even one that begins while the records are being paused or
         // after this call's attachment failed.
         survivorsToStop.insert(connectionID)
+        // Its complete records are held from here until its resume data is deleted, here or by
+        // a later activation, so nothing finalises one meanwhile.
+        undiscardedSignOuts.insert(connectionID)
         do {
             try locations.markSurvivorsToStop(connectionID: connectionID)
         } catch {
@@ -712,8 +716,12 @@ public actor DownloadEngine {
         // The session's listing cancelled the survivors, or adopted them before this call, which
         // cancelled them above; the marker stays until the resume data is gone too.
         if discarded {
-            undiscardedSignOuts.remove(connectionID)
             clearSurvivorsToStop(connectionID)
+            // The last quiesce under way releases the hold and finalises the records it held.
+            if quiescingConnections.count(where: { $0 == connectionID }) == 1 {
+                undiscardedSignOuts.remove(connectionID)
+                await finaliseCompletedRecords()
+            }
         }
         return records != nil && discarded
     }
@@ -828,8 +836,9 @@ public actor DownloadEngine {
         for connectionID in marked where !quiescingConnections.contains(connectionID) {
             if await discardResumeData(connectionID: connectionID) { discarded.insert(connectionID) }
         }
-        // A hold an earlier activation left goes once its data is deleted, unless a quiesce began
-        // meanwhile: that one may seal more, and releases the hold once it has deleted it.
+        // A hold an earlier activation or quiesce left goes once its data is deleted, unless a
+        // quiesce began meanwhile: that one may seal more, and releases the hold once it has
+        // deleted it.
         undiscardedSignOuts.subtract(discarded.filter { !hasQuiesced(connectionID: $0, since: generation) })
         undiscardedSignOuts.formUnion(marked.subtracting(discarded).subtracting(quiescingConnections))
         await finaliseCompletedRecords()
@@ -1636,9 +1645,11 @@ public actor DownloadEngine {
 
     /// Makes a complete record a local item, then deletes it. A cover-only record whose local
     /// item is gone is deleted and reported discarded instead. A failure is logged; the next
-    /// activation repeats it.
+    /// activation repeats it. A held connection's record (``undiscardedSignOuts``) is left to
+    /// the quiesce or activation that releases the hold.
     private func finalise(_ record: DownloadRecordDTO) async {
-        guard finalising.insert(record.id).inserted else { return }
+        guard !undiscardedSignOuts.contains(record.key.serverConnectionID), finalising.insert(record.id).inserted
+        else { return }
         defer { finalising.remove(record.id) }
         do {
             let item = try await localItems.upsertFromDownload(record, now: now())
@@ -1659,8 +1670,7 @@ public actor DownloadEngine {
 
     private func finaliseCompletedRecords() async {
         do {
-            for record in try await store.completedRecords()
-            where !undiscardedSignOuts.contains(record.key.serverConnectionID) {
+            for record in try await store.completedRecords() {
                 await finalise(record)
             }
         } catch {
