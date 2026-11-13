@@ -10,11 +10,19 @@ public struct PodcastEpisodeListing: Sendable, Hashable {
     /// In the server's order.
     public var episodes: [PodcastEpisode]
     public var finishedEpisodeIDs: Set<String>
+    /// The episodes the server has finished, without local changes not synced yet: evidence that
+    /// a finish reached the server.
+    public var serverFinishedEpisodeIDs: Set<String>
 
-    public init(isSerial: Bool, episodes: [PodcastEpisode], finishedEpisodeIDs: Set<String>) {
+    /// - Parameter serverFinishedEpisodeIDs: `finishedEpisodeIDs` when `nil`.
+    public init(
+        isSerial: Bool, episodes: [PodcastEpisode], finishedEpisodeIDs: Set<String>,
+        serverFinishedEpisodeIDs: Set<String>? = nil
+    ) {
         self.isSerial = isSerial
         self.episodes = episodes
         self.finishedEpisodeIDs = finishedEpisodeIDs
+        self.serverFinishedEpisodeIDs = serverFinishedEpisodeIDs ?? finishedEpisodeIDs
     }
 
     /// The podcast `item`'s episodes, finished per the user's `progress`.
@@ -24,6 +32,7 @@ public struct PodcastEpisodeListing: Sendable, Hashable {
         episodes = podcast?.episodes ?? []
         finishedEpisodeIDs = Set(
             progress.filter { $0.libraryItemId == item.id && $0.isFinished }.compactMap(\.episodeId))
+        serverFinishedEpisodeIDs = finishedEpisodeIDs
     }
 
     /// The episodes in the legacy "next episode" order (`pages/item/_id/index.vue` `play()`): by

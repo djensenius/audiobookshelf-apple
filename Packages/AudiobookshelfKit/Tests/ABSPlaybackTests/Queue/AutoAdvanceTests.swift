@@ -167,6 +167,44 @@ struct AutoAdvanceTests {
         #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
     }
 
+    /// A refreshed listing, requested after the end, that has the episode finished on the server
+    /// confirms the finish without a cache change: a discard after it makes the episode eligible
+    /// again (#554).
+    @Test func listingConfirmedFinishLetsALaterResetCount() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
+
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"])
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
+    /// A listing finished only by a local unsynced flag is no confirmation: the episode stays
+    /// skipped after a reset.
+    @Test func listingFinishedOnlyLocallyConfirmsNothing() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinished: [])
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
+    }
+
     /// The server can show the finish while the episode is still loaded; a later reset counts.
     /// Ending it here again makes the finish unconfirmed again.
     @Test func finishConfirmedWhileLoadedCountsUntilItEndsAgain() async {

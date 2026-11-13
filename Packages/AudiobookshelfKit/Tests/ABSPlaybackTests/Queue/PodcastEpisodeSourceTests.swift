@@ -76,6 +76,7 @@ struct PodcastEpisodeSourceTests {
         let listing = try await source.listing(podcastItemID: "P", excluding: ["e3"])
 
         #expect(listing.finishedEpisodeIDs == ["e1"])
+        #expect(listing.serverFinishedEpisodeIDs == ["e2"])
         #expect(listing.nextUnfinished(after: "e3")?.id == "e2")
     }
 

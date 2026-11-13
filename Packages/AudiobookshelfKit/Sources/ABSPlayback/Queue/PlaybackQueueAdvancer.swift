@@ -34,8 +34,11 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     private var listing: (podcastItemID: String, listing: PodcastEpisodeListing)?
     /// Episodes that ended while attached, whose finish may not have reached the server yet.
     private var endedEpisodes: Set<MediaKey> = []
-    /// The `endedEpisodes` the server has since shown finished, so a reset from then on is real.
+    /// The `endedEpisodes` the server has since shown finished (a `.finished` change, or a listing
+    /// requested after the end), so a reset from then on is real.
     private var confirmedEndings: Set<MediaKey> = []
+    /// Bumped by every end, so a listing requested before one isn't evidence of its finish.
+    private var endings = 0
     /// When the last preparation finished, with or without a next item.
     private var preparedAt: TimeInterval = 0
     /// Near-end refreshes done since the load, a resume or a seek out of them.
@@ -196,6 +199,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         case .ended:
             if let current, current.episodeId != nil {
                 endedEpisodes.insert(current)
+                endings += 1
                 // This end's finish is unconfirmed again, even if an earlier one was.
                 confirmedEndings.remove(current)
             }
@@ -297,8 +301,18 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         } else {
             try Task.checkCancellation()
             let ended = endedEpisodes.filter { $0.libraryItemId == key.libraryItemId }.compactMap(\.episodeId)
+            let endings = endings
             listing = try await episodes.listing(
                 podcastItemID: key.libraryItemId, excluding: Set(ended).union([episodeID]))
+            // The server's finished flags, requested after these ends, confirm them; the local
+            // unsynced flags and this advancer's exclusions don't.
+            if self.endings == endings {
+                for id in ended where listing.serverFinishedEpisodeIDs.contains(id) {
+                    let ended = MediaKey(
+                        serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId, episodeId: id)
+                    if endedEpisodes.contains(ended) { confirmedEndings.insert(ended) }
+                }
+            }
             guard self.revision == revision else { return nil }
             self.listing = (key.libraryItemId, listing)
         }

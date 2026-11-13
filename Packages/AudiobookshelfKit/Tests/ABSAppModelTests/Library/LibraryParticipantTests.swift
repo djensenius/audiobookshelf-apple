@@ -461,6 +461,28 @@ private struct Harness {
         }
     }
 
+    /// Replaying a finished item: the finished flag playback keeps isn't the server confirming
+    /// this play's end, so its position reports as an update; the server's row is a finish (#554).
+    @Test func playbackProgressOnAFinishedRowIsNoConfirmedFinish() async throws {
+        try await withLibrarySettings { settings in
+            let harness = Harness(settings: settings)
+            await harness.participant.sessionDidStart(harness.context(client: nil, isOffline: true, sessionID: 7))
+            var finished = progress("a", at: 10)
+            finished.duration = 100
+            finished.isFinished = true
+            finished.lastUpdate = 1_000
+            harness.store.progress.apply(finished)
+            let kinds = Locked<[ProgressChangeKind]>([])
+            harness.store.progress.onChange = { _, _, kind in kinds.value.append(kind) }
+
+            #expect(harness.participant.applyPlaybackProgress(playback("a", at: 100), sessionID: 7))
+            finished.lastUpdate = 3_000
+            harness.store.progress.apply(finished)
+
+            #expect(kinds.value == [.updated, .finished])
+        }
+    }
+
     /// The negative controls: nothing from another session, nor after the end cleared the cache.
     @Test func playbackProgressIsDroppedForAnotherSessionOrAfterTheEnd() async throws {
         try await withLibrarySettings { settings in

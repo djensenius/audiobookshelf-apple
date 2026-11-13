@@ -156,7 +156,9 @@ public final class LibraryParticipant: SessionSeeding {
     /// progress follows the player between seeds; the playback participant's progress sink. Only
     /// for the running session: nothing after its end, which cleared the cache, or for an older
     /// session's playback. Keeps the cached row's other fields, `isFinished` among them; a cached
-    /// row newer than `update` wins (``ProgressCache/apply(_:)``). Returns whether it was stored.
+    /// row newer than `update` wins (``ProgressCache/apply(_:isLocalPlayback:)``). A kept finished
+    /// flag isn't the server confirming this play's end, so it reports as an update (#554).
+    /// Returns whether it was stored.
     @discardableResult
     public func applyPlaybackProgress(_ update: PlaybackProgressUpdate, sessionID: UInt64) -> Bool {
         guard self.sessionID == sessionID else { return false }
@@ -170,7 +172,7 @@ public final class LibraryParticipant: SessionSeeding {
         if update.duration > 0 { progress.duration = update.duration }
         if progress.duration > 0 { progress.progress = min(max(progress.currentTime / progress.duration, 0), 1) }
         progress.lastUpdate = Int((update.date.timeIntervalSince1970 * 1000).rounded())
-        return store.progress.apply(progress)
+        return store.progress.apply(progress, isLocalPlayback: true)
     }
 
     // MARK: Private
