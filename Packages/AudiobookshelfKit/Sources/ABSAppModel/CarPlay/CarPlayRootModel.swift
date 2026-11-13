@@ -18,23 +18,17 @@ public enum CarPlayRootContent: Sendable, Hashable {
     case tabs(continueListening: CarPlayList, playingRowID: String?)
 }
 
-/// What CarPlay asks about its own play that the streaming policy blocked on a metered network
-/// (``CarPlayRootModel/streamingPrompt``).
-public enum CarPlayStreamingPrompt: Sendable, Hashable {
-    /// The setting is "ask": Stream (``CarPlayRootModel/confirmStreaming()``) or Cancel.
-    case confirm
-    /// The setting is "never": why nothing plays, with OK alone.
-    case notAllowed
-}
-
 /// How a CarPlay play ended (``CarPlayRootModel/play(_:)``): only a started one shows Now Playing.
 public enum CarPlayPlayOutcome: Sendable, Hashable {
     /// The play started, or at least nothing reported a failure.
     case started
-    /// The streaming policy blocked it; ``CarPlayRootModel/streamingPrompt`` says what to ask.
+    /// The streaming policy blocked it; ``CarPlayRootModel/alert`` says what to ask.
     case blocked
-    /// It failed; the player reports why.
+    /// It failed; ``CarPlayRootModel/alert`` says why.
     case failed
+    /// It ended after the account's session changed (a sign-out, a switch) or after a later
+    /// CarPlay play: its result belongs to nothing shown, so it shows nothing.
+    case discarded
 }
 
 /// CarPlay's root (#79): which template to show for the session, the Continue tab's rows and
@@ -50,9 +44,9 @@ public enum CarPlayPlayOutcome: Sendable, Hashable {
 ///
 /// Plays go through the app's ``PlayItemAction`` for the signed-in account, the same path as a
 /// play from the app's screens. A play the streaming policy blocks on a metered network starts
-/// nothing, so CarPlay asks about it itself (``streamingPrompt``), as the phone's player does,
-/// since a CarPlay-only launch has no phone screen to ask on. Its play requests the application-primary Now Playing session
-/// once playing, and asks to become the system primary one only afterwards, best effort: on a
+/// nothing, so CarPlay asks about it itself (``alert``), as the phone's player does, since a
+/// CarPlay-only launch has no phone screen to ask on; a play that fails says why there too. Its
+/// play requests the application-primary Now Playing session once playing, and asks to become the system primary one only afterwards, best effort: on a
 /// CarPlay-only launch that request fails and is logged, and playback has already started
 /// (ADR 0006, Lifecycle).
 @MainActor
@@ -71,34 +65,42 @@ public final class CarPlayRootModel {
     @ObservationIgnored private let playItem: @MainActor (SessionIdentity) -> PlayItemAction?
     @ObservationIgnored private let playing: @MainActor () -> MediaKey?
     @ObservationIgnored private let playback: (any PlayerPlaybackControlling)?
+    @ObservationIgnored private let playbackSession: @MainActor () -> AnyObject?
+    /// Advanced by each play and confirmation, so only the latest one's result is used.
+    @ObservationIgnored private var operation = 0
     @ObservationIgnored private let limits: CarPlayLimits
     @ObservationIgnored private let labels: CarPlayLabels
     @ObservationIgnored private let imageBucket: ImageWidthBucket
     private var home: HomeModel?
     private var homeIdentity: SessionIdentity?
-    /// The block of CarPlay's last play, while it may still be the player's error.
-    private var blockedPlay: PlaybackCoordinatorError?
+    /// The failure of CarPlay's last play, while it may still be shown (``alert``).
+    private var failedPlay: FailedPlay?
 
     /// - Parameters:
     ///   - gate: The session's gate (`SessionLifecycle.gate`).
     ///   - store: The shared library store; `nil` shows the signed-out content once signed in.
     ///   - playItem: The play action while `identity`'s account is the active one, else `nil`.
     ///   - playing: The item in the player, if any.
-    ///   - playback: The app's playback, whose error says whether the streaming policy blocked a
-    ///     play and which streams or declines it (``confirmStreaming()``, ``declineStreaming()``).
+    ///   - playback: The app's playback, whose error says whether a play failed or the streaming
+    ///     policy blocked it, and which streams or declines it (``confirmStreaming()``,
+    ///     ``dismissAlert()``).
+    ///   - playbackSession: The account session `playback` is bound to, `nil` while unbound: a play
+    ///     whose session changed before it returned is discarded.
     ///   - limits: The car's list limits (``CarPlayLimits``).
     ///   - imageBucket: The width bucket of row images (``CarPlayContentBuilder/imageBucket``).
     public init(
         gate: @escaping @MainActor () -> AuthGate, store: LibraryStore?,
         playItem: @escaping @MainActor (SessionIdentity) -> PlayItemAction?,
         playing: @escaping @MainActor () -> MediaKey?, playback: (any PlayerPlaybackControlling)? = nil,
-        limits: CarPlayLimits = .standard, labels: CarPlayLabels, imageBucket: ImageWidthBucket = .small
+        playbackSession: @escaping @MainActor () -> AnyObject? = { nil }, limits: CarPlayLimits = .standard,
+        labels: CarPlayLabels, imageBucket: ImageWidthBucket = .small
     ) {
         self.gate = gate
         self.store = store
         self.playItem = playItem
         self.playing = playing
         self.playback = playback
+        self.playbackSession = playbackSession
         self.limits = limits
         self.labels = labels
         self.imageBucket = imageBucket
@@ -182,8 +184,8 @@ public final class CarPlayRootModel {
     /// Starts playing `row` through the account's play action, for a tapped row. Returns the
     /// play, whose outcome says whether to show Now Playing, or `nil` when nothing plays: the
     /// tab doesn't show the row (by its ID, action and image, whatever its progress), the row
-    /// doesn't play or is disabled, the tabs aren't shown, or the account can't play. Failures
-    /// are logged; the player shows them.
+    /// doesn't play or is disabled, the tabs aren't shown, or the account can't play. A failure
+    /// or a streaming block becomes the ``alert``.
     @discardableResult
     public func play(_ row: CarPlayRow) -> Task<CarPlayPlayOutcome, Never>? {
         guard case .play(let itemID, let episodeID) = row.action, row.isEnabled,
@@ -193,58 +195,93 @@ public final class CarPlayRootModel {
             }),
             let identity, let playItem = playItem(identity)
         else { return nil }
-        blockedPlay = nil
+        let origin = begin(identity)
         return Task {
             do {
                 try await playItem(itemID: itemID, episodeID: episodeID)
             } catch {
                 Log.playback.error("CarPlay: couldn't play: \(error, privacy: .public)")
-                return .failed
+                return finish(origin, threw: true)
             }
-            return outcome()
+            return finish(origin, threw: false)
         }
     }
 
-    /// What CarPlay asks about its own play that the streaming policy blocked, while that block
-    /// is still the player's error: `nil` once it changes or clears, for example when the phone
-    /// streamed or cancelled it.
-    public var streamingPrompt: CarPlayStreamingPrompt? {
-        guard let blockedPlay, playback?.error == blockedPlay else { return nil }
-        switch blockedPlay {
-        case .streamingNeedsConfirmation: return .confirm
-        case .streamingNotAllowed: return .notAllowed
-        default: return nil
-        }
+    /// What CarPlay shows about its own last play: a streaming block to confirm
+    /// (``PlayerErrorMessage/streamingNeedsConfirmation``: Stream or Cancel) or explain, or a
+    /// failure (OK alone). Only while the account's session is the play's and its error is still
+    /// the player's: `nil` once it changes or clears, for example when the phone answered it.
+    public var alert: PlayerErrorMessage? {
+        guard let failedPlay, isCurrent(failedPlay.origin), playback?.error == failedPlay.error else { return nil }
+        return failedPlay.message
     }
 
-    /// Stream for ``CarPlayStreamingPrompt/confirm``: plays the blocked item on the metered
-    /// network. The policy is checked again, so "never" still blocks. `nil` without that prompt.
+    /// Stream for ``PlayerErrorMessage/streamingNeedsConfirmation``: plays the blocked item on the
+    /// metered network. The policy is checked again, so "never" still blocks. `nil` without that
+    /// alert.
     @discardableResult
     public func confirmStreaming() -> Task<CarPlayPlayOutcome, Never>? {
-        guard streamingPrompt == .confirm, let playback else { return nil }
-        blockedPlay = nil
+        guard alert == .streamingNeedsConfirmation, let playback, let identity else { return nil }
+        let origin = begin(identity)
         return Task {
             await playback.confirmMeteredStreaming()
-            return outcome()
+            return finish(origin, threw: false)
         }
     }
 
-    /// Cancel (or OK) for ``streamingPrompt``: a confirmation is declined, which clears the
-    /// player's error; a "never" block's message is only dismissed here.
-    public func declineStreaming() {
-        guard let prompt = streamingPrompt else { return }
-        blockedPlay = nil
-        if prompt == .confirm { playback?.declineMeteredStreaming() }
+    /// Cancel or OK for ``alert``: a confirmation is declined, which clears the player's error;
+    /// anything else is only dismissed here.
+    public func dismissAlert() {
+        guard let alert else { return }
+        failedPlay = nil
+        if alert == .streamingNeedsConfirmation { playback?.declineMeteredStreaming() }
     }
 
-    /// The outcome of a play that has returned, by the player's error; a streaming block is kept
-    /// for ``streamingPrompt``.
-    private func outcome() -> CarPlayPlayOutcome {
-        switch playback?.error {
-        case nil: return .started
-        case .streamingNeedsConfirmation?, .streamingNotAllowed?:
-            blockedPlay = playback?.error
-            return .blocked
+    /// Where a play or confirmation started: the account, its playback session (held weakly, so a
+    /// later session at the same address isn't taken for it), and the operation.
+    private struct Origin {
+        let identity: SessionIdentity
+        weak var session: AnyObject?
+        let hadSession: Bool
+        let operation: Int
+    }
+
+    /// A play's failure, with the player's error it came from (`nil` when the play threw).
+    private struct FailedPlay {
+        let origin: Origin
+        let error: PlaybackCoordinatorError?
+        let message: PlayerErrorMessage
+    }
+
+    /// Starts an operation, superseding the previous one and its alert.
+    private func begin(_ identity: SessionIdentity) -> Origin {
+        operation += 1
+        failedPlay = nil
+        let session = playbackSession()
+        return Origin(identity: identity, session: session, hadSession: session != nil, operation: operation)
+    }
+
+    /// Whether `origin`'s account and playback session are still the current ones. A play
+    /// started before the playback was bound may see it bound.
+    private func isCurrent(_ origin: Origin) -> Bool {
+        guard identity == origin.identity else { return false }
+        guard origin.hadSession else { return true }
+        guard let session = origin.session else { return false }
+        return session === playbackSession()
+    }
+
+    /// The outcome of an operation that has returned, by the player's error; a failure or block
+    /// is kept for ``alert``. Discarded once a later operation started or the account's session
+    /// changed: the playback may then be unbound (no error, which isn't a start) or another
+    /// account's.
+    private func finish(_ origin: Origin, threw: Bool) -> CarPlayPlayOutcome {
+        guard origin.operation == operation, isCurrent(origin) else { return .discarded }
+        let error = playback?.error
+        guard error != nil || threw else { return .started }
+        let message = error.map(PlayerErrorMessage.init) ?? .playbackFailed
+        failedPlay = FailedPlay(origin: origin, error: error, message: message)
+        switch message {
+        case .streamingNeedsConfirmation, .streamingNotAllowed: return .blocked
         default: return .failed
         }
     }

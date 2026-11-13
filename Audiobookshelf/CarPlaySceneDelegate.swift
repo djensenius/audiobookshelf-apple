@@ -10,11 +10,13 @@
     /// The root is a tab bar with the Continue tab. When the model has no rows to show (loading,
     /// signed out, the store unavailable, a failed load), the tab's list is empty and shows the
     /// state's message instead, and anything pushed over it is popped. Tapping a row plays it
-    /// through the model and pushes Now Playing once it starts. A play the streaming policy blocks
-    /// on a metered network presents an alert instead (``CarPlayRootModel/streamingPrompt``): Stream
-    /// or Cancel for "ask", the reason alone for "never". The alert is dismissed once the block
-    /// changes or clears, for example when the phone answered it. Covers come from the shared image pipeline: a row
-    /// shows a cached cover at once, or none until it's decoded.
+    /// through the model and pushes Now Playing once it starts. A play that fails, or that the
+    /// streaming policy blocks on a metered network, presents an alert instead
+    /// (``CarPlayRootModel/alert``): Stream or Cancel for "ask", the reason alone otherwise. The
+    /// alert is dismissed once the failure changes or clears, for example when the phone answered
+    /// it; ``CarPlayAlertPresenter`` presents one alert at a time. A play that ends after a sign-out
+    /// or switch shows nothing. Covers come from the shared image pipeline: a row shows a cached
+    /// cover at once, or none until it's decoded.
     final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate,
         CPInterfaceControllerDelegate
     {
@@ -24,8 +26,7 @@
         private var shownContent: CarPlayRootContent?
         private var loadedTrigger: CarPlayRootModel.LoadTrigger?
         private var hasShownContinue = false
-        private var shownPrompt: CarPlayStreamingPrompt?
-        private var promptAlert: CPAlertTemplate?
+        private var alerts = CarPlayAlertPresenter<PlayerErrorMessage>()
         private var pixelBox = PixelBox(width: 1, height: 1)
         /// The covers the rows show, kept so the pipeline doesn't evict them (``CoverImage``).
         private var covers: [ImageKey: CoverImage] = [:]
@@ -52,6 +53,7 @@
                         .playItem
                 },
                 playing: { environment.playback.current.mediaKey }, playback: environment.playback.current,
+                playbackSession: { environment.playback.current.current },
                 limits: CarPlayLimits(
                     maximumItemCount: min(12, CPListTemplate.maximumItemCount),
                     maximumSectionCount: CPListTemplate.maximumSectionCount),
@@ -66,7 +68,7 @@
             interfaceController.setRootTemplate(tabs, animated: false, completion: nil)
             observeContent()
             observeLoadTrigger()
-            observeStreamingPrompt()
+            observeAlert()
         }
 
         func templateApplicationScene(
@@ -81,8 +83,7 @@
             shownContent = nil
             loadedTrigger = nil
             hasShownContinue = false
-            shownPrompt = nil
-            promptAlert = nil
+            alerts = CarPlayAlertPresenter()
             self.interfaceController = nil
         }
 
@@ -110,14 +111,14 @@
             Task { await model.update() }
         }
 
-        private func observeStreamingPrompt() {
+        private func observeAlert() {
             guard let model else { return }
-            let prompt = withObservationTracking {
-                model.streamingPrompt
+            let alert = withObservationTracking {
+                model.alert
             } onChange: { [weak self] in
-                Task { @MainActor in self?.observeStreamingPrompt() }
+                Task { @MainActor in self?.observeAlert() }
             }
-            show(prompt)
+            perform(alerts.request(alert))
         }
 
         /// Reloads the shelves when the Continue tab shows again, for example after Now Playing.
@@ -171,7 +172,8 @@
             showNowPlaying(after: play)
         }
 
-        /// Pushes Now Playing once `play` has started; a blocked play shows its prompt instead.
+        /// Pushes Now Playing once `play` has started; a failed or blocked play shows its alert
+        /// instead, and a discarded one nothing.
         private func showNowPlaying(after play: Task<CarPlayPlayOutcome, Never>) {
             Task { [weak self] in
                 guard await play.value == .started, let interfaceController = self?.interfaceController else { return }
@@ -181,51 +183,50 @@
             }
         }
 
-        /// Presents `prompt`'s alert, replacing or dismissing the one shown.
-        private func show(_ prompt: CarPlayStreamingPrompt?) {
-            guard prompt != shownPrompt, let interfaceController else { return }
-            shownPrompt = prompt
-            let shown = promptAlert.flatMap { interfaceController.presentedTemplate === $0 ? $0 : nil }
-            promptAlert = nil
-            guard let prompt else {
-                if shown != nil { interfaceController.dismissTemplate(animated: true, completion: nil) }
-                return
+        /// Performs the presenter's command; a dismissal reports its completion, which may present
+        /// the alert wanted by then.
+        private func perform(_ command: CarPlayAlertPresenter<PlayerErrorMessage>.Command?) {
+            guard let command, let interfaceController else { return }
+            switch command {
+            case .dismiss:
+                interfaceController.dismissTemplate(animated: true) { [weak self] _, _ in
+                    Task { @MainActor in
+                        guard let self, self.interfaceController === interfaceController else { return }
+                        self.perform(self.alerts.didDismiss())
+                    }
+                }
+            case .present(let alert):
+                interfaceController.presentTemplate(template(for: alert), animated: true) { [weak self] presented, _ in
+                    guard !presented else { return }
+                    Task { @MainActor in self?.alerts.didFailToPresent(alert) }
+                }
             }
-            let alert: CPAlertTemplate
-            switch prompt {
-            case .confirm:
-                alert = CPAlertTemplate(
-                    titleVariants: [L10n.string("MessageStreamingNeedsConfirmation")],
-                    actions: [
-                        CPAlertAction(title: L10n.string("ButtonStream"), style: .default) { [weak self] _ in
-                            guard let play = self?.model?.confirmStreaming() else { return }
-                            self?.showNowPlaying(after: play)
-                        },
-                        CPAlertAction(title: L10n.string("ButtonCancel"), style: .cancel) { [weak self] _ in
-                            self?.model?.declineStreaming()
-                        },
-                    ])
-            case .notAllowed:
-                alert = CPAlertTemplate(
-                    titleVariants: [L10n.string("ToastStreamingNotAllowedOnCellular")],
+        }
+
+        /// The alert for `message`, with the player's strings: Stream or Cancel for a streaming
+        /// confirmation, OK otherwise.
+        private func template(for message: PlayerErrorMessage) -> CPAlertTemplate {
+            let title = L10n.string(PlayerSlot.messageKey(for: message))
+            guard message == .streamingNeedsConfirmation else {
+                return CPAlertTemplate(
+                    titleVariants: [title],
                     actions: [
                         CPAlertAction(title: L10n.string("ButtonOk"), style: .cancel) { [weak self] _ in
-                            self?.model?.declineStreaming()
+                            self?.model?.dismissAlert()
                         }
                     ])
             }
-            promptAlert = alert
-            // A template is presented only once the one shown is dismissed.
-            guard shown != nil else {
-                interfaceController.presentTemplate(alert, animated: true, completion: nil)
-                return
-            }
-            interfaceController.dismissTemplate(animated: true) { [weak self, weak interfaceController] _, _ in
-                Task { @MainActor in
-                    guard self?.promptAlert === alert else { return }
-                    interfaceController?.presentTemplate(alert, animated: true, completion: nil)
-                }
-            }
+            return CPAlertTemplate(
+                titleVariants: [title],
+                actions: [
+                    CPAlertAction(title: L10n.string("ButtonStream"), style: .default) { [weak self] _ in
+                        guard let play = self?.model?.confirmStreaming() else { return }
+                        self?.showNowPlaying(after: play)
+                    },
+                    CPAlertAction(title: L10n.string("ButtonCancel"), style: .cancel) { [weak self] _ in
+                        self?.model?.dismissAlert()
+                    },
+                ])
         }
 
         // MARK: - Covers
