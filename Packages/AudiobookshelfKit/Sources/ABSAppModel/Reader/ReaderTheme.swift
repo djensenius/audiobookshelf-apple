@@ -110,4 +110,18 @@ public struct ReaderSettingsPayload: Sendable, Hashable, Encodable {
         self.gap = gap.isFinite ? max(gap, 0) : 0
         themeRules = ReaderTheme.themeRules(for: settings, resolvedAppearance: resolvedAppearance)
     }
+
+    /// The payload for a spread already decided by ``ReaderSpreadPolicy``, so EPUB follows the
+    /// same rule as PDF: a single page is `spread: none`, and a spread is `auto` with its gap.
+    public init(settings: ReaderSettings, resolvedAppearance: ReaderAppearance, layout: ReaderSpreadLayout) {
+        var decided = settings
+        switch layout {
+        case .single:
+            decided.spread = .none
+            self.init(settings: decided, resolvedAppearance: resolvedAppearance)
+        case .twoUp(let gap):
+            decided.spread = .auto
+            self.init(settings: decided, resolvedAppearance: resolvedAppearance, gap: Double(gap))
+        }
+    }
 }

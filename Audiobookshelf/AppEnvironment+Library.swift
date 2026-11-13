@@ -9,21 +9,20 @@ extension AppEnvironment {
     /// and clears it when the session ends (#181).
     ///
     /// Each account's shared item actions (#368) update the local playback database through
-    /// `playback`'s one ``AppPlayback/writer``, the writer every account's `ProgressSyncer` writes
-    /// through, so its supersession tokens stay with that writer. They refuse to mark finished or
+    /// `writer`, the one ``AppPlayback/writer`` every account's `ProgressSyncer` writes through, so
+    /// its supersession tokens stay with that writer. They refuse to mark finished or
     /// not finished, or discard, the item in the player (``ItemActionError/itemInPlayer``): its
     /// session would write its position back. Disabling them is the simplest correct choice, and
     /// the user can close the player instead. A closed session's final sync and close can still be
     /// in flight, and another window can start the item while an action runs, so the actions also
-    /// share `playback`'s ``AppPlayback/mediaLeases`` with the coordinators: they wait for those
+    /// share `mediaLeases` (``AppPlayback/mediaLeases``) with the coordinators: they wait for those
     /// closes to settle, and a start of the item waits for them. They also clear the account's
     /// last-played record of the media (the store the account's scope restores from), whose
-    /// position predates the action.
+    /// position predates the action. `current` is playback's ``AppPlayback/current``.
     static func makeLibrary(
-        settings: AppSettings, accounts: AccountManager, lifecycle: SessionLifecycle, playback: AppPlayback
+        settings: AppSettings, accounts: AccountManager, lifecycle: SessionLifecycle, writer: LocalProgressStore?,
+        current: CurrentPlayback, mediaLeases: MediaLeases
     ) -> LibraryParticipant {
-        let writer = playback.writer
-        let current = playback.current
         let store = LibraryStore(
             settings: settings,
             itemActionLocalSync: { key in
@@ -41,7 +40,7 @@ extension AppEnvironment {
                         serverConnectionID: key.connectionID, libraryItemId: target.libraryItemID,
                         episodeId: target.episodeID)
             },
-            mediaLeases: playback.mediaLeases)
+            mediaLeases: mediaLeases)
         let participant = LibraryParticipant(
             store: store,
             defaultLibraryID: { [weak accounts] in accounts?.authorization?.userDefaultLibraryId })

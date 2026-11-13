@@ -1,5 +1,7 @@
 import ABSAPI
 import ABSCore
+import ABSData
+import ABSPlayback
 import Foundation
 import Testing
 
@@ -427,4 +429,57 @@ private struct Harness {
             #expect(harness.cached.isEmpty)
         }
     }
+
+    // MARK: Playback progress
+
+    /// The running session's playback moves its cached progress and keeps the row's other
+    /// fields; media without a row gets one (#184).
+    @Test func playbackProgressMovesTheRunningSessionsCache() async throws {
+        try await withLibrarySettings { settings in
+            let harness = Harness(settings: settings)
+            await harness.participant.sessionDidStart(harness.context(client: nil, isOffline: true, sessionID: 7))
+            var finished = progress("a", at: 10)
+            finished.duration = 100
+            finished.isFinished = true
+            finished.lastUpdate = 1_000
+            harness.store.progress.apply(finished)
+
+            #expect(harness.participant.applyPlaybackProgress(playback("a", at: 40, duration: 0), sessionID: 7))
+            let a = try #require(harness.store.progress.progress(libraryItemID: "a"))
+            #expect(a.id == "p-a")
+            #expect(a.currentTime == 40)
+            #expect(a.duration == 100)
+            #expect(a.progress == 0.4)
+            #expect(a.isFinished)
+            #expect(a.lastUpdate == 2_000)
+
+            #expect(harness.participant.applyPlaybackProgress(playback("b", at: 30, duration: 60), sessionID: 7))
+            let b = try #require(harness.store.progress.progress(libraryItemID: "b"))
+            #expect(b.id == "b")
+            #expect(b.progress == 0.5)
+            #expect(!b.isFinished)
+        }
+    }
+
+    /// The negative controls: nothing from another session, nor after the end cleared the cache.
+    @Test func playbackProgressIsDroppedForAnotherSessionOrAfterTheEnd() async throws {
+        try await withLibrarySettings { settings in
+            let harness = Harness(settings: settings)
+            await harness.participant.sessionDidStart(harness.context(client: nil, isOffline: true, sessionID: 7))
+
+            #expect(!harness.participant.applyPlaybackProgress(playback("a", at: 40), sessionID: 6))
+            #expect(harness.cached.isEmpty)
+
+            await harness.participant.sessionWillEnd(.signOut)
+            #expect(!harness.participant.applyPlaybackProgress(playback("a", at: 40), sessionID: 7))
+            #expect(harness.cached.isEmpty)
+        }
+    }
+}
+
+/// Playback of `itemID` on account A at `time`, two seconds after the epoch.
+private func playback(_ itemID: String, at time: Double, duration: Double = 100) -> PlaybackProgressUpdate {
+    PlaybackProgressUpdate(
+        key: MediaKey(serverConnectionID: identityA.connectionID, libraryItemId: itemID), currentTime: time,
+        duration: duration, date: Date(timeIntervalSince1970: 2))
 }
