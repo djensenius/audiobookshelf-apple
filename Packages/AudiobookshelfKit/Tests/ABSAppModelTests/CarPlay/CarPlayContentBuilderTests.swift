@@ -6,7 +6,7 @@ import Testing
 
 private let labels = CarPlayLabels(
     continueListening: "Continue", libraries: "Libraries", books: "Books", podcasts: "Podcasts", series: "Series",
-    authors: "Authors", more: "More…")
+    authors: "Authors", latest: "Latest", more: "More…")
 private let serverID = UUID(uuidString: "00000000-0000-0000-0000-0000000000AB")!
 
 private func builder(items: Int = 12, sections: Int = 12, depth: Int = 5) -> CarPlayContentBuilder {

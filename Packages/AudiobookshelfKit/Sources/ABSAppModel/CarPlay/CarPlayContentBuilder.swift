@@ -175,6 +175,19 @@ public struct CarPlayContentBuilder: Sendable {
             .authors(libraryID: libraryID), title: labels.authors, rows: rows, reachedEnd: reachedEnd, offset: offset)
     }
 
+    // MARK: - Latest tab (#80)
+
+    /// A page of a podcast library's newest episodes, each playing; `episodes` are the model's
+    /// loaded episodes and `reachedEnd` whether it has them all. Anything but an episode is left
+    /// out, as it would open a list below the tab's root.
+    public func latestEpisodes(
+        _ episodes: [ItemSummary], reachedEnd: Bool, libraryID: String, offset: Int = 0
+    ) -> CarPlayList {
+        items(
+            episodes, reachedEnd: reachedEnd, in: .latestEpisodes(libraryID: libraryID), title: labels.latest,
+            offset: offset)
+    }
+
     // MARK: - Helpers
 
     private func itemRow(_ item: ItemSummary, in destination: CarPlayDestination, progress: Double?) -> CarPlayRow {

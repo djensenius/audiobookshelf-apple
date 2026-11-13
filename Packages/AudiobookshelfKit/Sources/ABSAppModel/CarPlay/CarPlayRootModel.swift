@@ -203,6 +203,19 @@ public final class CarPlayRootModel {
         return start(itemID: itemID, episodeID: episodeID, identity: identity, playItem: playItem)
     }
 
+    /// ``play(_:)`` for a row of the Library or Latest tab (#80): `row` must be shown on the page
+    /// of `destination`'s list from `offset` in `browse`, the signed-in account's browse model.
+    @discardableResult
+    public func play(
+        _ row: CarPlayRow, in destination: CarPlayDestination, offset: Int, of browse: CarPlayBrowseModel
+    ) -> Task<CarPlayPlayOutcome, Never>? {
+        guard case .play(let itemID, let episodeID) = row.action, row.isEnabled, let identity,
+            browse.identity == identity, browse.shows(row, in: destination, offset: offset),
+            let playItem = playItem(identity)
+        else { return nil }
+        return start(itemID: itemID, episodeID: episodeID, identity: identity, playItem: playItem)
+    }
+
     /// Starts playing a row of Now Playing's queue (#81) as ``play(_:)`` plays a tapped row, with
     /// the same outcome, ``alert`` and Stream or Cancel. `nil` when the account can't play.
     @discardableResult
