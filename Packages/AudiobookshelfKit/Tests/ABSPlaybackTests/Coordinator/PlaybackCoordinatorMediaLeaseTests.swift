@@ -224,6 +224,29 @@ struct PlaybackCoordinatorMediaLeaseTests {
         #expect(coordinator.isPlaying)
     }
 
+    /// An account switch while a start waits for an action on its media: the start issued no
+    /// request, so the close wait doesn't time out on it, and once the action ends the retired
+    /// coordinator doesn't start it.
+    @Test func anAccountEndDoesntWaitForAStartHeldByAnAction() async throws {
+        h.sleep.isManual = true
+        let action = leases.acquire(h.key("A"), for: .progressAction)
+        let play = Task { await coordinator.play(itemID: "A") }
+        for _ in 0..<50 { await Task.yield() }
+
+        coordinator.stop(reason: .accountSwitch)
+        let wait = Task { try await coordinator.waitForClose() }
+        for _ in 0..<50 { await Task.yield() }
+        // The close wait's deadline passes.
+        while h.sleep.waitingCount > 0 { h.sleep.fireOldest() }
+        let outcome = try await wait.value
+        #expect(outcome.sessions.isEmpty)
+
+        action.release()
+        await play.value
+        #expect(h.service.starts.isEmpty)
+        #expect(coordinator.mediaKey == nil)
+    }
+
     @Test func aClosingSessionDoesntHoldAStartOfItsMedia() async {
         // Only progress actions hold a start: playing an item again right after closing it starts.
         let closing = leases.acquire(h.key("A"), for: .closingSession)

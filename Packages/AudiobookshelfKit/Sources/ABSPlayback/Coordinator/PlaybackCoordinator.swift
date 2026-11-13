@@ -456,6 +456,20 @@ public final class PlaybackCoordinator {
         }
         guard current == generation else { return }
 
+        // A progress action on this media (#368) finishes first, so the start reads its result. The
+        // wait comes before the opening is registered: until it ends no request is issued, so an
+        // account end mustn't wait for it, and the generation check drops the start after one.
+        if let mediaLeases, mediaLeases.isHeld(key, by: .progressAction) {
+            await mediaLeases.waitUntilFree(key, of: .progressAction)
+            guard current == generation else { return }
+            if Task.isCancelled {
+                // A cancelled caller abandons the start; that isn't a failure.
+                if phase == .starting { phase = .unloaded }
+                releaseKeptAudioSession()
+                return
+            }
+        }
+
         let openingID = UUID()
         let opening = PlaybackCloseResult<Void>()
         pendingOpenings[openingID] = opening
@@ -465,12 +479,6 @@ public final class PlaybackCoordinator {
         }
         let started: StartedSession
         do {
-            // A progress action on this media (#368) finishes first, so the start reads its result.
-            if let mediaLeases, mediaLeases.isHeld(key, by: .progressAction) {
-                await mediaLeases.waitUntilFree(key, of: .progressAction)
-                try Task.checkCancellation()
-                guard current == generation else { return }
-            }
             guard
                 let result = try await startSessionSerially(
                     itemID: itemID, episodeID: episodeID, generation: current, prepared: prepared)

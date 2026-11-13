@@ -195,7 +195,7 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     public func discardProgress(_ target: ItemActionTarget) async throws {
         try await enqueue(target) { session in
-            let lease = try await self.claim(target)
+            let lease = try await self.claim(target, session: session)
             defer { lease?.release() }
             guard try await self.discard(target, session: session) else { return }
             await self.syncLocally { try await $0.didDiscard(target) }
@@ -230,7 +230,7 @@ public final class ProgressItemActions: ItemActionPerforming {
     ) async throws {
         try await enqueue(target) { session in
             // An action with a local part changes the position the player's session writes.
-            let lease = local != nil ? try await self.claim(target) : nil
+            let lease = local != nil ? try await self.claim(target, session: session) : nil
             defer { lease?.release() }
             try await self.perform(target, update: update, optimistic: optimistic, session: session)
             await self.syncLocally(local)
@@ -238,9 +238,14 @@ public final class ProgressItemActions: ItemActionPerforming {
         }
     }
 
-    /// Takes the item's lease (after its closing sessions settled), then refuses the player's item.
-    private func claim(_ target: ItemActionTarget) async throws -> MediaLease? {
+    /// Takes the item's lease (after its closing sessions settled), then cancels if `session` ended
+    /// during the wait, and only then refuses the player's item.
+    private func claim(_ target: ItemActionTarget, session: ProgressCache.SessionToken) async throws -> MediaLease? {
         let lease = await lease(target)
+        guard cache.isCurrent(session) else {
+            lease?.release()
+            throw CancellationError()
+        }
         guard !isInPlayer(target) else {
             lease?.release()
             throw ItemActionError.itemInPlayer

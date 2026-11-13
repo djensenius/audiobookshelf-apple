@@ -333,6 +333,32 @@ private func cachedProgress(finished: Bool = false) -> MediaProgress {
         #expect(!leases.isHeld(key, by: .progressAction))
     }
 
+    /// The account's session ended during the wait for the item's close, and the item is back in
+    /// the player by then: the actions report cancellation (the session's end), not the player.
+    @Test func anActionWhoseSessionEndedDuringTheWaitCancelsBeforeCheckingThePlayer() async throws {
+        let leases = MediaLeases()
+        let sync = RecordingSync()
+        let writes = Locked(0)
+        let inPlayer = Locked<ItemActionTarget?>(nil)
+        let actions = leasedActions(
+            leases, writer: CountingWriter(base: writer, writes: writes), sync: sync, inPlayer: inPlayer)
+        cache.apply(cachedProgress())
+
+        let closing = leases.acquire(key, for: .closingSession)
+        let markFinished = Task { try await actions.markFinished(target) }
+        let discard = Task { try await actions.discardProgress(target) }
+        for _ in 0..<50 { await Task.yield() }
+        cache.clear()
+        inPlayer.value = target
+        closing.release()
+
+        await #expect(throws: CancellationError.self) { try await markFinished.value }
+        await #expect(throws: CancellationError.self) { try await discard.value }
+        #expect(writes.value == 0)
+        #expect(sync.calls.value.isEmpty)
+        #expect(!leases.isHeld(key, by: .progressAction))
+    }
+
     /// While the server request is suspended, the action holds the item's lease, so a playback
     /// start of it (which waits for ``MediaLeases/Holder/progressAction``) can't read the old
     /// position; the lease is released once the local sync ran.
