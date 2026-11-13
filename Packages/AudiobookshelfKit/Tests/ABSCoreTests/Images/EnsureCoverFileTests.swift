@@ -19,8 +19,23 @@ import Testing
         harness.key(id, updatedAt: updatedAt).with(bucket: .small)
     }
 
-    private func downloaded(updatedAt: Int) throws -> [String: DownloadedCover] {
-        let file = try TestImages.file(width: 1200, height: 1920, in: harness.directory.url)
+    /// A downloaded-cover lookup that reports when it's asked, then waits for `release`.
+    private struct GatedCovers: DownloadedCoverLookup {
+        var cover: DownloadedCover
+        let asked = Gate()
+        let release = Gate()
+
+        func downloadedCover(for key: ImageKey) async -> DownloadedCover? {
+            asked.open()
+            await release.wait()
+            return cover
+        }
+    }
+
+    private func downloaded(
+        updatedAt: Int, width: Int = 1200, height: Int = 1920
+    ) throws -> [String: DownloadedCover] {
+        let file = try TestImages.file(width: width, height: height, in: harness.directory.url)
         return ["item-1": DownloadedCover(fileURL: file, updatedAt: updatedAt)]
     }
 
@@ -48,6 +63,33 @@ import Testing
         let size = try #require(pixelSize(of: url))
         #expect(size.width == 300 && size.height == 480)
         #expect(await pipeline.networkFetchCount == 0)
+    }
+
+    @Test func aTallDownloadedCoverIsLimitedByWidthOnly() async throws {
+        let (pipeline, _) = await harness.make(downloaded: try downloaded(updatedAt: 2, width: 600, height: 3600))
+
+        let url = try await pipeline.ensureCoverFile(for: key())
+
+        let size = try #require(pixelSize(of: url))
+        #expect(size.width == 300 && size.height == 1800)
+    }
+
+    @Test func aServerRemovedDuringTheDownloadedCoverLookupIsNotWritten() async throws {
+        let store = CoverFileStore(directory: harness.directory.url.appending(path: "Images"), limit: 1 << 20)
+        let file = try TestImages.file(width: 600, height: 960, in: harness.directory.url)
+        let covers = GatedCovers(cover: DownloadedCover(fileURL: file, updatedAt: 2))
+        let pipeline = ImagePipeline(limits: .iPhone, fileStore: store, downloadedCovers: covers)
+        let key = key()
+        let ensure = Task { try await pipeline.ensureCoverFile(for: key) }
+        await covers.asked.wait()
+
+        await pipeline.removeServer(harness.serverID)
+        covers.release.open()
+
+        await #expect(throws: ImagePipelineError.noRequest) { try await ensure.value }
+        #expect(await store.size == 0)
+        let folder = store.directory.appending(path: harness.serverID.uuidString)
+        #expect(!FileManager.default.fileExists(atPath: folder.path))
     }
 
     @Test func aStoredFileIsReturnedWithoutFetchingAgain() async throws {

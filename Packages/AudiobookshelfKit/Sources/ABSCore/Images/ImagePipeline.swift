@@ -147,6 +147,9 @@ public actor ImagePipeline {
         if let stored = await fileStore.lookup(key) { return stored.url }
         if let cover = await downloadedCovers?.downloadedCover(for: key), Self.isFresh(cover, for: key) {
             let generation = await fileStore.generation(for: key.serverID)
+            // The server may have been removed while the lookup was suspended, and `generation`
+            // is then the post-removal one, which `insert` would accept.
+            guard !removedServers.contains(key.serverID) else { throw ImagePipelineError.noRequest }
             // A damaged or oversized download falls through to the network, as on display.
             if let jpeg = try? await Self.downsampledJPEG(of: cover.fileURL, bucket: key.bucket, in: temporaryFolder) {
                 defer { try? FileManager.default.removeItem(at: jpeg) }
@@ -475,13 +478,25 @@ public actor ImagePipeline {
         }
     }
 
-    /// `url` downsampled to `bucket`'s width (never upscaled), with its EXIF orientation applied,
-    /// as a new JPEG file in `folder`.
+    /// `url` downsampled to `bucket`'s width (never upscaled), with its aspect ratio and EXIF
+    /// orientation kept, as a new JPEG file in `folder`. Only the width is bounded, like the
+    /// server's `width=` rendition, so a tall cover isn't cut to a display box.
     @concurrent private static func downsampledJPEG(
         of url: URL, bucket: ImageWidthBucket, in folder: URL
     ) async throws -> URL {
         let info = try await ImageDecoder.inspect(url)
-        let image = try await ImageDecoder.decode(info, box: PixelBox(width: 1200, height: 1200), bucket: bucket)
+        let scale = min(Double(bucket.rawValue) / Double(info.width), 1)
+        let longSide = max(1, Int((Double(max(info.width, info.height)) * scale).rounded()))
+        guard
+            let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
+            let image = CGImageSourceCreateThumbnailAtIndex(
+                source, 0,
+                [
+                    kCGImageSourceThumbnailMaxPixelSize: longSide,
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                ] as CFDictionary)
+        else { throw ImagePipelineError.unsupportedImage }
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let output = folder.appending(path: "\(UUID().uuidString).jpg")
         guard
