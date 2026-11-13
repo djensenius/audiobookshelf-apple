@@ -94,6 +94,28 @@ import Testing
         #expect(restored.isPlaybackRequested)
     }
 
+    /// The play/pause control sets the state to end in: its value, not a toggle, so a second tap
+    /// on a stale control can't undo the first.
+    @Test func setPlayingPlaysOrPausesByItsValue() async throws {
+        try await withHandler {
+            _ = try await SetPlayingIntent(playing: false).perform()
+            #expect(!playback.isPlaybackRequested)
+            _ = try await SetPlayingIntent(playing: false).perform()
+            #expect(!playback.isPlaybackRequested)
+            _ = try await SetPlayingIntent(playing: true).perform()
+            #expect(playback.isPlaybackRequested)
+            _ = try await SetPlayingIntent(playing: true).perform()
+            #expect(playback.isPlaybackRequested)
+        }
+    }
+
+    @Test func setPlayingFailsWithoutAPlayer() async {
+        PlaybackIntentRouter.handler = nil
+        await #expect(throws: PlaybackIntentError.playerUnavailable) {
+            _ = try await SetPlayingIntent(playing: true).perform()
+        }
+    }
+
     @Test func jumpUsesTheGivenSecondsOrTheUsersInterval() async throws {
         try await withHandler {
             _ = try await JumpIntent(direction: .forward, seconds: 45).perform()
