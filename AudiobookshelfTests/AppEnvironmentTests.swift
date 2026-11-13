@@ -181,7 +181,10 @@ struct TestDownloads {
                     parts: [
                         DownloadPartDTO(
                             kind: .cover, serverPath: "/api/items/li_1/cover", filename: "cover.jpg",
-                            mimeType: "image/jpeg", destinationRelativePath: "li_1/cover.jpg", state: .completed)
+                            mimeType: "image/jpeg", destinationRelativePath: "li_1/cover.jpg", state: .completed),
+                        DownloadPartDTO(
+                            kind: .audio, serverPath: "/api/items/li_1/file", filename: "part1.mp3",
+                            mimeType: "audio/mpeg", destinationRelativePath: "li_1/part1.mp3", state: .completed),
                     ]),
                 coverUpdatedAt: coverUpdatedAt)
             let file = try DownloadLocations(root: downloads.root).fileURL(forRelativePath: "li_1/cover.jpg")
