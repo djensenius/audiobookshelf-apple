@@ -240,18 +240,22 @@ struct HomeRefreshSchedule {
     /// decides for `trigger`, while no library is selected. Behind a request in flight it waits,
     /// then reloads the list at most once (``retryAfterInFlight(isLoading:failed:isConnected:pollInterval:retry:)``).
     ///
-    /// - Parameter isConnected: Whether the server can be used now (no connection banner).
+    /// - Parameters:
+    ///   - isConnected: Whether the server can be used now (no connection banner).
+    ///   - refreshCount: The store's ``LibraryStore/refreshCount`` when the caller saw the list's
+    ///     state; it reloads nothing once a newer request has started (another waiter's retry
+    ///     owns the recovery). `nil` for now.
     @MainActor
     static func updateLibraries(
         of store: LibraryStore, for trigger: Trigger, isConnected: () -> Bool,
-        pollInterval: Duration = .milliseconds(100)
+        pollInterval: Duration = .milliseconds(100), since refreshCount: Int? = nil
     ) async {
         await reload(
             store,
             as: librariesRequest(
                 for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
                 isConnected: isConnected()),
-            isConnected: isConnected, pollInterval: pollInterval)
+            isConnected: isConnected, pollInterval: pollInterval, since: refreshCount)
     }
 
     /// Whether a shelves request's `error` says the server refused the library itself: it no
@@ -309,19 +313,26 @@ struct HomeRefreshSchedule {
 
     /// Makes `request` of `store`: behind a libraries request in flight, waits for it and reloads
     /// the list at most once (``retryAfterInFlight(isLoading:failed:isConnected:pollInterval:retry:)``).
+    /// Nothing once a request newer than `refreshCount` (``LibraryStore/refreshCount``, now when
+    /// `nil`) has started: when Home's completion and a verification wait for the same request,
+    /// only the first to see it fail retries it, and the other leaves that retry the recovery.
     @MainActor
     private static func reload(
-        _ store: LibraryStore, as request: LibrariesRequest?, isConnected: () -> Bool, pollInterval: Duration
+        _ store: LibraryStore, as request: LibrariesRequest?, isConnected: () -> Bool, pollInterval: Duration,
+        since refreshCount: Int? = nil
     ) async {
+        let refreshCount = refreshCount ?? store.refreshCount
+        func isLatest() -> Bool { store.refreshCount == refreshCount }
         switch request {
         case nil:
             return
         case .now:
+            guard isLatest() else { return }
             await store.refresh()
         case .afterInFlight:
             await retryAfterInFlight(
-                isLoading: { store.isLoading }, failed: { store.error != nil }, isConnected: isConnected,
-                pollInterval: pollInterval
+                isLoading: { store.isLoading }, failed: { store.error != nil && isLatest() },
+                isConnected: isConnected, pollInterval: pollInterval
             ) { await store.refresh() }
         }
     }
@@ -409,6 +420,9 @@ struct HomeRefreshSchedule {
         of model: HomeModel, store: LibraryStore, isConnected: () -> Bool,
         pollInterval: Duration = .milliseconds(100), retry: () async -> Bool, refreshed: () async -> Bool
     ) async {
+        // The list as the verification saw it: a request started after this one is a retry it
+        // leaves the recovery to.
+        let listRefreshCount = store.refreshCount
         let request = verificationRequest(
             libraryID: model.libraryID, isLoading: model.isLoading, hasError: model.error != nil,
             librariesFailed: store.error != nil, librariesLoading: store.isLoading, isConnected: isConnected())
@@ -429,7 +443,9 @@ struct HomeRefreshSchedule {
         // Otherwise the list may have failed meanwhile, or still be in flight: every path ends
         // here, so none skips it.
         if !listHandled, !Task.isCancelled {
-            await updateLibraries(of: store, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
+            await updateLibraries(
+                of: store, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval,
+                since: listRefreshCount)
         }
     }
 

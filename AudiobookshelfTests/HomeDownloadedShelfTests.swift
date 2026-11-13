@@ -694,6 +694,45 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
         #expect(await service.requests == 2)
     }
 
+    /// The libraries list had failed and is in flight again when both Home's completion of its
+    /// shelves and the verification wait for it: when it fails, only the first to see it retries,
+    /// and that retry failing too isn't retried by the other.
+    @Test func aListBothCompletionAndVerificationWaitForIsRetriedOnce() async throws {
+        let service = ScriptedLibraries([.fails, .held, .fails, .succeeds], shelves: [.succeeds])
+        let suiteName = "HomeDownloadedShelfTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = LibraryStore(settings: AppSettings(defaults: defaults))
+        store.attach(client: service, connectionKey: LibraryConnectionKey(connectionID: connectionID, userID: "u"))
+        let model = HomeModel(store: store, libraryID: "lib")
+        await model.load()
+        await store.refresh()
+        #expect(store.error != nil)
+        let list = Task { await store.refresh() }
+        while !store.isLoading { await Task.yield() }
+
+        // Both run until they wait, so each decides while the list is in flight.
+        let completion = Task.immediate { @MainActor in
+            await HomeRefreshSchedule.updateLibrariesAfterShelves(
+                of: store, shelvesError: nil, for: .loadTrigger, isConnected: { true },
+                pollInterval: .milliseconds(5))
+        }
+        let verification = Task.immediate { @MainActor in
+            await HomeRefreshSchedule.updateAfterVerification(
+                of: model, store: store, isConnected: { true }, pollInterval: .milliseconds(5),
+                retry: {
+                    await model.refresh(); return false
+                }, refreshed: { false })
+        }
+        service.answer(succeeds: false)
+        await list.value
+        #expect(await completion.value)
+        await verification.value
+        #expect(store.error != nil && !store.isLoading)
+        #expect(await service.shelvesRequests == 1)
+        #expect(await service.requests == 3)
+    }
+
     /// A verification Home left before its recovery finished stays pending, so Home recovers
     /// when it appears again; one that finished isn't recovered again, nor the first one seen.
     @Test func anUnfinishedVerificationStaysPending() {
