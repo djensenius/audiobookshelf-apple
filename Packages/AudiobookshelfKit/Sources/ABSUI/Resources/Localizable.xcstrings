@@ -121460,6 +121460,251 @@
         }
       }
     },
+    "MessageCarPlaySignedOut" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Sign in to Audiobookshelf on your iPhone to listen here."
+          }
+        }
+      }
+    },
     "MessageCellularSettingsHelp" : {
       "extractionState" : "manual",
       "localizations" : {

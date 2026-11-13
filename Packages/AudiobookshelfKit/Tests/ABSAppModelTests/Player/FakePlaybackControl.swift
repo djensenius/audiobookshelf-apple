@@ -44,6 +44,11 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     /// Makes ``resume(rewindingBy:)`` fail as the coordinator's does when the streaming policy blocks
     /// it or the audio session won't activate: it sets ``error`` and leaves play unrequested.
     var resumeFailure: PlaybackCoordinatorError?
+    /// The error a confirmed metered stream leaves, as the coordinator's replayed play does: `nil`
+    /// once it plays, or a block when the policy changed to "never" meanwhile.
+    var confirmFailure: PlaybackCoordinatorError?
+    /// Awaited by ``confirmMeteredStreaming()`` before its replay ends, to hold it while it starts.
+    var confirmHold: (@MainActor () async -> Void)?
     /// How a jump ends, as the coordinator's can: landing, deferred because it was queued or
     /// superseded, or failed because the target track wouldn't load.
     enum JumpBehavior { case lands, superseded, fails }
@@ -112,12 +117,19 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
         isPlaybackRequested = false
     }
 
+    /// Like the coordinator's, it only replays a play while the error is a confirmation.
     func confirmMeteredStreaming() async {
         calls.append(.confirmMeteredStreaming)
+        guard case .streamingNeedsConfirmation = error else { return }
+        await confirmHold?()
+        error = confirmFailure
     }
 
+    /// Like the coordinator's, it only clears a confirmation.
     func declineMeteredStreaming() {
         calls.append(.declineMeteredStreaming)
+        guard case .streamingNeedsConfirmation = error else { return }
+        error = nil
     }
 
     func handleStreamReset(sessionID: String) {
