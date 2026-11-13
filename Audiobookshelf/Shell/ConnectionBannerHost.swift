@@ -12,8 +12,8 @@ extension EnvironmentValues {
 /// One account shell's connection banner (#76): a ``ConnectionBannerModel`` fed by its own
 /// `NetworkMonitor` and pinging the server through the store's client. ``AccountShellValues``
 /// builds one per shell, so a sign-out or account switch drops it with the shell. While it runs,
-/// its ``ReconnectRestorer``, if any, restores the account's session when the banner comes back
-/// online while the account is offline.
+/// its ``ReconnectRestorer``, if any, reconnects the account's offline connection when the banner
+/// comes back online.
 @MainActor
 final class ConnectionBannerSession {
     /// Why a ping couldn't be sent.
@@ -31,22 +31,28 @@ final class ConnectionBannerSession {
 
     /// Pings `store`'s client while the store serves the account it serves now, and follows
     /// `monitor`'s paths (the device's, unless a test passes its own source).
-    /// With `accounts` and `lifecycle`, it also restores the account's session when the banner
-    /// comes back online while it's offline (``restoreEpoch(accounts:lifecycle:store:account:)``).
+    /// With `accounts` and `lifecycle`, it also reconnects the account when the banner comes back
+    /// online while it's offline (``restoreEpoch(accounts:lifecycle:store:account:)``), and when
+    /// a ping finds no client, as after a locked Keychain.
     convenience init(
         store: LibraryStore, monitor: NetworkMonitor = NetworkMonitor(), accounts: AccountManager? = nil,
         lifecycle: SessionLifecycle? = nil
     ) {
         let account = store.connectionKey
-        let reconnect = accounts.flatMap { accounts in
-            lifecycle.map { lifecycle in
-                ReconnectRestorer(
-                    epoch: Self.restoreEpoch(accounts: accounts, lifecycle: lifecycle, store: store, account: account),
-                    restore: { [weak accounts] in await accounts?.restoreSession() })
+        var reconnect: ReconnectRestorer?
+        var recover: Recover?
+        if let accounts, let lifecycle {
+            let epoch = Self.restoreEpoch(accounts: accounts, lifecycle: lifecycle, store: store, account: account)
+            let restore = Self.restore(accounts: accounts, lifecycle: lifecycle)
+            reconnect = ReconnectRestorer(epoch: epoch, restore: restore)
+            recover = {
+                guard let current = epoch() else { return }
+                await restore(current)
             }
         }
         self.init(
-            model: ConnectionBannerModel(paths: { monitor.paths() }, ping: Self.ping(store: store, account: account)),
+            model: ConnectionBannerModel(
+                paths: { monitor.paths() }, ping: Self.ping(store: store, account: account, recover: recover)),
             monitor: monitor, reconnect: reconnect)
     }
 
@@ -96,15 +102,38 @@ final class ConnectionBannerSession {
         }
     }
 
+    /// Reconnects the account a ``RestoreEpoch`` was read for: that connection only, never the
+    /// most recently used one, and in turn with the lifecycle's sign-outs and switches, so it
+    /// doesn't overlap their teardown (``SessionLifecycle/reconnect(_:using:)``).
+    static func restore(accounts: AccountManager, lifecycle: SessionLifecycle) -> ReconnectRestorer.Restore {
+        { [weak accounts, weak lifecycle] expected in
+            guard let accounts, let lifecycle, let epoch = expected as? RestoreEpoch else { return }
+            let id = epoch.session.identity.connectionID
+            await lifecycle.reconnect(epoch.session) { [weak accounts] in await accounts?.reconnect(id) }
+        }
+    }
+
+    /// Reconnects an offline account that has no client, so a ping can be sent.
+    typealias Recover = @MainActor @Sendable () async -> Void
+
     /// `GET /ping` through the store's current client, so a reconnect's new client is used. Once
-    /// the store serves another account the ping is cancelled, which the banner ignores.
-    static func ping(store: LibraryStore, account: LibraryConnectionKey?) -> ConnectionBannerModel.Ping {
+    /// the store serves another account the ping is cancelled, which the banner ignores. Without
+    /// a client, as offline after a locked Keychain, it first tries `recover`, which reads the
+    /// saved session again; the ping fails with ``PingError/noClient`` if there's still none.
+    static func ping(
+        store: LibraryStore, account: LibraryConnectionKey?, recover: Recover? = nil
+    ) -> ConnectionBannerModel.Ping {
         { [weak store] in
-            let client = try await MainActor.run { () throws -> APIClient in
+            let current = { @MainActor [weak store] () throws -> APIClient? in
                 guard let store, store.connectionKey == account else { throw CancellationError() }
-                guard let client = store.client as? APIClient else { throw PingError.noClient }
-                return client
+                return store.client as? APIClient
             }
+            var client = try await current()
+            if client == nil, let recover {
+                await recover()
+                client = try await current()
+            }
+            guard let client else { throw PingError.noClient }
             _ = try await client.send(AuthEndpoints.ping())
         }
     }

@@ -1,3 +1,4 @@
+import ABSCore
 import Foundation
 
 /// Restores an offline account's session once the connection banner is back online (#76).
@@ -16,8 +17,9 @@ public final class ReconnectRestorer {
     /// as its identity and the session's number; `nil` otherwise. Read when the banner comes
     /// online and again, in the same turn as the restore, after the debounce.
     public typealias Epoch = @MainActor () -> AnyHashable?
-    /// Restores the account's session, such as `AccountManager.restoreSession()`.
-    public typealias Restore = @MainActor () async -> Void
+    /// Restores the session of the account the epoch it's given was read for, such as with
+    /// ``AccountManager/reconnect(_:)``.
+    public typealias Restore = @MainActor (AnyHashable) async -> Void
 
     /// How long the banner stays online before a restore.
     public static let debounce: Duration = .seconds(2)
@@ -83,6 +85,22 @@ public final class ReconnectRestorer {
         isRestoring = true
         restores += 1
         defer { isRestoring = false }
-        await restore()
+        await restore(expected)
+    }
+}
+
+extension AccountManager {
+    /// Reconnects the offline connection `id` as ``switch(to:)`` does, if it's still the active
+    /// connection and offline; does nothing otherwise. Unlike ``restoreSession()``, which takes
+    /// the most recently used connection, it never reconnects another account, such as one a
+    /// cancelled sign-in marked used. Works without an `APIClient` too, such as after the
+    /// Keychain was locked: it reads the saved session again.
+    public func reconnect(_ id: UUID) async {
+        guard case .offline(let user) = state, user.connectionID == id, activeConnection?.id == id else { return }
+        do {
+            try await self.switch(to: id)
+        } catch {
+            Log.auth.notice("Couldn't reconnect: \(String(describing: type(of: error)), privacy: .public)")
+        }
     }
 }

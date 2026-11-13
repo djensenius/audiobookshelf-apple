@@ -4,20 +4,22 @@ import Testing
 
 @testable import ABSAppModel
 
-/// Counts restores and the epoch the restorer reads.
+/// Records restores and the epoch the restorer reads.
 @MainActor
 private final class Account {
     /// `nil` while a restore isn't wanted, such as signed in.
     var epoch: Int? = 1
-    private(set) var restores = 0
+    /// The epoch each restore was for.
+    private(set) var restored: [AnyHashable] = []
+    var restores: Int { restored.count }
     /// Holds each restore until opened, when set.
     var hold: Gate?
 
     func restorer(clock: ManualClock, state: ConnectionBannerState = .online) -> ReconnectRestorer {
         ReconnectRestorer(
             state: state, clock: clock, epoch: { [weak self] in self?.epoch.map(AnyHashable.init) },
-            restore: { [weak self] in
-                self?.restores += 1
+            restore: { [weak self] epoch in
+                self?.restored.append(epoch)
                 await self?.hold?.wait()
             })
     }
@@ -119,11 +121,11 @@ private final class Account {
         await signedOut?.value
         #expect(account.restores == 0)
 
-        // Control: an unchanged epoch restores.
+        // Control: an unchanged epoch restores, for that epoch.
         account.epoch = 3
         restorer.observe(offline)
         await comeOnline(restorer, clock: clock, sleeps: &sleeps)
-        #expect(account.restores == 1)
+        #expect(account.restored == [AnyHashable(3)])
     }
 
     @Test func flapsCoalesceIntoOneRestore() async {

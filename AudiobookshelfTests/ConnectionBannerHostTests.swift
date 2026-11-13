@@ -43,7 +43,7 @@ private struct OnePath: NetworkPathSource {
 
 private let account = LibraryConnectionKey(connectionID: UUID(), userID: "user-1")
 
-/// How many times a ``ReconnectRestorer`` restored.
+/// How many times a ``ReconnectRestorer`` restored, or a ping recovered.
 @MainActor
 private final class Restores {
     var count = 0
@@ -113,6 +113,33 @@ private final class Restores {
         }
     }
 
+    /// Without a client, as offline after a locked Keychain, the ping first recovers the account:
+    /// once that gives the store a client, the ping goes through it (control: a recovery that
+    /// gives none still fails, so the banner keeps retrying).
+    @Test(arguments: [true, false])
+    func pingRecoversAMissingClient(recovers: Bool) async throws {
+        let client = try fixtureClient()
+        try await withStore(client: NoLibraries()) { store in
+            let recoveries = Restores()
+            let ping = ConnectionBannerSession.ping(store: store, account: account) {
+                recoveries.count += 1
+                if recovers { store.attach(client: client, connectionKey: account) }
+            }
+            if recovers {
+                try await ping()
+            } else {
+                await #expect(throws: ConnectionBannerSession.PingError.self) { try await ping() }
+            }
+            #expect(recoveries.count == 1)
+
+            // With a client, the ping doesn't recover.
+            if recovers {
+                try await ping()
+                #expect(recoveries.count == 1)
+            }
+        }
+    }
+
     /// The shell's session follows its monitor and pings the store: no network shows offline; a
     /// network without a usable client shows the server as unreachable, with Retry.
     @Test func sessionFollowsTheNetworkAndThePing() async throws {
@@ -174,7 +201,7 @@ private final class Restores {
             model: model, monitor: NetworkMonitor(source: OnePath(path: .wifi)),
             reconnect: ReconnectRestorer(
                 debounce: .zero, epoch: { mayRestore ? AnyHashable(account) : nil },
-                restore: { restores.count += 1 }))
+                restore: { _ in restores.count += 1 }))
         let run = Task { await session.run() }
         #expect(try await until { model.stateDidChange != nil })
 
