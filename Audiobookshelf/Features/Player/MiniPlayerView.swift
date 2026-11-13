@@ -5,7 +5,8 @@ import SwiftUI
 
 /// The mini player (port of the collapsed `components/app/AudioPlayer.vue`): the cover and title
 /// open the full player, and their context menu opens the scene's queue inspector, with
-/// play/pause, the jumps and a close button that stops playback.
+/// play/pause, the jumps and a close button that stops playback. While the player is locked
+/// (``PlayerDisplayOptions/isLocked``) the jumps go, as in legacy.
 ///
 /// On iOS it is the tab view's bottom accessory; when the tab bar collapses it to the inline
 /// placement only play/pause stays. At accessibility text sizes the cover, author and jumps go, so
@@ -53,7 +54,8 @@ struct MiniPlayerView: View {
         HStack(spacing: 8) {
             openButton
             TransportControls(
-                style: layout.transportStyle, showsPause: model.showsPause,
+                style: model.displayOptions.showsSkipControls ? layout.transportStyle : .playPauseOnly,
+                showsPause: model.showsPause,
                 isBuffering: model.isBuffering, jumpBackwardSeconds: model.jumpBackwardSeconds,
                 jumpForwardSeconds: model.jumpForwardSeconds, haptic: settings?.hapticFeedback ?? .off
             ) { action in

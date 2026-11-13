@@ -14,10 +14,11 @@ struct TransportToolbarEntry: Equatable {
     /// Play/pause while buffering: a spinner instead of the symbol; it still works.
     let showsSpinner: Bool
 
-    /// The buttons in order: previous chapter, jump back, play/pause, jump forward, next chapter.
+    /// The buttons in order: previous chapter, jump back, play/pause, jump forward, next chapter;
+    /// only play/pause without `showsSkipControls` (a locked player).
     static func entries(
         showsPause: Bool, isBuffering: Bool, jumpBackwardSeconds: Int, jumpForwardSeconds: Int,
-        hasPreviousChapter: Bool, hasNextChapter: Bool, locale: Locale
+        hasPreviousChapter: Bool, hasNextChapter: Bool, showsSkipControls: Bool = true, locale: Locale
     ) -> [TransportToolbarEntry] {
         func chapter(next: Bool) -> TransportToolbarEntry {
             TransportToolbarEntry(
@@ -39,6 +40,7 @@ struct TransportToolbarEntry: Equatable {
             accessibilityLabel: TransportControls.playPauseLabel(showsPause: showsPause),
             accessibilityValue: TransportControls.playPauseAccessibilityValue(isBuffering: isBuffering),
             isEnabled: true, showsSpinner: isBuffering)
+        guard showsSkipControls else { return [playPause] }
         return [chapter(next: false), jump(forward: false), playPause, jump(forward: true), chapter(next: true)]
     }
 }
@@ -54,15 +56,16 @@ struct TransportToolbarEntry: Equatable {
         private let perform: (TransportControls.Action) -> Void
 
         /// The parameters are ``TransportControls``'s; `locale` formats the jump captions and labels.
+        /// Without `showsSkipControls` (a locked player) only play/pause shows.
         public init(
             showsPause: Bool, isBuffering: Bool = false, jumpBackwardSeconds: Int, jumpForwardSeconds: Int,
-            hasPreviousChapter: Bool = false, hasNextChapter: Bool = false, haptic: HapticFeedback = .off,
-            locale: Locale, perform: @escaping (TransportControls.Action) -> Void
+            hasPreviousChapter: Bool = false, hasNextChapter: Bool = false, showsSkipControls: Bool = true,
+            haptic: HapticFeedback = .off, locale: Locale, perform: @escaping (TransportControls.Action) -> Void
         ) {
             entries = TransportToolbarEntry.entries(
                 showsPause: showsPause, isBuffering: isBuffering, jumpBackwardSeconds: jumpBackwardSeconds,
                 jumpForwardSeconds: jumpForwardSeconds, hasPreviousChapter: hasPreviousChapter,
-                hasNextChapter: hasNextChapter, locale: locale)
+                hasNextChapter: hasNextChapter, showsSkipControls: showsSkipControls, locale: locale)
             self.haptic = haptic
             self.perform = perform
         }
