@@ -462,7 +462,11 @@ public actor DownloadEngine {
     public func deactivate() async {
         restartsQueuedParts = false
         isInBackground = true
-        await stop(partIDs: tasks.filter { $0.value.isForeground }.map(\.key), keepingResumeData: true)
+        // A task that has already finished is left to its completion event: its file may have
+        // moved, so queueing its part would download it again.
+        await stop(
+            partIDs: tasks.filter { $0.value.isForeground && $0.value.state != .completed }.map(\.key),
+            keepingResumeData: true)
     }
 
     /// ``deactivate()`` on the process's engine, if it has one.
@@ -1442,7 +1446,17 @@ public actor DownloadEngine {
             if tasks[partID] === task { tasks[partID] = nil }
             ignoredTasks.insert(task.key)
             task.cancel()
-            if !recorded { forget(partID) }
+            if !recorded {
+                forget(partID)
+                return
+            }
+            // Stopped (by a pause, or a deactivation stopping foreground transfers) while the
+            // part was saved as running: that save may have landed after the stop's, so the part
+            // is queued again, unless another launch or a completion has it, for a later start
+            // or activation to pick up.
+            if tasks[partID] == nil, launching[partID] == nil, contexts[partID] != nil, !settling.contains(partID) {
+                await persistIdle(partID) { _ = try await $0.queuePart(partID: partID, expecting: [.running]) }
+            }
             return
         }
         // The resume data now lives in the task.

@@ -128,15 +128,17 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
 
     /// Why `response` isn't the part's file, or `nil` when it may be. Checked in this order,
     /// both for a body and for a task that ended without one: another origin than the request
-    /// (whatever the status, so no refresh follows), a 401 after a redirect, a status other
-    /// than 200 or 206 (ADR 0007: a 204 is an error), and an error body (``isErrorBody(_:)``),
-    /// which the size check can't catch when its length happens to match.
+    /// (whatever the status, so no refresh follows), a 401 after a background session's
+    /// redirect, a status other than 200 or 206 (ADR 0007: a 204 is an error), and an error body
+    /// (``isErrorBody(_:)``), which the size check can't catch when its length happens to match.
     static func classify(response: URLResponse?, task: URLSessionTask) -> DownloadTaskResult? {
         guard let response = response as? HTTPURLResponse else { return .httpStatus(0) }
         guard let requested = task.originalRequest?.url, let answered = response.url,
             DownloadRequests.isSameOrigin(requested, answered)
         else { return .offOrigin }
-        if response.statusCode == 401, answered != requested { return .redirectedUnauthorized }
+        // The foreground session follows only same-origin hops and keeps `Authorization` on
+        // them (#467), so its 401 is the server's answer to the token, which a refresh may fix.
+        if response.statusCode == 401, answered != requested, !task.isForeground { return .redirectedUnauthorized }
         guard response.statusCode == 200 || response.statusCode == 206 else { return .httpStatus(response.statusCode) }
         if let type = response.mimeType?.lowercased(), isErrorBody(type) { return .unexpectedContent(type) }
         return nil

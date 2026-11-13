@@ -1,5 +1,6 @@
 import ABSAPI
 import Foundation
+import Synchronization
 import Testing
 
 @testable import ABSData
@@ -148,5 +149,119 @@ import Testing
         #expect(await engine.nextRecordComplete() != nil)
         #expect(harness.requests.count == 2)
         #expect(harness.foregroundSessions.withLock { $0.last?.resumedData } == [Self.resumeData])
+    }
+
+    /// Backgrounded while a foreground launch saves its part as running: the stop queues the
+    /// part, and the launch's later save would leave it running with no transfer, which no
+    /// activation restarts. The launch queues it again, so the next activation continues it.
+    @Test func aForegroundLaunchStoppedWhileSavingStartsOnTheNextActivation() async throws {
+        let harness = try await DownloadHarness(customHeaders: Self.headers) { _ in .status(200) }
+        let partID = UUID()
+        // One-shot: the next activation's launch passes the same seam.
+        let current = Mutex<(engine: DownloadEngine?, deactivates: Bool)>((nil, true))
+        let engine = harness.makeEngine(
+            beforeSavingRunning: { _ in
+                let (engine, deactivates) = current.withLock { state in
+                    defer { state.deactivates = false }
+                    return (state.engine, state.deactivates)
+                }
+                if deactivates { await engine?.deactivate() }
+            }, hasForegroundSession: true)
+        current.withLock { $0.engine = engine }
+        // Activated before the record exists, so only this start launches the part.
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        try await harness.addRecord(parts: [partID])
+
+        await engine.start(partIDs: [partID])
+
+        try #require(try await harness.store.part(id: partID)?.state == .queued)
+        #expect(harness.requests.isEmpty)
+        #expect(await engine.activate())
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 1)
+    }
+
+    /// Backgrounded after a foreground transfer finished but before the engine handled its
+    /// completion: the finished task isn't stopped, so its moved file completes the part rather
+    /// than the part being queued to download again.
+    @Test func backgroundingLeavesAFinishedForegroundTransferToItsCompletion() async throws {
+        let gate = StubGate()
+        let harness = try await DownloadHarness(customHeaders: Self.headers) {
+            $0.url?.path().contains("li_2") == true ? .status(200, gate: gate) : .status(200)
+        }
+        let first = UUID()
+        let second = UUID()
+        let record = try await harness.addRecord(parts: [first])
+        let other = try await harness.store.upsertRecord(
+            DownloadRecordDTO(
+                key: MediaKey(serverConnectionID: harness.connectionID, libraryItemId: "li_2"),
+                mediaType: .book, title: "The Other Book", state: .queued, relativeDirectory: "li_2",
+                media: LocalMediaSnapshot(metadata: .init(title: "The Other Book")),
+                parts: [
+                    DownloadPartDTO(
+                        id: second, kind: .audio, serverPath: DownloadRequests.filePath(itemID: "li_2", ino: "1"),
+                        filename: "1.mp3", mimeType: "audio/mpeg", serverIno: "1", trackIndex: 1, expectedBytes: 11,
+                        bytesWritten: 0, destinationRelativePath: "li_2/1.mp3", state: .queued)
+                ])
+        ).record
+        let (handled, finished) = AsyncStream.makeStream(of: Void.self)
+        let current = Mutex<DownloadEngine?>(nil)
+        // Holds the event loop on the first record's finalisation until the second transfer has
+        // finished, so its completion is still waiting when the app goes to the background.
+        let engine = harness.makeEngine(
+            afterUpsertingLocalItem: { recordID in
+                guard recordID == record.id, let engine = current.withLock({ $0 }) else { return }
+                gate.open()
+                await harness.waitForCompletions(2)
+                await engine.deactivate()
+                finished.yield()
+            }, hasForegroundSession: true)
+        current.withLock { $0 = engine }
+        // The activation starts both queued parts.
+        #expect(await engine.activate())
+
+        for await _ in handled { break }
+        await engine.waitForRestart()
+
+        // Completed and finalised: the record is gone, not queued to download again.
+        #expect(try await harness.store.record(id: other.id) == nil)
+        #expect(try await harness.store.part(id: second) == nil)
+        #expect(harness.requests.count == 2)
+    }
+
+    /// The foreground session keeps `Authorization` on a same-origin hop, so a 401 there is the
+    /// token's: it is refreshed and the part downloads, rather than failing as a redirect that
+    /// dropped the sign-in.
+    @Test func anUnauthorizedAnswerAfterASameOriginRedirectRefreshesTheToken() async throws {
+        let harness = try await DownloadHarness(customHeaders: Self.headers) { _ in .status(200) }
+        let base = harness.base
+        StubDownloadProtocol.register(host: harness.host) { request in
+            guard request.url?.path().hasPrefix("/abs/media/") == true else {
+                return .redirect(to: URL(string: "\(base)/media/1.mp3")!)
+            }
+            return request.authorization == "Bearer token-1" ? .status(401) : .status(200)
+        }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID])
+        let engine = harness.makeEngine(hasForegroundSession: true)
+
+        await engine.start(partIDs: [partID])
+
+        let update = await engine.next {
+            switch $0 {
+            case .recordComplete, .partFailed: true
+            default: false
+            }
+        }
+        guard case .recordComplete = update else {
+            Issue.record("Expected the download to complete, got \(String(describing: update))")
+            return
+        }
+        #expect(harness.credentials.calls == [nil, "token-1"])
+        #expect(
+            harness.requests.map(\.authorization) == [
+                "Bearer token-1", "Bearer token-1", "Bearer token-2", "Bearer token-2",
+            ])
     }
 }
