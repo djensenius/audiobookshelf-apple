@@ -916,12 +916,17 @@ public final class AccountManager {
         guard let expired = expiredGenerations[id], expired != expiredBefore,
             expired > signInGenerations[id, default: 0]
         else { return false }
+        let logoutBefore = latestLogout
         await willSaveSignOutOfExpiry?()
         guard let savedAt = await saveSignOut(of: id) else { return false }
         // As in `sessionExpired`: a sign-in that saved a newer session while this saved may have
         // marked the connection used first, so clear this one by its date, unless a newer expiry
-        // signed that session out too.
-        if signInGenerations[id, default: 0] > expired, expiredGenerations[id, default: 0] <= expired {
+        // or a logout since signed that session out too. This save replaced a logout's sign-out,
+        // whose delete may have failed, so it's kept for it; any logout counts, which at worst
+        // keeps a sign-out the newer session didn't need.
+        if signInGenerations[id, default: 0] > expired, expiredGenerations[id, default: 0] <= expired,
+            latestLogout == logoutBefore
+        {
             _ = try? await store.clearSignedOut(id: id, savedAt: savedAt)
         }
         return true

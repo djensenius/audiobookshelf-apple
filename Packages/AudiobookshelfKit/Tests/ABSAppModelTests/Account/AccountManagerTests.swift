@@ -2109,8 +2109,10 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
 
     /// A failed removal saves the sign-out of an expiry meanwhile; a sign-in that saves a newer
     /// session and marks the connection used while that save is pending keeps its session usable,
-    /// even after a relaunch.
-    @Test func failedRemovalsExpirySaveDoesNotMarkANewerSignInSignedOut() async throws {
+    /// even after a relaunch. Unless it's logged out meanwhile and its delete fails: that keeps
+    /// the sign-out, so the tokens aren't restored offline.
+    @Test(arguments: [false, true])
+    func failedRemovalsExpirySaveDoesNotMarkANewerSignInSignedOut(logsOut: Bool) async throws {
         let harness = try Harness()
         let manager = harness.makeManager()
         let server = FakeServer()
@@ -2133,14 +2135,25 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
             harness.keychain.failWrites(with: nil)
             _ = try? await signIn(manager, to: server)
             signedInAgain = true
+            guard logsOut else { return }
+            harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+            await manager.logout()
         }
         deleting.open()
         await #expect(throws: KeychainError(status: errSecInteractionNotAllowed)) { try await removing.value }
 
         #expect(signedInAgain)
+        let relaunched = harness.makeManager()
+        if logsOut {
+            #expect(try harness.session(id) != nil)
+            #expect(try await harness.store.connection(id: id)?.signedOutAt != nil)
+            server.update { $0.isOffline = true }
+            await relaunched.restoreSession()
+            #expect(relaunched.state == .signedOut)
+            return
+        }
         #expect(try await harness.store.connection(id: id)?.signedOutAt == nil)
         #expect(manager.state.user?.connectionID == id)
-        let relaunched = harness.makeManager()
         await relaunched.restoreSession()
         #expect(relaunched.state.user?.connectionID == id && relaunched.lastError == nil)
     }
