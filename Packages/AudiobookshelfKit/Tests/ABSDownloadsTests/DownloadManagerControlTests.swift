@@ -233,6 +233,63 @@ import Testing
         #expect(try await fixture.store.record(id: book.id)?.state == .queued)
     }
 
+    /// An owned resume that queued the record, then failed, after a sign-out's quiesce passed
+    /// over the paused record: it's paused again, so no automatic restart starts it.
+    @Test func aFailedOwnedResumeAfterAQuiesceLeavesTheRecordPaused() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        let owner = UUID()
+        #expect(try await manager.pause(recordID: book.id, owner: owner))
+        await fixture.engine.failNextResumes(1, queueingFirst: true)
+        await fixture.engine.quiesce(since: 0)
+
+        await #expect(throws: DownloadManagerError.storeFailure) {
+            try await manager.resume(recordID: book.id, owner: owner, unlessQuiescedSince: 0)
+        }
+
+        #expect(try await fixture.store.record(id: book.id)?.state == .paused)
+    }
+
+    /// A second replacement's quiesce refuses the first's resume: the first keeps holding the
+    /// pause, so the second takes it over and resumes the record.
+    @Test func aRefusedOwnedResumeLeavesThePauseForTheNextOwner() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        let first = UUID()
+        let second = UUID()
+        #expect(try await manager.pause(recordID: book.id, owner: first))
+        await fixture.engine.quiesce(since: 0)
+
+        #expect(try await manager.resume(recordID: book.id, owner: first, unlessQuiescedSince: 0) == false)
+        #expect(try await manager.pause(recordID: book.id, owner: second))
+        #expect(try await manager.resume(recordID: book.id, owner: second, unlessQuiescedSince: 1))
+
+        #expect(await fixture.engine.resumed == [book.id])
+        #expect(try await fixture.store.record(id: book.id)?.state == .queued)
+    }
+
+    /// A user pause after a refused owned resume still takes the record back.
+    @Test func aUserPauseAfterARefusedOwnedResumeKeepsTheRecordPaused() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        let first = UUID()
+        #expect(try await manager.pause(recordID: book.id, owner: first))
+        await fixture.engine.quiesce(since: 0)
+
+        #expect(try await manager.resume(recordID: book.id, owner: first, unlessQuiescedSince: 0) == false)
+        #expect(try await manager.pause(recordID: book.id))
+        #expect(try await manager.pause(recordID: book.id, owner: UUID()) == false)
+
+        #expect(await fixture.engine.resumed.isEmpty)
+        #expect(try await fixture.store.record(id: book.id)?.state == .paused)
+    }
+
     /// A credential replacement's quiesce, under way while a policy restart holds the record
     /// paused, refuses the restart's resume. The cleanup, waiting for the item meanwhile, then
     /// takes the restart's pause over, so the record resumes with the new credentials rather than

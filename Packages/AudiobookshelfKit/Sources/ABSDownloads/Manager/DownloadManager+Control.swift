@@ -45,7 +45,10 @@ extension DownloadManager {
     }
 
     /// Resumes a download `owner` paused (``pause(recordID:owner:)``), as
-    /// ``resume(recordID:unlessQuiescedSince:)`` does, unless the user paused it since.
+    /// ``resume(recordID:unlessQuiescedSince:)`` does, unless the user paused it since. `owner`
+    /// holds the pause until the record is resumed, so a later owned pause can take over one a
+    /// quiesce kept paused. A failed resume that queued the record leaves it paused if a quiesce
+    /// began since, as ``restartActiveTransfers()`` does: that quiesce passed over it.
     ///
     /// - Returns: `false` when `owner` no longer holds its pause, or it wasn't resumed.
     /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or saved.
@@ -53,10 +56,29 @@ extension DownloadManager {
     public func resume(
         recordID: UUID, owner: UUID, unlessQuiescedSince generation: Int
     ) async throws(DownloadManagerError) -> Bool {
-        try await control(recordID, from: [.paused]) { engine, recordID in
-            guard self.systemPauses[recordID] == owner else { return false }
-            self.systemPauses[recordID] = nil
-            return try await engine.resume(recordID: recordID, unlessQuiescedSince: generation)
+        guard let record = try await read({ try await self.store.record(id: recordID) }) else { return false }
+        return try await holdingItem(record.key) { () async throws(DownloadManagerError) -> Bool in
+            guard let current = try await read({ try await self.store.record(id: recordID) }),
+                current.state == .paused, systemPauses[recordID] == owner
+            else { return false }
+            let resumed: Bool
+            do throws(DownloadManagerError) {
+                resumed = try await read {
+                    try await self.engine.resume(recordID: recordID, unlessQuiescedSince: generation)
+                }
+            } catch {
+                if await engine.hasQuiesced(connectionID: record.key.serverConnectionID, since: generation) {
+                    _ = try? await read {
+                        try await self.store.setState(.paused, forRecord: recordID, expecting: [.queued])
+                    }
+                }
+                await refresh(recordID, announce: true)
+                throw error
+            }
+            guard resumed else { return false }
+            systemPauses[recordID] = nil
+            await refresh(recordID, announce: true)
+            return true
         }
     }
 
