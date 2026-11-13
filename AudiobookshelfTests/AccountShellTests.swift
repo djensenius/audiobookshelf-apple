@@ -191,6 +191,50 @@ private final class Recorder: SessionParticipant {
         #expect(RootView.statsService(accounts, for: a) == nil)
     }
 
+    // MARK: Handoff
+
+    @Test func handoffNamesOnlyTheShownShellsActiveAccount() async throws {
+        let environment = try makeEnvironment()
+        let accounts = try #require(environment.accounts)
+        let (a, b, hosts) = try await twoServers(environment, recorder: Recorder())
+        defer { cleanUp(hosts) }
+        let active = try #require(accounts.activeConnection)
+        let account = try #require(HandoffAccount(connection: active))
+        #expect(HandoffPublishing.account(active: active, shown: .shell(b, opensLinks: true)) == account)
+        // The outgoing shell of a switch, still up for A after accounts moved to B, publishes nothing.
+        #expect(HandoffPublishing.account(active: active, shown: .shell(a, opensLinks: false)) == nil)
+        #expect(HandoffPublishing.account(active: active, shown: .shell(a, opensLinks: true)) == nil)
+        // Same connection, another user.
+        let otherUser = SessionIdentity(connectionID: b.connectionID, userID: "usr_someone_else")
+        #expect(HandoffPublishing.account(active: active, shown: .shell(otherUser, opensLinks: true)) == nil)
+        #expect(HandoffPublishing.account(active: nil, shown: .shell(b, opensLinks: true)) == nil)
+        for shown: SceneContent in [.loading, .signingOut, .connect, .storeUnavailable] {
+            #expect(HandoffPublishing.account(active: active, shown: shown) == nil, "\(shown)")
+        }
+    }
+
+    @Test func handoffPublishesOnlyTheSelectedTabsTopScreen() {
+        let router = Router()
+        let shown = { (itemID: String, episodeID: String?, owner: AppTab?) in
+            HandoffPublishing.isFrontmost(itemID: itemID, episodeID: episodeID, in: router, owner: owner)
+        }
+        router[path: .home] = [.item(id: "li_1")]
+        #expect(shown("li_1", nil, .home))
+        #expect(!shown("li_2", nil, .home))
+        // The same item kept appeared in a hidden tab (macOS), or that tab selected away from.
+        #expect(!shown("li_1", nil, .series))
+        router.selectedTab = .series
+        #expect(!shown("li_1", nil, .home))
+        // Covered by a screen pushed on top of it.
+        router.selectedTab = .home
+        router[path: .home].append(.episode(itemID: "li_1", episodeID: "ep_1"))
+        #expect(!shown("li_1", nil, .home))
+        #expect(shown("li_1", "ep_1", .home))
+        #expect(!shown("li_1", "ep_2", .home))
+        // Previews have no router.
+        #expect(HandoffPublishing.isFrontmost(itemID: "li_1", episodeID: nil, in: nil, owner: nil))
+    }
+
     // MARK: Account session adapter
 
     @Test func adapterReportsRestoringUntilTheServerAnswers() async throws {
@@ -228,6 +272,21 @@ private final class Recorder: SessionParticipant {
 
         #expect(adapter.phase == .active(identity, isOffline: true))
         #expect(adapter.client != nil && adapter.client === restored.client)
+    }
+
+    @Test func adapterResolvesAHandoffAccountToItsConnection() async throws {
+        let environment = try makeEnvironment()
+        let accounts = try #require(environment.accounts)
+        let host = Self.host("handoff-")
+        defer { cleanUp([host]) }
+        let identity = try await signIn(accounts, to: host)
+        let adapter = AccountSessionAdapter(accounts: accounts)
+        let active = try #require(accounts.activeConnection)
+
+        let account = try #require(HandoffAccount(connection: active))
+        #expect(await adapter.connectionID(for: account) == identity.connectionID)
+        let stranger = try #require(HandoffAccount(serverAddress: active.address, userID: "usr_someone_else"))
+        #expect(await adapter.connectionID(for: stranger) == nil)
     }
 
     // MARK: Account tab and server list
