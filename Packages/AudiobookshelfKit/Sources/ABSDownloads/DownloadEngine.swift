@@ -177,7 +177,8 @@ public actor DownloadEngine {
     private let beforeClearingResumeFlag: (@Sendable (UUID) async throws -> Void)?
     /// After a finalisation made a record a local item, before it deletes the record.
     private let afterUpsertingLocalItem: (@Sendable (UUID) async -> Void)?
-    /// After a network wait's or a retry delay's continuation of a part's launch returns.
+    /// After a network wait's, a retry delay's or a recreated session's continuation of a part's
+    /// launch returns.
     private let launchContinued: (@Sendable (UUID) async -> Void)?
     /// Internal so tests can post events.
     let delegate = DownloadSessionDelegate()
@@ -1145,6 +1146,7 @@ public actor DownloadEngine {
         }
         for partID in deferred {
             await launch(partID, notBefore: notBefore)
+            if let launchContinued { await launchContinued(partID) }
         }
     }
 
@@ -1246,11 +1248,12 @@ public actor DownloadEngine {
         guard let context = contexts[partID], tasks[partID] == nil, retries[partID] == nil, launching[partID] == nil,
             !settling.contains(partID), !pendingRecordFailures.contains(context.recordID)
         else { return }
+        // Before any deferral: the launch that recreateSession() replays keeps the restriction.
+        if onlyWhileActive { contexts[partID]?.onlyWhileActive = true }
         guard session != nil, !isInvalidatingSession else {
             deferredLaunches.insert(partID)
             return
         }
-        if onlyWhileActive { contexts[partID]?.onlyWhileActive = true }
         guard let destination = context.destination else {
             await failPermanently(
                 partID, code: .invalidDestination, message: "The download's destination is invalid.",

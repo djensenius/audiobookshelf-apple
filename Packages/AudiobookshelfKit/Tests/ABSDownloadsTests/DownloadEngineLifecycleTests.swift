@@ -2974,6 +2974,48 @@ import Testing
         #expect(harness.requests.count == 2)
     }
 
+    /// An activation's launch deferred while the session is invalidating keeps its restriction:
+    /// the recreated session's replay after a deactivate starts no transfer, and the next
+    /// activation starts the part.
+    @Test(.timeLimit(.minutes(1))) func activationLaunchDeferredForARecreationWaitsForTheNextActivation()
+        async throws
+    {
+        let gate = StubGate()
+        let failGate = StubGate()
+        let harness = try await DownloadHarness { request in
+            guard request.url?.path().contains("/file/1/") == true else { return .status(200, gate: gate) }
+            let fileRequests = StubDownloadProtocol.requests(host: request.url?.host() ?? "")
+                .filter { $0.url?.path().contains("/file/1/") == true }
+            return fileRequests.count == 1
+                ? .failure(code: NSURLErrorBackgroundSessionWasDisconnected, gate: failGate) : .status(200)
+        }
+        let (continued, launchContinued) = AsyncStream<UUID>.makeStream()
+        let dropped = UUID()
+        let holding = UUID()
+        try await harness.addRecord(parts: [dropped, holding])
+        let engine = harness.makeEngine(launchContinued: { launchContinued.yield($0) })
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        // The disconnect invalidates the session; the gated transfer keeps it invalidating.
+        await harness.waitForRequests(2)
+        failGate.open()
+        await harness.waitForCompletions(1)
+        await engine.processPendingEvents()
+        #expect(try await harness.store.part(id: dropped)?.state == .queued)
+
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        await engine.deactivate()
+        gate.open()
+        for await partID in continued where partID == dropped { break }
+
+        #expect(harness.requestCount(file: 1) == 1)
+        #expect(try await harness.store.part(id: dropped)?.state == .queued)
+        #expect(await engine.activate())
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requestCount(file: 1) == 2)
+    }
+
     /// A failure's replay of an automatic resume that began after a deactivate, while the
     /// failure was settling, starts nothing either: the next activation starts the part.
     @Test func replayOfAGuardedResumeWaitsForTheNextActivation() async throws {
