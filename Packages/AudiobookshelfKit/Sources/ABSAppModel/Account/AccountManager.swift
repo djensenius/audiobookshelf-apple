@@ -99,6 +99,9 @@ public final class AccountManager {
     public private(set) var features: ServerFeatures?
     /// Why the last restore or switch ended signed out or offline, or why the session expired.
     public private(set) var lastError: AccountError?
+    /// Bumped whenever a connection's saved session is stored, deleted or found expired, the
+    /// active one's or not, so a view that caches ``hasSession(_:)`` reads it again.
+    public private(set) var credentialsRevision = 0
 
     @ObservationIgnored private let store: ServerConnectionStore
     @ObservationIgnored private let vault: CredentialVault
@@ -318,6 +321,7 @@ public final class AccountManager {
             let credentials = self.credentials(for: connection.id)
             let stored = try await credentials.signIn(
                 session, customHeaders: server.configuration.customHeaders, operation: operation)
+            credentialsRevision += 1
             signInGenerations[connection.id] = stored.generation
             saved = (connection.id, credentials, stored.generation)
             if let replaced = stored.replaced, replaced.refreshToken != session.refreshToken {
@@ -347,9 +351,9 @@ public final class AccountManager {
                 if await isRemoved(saved.id) {
                     // Nothing else would delete what this sign-in saved for the removed connection,
                     // unless a newer sign-in has replaced it, even while the removal is finishing.
-                    if let removed = try? await saved.credentials.removeAll(ifGeneration: saved.generation),
-                        let ended = removed.session
-                    {
+                    let removed = try? await saved.credentials.removeAll(ifGeneration: saved.generation)
+                    credentialsRevision += 1
+                    if let ended = removed?.session {
                         _ = await serverLogout(ended, client: logoutClient)
                     }
                 } else if latestLogout != attempt.latestLogout {
@@ -360,7 +364,9 @@ public final class AccountManager {
                     // first, clear it here too, as logout() does.
                     var signedOutAt: Date?
                     if signInGenerations[saved.id] == saved.generation { signedOutAt = await saveSignOut(of: saved.id) }
-                    if let signedOut = await saved.credentials.signOut(ifGeneration: saved.generation) {
+                    let signedOut = await saved.credentials.signOut(ifGeneration: saved.generation)
+                    credentialsRevision += 1
+                    if let signedOut {
                         if let ended = signedOut.ended { _ = await serverLogout(ended, client: logoutClient) }
                     } else if let signedOutAt, await saved.credentials.holdsSignIn(after: latestLogout) {
                         _ = try? await store.clearSignedOut(id: saved.id, savedAt: signedOutAt)
@@ -494,7 +500,9 @@ public final class AccountManager {
         let credentials = self.credentials(for: id)
         // Not a session that a sign-in started after this call saved, whichever reached the
         // credentials first.
-        guard let signedOut = await credentials.signOut(savedBefore: operation) else {
+        let signedOut = await credentials.signOut(savedBefore: operation)
+        credentialsRevision += 1
+        guard let signedOut else {
             // That sign-in clears the sign-out saved above when it marks the connection used, but
             // in case it did so first, clear it here unless another sign-out has replaced it.
             if let signedOutAt { _ = try? await store.clearSignedOut(id: id, savedAt: signedOutAt) }
@@ -558,6 +566,7 @@ public final class AccountManager {
             connection = found
             await willDeleteRemovedSession?()
             removed = try await credentials(for: id).removeAll()
+            credentialsRevision += 1
         } catch {
             // Only the active connection signed out above is put back, and only over the state it
             // left: a failed removal mustn't undo a newer call, another connection activating, or
@@ -846,6 +855,7 @@ public final class AccountManager {
             try ensureCurrent(operation)
             if let read, read.session != nil, !read.storedBySignIn {
                 _ = await credentials.signOut(ifGeneration: read.generation)
+                credentialsRevision += 1
             }
             throw AccountError.notSignedIn
         }
@@ -959,6 +969,7 @@ public final class AccountManager {
         // A sign-in that saved the expired session mustn't activate it.
         expiredGenerations[id] = generation
         Log.auth.notice("The session expired")
+        credentialsRevision += 1
         credentialsExpired?(id)
         if activeConnection?.id == id, !isRemoving(id) { signOutLocally(error: .server(.sessionExpired)) }
         // Not for a connection being removed, whose record the removal deletes; if it fails, it
