@@ -44,7 +44,7 @@ extension ItemSummary {
     /// pipeline serves the downloaded cover offline.
     ///
     /// A podcast is the whole podcast, as on the server's podcast shelves: no duration, and
-    /// played per episode.
+    /// played per episode. Its `libraryID` is the one recorded at download time, if any.
     public init(localItem item: LocalLibraryItemDTO) {
         let metadata = item.media.metadata
         let subtitle = [item.authorName ?? "", metadata.authors.joined(separator: ", ")].first { !$0.isEmpty }
@@ -53,13 +53,15 @@ extension ItemSummary {
         if item.mediaType == .podcast {
             self.init(
                 id: item.libraryItemId, itemID: item.libraryItemId, kind: .podcast, title: item.title,
-                subtitle: subtitle, cover: cover, isExplicit: metadata.explicit, hasAudio: false)
+                subtitle: subtitle, cover: cover, isExplicit: metadata.explicit, hasAudio: false,
+                libraryID: item.libraryId)
             return
         }
         let duration = item.media.audioTracks.reduce(0) { $0 + max($1.duration, 0) }
         self.init(
             id: item.libraryItemId, itemID: item.libraryItemId, kind: .book, title: item.title, subtitle: subtitle,
             duration: duration.isFinite && duration > 0 ? duration : nil, cover: cover, isExplicit: metadata.explicit,
-            isAbridged: metadata.abridged, hasAudio: item.files.contains { $0.kind == .audio })
+            isAbridged: metadata.abridged, hasAudio: item.files.contains { $0.kind == .audio },
+            libraryID: item.libraryId)
     }
 }

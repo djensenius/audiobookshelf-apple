@@ -141,6 +141,7 @@ public struct DownloadPlanner: Sendable {
         if let cover { parts.append(cover) }
         return DownloadRecordDTO(
             key: MediaKey(serverConnectionID: connectionID, libraryItemId: item.id),
+            libraryId: Self.libraryID(of: item),
             mediaType: .book,
             title: book.metadata.title,
             relativeDirectory: layout.folder,
@@ -178,6 +179,7 @@ public struct DownloadPlanner: Sendable {
         if let cover { parts.append(cover) }
         return DownloadRecordDTO(
             key: MediaKey(serverConnectionID: connectionID, libraryItemId: item.id, episodeId: episode.id),
+            libraryId: Self.libraryID(of: item),
             mediaType: .podcast,
             title: episode.title.isEmpty ? podcast.metadata.title : episode.title,
             relativeDirectory: layout.folder,
@@ -186,6 +188,12 @@ public struct DownloadPlanner: Sendable {
     }
 
     // MARK: - Shared
+
+    /// The item's library, recorded with the download so Add to playlist needn't look it up;
+    /// `nil` when the server sent none.
+    private static func libraryID(of item: LibraryItem) -> String? {
+        item.libraryId.isEmpty ? nil : item.libraryId
+    }
 
     /// The offline cover (ADR 0005), or `nil` when `hasCover` is false.
     private func coverPart(

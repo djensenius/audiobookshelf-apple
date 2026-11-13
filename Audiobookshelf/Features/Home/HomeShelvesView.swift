@@ -73,6 +73,11 @@ struct HomeSectionRow: View {
             addToPlaylist(item)
             return
         }
+        // Recorded at download time: no lookup.
+        if let libraryID = item.libraryID {
+            addToPlaylist(item, libraryID: libraryID)
+            return
+        }
         guard let items = store?.makeServices() else {
             playlistLibraryFailed = true
             return

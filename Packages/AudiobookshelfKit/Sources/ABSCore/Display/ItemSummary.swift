@@ -71,12 +71,15 @@ public struct ItemSummary: Sendable, Hashable, Identifiable {
     /// Missing or invalid on the server: it can't be played.
     public let isMissing: Bool
     public let hasAudio: Bool
+    /// The item's library when it's known without asking the server: a downloaded item's, as
+    /// recorded at download time. `nil` otherwise.
+    public let libraryID: String?
 
     public init(
         id: String, itemID: String, episodeID: String? = nil, seriesID: String? = nil, kind: ItemKind, title: String,
         subtitle: String? = nil, seriesText: String? = nil, duration: TimeInterval? = nil, bookCount: Int? = nil,
         cover: CoverRef? = nil, isExplicit: Bool = false, isAbridged: Bool = false, isMissing: Bool = false,
-        hasAudio: Bool = true
+        hasAudio: Bool = true, libraryID: String? = nil
     ) {
         self.id = id
         self.itemID = itemID
@@ -93,6 +96,7 @@ public struct ItemSummary: Sendable, Hashable, Identifiable {
         self.isAbridged = isAbridged
         self.isMissing = isMissing
         self.hasAudio = hasAudio
+        self.libraryID = libraryID
     }
 
     /// Maps a book, podcast, podcast episode or collapsed series.

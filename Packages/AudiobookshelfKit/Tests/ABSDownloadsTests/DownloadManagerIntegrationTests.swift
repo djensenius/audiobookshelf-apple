@@ -50,6 +50,7 @@ import Testing
         #expect(key == MediaKey(serverConnectionID: harness.connectionID, libraryItemId: "li_book"))
         #expect(try await harness.store.record(id: recordID) == nil)
         let local = try #require(try await harness.localItems.item(id: itemID))
+        #expect(local.libraryId == item.libraryId)
         let folder = "\(harness.connectionID.uuidString)/li_book"
         #expect(local.relativeDirectory == folder)
         #expect(local.files.map(\.kind) == [.audio, .audio, .audio, .ebook])

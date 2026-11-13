@@ -113,7 +113,8 @@ extension DownloadManager {
             mimeType: "image/jpeg", expectedBytes: 0, bytesWritten: 0,
             destinationRelativePath: folder.isEmpty ? name : "\(folder)/\(name)", state: .queued)
         let plan = DownloadRecordDTO(
-            key: key, mediaType: item.mediaType, title: item.title, relativeDirectory: item.relativeDirectory,
+            key: key, libraryId: item.libraryId, mediaType: item.mediaType, title: item.title,
+            relativeDirectory: item.relativeDirectory,
             media: LocalMediaSnapshot(metadata: item.media.metadata, coverUpdatedAt: cover.updatedAt), parts: [part])
         guard let record = try await read({ try await self.store.insertRecordIfSignedIn(plan) }) else { return false }
         track(record)

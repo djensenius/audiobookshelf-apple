@@ -51,6 +51,19 @@ import UniformTypeIdentifiers
         #expect(summary.episodeID == nil)
     }
 
+    /// The library recorded at download time goes with the card, so Add to playlist needn't look
+    /// it up; a download from before it was stored has none (#571).
+    @Test func aDownloadedCardCarriesItsRecordedLibrary() {
+        var book = item("Book")
+        var podcast = item("Show", .podcast)
+        #expect(ItemSummary(localItem: book).libraryID == nil)
+        #expect(ItemSummary(localItem: podcast).libraryID == nil)
+        book.libraryId = "lib_books"
+        podcast.libraryId = "lib_podcasts"
+        #expect(ItemSummary(localItem: book).libraryID == "lib_books")
+        #expect(ItemSummary(localItem: podcast).libraryID == "lib_podcasts")
+    }
+
     @Test func aBookWithoutAuthorNameOrAudioFallsBack() {
         let ebook = item("Ebook", metadata: .init(title: "Ebook", authors: ["A", "B"]), files: [.ebook])
 

@@ -552,6 +552,28 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
         }
     }
 
+    /// A download that recorded its library opens Add to playlist there with no lookup; one made
+    /// before the library was stored still reads it from the server (#571).
+    @Test func aDownloadWithItsLibraryRecordedNeedsNoLookup() async throws {
+        let services = ItemLibraries(["li_Old": "lib_B"])
+        var recorded = item("New")
+        recorded.libraryId = "lib_C"
+        let downloads = HomePresentation.downloadedSections(
+            of: await shelf([recorded, item("Old")]), libraryKind: .book, isConnected: true)
+        let section = try #require(downloads.first)
+        let books = section.entries.compactMap { entry -> ItemSummary? in
+            if case .item(let book) = entry { book } else { nil }
+        }
+        let new = try #require(books.first { $0.itemID == "li_New" })
+        let old = try #require(books.first { $0.itemID == "li_Old" })
+
+        #expect(try await HomePresentation.playlistLibraryID(for: new, in: section, items: services) == "lib_C")
+        #expect(await services.lookedUp.isEmpty)
+
+        #expect(try await HomePresentation.playlistLibraryID(for: old, in: section, items: services) == "lib_B")
+        #expect(await services.lookedUp == ["li_Old"])
+    }
+
     @Test func homeWaitsForTheDownloadsBeforeSayingThereAreNone() {
         #expect(HomeScreenState.resolve(Inputs(connection: .offline, downloadsLoaded: false)) == .loading)
         #expect(HomeScreenState.resolve(Inputs(hasLoaded: true, downloadsLoaded: false)) == .loading)

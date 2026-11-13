@@ -86,6 +86,31 @@ import Testing
         #expect(try await store.item(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_1") == item)
     }
 
+    /// A download's library becomes the local item's and survives reopening the store (#571); a
+    /// re-download from a record saved before the library was stored keeps it.
+    @Test func theDownloadsLibraryIsStoredAndSurvivesReopeningTheStore() async throws {
+        let directory = Fixtures.temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appending(path: "Audiobookshelf.store")
+        var download = bookDownload(parts: bookParts)
+        download.libraryId = "lib_1"
+
+        do {
+            let container = try DataStack(location: .url(url)).container
+            let context = ModelContext(container)
+            context.insert(Fixtures.connection(id: Fixtures.connectionID))
+            try context.save()
+            let store = LocalItemStore(modelContainer: container)
+            #expect(try await store.upsertFromDownload(download, now: now).libraryId == "lib_1")
+            download.libraryId = nil
+            #expect(try await store.upsertFromDownload(download, now: now).libraryId == "lib_1")
+        }
+
+        let reopened = LocalItemStore(modelContainer: try DataStack(location: .url(url)).container)
+        let item = try await reopened.item(serverConnectionID: Fixtures.connectionID, libraryItemId: "li_1")
+        #expect(item?.libraryId == "lib_1")
+    }
+
     @Test func upsertFromDownloadRequiresConnection() async throws {
         let store = LocalItemStore(modelContainer: try DataStack(location: .inMemory).container)
         await #expect(throws: LocalItemStore.StoreError.connectionNotFound(Fixtures.connectionID)) {
