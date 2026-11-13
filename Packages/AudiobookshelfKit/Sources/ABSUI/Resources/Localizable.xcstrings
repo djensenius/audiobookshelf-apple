@@ -19869,6 +19869,496 @@
         }
       }
     },
+    "ButtonReaderNextPage" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Next Page"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Next Page"
+          }
+        }
+      }
+    },
+    "ButtonReaderPreviousPage" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Previous Page"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Previous Page"
+          }
+        }
+      }
+    },
     "ButtonReaderThumbnails" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -140080,6 +140570,251 @@
         }
       }
     },
+    "MessageHandoffAccountNotSignedIn" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "The item you continued belongs to an account that isn't signed in on this device."
+          }
+        }
+      }
+    },
     "MessageHideFromContinueListeningFailed" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -164090,6 +164825,986 @@
         }
       }
     },
+    "MessageReaderLoadFailed" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Couldn't open this ebook. Try again."
+          }
+        }
+      }
+    },
+    "MessageReaderPDFLocked" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This PDF is password protected, so it can't be opened here."
+          }
+        }
+      }
+    },
+    "MessageReaderUnavailable" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This ebook's server account isn't signed in."
+          }
+        }
+      }
+    },
+    "MessageReaderUnsupported" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "This app can't open %1$@ ebooks yet. You can read it in the web client."
+          }
+        }
+      }
+    },
     "MessageRemoveServerAccount" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -171224,241 +172939,241 @@
         "ar" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "be" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "bg" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "bn" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "ca" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "cs" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "da" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "de" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "el" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "en" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "es" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "et" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "fa" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "fi" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "fr" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "gu" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "he" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "hi" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "hr" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "hu" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "is" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "it" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "ja" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "ko" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "lt" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "nb" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "nl" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "pl" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "pt-BR" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "ro" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "ru" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "sk" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "sl" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "sv" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "ta" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "tr" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "uk" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "vi" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "new",
-            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings."
+            "value" : "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?"
           }
         }
       }

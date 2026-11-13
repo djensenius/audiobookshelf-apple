@@ -23,6 +23,8 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     var isBuffering: Bool { get }
     /// The play intent: `true` while starting, playing or stalled with play requested.
     var isPlaybackRequested: Bool { get }
+    /// Whether recovery is waiting for the network before its next attempt.
+    var isWaitingForNetwork: Bool { get }
     /// The loaded timeline; `nil` unless media is loaded.
     var timeline: PlaybackTimeline? { get }
     var chapterIndex: Int? { get }
@@ -40,6 +42,10 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     @discardableResult func jumpOutcome(by offset: Double) async -> JumpOutcome
     func setRate(_ rate: Double)
     func stop(reason: PlaybackStopReason)
+    /// Replays the play a `.streamingNeedsConfirmation` error blocked, allowing the metered path.
+    func confirmMeteredStreaming() async
+    /// Clears a `.streamingNeedsConfirmation` error without playing.
+    func declineMeteredStreaming()
 }
 
 extension PlaybackCoordinator: PlayerPlaybackControlling {}

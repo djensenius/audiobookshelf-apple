@@ -21,7 +21,7 @@ import SwiftData
     }
 
     /// How long events should be kept; callers must invoke ``pruneExpired(now:)`` at launch.
-    /// The app-shell wiring for launch pruning belongs to issue #44.
+    /// The app's environment does, once per launch (#184).
     public static let retention: TimeInterval = 90 * 24 * 60 * 60
 
     /// The most events kept per media; the legacy app kept every event forever.
