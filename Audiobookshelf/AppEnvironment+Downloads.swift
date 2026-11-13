@@ -15,6 +15,9 @@ import Foundation
 struct AppDownloads {
     let engine: DownloadEngine
     let manager: DownloadManager
+    /// The downloaded items' only writer, shared by the engine and the manager, so its update
+    /// streams see every change.
+    let localItems: LocalItemStore
     let janitor: DownloadJanitor
     let controller: DownloadsController
     let lifecycle: DownloadsLifecycle
@@ -73,8 +76,8 @@ struct AppDownloads {
                 }
             })
         return AppDownloads(
-            engine: engine, manager: manager, janitor: janitor, controller: controller, lifecycle: lifecycle,
-            sessions: sessions,
+            engine: engine, manager: manager, localItems: localItems, janitor: janitor, controller: controller,
+            lifecycle: lifecycle, sessions: sessions,
             access: DownloadAccess(
                 requester: controller, status: StoredDownloadStatus(localItems: localItems, records: store)))
     }

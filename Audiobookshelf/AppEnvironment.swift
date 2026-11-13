@@ -50,6 +50,8 @@ final class AppEnvironment {
     let downloads: AppDownloads?
     /// The shared library and its session participant (#181), or `nil` without ``accounts``.
     let library: LibraryParticipant?
+    /// The realtime socket (#59), or `nil` without ``library`` or when left out.
+    let realtime: AppRealtime?
     /// The cover image pipeline and its session participant (#182).
     let images: ImageServices
     /// Writes the Continue Listening widget's snapshot (#89).
@@ -62,13 +64,14 @@ final class AppEnvironment {
     ///     tests pass a temporary directory, and `nil` leaves out the download stack.
     ///   - makeDownloadSession: The download engine's session; tests pass a non-background one.
     ///   - covers: Where the cover pipeline fetches and caches covers.
+    ///   - realtime: Whether sessions open the realtime socket; a fixture launch has no server for it.
     init(
         settings: AppSettings = AppSettings(), storeLocation: DataStack.Location = .appGroup,
         keychain: any KeychainStoring = KeychainStore(),
         sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() },
         downloadsRoot: URL? = .applicationSupportDirectory,
         makeDownloadSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession(),
-        covers: CoverSource = .app
+        covers: CoverSource = .app, realtime: Bool = true
     ) {
         let dataStack: DataStack?
         let accounts: AccountManager?
@@ -127,6 +130,15 @@ final class AppEnvironment {
         self.downloads = downloads
         downloads?.lifecycle.launch()
         self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
+
+        // Realtime (#59), after playback: the socket stops before the playback scope retires.
+        if realtime, let accounts, let library {
+            self.realtime = AppRealtime.make(
+                library: library, accounts: accounts, playback: playback, localProgress: localProgress,
+                lifecycle: lifecycle)
+        } else {
+            self.realtime = nil
+        }
 
         // Images (#182).
         let images = ImageServices(
