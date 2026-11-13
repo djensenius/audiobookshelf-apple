@@ -73,6 +73,9 @@ public final class DownloadsTabModel {
     /// or `nil`; only the downloads whose events arrived since are listed. ``reload()`` reads
     /// them again.
     public var queueLoadError: (any Error)? { services.controller.loadError }
+    /// The bytes the listed books and podcasts use, or `nil` until a read of them succeeds: after
+    /// a failed one (``loadError``), the items listed are those of an earlier read, or none.
+    public var downloadedBytes: Int64? { isLoaded && loadError == nil ? listing.downloadedBytes : nil }
     /// The bytes still available for downloads, or `nil` while unknown.
     public private(set) var availableBytes: Int64?
     public var notice: Notice?

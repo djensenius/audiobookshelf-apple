@@ -75,6 +75,8 @@ private actor FakeControl: DownloadControlling {
 private actor ItemSource {
     private(set) var reads = 0
     var items: [LocalLibraryItemDTO] = []
+    /// Whether reads throw, as a store that can't be opened would.
+    private var failing = false
     private var subscribers: [AsyncStream<[LocalLibraryItemDTO]>.Continuation] = []
 
     /// Sets the items, as a write to the store would, and sends them to ``updates(_:)``.
@@ -83,8 +85,13 @@ private actor ItemSource {
         for subscriber in subscribers { subscriber.yield(items) }
     }
 
-    func read(_ connectionID: UUID) -> [LocalLibraryItemDTO] {
+    func fail(_ failing: Bool) {
+        self.failing = failing
+    }
+
+    func read(_ connectionID: UUID) throws -> [LocalLibraryItemDTO] {
         reads += 1
+        if failing { throw CocoaError(.fileReadUnknown) }
         return items.filter { $0.serverConnectionID == connectionID }
     }
 
@@ -126,7 +133,7 @@ struct DownloadsTabModelTests {
         let model = DownloadsTabModel(
             services: DownloadsServices(
                 controller: controller, control: control, localItemUpdates: updates,
-                localItems: { await source.read($0) }, availableCapacity: { 1_000 }))
+                localItems: { try await source.read($0) }, availableCapacity: { 1_000 }))
         let (reloads, report) = AsyncStream.makeStream(of: Void.self)
         model.reloaded = { report.yield() }
         let observing = Task { await model.observe(connectionID: Self.connection) }
@@ -291,6 +298,46 @@ struct DownloadsTabModelTests {
 
         await model.reload()
         #expect(reads.value == 5)
+    }
+
+    /// A failed read of the items keeps listing those of the last read, with
+    /// ``DownloadsTabModel/loadError`` for the view to show beside them, and no storage total
+    /// until a read succeeds again. The negative controls: the total before the failure and
+    /// after the next read.
+    @Test func aFailedItemReadKeepsTheListButHidesTheStorageTotal() async throws {
+        let source = ItemSource()
+        await source.set([DownloadsListingTests.item("Walden", files: [DownloadsListingTests.file(size: 100)])])
+        let (model, cleanUp) = try await makeModel(source: source)
+        defer { cleanUp() }
+        #expect(model.loadError == nil)
+        #expect(model.downloadedBytes == 100)
+
+        await source.fail(true)
+        await model.reload()
+        #expect((model.loadError as? CocoaError)?.code == .fileReadUnknown)
+        #expect(model.listing.books.map(\.title) == ["Walden"])
+        #expect(model.downloadedBytes == nil)
+
+        await source.fail(false)
+        await model.reload()
+        #expect(model.loadError == nil)
+        #expect(model.downloadedBytes == 100)
+    }
+
+    /// When the first read of the items fails, the downloads under way are still listed, with
+    /// the error, and no storage total rather than one of 0 bytes.
+    @Test func aFailedFirstItemReadListsTheQueueWithoutAStorageTotal() async throws {
+        let queued = DownloadsListingTests.record("Queued", state: .queued)
+        let source = ItemSource()
+        await source.fail(true)
+        let (model, cleanUp) = try await makeModel(source: source, records: [queued])
+        defer { cleanUp() }
+
+        #expect(model.isLoaded)
+        #expect(model.loadError != nil)
+        #expect(model.listing.downloads.map(\.id) == [queued.id])
+        #expect(model.listing.downloadedBytes == 0)
+        #expect(model.downloadedBytes == nil)
     }
 
     /// Each window has its own model; one following the store's updates reads the items again

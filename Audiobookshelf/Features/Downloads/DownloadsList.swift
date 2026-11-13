@@ -64,11 +64,17 @@ struct DownloadsList: View {
             List {
                 if mode == .all {
                     Section {
-                        DownloadsStorageRow(used: listing.downloadedBytes, available: model.availableBytes)
+                        // No total until the items are read: those listed may be stale.
+                        if let used = model.downloadedBytes {
+                            DownloadsStorageRow(used: used, available: model.availableBytes)
+                        }
+                        if model.loadError != nil {
+                            loadFailedRow(L10n.string("MessageDownloadsLoadFailed"))
+                        }
                     }
                 }
                 if model.queueLoadError != nil {
-                    Section { queueLoadFailedRow }
+                    Section { loadFailedRow(L10n.string("MessageDownloadQueueLoadFailed")) }
                 }
                 downloadingSection(listing)
                 if mode == .all {
@@ -86,12 +92,12 @@ struct DownloadsList: View {
         return model.queueLoadError != nil ? L10n.string("MessageDownloadQueueLoadFailed") : nil
     }
 
-    /// Shown above the list when the stored downloads under way couldn't be read, so the queue
-    /// isn't silently missing; Retry reads them again.
-    private var queueLoadFailedRow: some View {
+    /// Shown above a non-empty list when the downloaded items or the stored downloads under way
+    /// couldn't be read, so what's missing or stale isn't silent; Retry reads them again.
+    private func loadFailedRow(_ message: String) -> some View {
         HStack(spacing: ABSSpacing.medium) {
             Label {
-                Text(verbatim: L10n.string("MessageDownloadQueueLoadFailed"))
+                Text(verbatim: message)
             } icon: {
                 Image(systemName: "exclamationmark.triangle")
                     .foregroundStyle(ABSColor.mutedForeground)
@@ -169,8 +175,11 @@ struct DownloadsList: View {
         .disabled(model.busy.contains(podcast.id))
     }
 
+    /// Not `.destructive`: the list would remove the row before the confirmation (as in
+    /// `BookmarksSheet`); the row goes once the confirmed deletion is read back.
     private func deleteButton(_ pending: PendingDelete) -> some View {
-        Button(L10n.string("ButtonDelete"), role: .destructive) { pendingDelete = pending }
+        Button(L10n.string("ButtonDelete")) { pendingDelete = pending }
+            .tint(.red)
     }
 
     private func delete(_ pending: PendingDelete) async {
