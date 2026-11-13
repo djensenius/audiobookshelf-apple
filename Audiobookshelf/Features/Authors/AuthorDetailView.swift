@@ -18,8 +18,6 @@ struct AuthorDetailView: View {
         Group {
             if let host, let model = host.model(for: key) {
                 AuthorDetailContent(model: model)
-                    // TODO(#181): drop this once the shell sets `itemProgressReader` from the same store.
-                    .environment(\.itemProgressReader, host.progressReader)
             } else {
                 BrowsePlaceholder(libraryID: libraryID, messages: AuthorsPresentation.detailMessages)
                     .navigationTitle(Text(verbatim: L10n.string("LabelAuthor")))
