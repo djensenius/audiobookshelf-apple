@@ -66,6 +66,10 @@ public protocol PlayableEntitySource {
 /// search, and Continue Listening as suggestions. Only the signed-in account's items: an
 /// identifier of another account (or of a signed-out one) finds nothing, so Siri can't play an
 /// item on the wrong server.
+///
+/// Every lookup is pinned to the account it started on: after each request it checks that the
+/// task isn't cancelled and the account is still the same, and otherwise gives up rather than
+/// continue through the next account's services, whose items could have the same IDs.
 @MainActor
 public struct PlayableEntityCatalog {
     /// Matches asked of each library's search, per group (books and episodes).
@@ -80,12 +84,16 @@ public struct PlayableEntityCatalog {
     /// The signed-in account's books and episodes matching `query`, from each library's server
     /// search: books first, in server order, then episodes. Empty for a blank query or while
     /// signed out.
+    /// - Throws: `CancellationError` when the task is cancelled or the account changes meanwhile.
     public func search(_ query: String) async throws -> [PlayableEntityRecord] {
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty, let connectionID = source.connectionID else { return [] }
         var records: [PlayableEntityRecord] = []
-        for library in try await source.libraries() {
+        let libraries = try await source.libraries()
+        try checkCurrent(connectionID)
+        for library in libraries {
             let results = try await source.searchLibrary(id: library.id, query: query, limit: Self.searchLimit)
+            try checkCurrent(connectionID)
             records += (results.books + results.episodes).compactMap {
                 PlayableEntityRecord(summary: ItemSummary(item: $0), connectionID: connectionID)
             }
@@ -95,11 +103,15 @@ public struct PlayableEntityCatalog {
 
     /// Each library's Continue Listening shelf, as Home shows it (finished and hidden items left
     /// out), in library order. Empty while signed out.
+    /// - Throws: `CancellationError` when the task is cancelled or the account changes meanwhile.
     public func suggestions() async throws -> [PlayableEntityRecord] {
         guard let connectionID = source.connectionID else { return [] }
         var records: [PlayableEntityRecord] = []
-        for library in try await source.libraries() {
+        let libraries = try await source.libraries()
+        try checkCurrent(connectionID)
+        for library in libraries {
             let shelves = try await source.personalizedShelves(libraryID: library.id)
+            try checkCurrent(connectionID)
             let sections = HomeSection.sections(from: shelves) { source.progress(libraryItemID: $0, episodeID: $1) }
             let shelf = sections.first { $0.id == "continue-listening" }
             records += (shelf?.entries ?? []).compactMap {
@@ -112,7 +124,8 @@ public struct PlayableEntityCatalog {
 
     /// The records for `identifiers`, in their order. An identifier that isn't a ``MediaKey``,
     /// belongs to another account, or names an item or episode the server no longer has (or that
-    /// can't be played) is left out.
+    /// can't be played) is left out. None at all when the task is cancelled or the account changes
+    /// meanwhile.
     public func entities(for identifiers: [String]) async -> [PlayableEntityRecord] {
         guard let connectionID = source.connectionID else { return [] }
         var items: [String: LibraryItem?] = [:]
@@ -124,6 +137,7 @@ public struct PlayableEntityCatalog {
                 item = cached
             } else {
                 item = try? await source.item(id: key.libraryItemId)
+                guard (try? checkCurrent(connectionID)) != nil else { return [] }
                 items[key.libraryItemId] = .some(item)
             }
             guard let item, let summary = Self.summary(of: item, episodeID: key.episodeId),
@@ -132,6 +146,13 @@ public struct PlayableEntityCatalog {
             records.append(record)
         }
         return records
+    }
+
+    /// Throws `CancellationError` when the task is cancelled or the account is no longer
+    /// `connectionID`'s.
+    private func checkCurrent(_ connectionID: UUID) throws {
+        try Task.checkCancellation()
+        guard source.connectionID == connectionID else { throw CancellationError() }
     }
 
     /// The item's summary, or its episode's; `nil` when the episode isn't the podcast's.

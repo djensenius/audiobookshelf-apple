@@ -152,7 +152,8 @@ public struct PlaybackIntentPerformer {
     ///   - playItem: The running session's play action; `nil` between sessions.
     /// - Throws: ``PlaybackIntentFailure/itemUnavailable`` when `key` isn't the signed-in account's
     ///   or there's no session to play it in, and ``PlaybackIntentFailure/playbackFailed`` when the
-    ///   player didn't start, as for ``resume()``.
+    ///   player didn't start `key`: play isn't requested, as for ``resume()``, or another item is
+    ///   still the current one (a start the streaming setting blocked leaves it playing).
     public func play(
         _ key: MediaKey, activeConnectionID: UUID?, playItem: PlayItemAction?
     ) async throws(PlaybackIntentFailure) {
@@ -164,6 +165,8 @@ public struct PlaybackIntentPerformer {
         } catch {
             throw .playbackFailed
         }
-        guard playback.isPlaybackRequested else { throw .playbackFailed }
+        // A blocked start (the streaming setting) leaves the previous item playing: success only
+        // when this item is the one requested.
+        guard playback.isPlaybackRequested, playback.mediaKey == key else { throw .playbackFailed }
     }
 }

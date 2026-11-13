@@ -289,13 +289,17 @@ private let restored = LastPlayedRecord(
     private static let account = FakePlaybackControl.serverID
     private static let episodeKey = MediaKey(serverConnectionID: account, libraryItemId: "li_pod", episodeId: "ep_1")
 
-    /// A play action that records its calls and, like the app's, requests playback on `playback`.
+    /// A play action that records its calls and, like the app's, makes the item current and
+    /// requests playback on `playback` when it `starts`; otherwise it leaves `playback` as it was,
+    /// as a start the streaming setting blocks does.
     private static func recordingPlay(
         _ playback: FakePlaybackControl, starts: Bool = true, calls: Locked<[String]>
     ) -> PlayItemAction {
         PlayItemAction { itemID, episodeID, startTime in
             calls.value.append("\(itemID) \(episodeID ?? "-") \(startTime.map { "\($0)" } ?? "-")")
-            playback.isPlaybackRequested = starts
+            guard starts else { return }
+            playback.mediaKey = MediaKey(serverConnectionID: account, libraryItemId: itemID, episodeId: episodeID)
+            playback.isPlaybackRequested = true
         }
     }
 
@@ -340,6 +344,22 @@ private let restored = LastPlayedRecord(
                     playItem: Self.recordingPlay(playback, starts: false, calls: calls))
             }
             #expect(calls.value == ["li_pod ep_1 -"])
+        }
+    }
+
+    @Test func playBlockedWhileAnotherItemPlaysFails() async throws {
+        try await withPerformer { performer, playback, _ in
+            // Book `li_book` plays; the episode's start is blocked.
+            playback.load(FakePlaybackControl.bookSession(), at: 50, playing: true)
+            let calls = Locked<[String]>([])
+            await #expect(throws: PlaybackIntentFailure.playbackFailed) {
+                try await performer.play(
+                    Self.episodeKey, activeConnectionID: Self.account,
+                    playItem: Self.recordingPlay(playback, starts: false, calls: calls))
+            }
+            #expect(calls.value == ["li_pod ep_1 -"])
+            #expect(playback.isPlaybackRequested)
+            #expect(playback.mediaKey?.libraryItemId == "li_book")
         }
     }
 }

@@ -18,21 +18,26 @@ private final class FakeEntitySource: PlayableEntitySource {
     var items: [String: LibraryItem] = [:]
     var progressByKey: [String: MediaProgress] = [:]
     private(set) var requests: [String] = []
+    /// Run after each request is recorded, before it returns: to switch accounts or cancel mid-lookup.
+    var afterRequest: (@MainActor (FakeEntitySource) -> Void)?
 
     func libraries() async throws -> [Library] { libraryList }
 
     func searchLibrary(id: String, query: String, limit: Int?) async throws -> LibrarySearchResults {
         requests.append("search \(id) \(query) \(limit.map(String.init) ?? "-")")
+        afterRequest?(self)
         return searchResults[id] ?? LibrarySearchResults()
     }
 
     func personalizedShelves(libraryID: String) async throws -> [Shelf] {
         requests.append("shelves \(libraryID)")
+        afterRequest?(self)
         return shelves[libraryID] ?? []
     }
 
     func item(id: String) async throws -> LibraryItem {
         requests.append("item \(id)")
+        afterRequest?(self)
         guard let item = items[id] else { throw URLError(.fileDoesNotExist) }
         return item
     }
@@ -237,5 +242,51 @@ private enum EntityFixtures {
         source.connectionID = nil
         #expect(await catalog.entities(for: [EntityFixtures.key("li_1")]).isEmpty)
         #expect(source.requests.isEmpty)
+    }
+
+    // MARK: Account changes
+
+    @Test func anAccountSwitchDuringALookupFindsNothing() async {
+        // Both accounts have an `li_1` and an `li_2`: after the switch, the source would answer
+        // with the other account's items, which must not get this account's identifiers.
+        source.items = ["li_1": EntityFixtures.book("li_1"), "li_2": EntityFixtures.book("li_2")]
+        source.afterRequest = { $0.connectionID = EntityFixtures.otherConnection }
+
+        let records = await catalog.entities(for: [EntityFixtures.key("li_1"), EntityFixtures.key("li_2")])
+
+        #expect(records.isEmpty)
+        #expect(source.requests == ["item li_1"])
+    }
+
+    @Test func aCancelledLookupFindsNothing() async {
+        source.items = ["li_1": EntityFixtures.book("li_1"), "li_2": EntityFixtures.book("li_2")]
+        source.afterRequest = { _ in withUnsafeCurrentTask { $0?.cancel() } }
+
+        let records = await catalog.entities(for: [EntityFixtures.key("li_1"), EntityFixtures.key("li_2")])
+
+        #expect(records.isEmpty)
+        #expect(source.requests == ["item li_1"])
+    }
+
+    @Test func anAccountSwitchDuringASearchThrows() async {
+        source.searchResults = ["books": LibrarySearchResults(books: [EntityFixtures.book("li_1")])]
+        source.afterRequest = { $0.connectionID = EntityFixtures.otherConnection }
+
+        await #expect(throws: CancellationError.self) { try await catalog.search("dune") }
+        #expect(source.requests == ["search books dune 10"])
+    }
+
+    @Test func anAccountSwitchDuringSuggestionsThrows() async {
+        source.shelves = [
+            "books": [
+                Shelf(
+                    id: "continue-listening", label: "Continue Listening", type: .book,
+                    entities: .libraryItems([EntityFixtures.book("li_1")]))
+            ]
+        ]
+        source.afterRequest = { $0.connectionID = EntityFixtures.otherConnection }
+
+        await #expect(throws: CancellationError.self) { try await catalog.suggestions() }
+        #expect(source.requests == ["shelves books"])
     }
 }
