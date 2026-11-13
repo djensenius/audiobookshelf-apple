@@ -31,6 +31,9 @@ public protocol PlaybackSessionService: Sendable {
     /// Whether the server still has session `id` open (`GET /api/session/{id}`): recovery's check
     /// before an attempt (ADR 0007). Defaults to ``PlaybackSessionStatus/unknown``.
     func sessionStatus(id: String) async -> PlaybackSessionStatus
+    /// The ``sessionStatus(id:)``, and whether the lookup refreshed the access token. Defaults to
+    /// that status and no refresh.
+    func sessionCheck(id: String) async -> PlaybackSessionCheck
 }
 
 /// A session's stream plan with the URL to load for each of its tracks.

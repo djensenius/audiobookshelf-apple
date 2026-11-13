@@ -155,6 +155,58 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(tokens.expiredCount == 0)
     }
 
+    /// A request whose 401 a refresh answered reports it; one sent with tokens the server accepts
+    /// doesn't.
+    @Test(arguments: [true, false])
+    func trackedRequestReportsItsOwnRefresh(rejected: Bool) async throws {
+        let server = tokenServer(refresh: .json(refreshedJSON))
+        let tokens = InMemoryTokenProvider(
+            AuthTokens(accessToken: rejected ? "access-1" : "access-2", refreshToken: "refresh-1"))
+        let client = try makeClient(server, tokens: tokens)
+
+        let tracked = await client.sendTrackingRefresh(Endpoint<OK>(.get, "/api/me"))
+
+        #expect(try tracked.result.get() == OK(ok: true))
+        #expect(tracked.didRefresh == rejected)
+        #expect(server.requests(path: refreshPath).count == (rejected ? 1 : 0))
+    }
+
+    /// The refresh is reported even when the retried request then fails.
+    @Test func trackedRequestReportsARefreshBeforeItsFailure() async throws {
+        let server = StubServer { request in
+            if request.url?.path() == refreshPath { return .json(refreshedJSON) }
+            let refreshed = request.value(forHTTPHeaderField: "Authorization") == "Bearer access-2"
+            return .text(refreshed ? "Not Found" : "Unauthorized", status: refreshed ? 404 : 401)
+        }
+        let client = try makeClient(server, tokens: InMemoryTokenProvider())
+
+        let tracked = await client.sendTrackingRefresh(Endpoint<OK>(.get, "/api/session/s"))
+
+        #expect(throws: APIError.notFound) { try tracked.result.get() }
+        #expect(tracked.didRefresh)
+    }
+
+    /// Another request's refresh while this one is in flight isn't this one's, though its tokens
+    /// changed meanwhile (comparing them before and after would say otherwise).
+    @Test func anotherRequestsRefreshIsNotTracked() async throws {
+        let server = tokenServer(refresh: .json(refreshedJSON))
+        // Call 1 is the tracked request's token read, held until the other request has refreshed.
+        let tokens = GatedTokenProvider(holdingCall: 1, readsAfterRelease: true)
+        let client = try makeClient(server, tokens: tokens)
+
+        let tracked = Task { await client.sendTrackingRefresh(Endpoint<OK>(.get, "/api/me")) }
+        await tokens.held()
+        let other = await client.sendTrackingRefresh(Endpoint<OK>(.get, "/api/other"))
+        tokens.release()
+        let result = await tracked.value
+
+        // Control: the other request did refresh.
+        #expect(other.didRefresh)
+        #expect(try result.result.get() == OK(ok: true))
+        #expect(!result.didRefresh)
+        #expect(server.requests(path: refreshPath).count == 1)
+    }
+
     @Test func keepsRefreshTokenWhenResponseOmitsIt() async throws {
         let server = tokenServer(refresh: .json(#"{"user":{"accessToken":"access-2"}}"#))
         let tokens = InMemoryTokenProvider()

@@ -148,6 +148,28 @@ public actor APIClient {
 
     /// Sends `endpoint` and returns the decoded value with its HTTP response.
     public func response<Response>(for endpoint: Endpoint<Response>) async throws -> APIResponse<Response> {
+        var refreshed = false
+        return try await response(for: endpoint, refreshed: &refreshed)
+    }
+
+    /// Sends `endpoint` as ``send(_:)`` does, and reports whether this request's own 401 was
+    /// answered by refreshing the tokens it was rejected with (a refresh it started, or one of
+    /// those tokens it joined), whether the request then succeeded or failed. A refresh another
+    /// request made for its own 401 isn't this request's.
+    public func sendTrackingRefresh<Response>(_ endpoint: Endpoint<Response>) async -> RefreshTrackedResult<Response> {
+        var refreshed = false
+        do {
+            let value = try await response(for: endpoint, refreshed: &refreshed).value
+            return RefreshTrackedResult(result: .success(value), didRefresh: refreshed)
+        } catch {
+            return RefreshTrackedResult(result: .failure(error), didRefresh: refreshed)
+        }
+    }
+
+    /// - Parameter refreshed: Set once a refresh answers this request's 401.
+    private func response<Response>(
+        for endpoint: Endpoint<Response>, refreshed: inout Bool
+    ) async throws -> APIResponse<Response> {
         let request = try makeRequest(for: endpoint)
         let followsRedirects = endpoint.followsRedirects
         let staysOnOrigin = endpoint.staysOnOrigin
@@ -213,7 +235,10 @@ public actor APIClient {
                 guard sendsLeft > 0 else { return try handle(reply.data, reply.http, for: endpoint) }
                 let outcome = try await refreshedTokens(
                     replacing: tokens, readAt: tokensGeneration, sentAt: sendGeneration)
-                if outcome.didRefresh { refreshedPair = outcome.tokens }
+                if outcome.didRefresh {
+                    refreshedPair = outcome.tokens
+                    refreshed = true
+                }
                 next = outcome.tokens
             }
             guard sendsLeft > 0 else { return try handle(reply.data, reply.http, for: endpoint) }

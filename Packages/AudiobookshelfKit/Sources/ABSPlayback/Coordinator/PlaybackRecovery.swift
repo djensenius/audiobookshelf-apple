@@ -63,8 +63,8 @@ struct PlaybackRecoveryHost {
     /// Refreshes the access token once; returns the error that stops recovery, if any.
     var refresh: () async -> PlaybackCoordinatorError?
     /// Looks up the loaded session (`GET /api/session/{id}`); ``PlaybackSessionStatus/unknown``
-    /// with none.
-    var checkSession: () async -> PlaybackSessionStatus
+    /// with none. A lookup that refreshed the token spends the episode's refresh.
+    var checkSession: () async -> PlaybackSessionCheck
     /// Surfaces `error` and ends recovery.
     var giveUp: (PlaybackCoordinatorError) -> Void
 }
@@ -80,7 +80,8 @@ struct PlaybackRecoveryHost {
 ///   ``PlaybackCoordinatorError/recoveryExhausted``.
 /// - **401.** The first one in an episode refreshes the token, then rebuilds (counted against the
 ///   rebuild budget). A second one stops with ``PlaybackCoordinatorError/streamRejected``; there is
-///   never a second refresh.
+///   never a second refresh. A session lookup whose request refreshed the token spends that one
+///   refresh too (#491).
 /// - **Network and session.** Before each attempt, recovery waits while the network path is
 ///   unsatisfied (no budget is spent offline) for up to ``networkWaitLimit``, then gives up with
 ///   ``PlaybackCoordinatorError/recoveryExhausted``; once the path returns it skips that attempt's
@@ -234,7 +235,7 @@ final class PlaybackRecovery {
             cameBack = false
             var session = PlaybackSessionStatus.unknown
             if returned || needsSessionCheck(current) {
-                session = await host.checkSession()
+                session = await checkSession(run, host)
                 guard isCurrent(run, host) else { return }
             }
             guard let episode = self.episode else { return }
@@ -370,7 +371,7 @@ final class PlaybackRecovery {
                 giveUp(.recoveryExhausted, host)
                 return false
             case .returned:
-                let session = await host.checkSession()
+                let session = await checkSession(run, host)
                 guard isCurrent(run, host) else { return false }
                 if session == .unauthorized {
                     giveUp(.streamRejected, host)
@@ -410,6 +411,14 @@ final class PlaybackRecovery {
             }
             return true
         }
+    }
+
+    /// Looks up the session, charging a refresh its request made to the run's episode's one
+    /// refresh.
+    private func checkSession(_ run: Int, _ host: PlaybackRecoveryHost) async -> PlaybackSessionStatus {
+        let check = await host.checkSession()
+        if check.refreshedToken, isCurrent(run, host) { episode?.refreshed = true }
+        return check.status
     }
 
     private func giveUp(_ error: PlaybackCoordinatorError, _ host: PlaybackRecoveryHost) {
