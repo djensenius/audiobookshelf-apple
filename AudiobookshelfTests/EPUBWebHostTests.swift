@@ -943,17 +943,17 @@ private final class ReaderPage {
         #expect(rewritten.filter(\.isEmpty).count == 5 - rewrittenSheets)
     }
 
-    /// Opens a book with an image `a.png` and the style `sheets` (paths in `OEBPS`, listed in this
+    /// Opens a book with the `images` and the style `sheets` (paths in `OEBPS`, listed in this
     /// order), reading the sheet at `slow` out of the archive last, and returns, for each sheet: its
     /// rewritten blob URL, its rewritten text, the first blob URL in that text, and that blob's text.
     private func rewrittenSheets(
-        _ sheets: [(path: String, text: String)], slow: String = ""
+        _ sheets: [(path: String, text: String)], images: [String] = ["a.png"], slow: String = ""
     ) async throws -> [String: [String]] {
         let manifest =
-            #"<item id="a" href="a.png" media-type="image/png"/>"#
+            images.enumerated().map { #"<item id="i\#($0)" href="\#($1)" media-type="image/png"/>"# }.joined()
             + sheets.enumerated().map { #"<item id="s\#($0)" href="\#($1.path)" media-type="text/css"/>"# }.joined()
         let extra =
-            [TinyEPUB.Entry(name: "OEBPS/a.png", body: Data(count: 16))]
+            images.map { TinyEPUB.Entry(name: "OEBPS/\($0)", body: Data(count: 16)) }
             + sheets.map { TinyEPUB.Entry(name: "OEBPS/\($0.path)", body: Data($0.text.utf8)) }
         let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data(extra: extra, manifest: manifest) })
         _ = try await page.controller.webView.evaluateJavaScript(
@@ -1022,6 +1022,21 @@ private final class ReaderPage {
         let b = try #require(sheets["b.css"])
         #expect(a[2] == b[0])
         #expect(b[3] == #"@import "b.css";"#)
+    }
+
+    /// An image whose path starts with a style sheet's (`a.css.png`) isn't taken for that sheet:
+    /// the scan matches every asset longest first, as the rewrite does, so `b.css` doesn't seem to
+    /// import `a.css`, and `a.css` imports `b.css` rewritten, with its image's blob URL.
+    @Test(.timeLimit(.minutes(1))) func anAssetPathStartingWithASheetsIsNoImport() async throws {
+        let sheets = try await rewrittenSheets(
+            [("b.css", "body { background: url(a.css.png) }"), ("a.css", #"@import "b.css";"#)],
+            images: ["a.css.png"])
+
+        let a = try #require(sheets["a.css"])
+        let b = try #require(sheets["b.css"])
+        #expect(a[2] == b[0])
+        #expect(a[3].contains("url(blob:"))
+        #expect(!a[3].contains("a.css.png"))
     }
 
     /// A relocation is posted whenever any of its fields changes, not only its start.

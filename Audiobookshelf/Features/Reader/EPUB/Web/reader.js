@@ -444,18 +444,21 @@
         const body = replaced === null ? '' : replaced
         sheets.set(href, keep(URL.createObjectURL(new Blob([body], { type: 'text/css' }))))
       }
-      // The other style sheets `css` (at `href`) refers to.
-      const referenced = function (href, css, texts) {
+      // The other style sheets `css` (at `href`) refers to. Its URLs are matched as `rewrite`
+      // matches them, every asset with a replacement (`available`) or still to be rewritten
+      // longest first, so a longer asset path starting with a sheet's isn't taken for that sheet.
+      const referenced = function (href, css, texts, available) {
         const relative = resources.relativeTo(resources.settings.resolver(href))
         const byURL = new Map()
-        texts.forEach(function (_, other) {
-          const url = relative[resources.urls.indexOf(other)]
-          if (other !== href && url) byURL.set(url, other)
+        resources.urls.forEach(function (other, index) {
+          const url = relative[index]
+          if (url && !byURL.has(url) && (available[index] || texts.has(other))) byURL.set(url, other)
         })
         if (byURL.size === 0) return []
         const found = new Set()
         for (const match of css.matchAll(new RegExp(alternation(Array.from(byURL.keys())), 'g'))) {
-          found.add(byURL.get(match[0]))
+          const other = byURL.get(match[0])
+          if (other !== href && texts.has(other)) found.add(other)
         }
         return Array.from(found)
       }
@@ -484,11 +487,12 @@
         })
         rewriting = Promise.all(reads).then(function (read) {
           const texts = new Map(read.filter(Boolean))
+          const available = replacements()
           const seen = new Set()
           texts.forEach(function (css, root) {
             if (seen.has(root)) return
             seen.add(root)
-            const stack = [{ href: root, refs: referenced(root, css, texts) }]
+            const stack = [{ href: root, refs: referenced(root, css, texts, available) }]
             while (stack.length > 0) {
               const top = stack[stack.length - 1]
               const next = top.refs.find(function (href) {
@@ -499,7 +503,7 @@
                 rewrite(top.href, texts.get(top.href))
               } else {
                 seen.add(next)
-                stack.push({ href: next, refs: referenced(next, texts.get(next), texts) })
+                stack.push({ href: next, refs: referenced(next, texts.get(next), texts, available) })
               }
             }
           })
