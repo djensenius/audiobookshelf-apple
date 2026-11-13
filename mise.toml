@@ -179,7 +179,7 @@ env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xco
 run = "swift test --package-path Tools/StringsImport --scratch-path .build/strings-import"
 
 [tasks."test:release"]
-description = "Test scripts/set-version.sh and the What to Test notes in ci_scripts/ci_post_xcodebuild.sh"
+description = "Test scripts/set-version.sh, the What to Test notes in ci_scripts/ci_post_xcodebuild.sh, and the release tag check in ci_scripts/ci_post_clone.sh"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "python3 scripts/test-release-tests.py"
 

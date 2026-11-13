@@ -12,7 +12,7 @@ repository provides:
 
 | Path | Purpose |
 | --- | --- |
-| `ci_scripts/ci_post_clone.sh` | Prints the Xcode version. Holds the opt-in `.xcproj` fallback (below). Installs nothing. |
+| `ci_scripts/ci_post_clone.sh` | On tag builds, fails if a `v<x.y.z>` tag doesn't match `MARKETING_VERSION` ([Releasing a version](#releasing-a-version)). Prints the Xcode version. Holds the opt-in `.xcproj` fallback (below). Installs nothing. |
 | `ci_scripts/ci_post_xcodebuild.sh` | Writes `TestFlight/WhatToTest.en-US.txt` after archive actions |
 | `CHANGELOG.md` | Release notes ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)); its topmost section with entries becomes "What to Test" |
 | `scripts/set-version.sh` (`mise run release:version`) | Sets `MARKETING_VERSION` ([Versioning](#versioning)) |
@@ -92,8 +92,18 @@ to the App Store is a separate, manual step in App Store Connect.
    git push origin vx.y.z
    ```
 
-   The tag must match `MARKETING_VERSION`. Nothing checks this yet, so look before you
-   push.
+   The tag must match `MARKETING_VERSION`. `ci_post_clone.sh` checks this first on every
+   tag build (`CI_TAG` is set) and stops the build before anything else runs:
+
+   - a tag that doesn't start with `v` and a digit, such as `nightly`, isn't a release
+     tag; the script logs that and doesn't check it;
+   - any other tag must be exactly `v<MAJOR.MINOR.PATCH>`, with the same rules as
+     `release:version` (no leading zeros, no suffixes), so `v1.0` and `v0.9.1-beta` fail;
+   - every `MARKETING_VERSION` setting in `project.xcproj`, conditional ones included,
+     must equal the tag's version.
+
+   The workflow builds every `v*` tag, so a malformed one fails rather than shipping a
+   build whose version isn't the tag. `mise run test:release` covers the check.
 4. The `Release (tags)` workflow ([checklist](#release-workflow-checklist)) archives iOS
    and macOS. "What to Test" comes from the `x.y.z` section, because the empty
    `Unreleased` section is passed over. Both builds go to the external group, and the
@@ -261,7 +271,7 @@ way as `TestFlight (main)`, or duplicate that workflow and change it:
 - [ ] Start condition: **Tag Changes** only, restricted to custom tags matching `v*`.
       Remove the Branch Changes condition. The repository still has old upstream tags
       such as `v0.9.x-beta`; they only start a build if someone pushes them again, so
-      don't.
+      don't. If one does, the tag check fails it.
 - [ ] Action: Archive, platform **iOS**, scheme `Audiobookshelf`, deployment preparation
       **TestFlight and App Store**.
 - [ ] Action: Archive, platform **macOS**, scheme `Audiobookshelf`, deployment preparation
@@ -275,6 +285,7 @@ way as `TestFlight (main)`, or duplicate that workflow and change it:
 - [ ] Signing and export compliance: as for `TestFlight (main)`; nothing to set up.
 - [ ] Do a first release with [Releasing a version](#releasing-a-version). Check:
   - the build starts from the tag, not from `main`;
+  - the `ci_post_clone.sh` log shows `Release tag vx.y.z matches MARKETING_VERSION x.y.z`;
   - TestFlight shows `x.y.z (N)`, with N the Xcode Cloud build number;
   - "What to Test" shows the `x.y.z` section of `CHANGELOG.md`;
   - the build is submitted for Beta App Review and reaches the external group.
@@ -291,6 +302,7 @@ way as `TestFlight (main)`, or duplicate that workflow and change it:
 | macOS upload is rejected because the build number is too low | A build was uploaded outside Xcode Cloud. Raise Next Build Number in App Store Connect › Xcode Cloud › Settings › Build Number. |
 | TestFlight shows build `(1)` for every build | Xcode Cloud didn't apply its build number. Don't use `agvtool`. Add a CI-only text edit of `"CURRENT_PROJECT_VERSION": "1"` in `project.xcproj` to `ci_post_clone.sh` (in the checkout only, never committed), and record it here. |
 | "What to Test" is empty or old | Check the `ci_post_xcodebuild.sh` log for `Wrote …/WhatToTest.en-US.txt` or a `Skipping What to Test notes: …` line, which gives the reason. Notes are only written after a successful archive for TestFlight. If the log says `CHANGELOG.md is missing or has no entries`, the notes list commits instead; add entries to `CHANGELOG.md`. |
+| Tag build fails with `release tag v… doesn't match MARKETING_VERSION` or `is not v<MAJOR.MINOR.PATCH>` | The tag points at a commit whose `MARKETING_VERSION` differs, or isn't a strict `v<x.y.z>`. Run `mise run release:version x.y.z` on a branch, merge it, then delete the tag (`git push origin :refs/tags/vx.y.z` and `git tag -d vx.y.z`) and tag the merge commit. |
 | Upload rejected because the version is closed or already released | App Store Connect doesn't take new builds for a version that is already on the App Store. Run `mise run release:version` with the next version and merge it. |
 | Package resolution fails | Xcode Cloud doesn't resolve packages automatically. The only remote package is ZIPFoundation (pinned in `AudiobookshelfKit`). Its pin is committed in both `Packages/AudiobookshelfKit/Package.resolved` and `Audiobookshelf.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`; update both when a remote package changes. |
 
@@ -301,6 +313,7 @@ way as `TestFlight (main)`, or duplicate that workflow and change it:
   `zsh` when they're missing.
 - [Environment variable reference](https://developer.apple.com/documentation/xcode/environment-variable-reference):
   `CI_PRIMARY_REPOSITORY_PATH` (the clone, for example `/Volumes/workspace/repository`),
+  `CI_TAG` (the tag that started the build; unset or empty for branch builds),
   `CI_WORKSPACE_PATH` (for example `/Volumes/workspace`), `CI_BUILD_NUMBER`,
   `CI_XCODEBUILD_ACTION`, `CI_XCODEBUILD_EXIT_CODE`, `CI_ARCHIVE_PATH` (archive actions
   only) and `CI_APP_STORE_SIGNED_APP_PATH` (the export signed for TestFlight and the App
