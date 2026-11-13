@@ -260,10 +260,16 @@ public actor LocalSessionUploader {
         return attempt
     }
 
-    /// `POST /api/session/local` for each session, oldest first, until one gets no answer.
+    /// `POST /api/session/local` for each session, oldest first, until one gets no answer or the
+    /// pass is cancelled; the answers so far are still settled.
     private func uploadEach(_ payloads: [Payload]) async -> Attempt {
         var attempt = Attempt()
         for payload in payloads {
+            // A request needn't throw when cancelled, so check between them.
+            guard !Task.isCancelled else {
+                attempt.stop = .end
+                return attempt
+            }
             do {
                 try await service.upload(payload.body)
                 attempt.answer(payload.body.id, sent: payload.updatedAt, .success)

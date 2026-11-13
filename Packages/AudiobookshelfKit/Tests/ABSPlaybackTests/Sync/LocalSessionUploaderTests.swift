@@ -304,6 +304,37 @@ struct LocalSessionUploaderTests {
         #expect(try await store.session(id: session.id)?.uploadAttempts == 0)
     }
 
+    /// A `/local` call that returns normally after a cancel ends the pass: the other sessions
+    /// aren't sent, and the answer it got is still settled.
+    @Test func cancelDuringAFallbackUploadSendsNoMoreButSettlesItsAnswer() async throws {
+        let first = try await save(minute: 0)
+        let second = try await save(minute: 1)
+        let third = try await save(minute: 2)
+        let entered = Gate()
+        let release = Gate()
+        let service = StubUploadService(
+            all: { _, _ in throw APIError.notFound },
+            one: { call, _ in
+                guard call == 1 else { return }
+                entered.open()
+                await release.wait()
+            })
+        let uploader = uploader(service)
+
+        let pass = Task { await uploader.sync() }
+        await entered.wait()
+        await uploader.cancel()
+        release.open()
+
+        let report = await pass.value
+        #expect(service.singles == [first.id])
+        #expect(report.results == [first.id: .success] && report.deleted == [first.id] && !report.isComplete)
+        #expect(try await store.session(id: first.id) == nil)
+        for session in [second, third] {
+            #expect(try await store.session(id: session.id)?.uploadAttempts == 0)
+        }
+    }
+
     // MARK: - Helpers
 
     private func uploader(_ service: StubUploadService, batchSize: Int = LocalSessionUploader.defaultBatchSize)
