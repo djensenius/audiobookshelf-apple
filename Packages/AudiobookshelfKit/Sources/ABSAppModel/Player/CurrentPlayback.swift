@@ -47,6 +47,7 @@ public final class CurrentPlayback: PlayerPlaybackControlling {
     public var isPlaying: Bool { bound?.isPlaying ?? false }
     public var isBuffering: Bool { bound?.isBuffering ?? false }
     public var isPlaybackRequested: Bool { bound?.isPlaybackRequested ?? false }
+    public var isWaitingForNetwork: Bool { bound?.isWaitingForNetwork ?? false }
     public var timeline: PlaybackTimeline? { bound?.timeline }
     public var chapterIndex: Int? { bound?.chapterIndex }
     public var chapter: Chapter? { bound?.chapter }
@@ -80,5 +81,17 @@ public final class CurrentPlayback: PlayerPlaybackControlling {
 
     public func stop(reason: PlaybackStopReason) {
         current?.stop(reason: reason)
+    }
+
+    public func confirmMeteredStreaming() async {
+        await current?.confirmMeteredStreaming()
+    }
+
+    public func declineMeteredStreaming() {
+        current?.declineMeteredStreaming()
+    }
+
+    public func handleStreamReset(sessionID: String) {
+        current?.handleStreamReset(sessionID: sessionID)
     }
 }

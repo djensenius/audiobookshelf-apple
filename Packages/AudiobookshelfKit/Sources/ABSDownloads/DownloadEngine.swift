@@ -256,6 +256,22 @@ public actor DownloadEngine {
     /// Records whose `failed` state couldn't be saved after a part failed for good. Their parts
     /// can't launch until ``reconcile()`` saves it.
     private var pendingRecordFailures: Set<UUID> = []
+    /// Records a ``resume(recordID:unlessQuiescedSince:)`` has queued but not yet checked against
+    /// the quiesce generation. Their parts can't launch (an activation's restart, a retry) until
+    /// the check passes and the resume starts them itself. A guarded resume that fails while the
+    /// record may still be queued leaves it here until it is known not to be: paused again (by
+    /// the resume's rollback, the next activation's restart, or a pause), deleted, or resumed; or
+    /// until the next activation finds no quiesce since the resume's generation, unless the
+    /// resume was a new record's (``resumeNewRecord(recordID:unlessQuiescedSince:)``).
+    private var validatingResumes: [UUID: GuardedResume] = [:]
+
+    /// A guarded resume in ``validatingResumes``.
+    private struct GuardedResume {
+        /// The `unlessQuiescedSince` generation.
+        let generation: Int
+        /// Whether it is ``resumeNewRecord(recordID:unlessQuiescedSince:)``'s.
+        let isNewRecord: Bool
+    }
     /// The connections of the failures for good under way, from the start of their handling
     /// until their replay has started, and the ``quiesce(connectionID:pausing:)`` calls waiting
     /// for them.
@@ -590,6 +606,7 @@ public actor DownloadEngine {
         guard try await store.setState(.paused, forRecord: recordID, expecting: [.queued, .downloading, .paused])
         else { return false }
         pendingRecordFailures.remove(recordID)
+        validatingResumes[recordID] = nil
         await stop(partIDs: record.parts.filter { $0.state != .completed }.map(\.id), keepingResumeData: true)
         return true
     }
@@ -618,6 +635,18 @@ public actor DownloadEngine {
         try await serialized(recordID) { try await $0.performResume(recordID, unlessQuiescedSince: generation) }
     }
 
+    /// ``resume(recordID:unlessQuiescedSince:)`` for a record just saved for a request
+    /// (``DownloadManager/enqueue(item:episodeID:connectionID:replacingExisting:unlessQuiescedSince:)``),
+    /// which deletes it when this throws. A failure that may leave it queued keeps it
+    /// unlaunchable until it is paused again or deleted: an activation pauses it rather than
+    /// starting it, even without a quiesce, so no transfer outlives the failed request.
+    @discardableResult
+    public func resumeNewRecord(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool {
+        try await serialized(recordID) {
+            try await $0.performResume(recordID, unlessQuiescedSince: generation, isNewRecord: true)
+        }
+    }
+
     /// The quiesce count now, for ``resume(recordID:unlessQuiescedSince:)`` and
     /// ``hasQuiesced(connectionID:since:)``.
     public func quiesceGeneration() -> Int {
@@ -630,7 +659,9 @@ public actor DownloadEngine {
         quiescingConnections.contains(connectionID) || lastQuiesces[connectionID, default: 0] > generation
     }
 
-    private func performResume(_ recordID: UUID, unlessQuiescedSince generation: Int?) async throws -> Bool {
+    private func performResume(
+        _ recordID: UUID, unlessQuiescedSince generation: Int?, isNewRecord: Bool = false
+    ) async throws -> Bool {
         resumeGenerations[recordID, default: 0] += 1
         if generation != nil {
             guardedResumes.insert(recordID)
@@ -639,19 +670,47 @@ public actor DownloadEngine {
         }
         resumingRecords.insert(recordID)
         defer { resumingRecords.remove(recordID) }
-        guard try await store.setState(.queued, forRecord: recordID),
-            let record = try await readRecord(store, recordID)
-        else { return false }
+        // Until the check below, nothing else may launch the queued record: a quiesce that already
+        // passed over it wouldn't stop the transfer. Nor after a failure that may leave it queued,
+        // until it is paused again.
+        if let generation {
+            validatingResumes[recordID] = GuardedResume(generation: generation, isNewRecord: isNewRecord)
+        }
+        let record: DownloadRecordDTO?
+        do {
+            record = try await store.setState(.queued, forRecord: recordID) ? readRecord(store, recordID) : nil
+        } catch {
+            if generation != nil { await rollBackGuardedResume(recordID) }
+            throw error
+        }
+        guard let record else {
+            // Gone: nothing is left to launch.
+            validatingResumes[recordID] = nil
+            return false
+        }
         // Checked once the record is queued: a quiesce that begins later finds it so and pauses it.
         if let generation, hasQuiesced(connectionID: record.key.serverConnectionID, since: generation) {
             Log.downloads.notice("Not resuming a download of a server whose downloads are being stopped")
             _ = try await store.setState(.paused, forRecord: recordID, expecting: [.queued])
+            validatingResumes[recordID] = nil
             return false
         }
+        validatingResumes[recordID] = nil
         await start(
             partIDs: record.parts.filter { $0.state != .completed }.map(\.id), resumingRecordID: recordID,
             onlyWhileActive: generation != nil)
         return true
+    }
+
+    /// Pauses the record a failed guarded resume may have queued. It stays unlaunchable (see
+    /// ``validatingResumes``) until this write, or a later one, succeeds.
+    private func rollBackGuardedResume(_ recordID: UUID) async {
+        do {
+            _ = try await store.setState(.paused, forRecord: recordID, expecting: [.queued])
+            validatingResumes[recordID] = nil
+        } catch {
+            logError("Couldn't pause a download whose resume failed; it stays stopped until it is", error)
+        }
     }
 
     /// Runs `operation` once the record's previous pause or resume has finished. Registered
@@ -1225,12 +1284,46 @@ public actor DownloadEngine {
             logError("Couldn't read downloads", error)
             return
         }
-        let candidates = records.filter { $0.state == .queued || $0.state == .downloading }
-            .flatMap(\.parts).filter { $0.state == .queued || $0.state == .failed || strandedRunning.contains($0.id) }
-            .map(\.id)
+        let settled = await settleFailedResumes()
+        let candidates = records.filter {
+            ($0.state == .queued || $0.state == .downloading) && !settled.contains($0.id)
+        }
+        .flatMap(\.parts).filter { $0.state == .queued || $0.state == .failed || strandedRunning.contains($0.id) }
+        .map(\.id)
         for partID in candidates where restartsQueuedParts {
             await launch(partID, onlyWhileActive: true)
         }
+    }
+
+    /// Settles the records failed guarded resumes left unlaunchable, skipping those with a pause
+    /// or resume under way (it settles them, or the next activation does). One still queued with
+    /// a quiesce of its server since the resume's generation, or from a new record's resume (its
+    /// request failed, and the manager deletes it), is paused; otherwise it is
+    /// released to this restart, as an unguarded resume would leave it queued (and as
+    /// ``DownloadManager/restartActiveTransfers()`` leaves it after failed resumes). One not
+    /// queued is released. Returns the ones it paused.
+    private func settleFailedResumes() async -> Set<UUID> {
+        var paused: Set<UUID> = []
+        for recordID in validatingResumes.keys where recordOperations[recordID] == nil {
+            // Registered at once, as nothing runs before it: a pause or resume beginning
+            // meanwhile waits for it.
+            let didPause = try? await serialized(recordID) { engine in
+                guard let pending = engine.validatingResumes[recordID] else { return false }
+                // Read again: the activation's read may predate the failed resume.
+                let record = try await engine.readRecord(engine.store, recordID)
+                guard let record, record.state == .queued || record.state == .downloading,
+                    pending.isNewRecord
+                        || engine.hasQuiesced(connectionID: record.key.serverConnectionID, since: pending.generation)
+                else {
+                    engine.validatingResumes[recordID] = nil
+                    return false
+                }
+                await engine.rollBackGuardedResume(recordID)
+                return engine.validatingResumes[recordID] == nil
+            }
+            if didPause == true { paused.insert(recordID) }
+        }
+        return paused
     }
 
     // MARK: - Tasks
@@ -1254,7 +1347,8 @@ public actor DownloadEngine {
     ) async {
         if let stop = stopping[partID] { await stop.value }
         guard let context = contexts[partID], tasks[partID] == nil, retries[partID] == nil, launching[partID] == nil,
-            !settling.contains(partID), !pendingRecordFailures.contains(context.recordID)
+            !settling.contains(partID), !pendingRecordFailures.contains(context.recordID),
+            validatingResumes[context.recordID] == nil
         else { return }
         // Before any deferral: the launch that recreateSession() replays keeps the restriction.
         if onlyWhileActive { contexts[partID]?.onlyWhileActive = true }

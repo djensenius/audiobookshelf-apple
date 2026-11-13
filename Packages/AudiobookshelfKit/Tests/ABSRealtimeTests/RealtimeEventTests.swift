@@ -115,6 +115,19 @@ enum RealtimeFixtures {
         #expect(throws: (any Error).self) { try decode(#"["rss_feed_open",{"id":"feed-1"}]"#) }
     }
 
+    @Test func decodesStreamReset() throws {
+        // `HlsRouter`'s `{startTime, streamId}`; the start time is only a signal, so it may be missing.
+        #expect(
+            try decode(#"["stream_reset",{"startTime":1206,"streamId":"ses-1"}]"#)
+                == .streamReset(StreamReset(streamId: "ses-1", startTime: 1206)))
+        #expect(try decode(#"["stream_reset",{"streamId":"ses-1"}]"#) == .streamReset(StreamReset(streamId: "ses-1")))
+        // Without the stream's ID there is nothing to match, so it's malformed.
+        #expect(throws: (any Error).self) { try decode(#"["stream_reset",{"startTime":1206}]"#) }
+        #expect(throws: (any Error).self) { try decode(#"["stream_reset",{"streamId":7,"startTime":1206}]"#) }
+        #expect(throws: (any Error).self) { try decode(#"["stream_reset","ses-1"]"#) }
+        #expect(throws: (any Error).self) { try decode(#"["stream_reset"]"#) }
+    }
+
     @Test func ignoresUnknownEvents() throws {
         #expect(try decode(#"["item_updated",{"id":"li-1"}]"#) == nil)
         #expect(try decode(#"["pong"]"#) == nil)

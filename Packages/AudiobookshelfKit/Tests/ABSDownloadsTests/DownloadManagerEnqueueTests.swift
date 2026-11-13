@@ -788,10 +788,195 @@ import Testing
         #expect(await manager.subscriberCount == 1)
     }
 
+    // MARK: - Stopped downloads (#492)
+
+    @Test func aRequestFromBeforeAQuiesceQueuesNothing() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let generation = await manager.quiesceGeneration()
+        await fixture.engine.quiesce(since: generation)
+
+        await #expect(throws: DownloadManagerError.downloadsStopped(fixture.connectionID)) {
+            try await manager.enqueue(
+                item: LibraryItemFixtures.book(), episodeID: nil, connectionID: fixture.connectionID,
+                unlessQuiescedSince: generation)
+        }
+        #expect(try await fixture.store.allRecords().isEmpty)
+        #expect(await fixture.engine.started.isEmpty)
+    }
+
+    /// A quiesce that begins after the first check, and pauses what's queued before this record
+    /// is saved, is caught by the check after the save.
+    @Test func aQuiesceDuringTheEnqueueDeletesTheNewRecord() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let events = await manager.events()
+        let generation = await manager.quiesceGeneration()
+        await fixture.engine.quiesce(afterNextCheckSince: generation)
+
+        await #expect(throws: DownloadManagerError.downloadsStopped(fixture.connectionID)) {
+            try await manager.enqueue(
+                item: LibraryItemFixtures.book(), episodeID: nil, connectionID: fixture.connectionID,
+                unlessQuiescedSince: generation)
+        }
+        #expect(try await fixture.store.allRecords().isEmpty)
+        #expect(await fixture.engine.started.isEmpty)
+        #expect(await fixture.engine.resumed.isEmpty)
+        // The discarded record is reported removed, before the next enqueue's change.
+        guard case .recordRemoved = await events.next(where: { _ in true }) else {
+            Issue.record("The discarded record wasn't reported removed")
+            return
+        }
+        let item = LibraryItemFixtures.book()
+        _ = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(await events.next { _ in true } == .recordChanged(record))
+    }
+
+    /// A discarded record whose delete fails is paused instead, and reported as it now is, so a
+    /// controller lists it with Retry whatever its snapshot read.
+    @Test func aDiscardedRecordThatCantBeDeletedIsReportedPaused() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let events = await manager.events()
+        let generation = await manager.quiesceGeneration()
+        await fixture.engine.quiesce(afterNextCheckSince: generation)
+        let store = fixture.store
+        // The guarded resume finds the quiesce and changes nothing; the delete after it fails.
+        await fixture.engine.onGuardedResume { _ in await store.failNextCommit(with: TestError()) }
+        let item = LibraryItemFixtures.book()
+
+        await #expect(throws: DownloadManagerError.downloadsStopped(fixture.connectionID)) {
+            try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID, unlessQuiescedSince: generation)
+        }
+
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(record.state == .paused)
+        #expect(await fixture.engine.started.isEmpty)
+        // Reported before the next enqueue's change.
+        _ = try await manager.enqueue(
+            item: LibraryItemFixtures.book(id: "li_other"), episodeID: nil, connectionID: fixture.connectionID)
+        #expect(await events.next { _ in true } == .recordChanged(record))
+    }
+
+    @Test func aPausedRecordStaysPausedAfterAQuiesce() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        try await fixture.store.setState(.paused, forRecord: recordID)
+        let generation = await manager.quiesceGeneration()
+        await fixture.engine.quiesce(afterNextCheckSince: generation)
+
+        await #expect(throws: DownloadManagerError.downloadsStopped(fixture.connectionID)) {
+            try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID, unlessQuiescedSince: generation)
+        }
+        #expect(try await fixture.store.record(id: recordID)?.state == .paused)
+        #expect(await fixture.engine.resumed.isEmpty)
+    }
+
+    /// A new record is saved paused, so an activation before the guarded resume has checked for a
+    /// quiesce doesn't start it; the resume queues and starts it.
+    @Test func aGuardedRequestIsNotStartableUntilTheEngineResumesIt() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let events = await manager.events()
+        let store = fixture.store
+        let startable = Startable()
+        // What an activation in the interval would start: the queued and downloading records.
+        await fixture.engine.onGuardedResume { _ in
+            let queued = (try? await store.records(state: .queued)) ?? []
+            let downloading = (try? await store.records(state: .downloading)) ?? []
+            await startable.append((queued + downloading).map(\.id))
+        }
+        let item = LibraryItemFixtures.book()
+
+        let result = try await manager.enqueue(
+            item: item, episodeID: nil, connectionID: fixture.connectionID,
+            unlessQuiescedSince: await manager.quiesceGeneration())
+
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(await startable.records == [[]])
+        #expect(result == .started(record.id))
+        #expect(record.state == .queued)
+        #expect(await fixture.engine.resumed == [record.id])
+        #expect(await events.next { _ in true } == .recordChanged(record))
+    }
+
+    @Test func aGuardedRequestWhoseResumeFailsIsDeleted() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        await fixture.engine.failNextResumes(1, queueingFirst: true)
+
+        await #expect(throws: DownloadManagerError.storeFailure) {
+            try await manager.enqueue(
+                item: LibraryItemFixtures.book(), episodeID: nil, connectionID: fixture.connectionID,
+                unlessQuiescedSince: await manager.quiesceGeneration())
+        }
+        #expect(try await fixture.store.allRecords().isEmpty)
+        #expect(await fixture.engine.started.isEmpty)
+    }
+
+    /// A guarded resume that queued the paused record, then couldn't pause it again for the
+    /// quiesce: the record is paused, as the quiesce, which passed over it, leaves the others.
+    @Test func aPausedRecordStaysPausedWhenTheGuardedResumeFails() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        try await fixture.store.setState(.paused, forRecord: recordID)
+        let generation = await manager.quiesceGeneration()
+        await fixture.engine.quiesce(afterNextCheckSince: generation)
+        await fixture.engine.failNextResumes(1, queueingFirst: true)
+
+        await #expect(throws: DownloadManagerError.downloadsStopped(fixture.connectionID)) {
+            try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID, unlessQuiescedSince: generation)
+        }
+        #expect(try await fixture.store.record(id: recordID)?.state == .paused)
+    }
+
+    /// The control: without a generation, a quiesce doesn't stop the enqueue (internal callers).
+    @Test func withoutAGenerationAQuiesceIsIgnored() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        await fixture.engine.quiesce(since: await manager.quiesceGeneration())
+        let item = LibraryItemFixtures.book()
+
+        let result = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(result == .started(record.id))
+        #expect(await fixture.engine.started == [record.parts.map(\.id)])
+    }
+
     @Test func readsTheVolumeCapacity() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "capacity-\(UUID().uuidString)")
         // The downloads folder doesn't exist yet: its volume is still found.
         #expect(try VolumeStorageCapacity(locations: DownloadLocations(root: root)).availableCapacity() > 0)
+    }
+}
+
+/// The records an activation would have started, at each guarded resume.
+private actor Startable {
+    private(set) var records: [[UUID]] = []
+
+    func append(_ ids: [UUID]) {
+        records.append(ids)
     }
 }
 

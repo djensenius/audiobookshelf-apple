@@ -104,6 +104,22 @@ import Testing
         #expect(ReaderSettingsPayload(settings: settings, resolvedAppearance: .light, gap: .infinity).gap == 0)
     }
 
+    @Test func payloadFollowsTheDecidedSpread() {
+        let settings = ReaderSettings()
+        #expect(settings.spread == .auto)
+        // A compact iPhone in landscape: the policy says one page, wider than epub.js's 800.
+        let layout = ReaderSpreadPolicy.layout(
+            setting: settings.spread, platform: .iOS, sizeClass: .compact, size: CGSize(width: 852, height: 393),
+            hingeWidth: nil)
+        let single = ReaderSettingsPayload(settings: settings, resolvedAppearance: .light, layout: layout)
+        #expect(single.spread == .none)
+        #expect(single.gap == 0)
+
+        let spread = ReaderSettingsPayload(settings: settings, resolvedAppearance: .light, layout: .twoUp(gap: 24))
+        #expect(spread.spread == .auto)
+        #expect(spread.gap == 24)
+    }
+
     @Test func everyOptionHasALocalizationKey() {
         #expect(ReaderSettings.Theme.allCases.map(\.titleKey).allSatisfy { $0.hasPrefix("LabelTheme") })
         #expect(Set(ReaderSettings.Theme.allCases.map(\.titleKey)).count == ReaderSettings.Theme.allCases.count)

@@ -22,6 +22,9 @@
                 // A failed Playback menu command shows here while this window is focused; inside
                 // the session's subtree, so a switch drops the last session's alert.
                 .playbackCommandAlert()
+                // The queue sheet shows a failed queued play here while this window is active; the
+                // browsing windows show the player's failures only while they're active.
+                .playerErrorAlerts(player: player, showsWindowAlert: false)
                 .id(Self.sessionKey(bookmarks))
                 .onChange(of: player.hasSession, initial: true) { _, hasSession in
                     if !hasSession { dismissWindow(id: Self.id) }
