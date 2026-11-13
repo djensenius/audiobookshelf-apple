@@ -92,7 +92,8 @@ struct ProgressLateCloseTests {
     }
 
     /// Session 1's `/close` outlives the close wait, so `/play` starts session 2 without it; once
-    /// released, the server has retired session 1 and the close changes nothing.
+    /// released, the server has retired session 1 and the close changes nothing. Its 404 means
+    /// nothing applied, so its 5 s ride along in session 2's next report (ADR 0007).
     @Test func aLateCloseIsRetiredByTheNextPlay() async throws {
         let (s, model, client) = try Self.modelHarness()
         let close = Request()
@@ -112,16 +113,27 @@ struct ProgressLateCloseTests {
         #expect(try await Self.serverTime(model, client) == newer)
         #expect(try await s.store.progress(for: s.h.key("a"))?.currentTime == newer)
         // The takeover saved session 1's listening; the late close added nothing to it.
-        let stored = try await s.h.service.listeningSessions(itemID: "a").sessions
+        var stored = try await s.h.service.listeningSessions(itemID: "a").sessions
         #expect(stored.first { $0.id == "session-1" }?.timeListening == 15)
+        #expect(s.syncer.closeQueue.carried.isEmpty)
+
+        // Session 2 played 15 s; its close reports them with session 1's last 5 s, once.
+        s.coordinator.stop()
+        await s.coordinator.waitForPendingCloses()
+        await s.settle()
+        await s.syncer.closeQueue.waitForCaptures()
+        stored = try await s.h.service.listeningSessions(itemID: "a").sessions
+        #expect(stored.first { $0.id == "session-1" }?.timeListening == 15)
+        #expect(stored.first { $0.id == "session-2" }?.timeListening == 20)
+        #expect(!s.service.log.contains("records a"))
     }
 
     /// A `/close` goes out from the coordinator once per session. The syncer resends one the
     /// server may not have applied once, after the reconcile delay and through the admission rule
     /// (#382), and its listening time counts once: never applied, the resend is acknowledged;
-    /// applied with its response lost, the resend meets the closed session's 404 and is dropped.
-    /// One answered 404 after a server restart is never resent. TODO(#382): on 404, decide from
-    /// the item's listening sessions instead (ADR 0007).
+    /// applied with its response lost, the resend meets the closed session's 404, and the
+    /// session's stored record shows it counted, so it's dropped. One answered 404 after a server
+    /// restart is never resent: nothing applied, so its 5 s ride along in session 2 (ADR 0007).
     @Test(arguments: [nil, Request.Outcome.unapplied, .appliedResponseLost])
     func aCloseIsResentOnlyWhileItCanStillCount(outcome: Request.Outcome?) async throws {
         let (s, model, _) = try Self.modelHarness()
@@ -156,7 +168,12 @@ struct ProgressLateCloseTests {
         #expect(s.service.closes.map(\.id) == (outcome == nil ? [] : ["session-1"]))
         let stored = try await s.h.service.listeningSessions(itemID: "a").sessions
         #expect(stored.first { $0.id == "session-1" }?.timeListening == (outcome == nil ? 15 : 20))
+        #expect(stored.first { $0.id == "session-2" }?.timeListening == (outcome == nil ? 25 : 20))
+        // Every second played counts once.
+        #expect(stored.map(\.timeListening).reduce(0, +) == 40)
+        #expect(s.service.log.contains("records a") == (outcome == .appliedResponseLost))
         #expect(try await s.store.sessionCloses(for: s.h.connectionID).isEmpty)
+        #expect(s.syncer.closeQueue.carried.isEmpty)
     }
 
     /// Characterization of a documented limit: the tablet's sessions aren't retired by the phone's

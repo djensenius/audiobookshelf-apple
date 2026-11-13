@@ -170,7 +170,9 @@ struct CloseRetryTests {
 
     /// #195 acceptance 2: once a newer session of the same media is current, the old session's
     /// close is never resent, and the server keeps the newer session's position. Another item's
-    /// session doesn't hold it back (its resend then meets the retired session's 404).
+    /// session doesn't hold it back: its resend then meets the retired session's 404, and the
+    /// stored record, at what was acknowledged, shows it never counted, so its 5 s wait for the
+    /// media's next session.
     @Test(arguments: [true, false])
     func aNewerSessionOfTheSameMediaSkipsTheResend(sameItem: Bool) async throws {
         let f = try CloseRetryFixture()
@@ -188,6 +190,9 @@ struct CloseRetryTests {
         // Without the newer session, the drain PATCHed session 1's own position.
         #expect(try await f.serverTime() == (sameItem ? newer : 20))
         #expect(try await f.queued().isEmpty)
+        #expect(f.s.service.log.contains("records a") == !sameItem)
+        #expect(f.s.syncer.closeQueue.carried.map(\.seconds) == (sameItem ? [] : [5]))
+        #expect(try await f.listened("session-1") == 15)
     }
 
     /// A resend's attempt time is saved before it reaches the server, as the coordinator's

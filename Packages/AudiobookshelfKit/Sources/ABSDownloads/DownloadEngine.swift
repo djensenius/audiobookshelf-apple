@@ -165,6 +165,10 @@ public actor DownloadEngine {
     private let beforeReplayStart: (@Sendable (UUID) async -> Void)?
     private let startFoundSettling: (@Sendable (Set<UUID>) async -> Void)?
     private let adoptionStarted: (@Sendable (UUID) async -> Void)?
+    /// Before a discard clears a part's resume-data flag; throwing fails that write.
+    private let beforeClearingResumeFlag: (@Sendable (UUID) async throws -> Void)?
+    /// After a finalisation made a record a local item, before it deletes the record.
+    private let afterUpsertingLocalItem: (@Sendable (UUID) async -> Void)?
     /// Internal so tests can post events.
     let delegate = DownloadSessionDelegate()
 
@@ -246,9 +250,15 @@ public actor DownloadEngine {
     private var lastQuiesces: [UUID: Int] = [:]
     /// Connections quiesced: their transfers that survived a relaunch (any task this engine
     /// didn't create) are cancelled, not adopted, and their results dropped, for the rest of the
-    /// process; they carry the credentials of before the sign-out. Only in memory:
-    /// TODO(#411) keep it across a relaunch.
+    /// process; they carry the credentials of before the sign-out. Each is also marked on disk
+    /// (``DownloadLocations/markSurvivorsToStop(connectionID:)``) until a session listing has
+    /// cancelled its survivors and its resume data is deleted, so a relaunch before that still
+    /// does both; each activation reads the markers again before it lists the session's tasks.
     private var survivorsToStop: Set<UUID> = []
+    /// Connections whose resume data isn't known to be deleted: being quiesced, or a quiesce or
+    /// activation couldn't delete it. ``finalise(_:)`` leaves their complete records, so the
+    /// parts that lead to the blobs stay for the next try.
+    private var undiscardedSignOuts: Set<UUID> = []
     /// The identifiers of the tasks this engine created, so they aren't taken for survivors.
     private var createdTasks: Set<Int> = []
     /// Surviving transfers whose adoption ``reattach(_:partID:)`` is deciding, and the results
@@ -324,6 +334,8 @@ public actor DownloadEngine {
         beforeReplayStart: (@Sendable (UUID) async -> Void)? = nil,
         startFoundSettling: (@Sendable (Set<UUID>) async -> Void)? = nil,
         adoptionStarted: (@Sendable (UUID) async -> Void)? = nil,
+        beforeClearingResumeFlag: (@Sendable (UUID) async throws -> Void)? = nil,
+        afterUpsertingLocalItem: (@Sendable (UUID) async -> Void)? = nil,
         preflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight()
     ) {
         (updates, updateContinuation) = AsyncStream.makeStream()
@@ -349,6 +361,8 @@ public actor DownloadEngine {
         self.beforeReplayStart = beforeReplayStart
         self.startFoundSettling = startFoundSettling
         self.adoptionStarted = adoptionStarted
+        self.beforeClearingResumeFlag = beforeClearingResumeFlag
+        self.afterUpsertingLocalItem = afterUpsertingLocalItem
         registry.register(self)
     }
 
@@ -606,10 +620,12 @@ public actor DownloadEngine {
     /// Deletes the resume data of every part of `connectionID`'s downloads, for sign-out,
     /// removal or a credential change (ADR 0003). Their next start is a fresh request. Only the
     /// parts' resume-data flags are written, so a part that failed or started since the
-    /// downloads were read keeps its state.
+    /// downloads were read keeps its state. A stop of one of those parts still under way, such
+    /// as a pause whose transfer is producing its resume data, is waited for first, so what it
+    /// seals is deleted too.
     ///
-    /// - Returns: `false` when the downloads couldn't be read (deleting nothing) or a blob couldn't
-    ///   be deleted (a flagged part stays flagged).
+    /// - Returns: `false` when the downloads couldn't be read (deleting nothing), a blob couldn't
+    ///   be deleted (a flagged part stays flagged), or a flag couldn't be cleared.
     @discardableResult
     public func discardResumeData(connectionID: UUID) async -> Bool {
         let records: [DownloadRecordDTO]
@@ -619,6 +635,10 @@ public actor DownloadEngine {
             logError("Couldn't read downloads; not deleting a server's resume data", error)
             return false
         }
+        // Only a stop with a live transfer seals, and the connection's transfers are stopped or
+        // refused by now, so no stop that begins after this one can seal.
+        let pendingStops = records.flatMap(\.parts).compactMap { stopping[$0.id] }
+        for stop in pendingStops { await stop.value }
         var deleted = true
         // Every part, flagged or not: a pause whose seal failed, and whose previous blob couldn't
         // be deleted, leaves one unflagged, and a completion whose delete failed one completed.
@@ -630,7 +650,13 @@ public actor DownloadEngine {
             }
             guard part.hasResumeData || contexts[part.id]?.hasResumeData == true else { continue }
             contexts[part.id]?.hasResumeData = false
-            await persist { _ = try await $0.updatePart(partID: part.id, hasResumeData: false) }
+            do {
+                try await beforeClearingResumeFlag?(part.id)
+                _ = try await store.updatePart(partID: part.id, hasResumeData: false)
+            } catch {
+                logError("Couldn't clear a deleted resume data's flag", error)
+                deleted = false
+            }
         }
         return deleted
     }
@@ -641,8 +667,9 @@ public actor DownloadEngine {
     /// failed for good, whose sibling stops and replays could otherwise run after the discard.
     ///
     /// - Parameter pausing: sets the connection's records' state (for example `paused`), so
-    ///   nothing starts them again. It runs first; from then until this returns, a failure's
-    ///   replay doesn't queue a record of the connection again (one left `failed` stays so).
+    ///   nothing starts them again. It runs first; from then until its resume data is deleted, a
+    ///   failure's replay doesn't queue a record of the connection again (one left `failed`
+    ///   stays so).
     /// - Returns: `false` when there is no session (the downloads couldn't be read, or another
     ///   process holds it), the downloads couldn't be read at any step, or resume data couldn't
     ///   be deleted. The transfers the engine knows of are still stopped, the resume data is
@@ -654,10 +681,23 @@ public actor DownloadEngine {
         // adopts one meanwhile, even one that begins while the records are being paused or
         // after this call's attachment failed.
         survivorsToStop.insert(connectionID)
+        // Its complete records are held from here until its resume data is deleted, here or by
+        // a later activation, so nothing finalises one meanwhile.
+        undiscardedSignOuts.insert(connectionID)
+        do {
+            try locations.markSurvivorsToStop(connectionID: connectionID)
+        } catch {
+            logError("Couldn't save a server's sign-out for the next launch", error)
+        }
         // The pauses can wait on each other (the manager holds a podcast's item for each of its
         // episodes), so every transfer stops with the old credentials first, without a wait.
         let cancelled = cancelTransfers(of: connectionID)
-        defer {
+        var isUnderWay = true
+        // Ends this call's registration once, before its finalisation awaits, so a quiesce that
+        // begins meanwhile sees itself as the last under way and clears the marker and hold.
+        func end() {
+            guard isUnderWay else { return }
+            isUnderWay = false
             if let index = quiescingConnections.firstIndex(of: connectionID) {
                 quiescingConnections.remove(at: index)
             }
@@ -665,6 +705,7 @@ public actor DownloadEngine {
             quiesceCount += 1
             lastQuiesces[connectionID] = quiesceCount
         }
+        defer { end() }
         await pausing()
         guard await ensureSession() else {
             await discardResumeData(connectionID: connectionID)
@@ -689,7 +730,27 @@ public actor DownloadEngine {
         await stop(partIDs: Array(parts), keepingResumeData: false)
         await waitForFailuresForGood(of: connectionID)
         let discarded = await discardResumeData(connectionID: connectionID)
+        // The session's listing cancelled the survivors, or adopted them before this call, which
+        // cancelled them above; the marker stays until the resume data is gone too. Only the
+        // last quiesce under way clears it, releases the hold and finalises the records it held:
+        // another may still seal more, or fail to delete it.
+        end()
+        if discarded, !quiescingConnections.contains(connectionID) {
+            clearSurvivorsToStop(connectionID)
+            undiscardedSignOuts.remove(connectionID)
+            await finaliseCompletedRecords()
+        }
         return records != nil && discarded
+    }
+
+    /// Removes `connectionID`'s marker. A failure is logged; the next activation reads the
+    /// markers again and retries it.
+    private func clearSurvivorsToStop(_ connectionID: UUID) {
+        do {
+            try locations.clearSurvivorsToStop(connectionID: connectionID)
+        } catch {
+            logError("Couldn't clear a server's sign-out marker; the next session retries", error)
+        }
     }
 
     /// Cancels `connectionID`'s transfers, launches and retries at once, dropping their resume
@@ -774,13 +835,29 @@ public actor DownloadEngine {
 
     private func performActivation() async -> Bool {
         let records: [DownloadRecordDTO]
+        // The connections a quiesce, maybe of a previous launch, couldn't finish cleaning up.
+        let marked: Set<UUID>
         do {
             records = try await loadRecords()
+            marked = try locations.connectionsWithSurvivorsToStop()
         } catch {
-            logError("Couldn't read downloads; not creating the session", error)
+            logError("Couldn't read downloads or sign-out markers; not creating the session", error)
             activation = nil
             return false
         }
+        survivorsToStop.formUnion(marked)
+        // Their resume data goes before their complete records are finalised, which drops the
+        // parts that lead to it; a quiesce under way deletes it itself, once its pauses end.
+        let generation = quiesceCount
+        var discarded: Set<UUID> = []
+        for connectionID in marked where !quiescingConnections.contains(connectionID) {
+            if await discardResumeData(connectionID: connectionID) { discarded.insert(connectionID) }
+        }
+        // A hold an earlier activation or quiesce left goes once its data is deleted, unless a
+        // quiesce began meanwhile: that one may seal more, and releases the hold once it has
+        // deleted it.
+        undiscardedSignOuts.subtract(discarded.filter { !hasQuiesced(connectionID: $0, since: generation) })
+        undiscardedSignOuts.formUnion(marked.subtracting(discarded).subtracting(quiescingConnections))
         await finaliseCompletedRecords()
         let session = makeSession(delegate)
         self.session = session
@@ -804,6 +881,11 @@ public actor DownloadEngine {
                 continue
             }
             await reattach(download, partID: partID, activationOwnsSession: true)
+        }
+        // Their survivors are cancelled and their resume data deleted, unless a quiesce began
+        // meanwhile, which may seal more and clears the marker itself.
+        for connectionID in discarded where !hasQuiesced(connectionID: connectionID, since: generation) {
+            clearSurvivorsToStop(connectionID)
         }
         // A part left running without a transfer: either its transfer moved the file, but iOS
         // ended the process before the completion was saved, or the app ended before the system
@@ -1580,15 +1662,21 @@ public actor DownloadEngine {
 
     /// Makes a complete record a local item, then deletes it. A cover-only record whose local
     /// item is gone is deleted and reported discarded instead. A failure is logged; the next
-    /// activation repeats it.
+    /// activation repeats it. A held connection's record (``undiscardedSignOuts``) is left to
+    /// the quiesce or activation that releases the hold, also when the hold begins while the
+    /// local item is written.
     private func finalise(_ record: DownloadRecordDTO) async {
-        guard finalising.insert(record.id).inserted else { return }
+        guard !undiscardedSignOuts.contains(record.key.serverConnectionID), finalising.insert(record.id).inserted
+        else { return }
         defer { finalising.remove(record.id) }
         do {
             let item = try await localItems.upsertFromDownload(record, now: now())
+            await afterUpsertingLocalItem?(record.id)
+            guard !undiscardedSignOuts.contains(record.key.serverConnectionID) else { return }
             try await store.deleteRecord(record.id)
             updateContinuation.yield(.recordComplete(recordID: record.id, itemID: item.id))
         } catch LocalItemStore.StoreError.itemNotFound {
+            guard !undiscardedSignOuts.contains(record.key.serverConnectionID) else { return }
             do {
                 if try await store.deleteRecord(record.id) != nil {
                     updateContinuation.yield(.recordDiscarded(record))
@@ -1635,8 +1723,8 @@ public actor DownloadEngine {
         }
         await persistIdle(partID) {
             try await $0.setPartState(
-                .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData,
-                retryCount: failure)
+                .failed, partID: partID, taskIdentifier: nil, error: message, errorCode: code.rawValue,
+                hasResumeData: context.hasResumeData, retryCount: failure)
         }
         updateContinuation.yield(
             .partFailed(partID: partID, recordID: context.recordID, code: code, message: message, willRetry: true))
@@ -1736,8 +1824,8 @@ public actor DownloadEngine {
         await saveRecordFailure(context.recordID, ownsFailure: isReplayedAttempt)
         await persistIdle(partID) {
             try await $0.setPartState(
-                .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData,
-                retryCount: retryCount)
+                .failed, partID: partID, taskIdentifier: nil, error: message, errorCode: code.rawValue,
+                hasResumeData: context.hasResumeData, retryCount: retryCount)
         }
         if let beforeStoppingSiblings { await beforeStoppingSiblings(partID) }
         let siblings = contexts.filter { $0.value.recordID == context.recordID && $0.key != partID }.map(\.key)

@@ -612,6 +612,39 @@ import Testing
                 == .completed(recordID: recordID, itemID: itemID, key: fixture.key(item)))
     }
 
+    /// The record announced for a failure carries the code the engine saved with it (#73), so
+    /// the UI can show a localised message from the stored record.
+    @Test func aFailureIsAnnouncedWithItsStoredCode() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        try await manager.start()
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: LibraryItemFixtures.book(), episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        let parts = try #require(try await fixture.store.record(id: recordID)).parts
+        let events = await manager.events()
+
+        // The engine saves the failure with its code, then reports it.
+        try await fixture.store.setPartState(
+            .failed, partID: parts[1].id, taskIdentifier: nil, error: "404", errorCode: "httpStatus")
+        try await fixture.store.setState(.failed, forRecord: recordID)
+        fixture.engine.updateContinuation.yield(
+            .partFailed(partID: parts[1].id, recordID: recordID, code: .httpStatus, message: "404", willRetry: false))
+
+        guard case .recordChanged(let failed) = await events.next(where: { _ in true }) else {
+            Issue.record("Not a record change")
+            return
+        }
+        #expect(failed.parts[1].failureCode == .httpStatus)
+        #expect(failed.parts[0].failureCode == nil)
+        #expect(failed.failureCode == .httpStatus)
+        #expect(await events.next { _ in true } == .failed(recordID: recordID, code: .httpStatus, message: "404"))
+    }
+
     /// Expected lengths too big to add up as `Int64` still make a progress fraction.
     @Test func hugeExpectedLengthsDontOverflowProgress() async throws {
         let fixture = try await ManagerFixture()

@@ -74,6 +74,9 @@ public struct DownloadPartDTO: Sendable, Equatable, Identifiable {
     public var hasResumeData: Bool
     public var retryCount: Int
     public var lastError: String?
+    /// The stable code of ``lastError``'s failure, a `DownloadFailureCode` raw value
+    /// (`failureCode` in ABSDownloads), for a localised message; `nil` while there's none.
+    public var lastErrorCode: String?
 
     public init(
         id: UUID = UUID(),
@@ -91,7 +94,8 @@ public struct DownloadPartDTO: Sendable, Equatable, Identifiable {
         taskIdentifier: Int? = nil,
         hasResumeData: Bool = false,
         retryCount: Int = 0,
-        lastError: String? = nil
+        lastError: String? = nil,
+        lastErrorCode: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -109,6 +113,7 @@ public struct DownloadPartDTO: Sendable, Equatable, Identifiable {
         self.hasResumeData = hasResumeData
         self.retryCount = retryCount
         self.lastError = lastError
+        self.lastErrorCode = lastErrorCode
     }
 }
 
@@ -154,7 +159,8 @@ extension DownloadPartDTO {
             taskIdentifier: part.taskIdentifier,
             hasResumeData: part.hasResumeData,
             retryCount: part.retryCount,
-            lastError: part.lastError
+            lastError: part.lastError,
+            lastErrorCode: part.lastErrorCode
         )
     }
 
@@ -175,6 +181,7 @@ extension DownloadPartDTO {
         part.hasResumeData = hasResumeData
         part.retryCount = retryCount
         part.lastError = lastError
+        part.lastErrorCode = lastErrorCode
     }
 
     func makeModel() -> DownloadPart {
@@ -194,7 +201,8 @@ extension DownloadPartDTO {
             taskIdentifier: taskIdentifier,
             hasResumeData: hasResumeData,
             retryCount: retryCount,
-            lastError: lastError
+            lastError: lastError,
+            lastErrorCode: lastErrorCode
         )
     }
 
