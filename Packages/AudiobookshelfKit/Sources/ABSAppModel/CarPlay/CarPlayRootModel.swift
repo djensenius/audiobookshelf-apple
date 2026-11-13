@@ -75,6 +75,8 @@ public final class CarPlayRootModel {
     private var homeIdentity: SessionIdentity?
     /// The failure of CarPlay's last play, while it may still be shown (``alert``).
     private var failedPlay: FailedPlay?
+    /// The latest play while it's starting, which a tap on the same item joins.
+    @ObservationIgnored private var pendingPlay: PendingPlay?
 
     /// - Parameters:
     ///   - gate: The session's gate (`SessionLifecycle.gate`).
@@ -185,7 +187,10 @@ public final class CarPlayRootModel {
     /// play, whose outcome says whether to show Now Playing, or `nil` when nothing plays: the
     /// tab doesn't show the row (by its ID, action and image, whatever its progress), the row
     /// doesn't play or is disabled, the tabs aren't shown, or the account can't play. A failure
-    /// or a streaming block becomes the ``alert``.
+    /// or a streaming block becomes the ``alert``. Tapped again while it's starting (the same
+    /// item, account and session), the same play is returned: the coordinator would return at
+    /// once for the item it's loading, and its outcome is the first tap's. Another item's tap
+    /// supersedes it.
     @discardableResult
     public func play(_ row: CarPlayRow) -> Task<CarPlayPlayOutcome, Never>? {
         guard case .play(let itemID, let episodeID) = row.action, row.isEnabled,
@@ -195,16 +200,26 @@ public final class CarPlayRootModel {
             }),
             let identity, let playItem = playItem(identity)
         else { return nil }
+        if let pendingPlay, pendingPlay.action == row.action, pendingPlay.origin.operation == operation,
+            isCurrent(pendingPlay.origin)
+        {
+            return pendingPlay.task
+        }
         let origin = begin(identity)
-        return Task {
+        let task = Task {
+            let threw: Bool
             do {
                 try await playItem(itemID: itemID, episodeID: episodeID)
+                threw = false
             } catch {
                 Log.playback.error("CarPlay: couldn't play: \(error, privacy: .public)")
-                return finish(origin, threw: true)
+                threw = true
             }
-            return finish(origin, threw: false)
+            if pendingPlay?.origin.operation == origin.operation { pendingPlay = nil }
+            return finish(origin, threw: threw)
         }
+        pendingPlay = PendingPlay(action: row.action, origin: origin, task: task)
+        return task
     }
 
     /// What CarPlay shows about its own last play: a streaming block to confirm
@@ -244,6 +259,13 @@ public final class CarPlayRootModel {
         weak var session: AnyObject?
         let hadSession: Bool
         let operation: Int
+    }
+
+    /// A play while it's starting.
+    private struct PendingPlay {
+        let action: CarPlayRow.Action
+        let origin: Origin
+        let task: Task<CarPlayPlayOutcome, Never>
     }
 
     /// A play's failure, with the player's error it came from (`nil` when the play threw).

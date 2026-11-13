@@ -419,8 +419,40 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
         }
     }
 
-    /// #544: only the latest play's result counts; an earlier one ending after it shows nothing.
-    @Test func anEarlierPlayEndingLaterIsDiscarded() async throws {
+    /// #544: a tap on another item while one is starting supersedes it: only the latest play's
+    /// result counts, and the earlier one's failure, ending after it, shows nothing.
+    @Test func aTapOnAnotherItemSupersedesTheStartingPlay() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(
+                client: service([SampleLibrary.frankenstein, SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            let model = harness.model()
+            await model.update()
+            let rows = tabRows(model.content)
+            let first = try #require(rows.first)
+            let other = try #require(rows.last)
+
+            harness.holdsPlays = true
+            let firstPlay = try #require(model.play(first))
+            while harness.heldPlayCount == 0 { await Task.yield() }
+            harness.holdsPlays = false
+            let otherPlay = try #require(model.play(other))
+            #expect(otherPlay != firstPlay)
+            #expect(await otherPlay.value == .started)
+            harness.playError = .sessionStartFailed(.timedOut)
+            harness.releasePlays()
+            #expect(await firstPlay.value == .discarded)
+            #expect(model.alert == nil)
+            #expect(harness.plays.value == ["A:\(SampleLibrary.frankenstein.id)", "A:\(SampleLibrary.sherlock.id)"])
+        }
+    }
+
+    /// #544: tapping the row again while its play is starting joins that play rather than
+    /// starting (and so superseding) another: its outcome comes with the real start, and its
+    /// failure is one alert.
+    @Test(arguments: [false, true])
+    func aSecondTapOnAStartingItemJoinsItsPlay(fails: Bool) async throws {
         try await withLibrarySettings { settings in
             let store = LibraryStore(settings: settings)
             await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
@@ -432,12 +464,25 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
             harness.holdsPlays = true
             let first = try #require(model.play(row))
             while harness.heldPlayCount == 0 { await Task.yield() }
+            // A play the second tap might start isn't held, so it can't outlive the test.
             harness.holdsPlays = false
-            #expect(await model.play(row)?.value == .started)
-            harness.playError = .sessionStartFailed(.timedOut)
+            let second = try #require(model.play(row))
+            #expect(second == first)
+            #expect(harness.plays.value == ["A:\(SampleLibrary.sherlock.id)"])
+
+            if fails { harness.playError = .sessionStartFailed(.timedOut) }
             harness.releasePlays()
-            #expect(await first.value == .discarded)
-            #expect(model.alert == nil)
+            let outcome: CarPlayPlayOutcome = fails ? .failed : .started
+            #expect(await first.value == outcome)
+            #expect(await second.value == outcome)
+            #expect(model.alert == (fails ? .sessionStartFailed : nil))
+
+            // Once it has started, a tap plays again.
+            harness.playError = nil
+            let again = try #require(model.play(row))
+            #expect(again != first)
+            #expect(await again.value == .started)
+            #expect(harness.plays.value.count == 2)
         }
     }
 
