@@ -128,7 +128,7 @@ private struct GroupDetailHeader<Kind: GroupScreenKind>: View {
     @Environment(\.serverID) private var serverID
     @Environment(\.playItem) private var playItem
     @Environment(\.currentPlayback) private var playback
-    @State private var isStarting = false
+    @State private var starts = GroupPlayStarts()
     /// The key of the message for the last failed start, kept while the alert is dismissed.
     @State private var failureKey: String?
     @State private var showsFailure = false
@@ -141,11 +141,11 @@ private struct GroupDetailHeader<Kind: GroupScreenKind>: View {
                 // The navigation title names the group.
                 .accessibilityHidden(true)
             if let playAll = GroupPresentation.playAll(
-                of: model, canPlay: playItem != nil && !isStarting, nowPlaying: playback?.mediaKey,
+                of: model, canPlay: playItem != nil && !starts.isStarting, nowPlaying: playback?.mediaKey,
                 isPlaying: playback?.isPlaying ?? false, serverID: serverID)
             {
                 Button {
-                    start(playAll)
+                    tap(playAll)
                 } label: {
                     Label {
                         Text(verbatim: L10n.string(playAll.titleKey))
@@ -172,13 +172,13 @@ private struct GroupDetailHeader<Kind: GroupScreenKind>: View {
         }
     }
 
-    private func start(_ playAll: GroupPlayAll) {
-        let play = playItem
+    private func tap(_ playAll: GroupPlayAll) {
         let playback = playback
-        isStarting = true
+        guard let token = GroupPresentation.tap(playAll, starts: &starts, pause: { playback?.pause() }) else { return }
+        let play = playItem
         Task {
-            defer { isStarting = false }
-            if let key = await GroupPresentation.performPlayAll(playAll, play: play, pause: { playback?.pause() }) {
+            defer { starts.end(token) }
+            if let key = await GroupPresentation.performPlayAll(playAll, play: play) {
                 failureKey = key
                 showsFailure = true
             }

@@ -105,11 +105,6 @@ private func finished(_ itemID: String, episodeID: String? = nil, _ isFinished: 
         progress: isFinished ? 1 : 0.5, isFinished: isFinished)
 }
 
-/// A pause for play-all calls that must play rather than pause.
-private func unexpectedPause() {
-    Issue.record("Play-all paused instead of playing")
-}
-
 /// The media key of `itemID` (and `episodeID`) on the test account's connection.
 private func playing(_ itemID: String, episodeID: String? = nil, on connectionID: UUID = account.connectionID)
     -> MediaKey
@@ -251,7 +246,7 @@ private func playing(_ itemID: String, episodeID: String? = nil, on connectionID
                 #expect(startTime == nil)
                 played.withLock { $0.append(GroupPlayTarget(itemID: itemID, episodeID: episodeID)) }
             }
-            #expect(await GroupPresentation.performPlayAll(playAll, play: play, pause: unexpectedPause) == nil)
+            #expect(await GroupPresentation.performPlayAll(playAll, play: play) == nil)
             #expect(played.withLock { $0 } == [GroupPlayTarget(itemID: SampleLibrary.podcast.id, episodeID: "ep_1")])
 
             #expect(playAll.hintKey == nil)
@@ -262,7 +257,7 @@ private func playing(_ itemID: String, episodeID: String? = nil, on connectionID
             #expect(playAll == GroupPlayAll(next: nil, isEnabled: false))
             #expect(playAll.hintKey == "MessageGroupAllFinished")
             #expect(GroupPresentation.playAllAccessibilityLabel(playAll) == L10n.string("ButtonPlay"))
-            #expect(await GroupPresentation.performPlayAll(playAll, play: play, pause: unexpectedPause) == nil)
+            #expect(await GroupPresentation.performPlayAll(playAll, play: play) == nil)
             #expect(played.withLock { $0.count } == 1)
         }
     }
@@ -288,11 +283,50 @@ private func playing(_ itemID: String, episodeID: String? = nil, on connectionID
                 GroupPresentation.playAllAccessibilityLabel(playAll)
                     == "\(L10n.string("ButtonPause")), Frankenstein; or, The Modern Prometheus")
 
-            var pauses = 0
+            // Pause pauses at once, without play-all playing.
             let play = PlayItemAction { _, _, _ in Issue.record("Pause played") }
-            #expect(await GroupPresentation.performPlayAll(playAll, play: play, pause: { pauses += 1 }) == nil)
+            #expect(await GroupPresentation.performPlayAll(playAll, play: play) == nil)
+            var pauses = 0
+            var starts = GroupPlayStarts()
+            #expect(GroupPresentation.tap(playAll, starts: &starts, pause: { pauses += 1 }) == nil)
             #expect(pauses == 1)
+            #expect(!starts.isStarting)
         }
+    }
+
+    @Test func pauseLeavesAPlayInFlightAlone() async throws {
+        try await withStore { store, services in
+            let model = CollectionDetailModel(id: "col_classics", service: services, cache: store.progress)
+            await model.loadIfNeeded()
+            var starts = GroupPlayStarts()
+            var pauses = 0
+            let play = try #require(GroupPresentation.playAll(of: model, canPlay: true))
+            let started = try #require(GroupPresentation.tap(play, starts: &starts, pause: { pauses += 1 }))
+            #expect(starts.isStarting)
+            #expect(GroupPresentation.playAll(of: model, canPlay: !starts.isStarting)?.isEnabled == false)
+
+            // Now Playing activates before the Play's task ends, and the user taps Pause.
+            let pause = try #require(
+                GroupPresentation.playAll(
+                    of: model, canPlay: !starts.isStarting, nowPlaying: playing(SampleLibrary.prideAndPrejudice.id),
+                    isPlaying: true, serverID: account.connectionID))
+            #expect(GroupPresentation.tap(pause, starts: &starts, pause: { pauses += 1 }) == nil)
+            #expect(pauses == 1)
+            #expect(starts.current == started)
+
+            starts.end(started)
+            #expect(!starts.isStarting)
+        }
+    }
+
+    @Test func anOlderStartCantEndANewerOne() {
+        var starts = GroupPlayStarts()
+        let older = starts.begin()
+        let newer = starts.begin()
+        starts.end(older)
+        #expect(starts.current == newer)
+        starts.end(newer)
+        #expect(!starts.isStarting)
     }
 
     @Test func playingMemberEpisodeMakesPlayPause() async throws {
@@ -392,10 +426,10 @@ private func playing(_ itemID: String, episodeID: String? = nil, on connectionID
             #expect(playAll.next?.target.itemID == SampleLibrary.prideAndPrejudice.id)
             let failing = PlayItemAction { _, _, _ in throw Failure() }
             #expect(
-                await GroupPresentation.performPlayAll(playAll, play: failing, pause: unexpectedPause)
+                await GroupPresentation.performPlayAll(playAll, play: failing)
                     == "MessagePlaybackStartFailed")
             let cancelled = PlayItemAction { _, _, _ in throw CancellationError() }
-            #expect(await GroupPresentation.performPlayAll(playAll, play: cancelled, pause: unexpectedPause) == nil)
+            #expect(await GroupPresentation.performPlayAll(playAll, play: cancelled) == nil)
         }
     }
 

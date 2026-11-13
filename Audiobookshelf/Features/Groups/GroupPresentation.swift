@@ -40,6 +40,26 @@ struct GroupPlayAll: Hashable {
     var hintKey: String? { playing == nil && next == nil ? "MessageGroupAllFinished" : nil }
 }
 
+/// The group screen's Play start in flight, if any. Each start has a token, so an older start that ends late can't
+/// clear a newer one.
+struct GroupPlayStarts {
+    private(set) var current: Int?
+    private var last = 0
+
+    var isStarting: Bool { current != nil }
+
+    mutating func begin() -> Int {
+        last += 1
+        current = last
+        return last
+    }
+
+    /// Ends the start `token`, unless a newer one has begun since.
+    mutating func end(_ token: Int) {
+        if current == token { current = nil }
+    }
+}
+
 /// What the collection and playlist screens decide, kept out of the views so app tests cover it.
 enum GroupPresentation {
     static func listMessages(_ kind: GroupSummary.Kind) -> BrowseMessages {
@@ -157,20 +177,31 @@ enum GroupPresentation {
             .joined(separator: ", ")
     }
 
-    /// Pauses through `pause` while a member plays; else plays the member play-all starts through `play`, like a
-    /// card's Play.
+    /// A tap on the button. While a member plays it pauses through `pause` at once, so a Pause never takes or ends a
+    /// Play's in-flight start; otherwise it begins a start in `starts`.
     ///
-    /// Legacy plays only that member. TODO(#354): queue the playable members after it once the app has a
-    /// `PlaybackQueue`.
-    ///
-    /// - Returns: The failure message's key; `nil` when it paused, started, was cancelled or had nothing to play.
+    /// - Returns: The start's token, for ``performPlayAll(_:play:)`` and then ``GroupPlayStarts/end(_:)``; `nil`
+    ///   when it paused or there is nothing to play.
     @MainActor
-    static func performPlayAll(_ playAll: GroupPlayAll, play: PlayItemAction?, pause: () -> Void) async -> String? {
+    static func tap(_ playAll: GroupPlayAll, starts: inout GroupPlayStarts, pause: () -> Void) -> Int? {
         if playAll.playing != nil {
             pause()
             return nil
         }
-        guard playAll.isEnabled, let next = playAll.next else { return nil }
+        guard playAll.isEnabled, playAll.next != nil else { return nil }
+        return starts.begin()
+    }
+
+    /// Plays the member play-all starts through `play`, like a card's Play; does nothing while a member plays, which
+    /// ``tap(_:starts:pause:)`` pauses instead.
+    ///
+    /// Legacy plays only that member. TODO(#354): queue the playable members after it once the app has a
+    /// `PlaybackQueue`.
+    ///
+    /// - Returns: The failure message's key; `nil` when it started, was cancelled or had nothing to play.
+    @MainActor
+    static func performPlayAll(_ playAll: GroupPlayAll, play: PlayItemAction?) async -> String? {
+        guard playAll.playing == nil, playAll.isEnabled, let next = playAll.next else { return nil }
         return await ItemCardActions.perform(.play, on: next.summary, actions: NoOpItemActions(), play: play)
     }
 }
