@@ -105,6 +105,12 @@ public actor DownloadManager {
     /// an episode completes into a deleted item and no record of the item is left. In memory
     /// only.
     var refusedCovers: [MediaKey: CoverSource] = [:]
+    /// Records the system paused rather than the user, by who holds the pause: a policy restart
+    /// (``restartActiveTransfers()``) or a credential replacement's cleanup
+    /// (``pause(recordID:owner:)``). A user pause takes it back, so only the holder's
+    /// ``resume(recordID:owner:unlessQuiescedSince:)`` resumes the record, and only until then.
+    /// In memory only.
+    var systemPauses: [UUID: UUID] = [:]
 
     /// - Parameters:
     ///   - store: the same actor the engine uses.

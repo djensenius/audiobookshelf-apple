@@ -156,6 +156,33 @@ private actor FakeManager: DownloadsLifecycleManager {
         resumes.continuation.yield()
         return true
     }
+
+    /// Records a cleanup's pauses don't take, as the user's.
+    private var userPaused: Set<UUID> = []
+    /// Holds the next owned resume until it opens.
+    private var resumeGate: StubGate?
+
+    func pauseForUser(_ recordID: UUID) {
+        userPaused.insert(recordID)
+    }
+
+    func holdResume(_ gate: StubGate) {
+        resumeGate = gate
+    }
+
+    /// As ``pause(recordID:)``, but declines a record the user paused.
+    func pause(recordID: UUID, owner: UUID) async throws(DownloadManagerError) -> Bool {
+        let paused = try await pause(recordID: recordID)
+        return paused && !userPaused.contains(recordID)
+    }
+
+    func resume(recordID: UUID, owner: UUID, unlessQuiescedSince generation: Int) async -> Bool {
+        if let gate = resumeGate {
+            resumeGate = nil
+            await gate.pass()
+        }
+        return resume(recordID: recordID, unlessQuiescedSince: generation)
+    }
 }
 
 @MainActor
@@ -597,20 +624,43 @@ struct DownloadsLifecycleTests {
     }
 
     /// New credentials over a saved session: the records are paused and the transfers and resume
-    /// data with the old ones are gone (the quiesce) before the paused records resume. Another
+    /// data with the old ones are gone (the quiesce) before the paused records resume, except one
+    /// the user paused. A paused record is offered too: a policy restart may hold it. Another
     /// connection's downloads are left alone.
-    @Test func replacedCredentialsPauseQuiesceThenResume() async {
+    @Test func replacedCredentialsPauseQuiesceThenResume() async throws {
         let lifecycle = makeLifecycle()
+        let userPaused = try #require(recordsA.first { $0.state == .paused })
+        await manager.pauseForUser(userPaused.id)
 
         lifecycle.credentialsReplaced(connectionA)
         // Waits for the cleanup.
         await lifecycle.sessionDidStart(context(connectionA))
+        await lifecycle.pendingResumes?.value
 
-        let stopped = pauses(recordsA) + ["quiesce \(connectionA)"]
+        let offered = recordsA.filter { [.queued, .downloading, .paused].contains($0.state) }
+        let stopped = offered.map { "pause \($0.id)" }.sorted() + ["quiesce \(connectionA)"]
         let all = calls.all
         #expect(Array(all.prefix(stopped.count)) == stopped)
-        let resumed = recordsA.filter { [.queued, .downloading].contains($0.state) }.map { "resume \($0.id) since 7" }
+        let resumed = offered.filter { $0.id != userPaused.id }.map { "resume \($0.id) since 7" }
         #expect(all.dropFirst(stopped.count).sorted() == resumed.sorted())
+    }
+
+    /// The resumes after a replacement run outside its cleanup: a held one (its network
+    /// preflight, say) holds up neither a new session nor a later cleanup, whose quiesce
+    /// cancels it.
+    @Test func aHeldResumeAfterAReplacementDoesNotHoldUpALaterCleanup() async {
+        let lifecycle = makeLifecycle()
+        let gate = StubGate()
+        await manager.holdResume(gate)
+
+        lifecycle.credentialsReplaced(connectionA)
+        await gate.arrived()
+        lifecycle.connectionExpired(connectionA)
+        await lifecycle.sessionDidStart(context(connectionA))
+
+        #expect(calls.all.filter { $0 == "quiesce \(connectionA)" }.count == 2)
+        gate.open()
+        await lifecycle.pendingResumes?.value
     }
 
     /// A cleanup that didn't finish leaves the records paused: its retry doesn't resume them.
@@ -621,7 +671,9 @@ struct DownloadsLifecycleTests {
         lifecycle.credentialsReplaced(connectionA)
         await lifecycle.sessionDidStart(context(connectionA))
 
-        #expect(calls.all == pauses(recordsA) + ["quiesce \(connectionA)"])
+        let offered = recordsA.filter { [.queued, .downloading, .paused].contains($0.state) }
+        #expect(calls.all == offered.map { "pause \($0.id)" }.sorted() + ["quiesce \(connectionA)"])
+        #expect(lifecycle.pendingResumes == nil)
     }
 
     /// Once a session of the connection starts, its downloads are that session's.
