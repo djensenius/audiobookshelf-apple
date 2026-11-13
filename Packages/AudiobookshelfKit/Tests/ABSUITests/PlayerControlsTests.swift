@@ -41,11 +41,11 @@ import Testing
     }
 
     /// A scrubber that appends each callback's name to `calls`.
-    private func recordingScrubber(_ calls: Recorder) -> PlayerScrubber {
+    private func recordingScrubber(_ calls: Recorder, allowsScrubbing: Bool = true) -> PlayerScrubber {
         PlayerScrubber(
             progress: 0.5, elapsed: 100, remaining: 100, onScrub: { _ in calls.values.append("scrub") },
             onScrubEnd: { calls.values.append("end") }, onIncrement: { calls.values.append("increment") },
-            onDecrement: { calls.values.append("decrement") })
+            onDecrement: { calls.values.append("decrement") }, allowsScrubbing: allowsScrubbing)
     }
 
     @Test func aDragThatStopsEndsTheScrubOnce() {
@@ -68,6 +68,15 @@ import Testing
         scrubber.adjust(.decrement)
         scrubber.adjust(.increment)
         #expect(calls.values == ["increment", "decrement", "increment"])
+    }
+
+    /// A locked player (#505) can't be moved from VoiceOver's adjustable action either.
+    @Test func aLockedScrubberIgnoresTheAdjustableAction() {
+        let calls = Recorder()
+        let scrubber = recordingScrubber(calls, allowsScrubbing: false)
+        scrubber.adjust(.increment)
+        scrubber.adjust(.decrement)
+        #expect(calls.values.isEmpty)
     }
 }
 
@@ -162,5 +171,13 @@ private final class Recorder {
         #expect(!idle[2].showsSpinner)
         #expect(idle[2].accessibilityValue.isEmpty)
         #expect(idle[3].caption == "2m")
+    }
+
+    /// A locked player (#505) keeps only play/pause in the toolbar.
+    @Test func lockedToolbarTransportShowsOnlyPlayPause() {
+        let entries = TransportToolbarEntry.entries(
+            showsPause: true, isBuffering: false, jumpBackwardSeconds: 10, jumpForwardSeconds: 30,
+            hasPreviousChapter: true, hasNextChapter: true, showsSkipControls: false, locale: locale)
+        #expect(entries.map(\.action) == [.playPause])
     }
 }

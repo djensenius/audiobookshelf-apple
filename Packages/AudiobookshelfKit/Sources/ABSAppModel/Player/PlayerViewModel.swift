@@ -45,7 +45,9 @@ public enum PlayerErrorMessage: Sendable, Hashable {
 ///   session, a restart or a failed load keep the last text for the same item.
 /// - **Progress.** ``elapsed``, ``remaining`` and ``progress`` are relative to the current chapter
 ///   when ``AppSettings/chapterTrack`` is on and a chapter is playing, else to the whole item, in
-///   media seconds; ``remainingAtRate`` is the wall-clock time left.
+///   media seconds; ``remainingAtRate`` is the wall-clock time left. ``trackTimes`` and
+///   ``totalTrackTimes`` are what the full player shows, with the ``displayOptions``
+///   (``PlayerDisplayOptions``) applied.
 /// - **Scrubbing.** Between ``beginScrub(owner:)`` and ``endScrub(owner:)`` the times and progress
 ///   show the scrub position over the range fixed when it began, ignoring playback ticks;
 ///   ``endScrub(owner:)`` seeks once, and only if the position moved. A view splits it into
@@ -110,6 +112,8 @@ public final class PlayerViewModel {
         var owner: ScrubOwner
         var key: MediaKey?
         var range: Span
+        /// Whether ``range`` is a chapter's, not the whole item's.
+        var isChapter: Bool
         var time: Double
         /// Whether ``scrub(to:owner:)`` moved it; an unmoved scrub (a tap) doesn't seek.
         var moved = false
@@ -202,6 +206,8 @@ public final class PlayerViewModel {
     public var jumpBackwardSeconds: Int { settings.jumpBackwardsTime }
     /// Whether the scrubber shows the current chapter rather than the whole item.
     public var usesChapterTrack: Bool { settings.chapterTrack }
+    /// The full player's menu options, from ``AppSettings``.
+    public var displayOptions: PlayerDisplayOptions { PlayerDisplayOptions(settings) }
 
     /// Whether previous chapter does anything: media is loaded. Without chapters it restarts the
     /// item, as the legacy player did.
@@ -241,6 +247,24 @@ public final class PlayerViewModel {
         return range.fraction(at: time)
     }
 
+    /// The shown range's times as the full player shows them, with ``displayOptions``' speed
+    /// scaling.
+    public var trackTimes: PlayerTrackTimes {
+        let (range, time) = shownPosition
+        return displayOptions.times(elapsed: range.elapsed(at: time), duration: range.duration, rate: playback.rate)
+    }
+
+    /// The whole item's times, shown alongside ``trackTimes`` while it shows a chapter and the
+    /// total track is on (``PlayerDisplayOptions/showsTotalTrack(mainTrackIsChapter:)``); else
+    /// `nil`. While scrubbing, at the scrub position.
+    public var totalTrackTimes: PlayerTrackTimes? {
+        let options = displayOptions
+        guard options.showsTotalTrack(mainTrackIsChapter: shownRangeIsChapter) else { return nil }
+        let time = activeScrub?.time ?? playback.currentTime
+        let item = itemSpan
+        return options.times(elapsed: item.elapsed(at: time), duration: item.duration, rate: playback.rate)
+    }
+
     // MARK: Commands
 
     /// Pauses while play is requested (also while starting or stalled), else resumes.
@@ -278,8 +302,9 @@ public final class PlayerViewModel {
     /// Starts a fresh gesture for `owner`, making it eligible again, and scrubs over the range shown
     /// now, replacing its own scrub if any. The gesture is rejected, and stays ineligible until it
     /// ends, while another owner is scrubbing, without an item, while the item is starting (a seek
-    /// would replace the resume position still being resolved), or with an empty range (an
-    /// unloaded item of unknown duration).
+    /// would replace the resume position still being resolved), with an empty range (an
+    /// unloaded item of unknown duration), or while the player is locked
+    /// (``PlayerDisplayOptions/allowsScrubbing``).
     public func beginScrub(owner: ScrubOwner) {
         ineligibleScrubOwners.remove(owner)
         startScrub(owner: owner)
@@ -289,7 +314,7 @@ public final class PlayerViewModel {
     /// ``beginScrub(owner:)``.
     private func startScrub(owner: ScrubOwner) {
         let othersScrub = activeScrub.map { $0.owner != owner } ?? false
-        guard !othersScrub, hasSession, playback.phase != .starting else {
+        guard !othersScrub, hasSession, playback.phase != .starting, displayOptions.allowsScrubbing else {
             ineligibleScrubOwners.insert(owner)
             return
         }
@@ -299,7 +324,7 @@ public final class PlayerViewModel {
             return
         }
         scrubState = Scrub(
-            owner: owner, key: playback.mediaKey, range: range,
+            owner: owner, key: playback.mediaKey, range: range, isChapter: shownRangeIsChapter,
             time: range.time(forElapsed: range.elapsed(at: time)))
     }
 
@@ -367,8 +392,32 @@ public final class PlayerViewModel {
     }
 
     /// Switches the scrubber between the current chapter and the whole item; saved in settings.
+    /// Turning it off turns the total track on (``PlayerDisplayOptions/toggleChapterTrack()``).
     public func toggleChapterTrack() {
-        settings.chapterTrack.toggle()
+        updateDisplayOptions { $0.toggleChapterTrack() }
+    }
+
+    /// Shows or hides the whole item's track alongside the chapter track; saved in settings.
+    /// Turning it off turns the chapter track on (``PlayerDisplayOptions/toggleTotalTrack()``).
+    public func toggleTotalTrack() {
+        updateDisplayOptions { $0.toggleTotalTrack() }
+    }
+
+    /// Turns scaling the elapsed time by the playback rate on or off; saved in settings.
+    public func toggleScaleElapsedTimeBySpeed() {
+        updateDisplayOptions { $0.scalesElapsedTimeBySpeed.toggle() }
+    }
+
+    /// Locks or unlocks the player (``PlayerDisplayOptions/isLocked``); saved in settings. Locking
+    /// doesn't end a scrub already in progress; it refuses new ones.
+    public func toggleLock() {
+        updateDisplayOptions { $0.isLocked.toggle() }
+    }
+
+    private func updateDisplayOptions(_ change: (inout PlayerDisplayOptions) -> Void) {
+        var options = displayOptions
+        change(&options)
+        options.save(to: settings)
     }
 
     /// Stops playback and closes the item, as the user's close button. Cancels any scrub like an
@@ -413,8 +462,19 @@ public final class PlayerViewModel {
         if let scrub = activeScrub { return (scrub.range, scrub.time) }
         let time = playback.currentTime
         if settings.chapterTrack, let range = playback.chapterRange { return (Span(range), time) }
+        return (itemSpan, time)
+    }
+
+    /// The whole item's span; empty while its duration is unknown.
+    private var itemSpan: Span {
         let duration = playback.duration
-        return (Span(start: 0, end: duration.isFinite ? duration : 0), time)
+        return Span(start: 0, end: duration.isFinite ? duration : 0)
+    }
+
+    /// Whether ``shownPosition`` is a chapter's span rather than the whole item's.
+    private var shownRangeIsChapter: Bool {
+        if let scrub = activeScrub { return scrub.isChapter }
+        return settings.chapterTrack && playback.chapterRange != nil
     }
 
     private var display: PlayerDisplayInfo? {
