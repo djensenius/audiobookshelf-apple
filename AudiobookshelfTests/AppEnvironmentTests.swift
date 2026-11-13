@@ -206,6 +206,53 @@ struct TestDownloads {
         }
     }
 
+    /// Every scope's syncer records history through the environment's one history store (#184).
+    @Test func playbackRecordsHistoryInTheEnvironmentsStore() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+            let store = try #require(environment.playbackHistory)
+            let history = try #require(environment.playback.history)
+            let configuration = AppPlayback.configuration(
+                for: try scopeRequest(environment), settings: settings,
+                policy: NetworkPolicy(monitor: NetworkMonitor(), settings: settings),
+                engine: AudioEngine(audioSession: nil), history: history)
+            let key = MediaKey(serverConnectionID: UUID(), libraryItemId: "li_book")
+
+            await configuration.history?.record(.play, for: PlaybackHistoryMedia(key: key, displayTitle: "Book"), at: 5)
+
+            #expect(try await store.events(for: key).map(\.name) == [.play])
+        }
+    }
+
+    /// Launching prunes history past its retention, keeping the rest (ADR 0003).
+    @Test func launchPrunesExpiredPlaybackHistory() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(
+            path: "AppEnvironmentTests-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let location = DataStack.Location.url(directory.appending(path: "Audiobookshelf.store"))
+        let key = MediaKey(serverConnectionID: UUID(), libraryItemId: "li_book")
+        func event(_ name: PlaybackHistoryEventName, at timestamp: Date) -> PlaybackHistoryEventDTO {
+            PlaybackHistoryEventDTO(
+                serverConnectionID: key.serverConnectionID, mediaKey: key, mediaDisplayTitle: "Book", name: name,
+                type: .playback, timestamp: timestamp)
+        }
+        do {
+            let seeded = PlaybackHistoryStore(modelContainer: try DataStack(location: location).container)
+            try await seeded.record(event(.play, at: .now.addingTimeInterval(-PlaybackHistoryStore.retention - 60)))
+            try await seeded.record(event(.pause, at: .now.addingTimeInterval(-60)))
+        }
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: location, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+            let store = try #require(environment.playbackHistory)
+
+            await environment.historyPruning?.value
+
+            #expect(try await store.events(for: key).map(\.name) == [.pause])
+        }
+    }
+
     /// The audio session's interruption handler gets the scope's coordinator, so an interruption
     /// also cancels a play the coordinator holds outside the engine (recovery, the initial load).
     @Test func playbackInterruptionsReachTheScopesCoordinator() async throws {

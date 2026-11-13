@@ -68,4 +68,16 @@ final class ScopePlayback: PlayerPlaybackControlling {
     func stop(reason: PlaybackStopReason) {
         coordinator.stop(reason: reason)
     }
+
+    func confirmMeteredStreaming() async {
+        if let scope {
+            await scope.confirmMeteredStreaming()
+        } else {
+            await coordinator.confirmMeteredStreaming()
+        }
+    }
+
+    func declineMeteredStreaming() {
+        coordinator.declineMeteredStreaming()
+    }
 }
