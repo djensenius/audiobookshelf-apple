@@ -82,32 +82,27 @@ enum PlayerErrorAction: Equatable {
 /// would close it too (#60).
 ///
 /// A playback failure (`errorMessageKey`) shows in an alert, with or without a session, and only
-/// in the active scene, so other windows don't repeat it. On iOS the full player shows it while
-/// it covers the scene. Each scene shows a failure until it's dismissed there, and again only
+/// in the active scene, so other windows don't repeat it (``PlayerErrorAlertOwner``). The queue
+/// inspector and, on iOS, the full player show it while they're on screen, the one on top
+/// instead of the content. Each scene shows a failure until it's dismissed there, and again only
 /// after the player has had none (or a different one). A failure with a ``PlayerErrorAction``
 /// offers it and Cancel instead of OK.
 struct PlayerSlot: ViewModifier {
     @Bindable var router: Router
     let player: any PlayerSlotState
-    @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.appearsActive) private var appearsActive
     #if os(macOS)
         @Environment(\.openWindow) private var openWindow
     #endif
-    /// The failure this scene's alert was dismissed for.
-    @State private var dismissedError: PlayerErrorMessage?
 
     func body(content: Content) -> some View {
-        errorAlert(hosting(content), isEnabled: !fullPlayerCoversContent)
+        hosting(content)
+            .playerErrorAlerts(player: player)
             .onChange(
                 of: Self.presentsWithoutSession(
                     isPresented: router.isFullPlayerPresented, hasSession: player.hasSession),
                 initial: true
             ) { _, stale in
                 if stale { router.isFullPlayerPresented = false }
-            }
-            .onChange(of: player.errorMessageKey) { _, error in
-                dismissedError = Self.dismissed(afterChangeTo: error, dismissed: dismissedError)
             }
     }
 
@@ -149,61 +144,6 @@ struct PlayerSlot: ViewModifier {
         }
     }
 
-    /// The failure this scene shows, while it's the active one.
-    private var shownError: PlayerErrorMessage? {
-        guard scenePhase == .active, appearsActive else { return nil }
-        return Self.shownError(current: player.errorMessageKey, dismissed: dismissedError)
-    }
-
-    /// Whether the full-screen player covers the content (iOS), which then can't present the alert.
-    private var fullPlayerCoversContent: Bool {
-        #if os(iOS)
-            router.isFullPlayerPresented
-        #else
-            false
-        #endif
-    }
-
-    /// ``shownError``'s alert on `view`, while `isEnabled`.
-    private func errorAlert(_ view: some View, isEnabled: Bool) -> some View {
-        let error = isEnabled ? shownError : nil
-        return view.alert(
-            Text(verbatim: error.map { L10n.string(Self.messageKey(for: $0)) } ?? ""),
-            isPresented: Binding(
-                get: { error != nil },
-                set: { if !$0 { dismissedError = player.errorMessageKey } }),
-            presenting: error
-        ) { error in
-            let action = PlayerErrorAction(error)
-            if let action {
-                Button {
-                    perform(action)
-                } label: {
-                    Text(verbatim: L10n.string(action.titleKey))
-                }
-            }
-            Button(role: .cancel) {
-                dismiss(action)
-            } label: {
-                Text(verbatim: L10n.string(action == nil ? "ButtonOk" : "ButtonCancel"))
-            }
-        }
-    }
-
-    private func perform(_ action: PlayerErrorAction) {
-        switch action {
-        case .streamAnyway: Task { await player.confirmMeteredStreaming() }
-        }
-    }
-
-    /// The alert's cancel (or OK) button, after `action` was offered.
-    private func dismiss(_ action: PlayerErrorAction?) {
-        switch action {
-        case .streamAnyway: player.declineMeteredStreaming()
-        case nil: break
-        }
-    }
-
     @ViewBuilder private func hosting(_ content: Content) -> some View {
         #if os(iOS)
             content
@@ -211,10 +151,11 @@ struct PlayerSlot: ViewModifier {
                     miniPlayer
                 }
                 .fullScreenCover(isPresented: $router.isFullPlayerPresented) {
-                    errorAlert(fullPlayer, isEnabled: true)
+                    fullPlayer.playerErrorAlertLayer(player: player)
                 }
                 .inspector(isPresented: $router.isQueueInspectorPresented) {
                     QueueInspector(router: router)
+                        .playerErrorAlertLayer(player: player)
                 }
         #else
             content
@@ -226,6 +167,7 @@ struct PlayerSlot: ViewModifier {
                 }
                 .inspector(isPresented: $router.isQueueInspectorPresented) {
                     QueueInspector(router: router)
+                        .playerErrorAlertLayer(player: player)
                 }
                 .onChange(of: router.isFullPlayerPresented) { _, isPresented in
                     if Self.opensNowPlayingWindow(isPresented: isPresented, hasSession: player.hasSession) {

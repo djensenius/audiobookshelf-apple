@@ -28,13 +28,17 @@ struct QueueSlot: View {
     }
 }
 
-/// The queue as one of the full player's sheets (``PlayerSheet/queue``).
+/// The queue as one of the full player's sheets (``PlayerSheet/queue``). While it's up, it shows
+/// the player's failures, such as a queued item that fails to play, instead of the window under it
+/// (``SwiftUICore/View/playerErrorAlertLayer(player:)``).
 struct QueueSheet: View {
+    let model: PlayerViewModel
     let close: () -> Void
 
     var body: some View {
         QueueList()
             .playerSheetStyle(title: L10n.string("HeaderUpNext"), onDone: close)
+            .playerErrorAlertLayer(player: model)
     }
 }
 
@@ -67,11 +71,11 @@ struct QueueInspector: View {
 
 /// The running session's queue (`\.playbackQueue`) as ``QueueContent``: its changes go to the
 /// queue, and a tap plays the row through `\.playItem`, which takes it out of the queue once its
-/// session starts. A play that fails shows an alert and leaves the row queued.
+/// session starts. A play that fails leaves the row queued; the player reports the failure
+/// (`errorMessageKey`), which the presenting ``QueueSheet`` or ``QueueInspector`` layer shows.
 struct QueueList: View {
     @Environment(\.playbackQueue) private var queue
     @Environment(\.playItem) private var playItem
-    @State private var playFailed = false
 
     var body: some View {
         let queue = queue
@@ -84,23 +88,12 @@ struct QueueList: View {
             move: { queue?.move(fromOffsets: $0, toOffset: $1) },
             clear: { queue?.clear() }
         )
-        .alert(Text(verbatim: L10n.string("MessagePlaybackStartFailed")), isPresented: $playFailed) {
-            Button(role: .cancel) {
-            } label: {
-                Text(verbatim: L10n.string("ButtonOk"))
-            }
-        }
     }
 
     private func play(_ row: QueueRow) {
         guard let playItem else { return }
-        Task {
-            do {
-                try await row.play(with: playItem)
-            } catch {
-                playFailed = true
-            }
-        }
+        // The app's action reports a failure through the player, not by throwing.
+        Task { try? await row.play(with: playItem) }
     }
 }
 

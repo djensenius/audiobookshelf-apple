@@ -26,7 +26,7 @@ struct PlayerSheetContent: View {
         case .bookmarks: BookmarksSheet(model: model, close: close)
         case .speed: PlaybackSpeedSheet(model: model, close: close)
         case .sleepTimer: SleepTimerSheet(model: model, close: close)
-        case .queue: QueueSheet(close: close)
+        case .queue: QueueSheet(model: model, close: close)
         }
     }
 }
