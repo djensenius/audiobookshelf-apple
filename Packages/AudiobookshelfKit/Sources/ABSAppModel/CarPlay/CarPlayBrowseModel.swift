@@ -228,8 +228,14 @@ public final class CarPlayBrowseModel {
         default:
             break
         }
-        if let pager = sources[destination]?.pager, pager.loadedCount > 0 || pager.reachedEnd {
+        // A list a page arrived for restarts from its first page, even when it kept no items.
+        if let pager = sources[destination]?.pager,
+            pager.loadedCount > 0 || pager.reachedEnd || answered.contains(destination)
+        {
             await pager.refresh()?.value
+            // A failed first page keeps the rows on screen with their old paging: loading on
+            // would append newer pages to them, so the list waits for the next refresh.
+            if pager.error != nil { return }
         }
         await load(destination, offset: offset)
     }

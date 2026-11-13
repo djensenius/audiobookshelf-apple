@@ -25,6 +25,8 @@ struct FakeCarPlayBrowseService: CarPlayBrowseService {
     let requests = Locked<[String]>([])
     let failsLibraries = Locked(false)
     let failsBooks = Locked(false)
+    /// A books page that fails, when set.
+    let failsBooksPage = Locked<Int?>(nil)
     /// While set, a books request waits for ``releaseBooks()``.
     let holdsBooks = Locked(false)
     let heldBooks = Locked<[CheckedContinuation<Void, Never>]>([])
@@ -72,7 +74,7 @@ struct FakeCarPlayBrowseService: CarPlayBrowseService {
     func filteredBooksPage(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> {
         requests.value.append("books \(libraryID) \(query.filter?.queryValue ?? "-") \(query.page ?? 0)")
         if holdsBooks.value { await withCheckedContinuation { heldBooks.value.append($0) } }
-        if failsBooks.value { throw TestError.offline }
+        if failsBooks.value || failsBooksPage.value == (query.page ?? 0) { throw TestError.offline }
         var all = books.value[libraryID] ?? []
         if let filter = query.filter, filter.group == "series" {
             all = all.filter { $0.series?.id == filter.value }
@@ -329,6 +331,44 @@ private func ids(_ list: CarPlayList) -> [String] { list.rows.map(\.id) }
             let rows = model.list(latest).rows
             #expect(rows.count == 1)
             #expect(rows.allSatisfy { if case .more = $0.action { true } else { false } })
+        }
+    }
+
+    @Test func refreshingALatestListThatKeptNoEpisodesStartsOverFromTheFirstPage() async throws {
+        try await withLibrarySettings { settings in
+            let service = FakeCarPlayBrowseService()
+            service.libraryList.value = [makeLibrary("pods", mediaType: .podcast)]
+            let unmapped = (0..<2000).map { BrowseFixtures.recent("x\($0)", podcast: "") }
+            service.recent.value = ["pods": unmapped]
+            let (_, model) = await makeBrowse(service, settings: settings)
+            let latest = CarPlayDestination.latestEpisodes(libraryID: "pods")
+            await model.load(latest)
+            #expect(model.status(latest) == .loaded)
+
+            // A new episode lands at the start: the refresh reads the first page again.
+            service.recent.value = ["pods": [BrowseFixtures.recent("new")] + unmapped]
+            await model.refresh(latest)
+            #expect(model.list(latest).rows.first?.action == .play(itemID: "pod", episodeID: "new"))
+        }
+    }
+
+    @Test func aFailedRefreshKeepsTheRowsWithoutLoadingOn() async throws {
+        try await withLibrarySettings { settings in
+            let service = FakeCarPlayBrowseService()
+            service.libraryList.value = [makeLibrary("books")]
+            service.books.value = ["books": BrowseFixtures.books(40)]
+            let (_, model) = await makeBrowse(service, settings: settings, limits: CarPlayLimits(maximumItemCount: 5))
+            let books = CarPlayDestination.items(libraryID: "books")
+            await model.load(books)
+            let shown = model.list(books, offset: 8)
+
+            // The refresh's first page fails while the page from 12 needs more rows.
+            service.failsBooksPage.value = 0
+            let before = service.requests.value.count
+            await model.refresh(books, offset: 12)
+            #expect(Array(service.requests.value[before...]) == ["books books - 0"])
+            #expect(model.status(books) == .loaded)
+            #expect(model.list(books, offset: 8) == shown)
         }
     }
 
