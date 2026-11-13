@@ -17,9 +17,9 @@ import Synchronization
 /// download lookup the media may be downloaded.
 ///
 /// Each later call goes to the service that owns the session. ``mediaProgress(itemID:episodeID:)``
-/// asks `remote` first even for downloaded media, so newer server progress still wins before a
-/// local start; when it fails (for example offline), downloaded media gets the progress this device
-/// last saw from the server.
+/// always asks `remote`, even for downloaded media, so newer server progress still wins before a
+/// local start; when it fails (for example offline), the error reaches the coordinator, which then
+/// reads local progress itself rather than taking a cache for a server answer.
 ///
 /// A forced transcode (#533's `startSession(…, forceTranscode:)`, not on main yet) must always
 /// stream; add that forward here when it lands.
@@ -57,15 +57,10 @@ public final class PreferringLocalSessionService: PlaybackSessionService {
         }
     }
 
+    /// Always `remote`'s answer or error, even for downloaded media: what the device cached from
+    /// the server isn't a fetch, so offline the coordinator reads local progress itself.
     public func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
-        do {
-            return try await remote.mediaProgress(itemID: itemID, episodeID: episodeID)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            guard (try? await local.playableItem(itemID: itemID, episodeID: episodeID)) != nil else { throw error }
-            return try await local.mediaProgress(itemID: itemID, episodeID: episodeID)
-        }
+        try await remote.mediaProgress(itemID: itemID, episodeID: episodeID)
     }
 
     public func resolveStream(for session: PlaybackSession) async throws -> ResolvedStream {

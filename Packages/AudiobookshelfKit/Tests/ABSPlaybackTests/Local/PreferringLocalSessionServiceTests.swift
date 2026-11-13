@@ -111,9 +111,9 @@ struct PreferringLocalSessionServiceTests {
         #expect(session.playMethod == .directPlay && remote.calls == ["start book"])
     }
 
-    /// The server's progress still wins when it answers; offline, downloaded media gets the
-    /// baseline the device last saw.
-    @Test func progressComesFromTheServerAndFallsBackToTheLocalBaselineOffline() async throws {
+    /// Progress is always the server's: offline, the remote error reaches the coordinator even
+    /// for downloaded media with a cached baseline, so the cache is never taken for a fetch.
+    @Test func progressComesOnlyFromTheServer() async throws {
         items.add(.book())
         files.addAll(for: .book())
         let seen = ProgressBaseline(
@@ -125,9 +125,8 @@ struct PreferringLocalSessionServiceTests {
 
         #expect(try await service.mediaProgress(itemID: "book", episodeID: nil)?.currentTime == 42)
         remote.failProgress()
-        #expect(try await service.mediaProgress(itemID: "book", episodeID: nil)?.currentTime == 100)
         await #expect(throws: APIError.self) {
-            try await service.mediaProgress(itemID: "other", episodeID: nil)
+            try await service.mediaProgress(itemID: "book", episodeID: nil)
         }
     }
 }

@@ -19,6 +19,10 @@ public enum LocalPlaybackError: Error, Sendable, Hashable {
     /// §7: a download never falls back to streaming silently, so this is shown with a "Stream
     /// instead" action (``PreferringLocalSessionService/streamInstead(_:)``).
     case downloadFilesMissing(MediaKey)
+    /// Asked for server progress, which only the server has. The progress this device last saw
+    /// from the server is a cache: handed to the coordinator as a fetch, it could confirm a pending
+    /// PATCH and replay an older socket value over acknowledged progress.
+    case serverProgressUnavailable
 }
 
 /// ``PlaybackSessionService`` for downloaded media on one connection (ADR 0007, decision 7). It
@@ -30,12 +34,15 @@ public enum LocalPlaybackError: Error, Sendable, Hashable {
 ///   parity). It throws ``LocalPlaybackError/notDownloaded`` without a download of the media, and
 ///   ``LocalPlaybackError/downloadFilesMissing(_:)`` when one of its files is missing.
 /// - ``resolveStream(for:)`` returns the files' URLs, with no transport or token.
-/// - ``mediaProgress(itemID:episodeID:)`` is the server progress this device last saw for the
-///   media (the local row's server baseline), never the local position: the coordinator takes this
-///   as the server's answer, and a local edit taken as one would be marked as synced.
+/// - ``mediaProgress(itemID:episodeID:)`` throws ``LocalPlaybackError/serverProgressUnavailable``:
+///   the coordinator takes its answer as the server's, so on failure it reads local progress itself.
 /// - ``closeSession(id:report:)`` saves the session for upload, adding the report's listening time
-///   to what is already saved under its id.
+///   to what is already saved under its id. Without a report (a superseded or failed start), a
+///   session never saved is dropped.
 /// - ``sessionStatus(id:)`` reports a session it started as open: no server can end it.
+///
+/// Saved sessions are shared by every connection in one store; this service only accepts its own
+/// connection's.
 public final class LocalPlaybackSessionService: PlaybackSessionService {
     public let serverConnectionID: UUID
     private let items: any LocalItemReading
@@ -87,10 +94,19 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
         return item
     }
 
-    /// Whether `id` is a session this service started: still open, or saved for upload.
+    /// Whether `id` is a session this service started: still open, or saved for upload on its
+    /// connection.
     public func owns(sessionID id: String) async -> Bool {
         if open.withLock({ $0[id] != nil }) { return true }
-        return (try? await progress.session(id: id)) != nil
+        return (try? await savedSession(id: id)) != nil
+    }
+
+    /// The saved session `id` if it belongs to this connection; another connection's with the same
+    /// id is not this service's to read or replace.
+    private func savedSession(id: String) async throws -> PendingLocalSessionDTO? {
+        guard let session = try await progress.session(id: id), session.key.serverConnectionID == serverConnectionID
+        else { return nil }
+        return session
     }
 
     public func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
@@ -118,15 +134,10 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
         return session
     }
 
-    /// The local row's server baseline, or `nil` without one.
+    /// Always throws ``LocalPlaybackError/serverProgressUnavailable``: this device can't answer for
+    /// the server (see the type's documentation).
     public func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
-        let key = MediaKey(serverConnectionID: serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
-        guard let baseline = try await progress.progress(for: key)?.serverBaseline else { return nil }
-        return MediaProgress(
-            id: key.rawValue, libraryItemId: itemID, episodeId: episodeID, duration: baseline.duration,
-            progress: baseline.progress, currentTime: baseline.currentTime, isFinished: baseline.isFinished,
-            ebookLocation: baseline.ebookLocation, ebookProgress: baseline.ebookProgress,
-            lastUpdate: Self.milliseconds(baseline.lastUpdate), finishedAt: baseline.finishedAt.map(Self.milliseconds))
+        throw LocalPlaybackError.serverProgressUnavailable
     }
 
     /// - Throws: ``StreamResolutionError/resolution(_:)`` with
@@ -150,10 +161,22 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
     }
 
     /// Saves session `id` for upload, inactive: `currentTime` from `report`, and its listening time
-    /// added to the saved total. A session this service doesn't know is ignored.
+    /// added to the saved total. Without a report (the start was superseded, or its stream or load
+    /// failed), a session never saved is dropped rather than uploaded unplayed, and a saved one is
+    /// only marked inactive. A session this service doesn't know is ignored.
     public func closeSession(id: String, report: PlaybackSyncReport?) async throws {
         let started = open.withLock { $0[id] }
-        guard var session = try await progress.session(id: id) ?? started else { return }
+        let stored = try await progress.session(id: id)
+        // Another connection's saved session with this id is never replaced.
+        if let stored, stored.key.serverConnectionID != serverConnectionID {
+            open.withLock { _ = $0.removeValue(forKey: id) }
+            return
+        }
+        if report == nil, stored == nil {
+            open.withLock { _ = $0.removeValue(forKey: id) }
+            return
+        }
+        guard var session = stored ?? started else { return }
         if let report {
             session.currentTime = report.currentTime
             session.timeListening += report.timeListened
@@ -172,9 +195,5 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
     /// ``PlaybackSessionStatus/unknown``.
     public func sessionStatus(id: String) async -> PlaybackSessionStatus {
         await owns(sessionID: id) ? .alive : .unknown
-    }
-
-    private static func milliseconds(_ date: Date) -> Int {
-        Int((date.timeIntervalSince1970 * 1000).rounded())
     }
 }

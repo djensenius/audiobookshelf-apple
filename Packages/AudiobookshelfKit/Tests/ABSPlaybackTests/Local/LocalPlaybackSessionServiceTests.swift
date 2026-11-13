@@ -167,20 +167,75 @@ struct LocalPlaybackSessionServiceTests {
         #expect(await service.sessionStatus(id: "other") == .unknown)
     }
 
-    /// The coordinator takes this as the server's progress, so it is the server baseline the row
-    /// last saw, never the unsent local position.
-    @Test func mediaProgressIsTheServerBaselineNotTheLocalPosition() async throws {
+    /// The coordinator takes this as a server fetch, so the cached baseline is never offered as
+    /// one, even a malformed one (`lastUpdate` past `Int.max` milliseconds) that must not trap.
+    @Test(arguments: [1_800_000_000.0, Double(Int.max)])
+    func mediaProgressNeverAnswersForTheServer(lastUpdate: Double) async throws {
+        items.add(.book())
+        files.addAll(for: .book())
         let seen = ProgressBaseline(
-            currentTime: 100, progress: 0.4, duration: 250, isFinished: false, lastUpdate: Self.start)
+            currentTime: 100, progress: 0.4, duration: 250, isFinished: false,
+            lastUpdate: Date(timeIntervalSince1970: lastUpdate / 1000))
         try await store.recordEdit(
             ProgressEdit(audio: .init(currentTime: 130, duration: 250, progress: 0.52)), for: Self.key("book"),
             serverProgress: seen, now: Self.start.addingTimeInterval(60))
 
-        let progress = try #require(try await service().mediaProgress(itemID: "book", episodeID: nil))
+        await #expect(throws: LocalPlaybackError.serverProgressUnavailable) {
+            try await service().mediaProgress(itemID: "book", episodeID: nil)
+        }
+    }
 
-        #expect(progress.currentTime == 100 && progress.duration == 250 && !progress.isFinished)
-        #expect(progress.lastUpdate == 1_800_000_000_000 && progress.libraryItemId == "book")
-        #expect(try await service().mediaProgress(itemID: "other", episodeID: nil) == nil)
+    /// A start the coordinator closes without a report (superseded, or its stream or load failed)
+    /// was never played: it isn't saved for upload.
+    @Test func closeWithoutAReportDropsASessionNeverSaved() async throws {
+        items.add(.book())
+        files.addAll(for: .book())
+        let service = service()
+        let session = try await service.startSession(itemID: "book", episodeID: nil)
+
+        try await service.closeSession(id: session.id, report: nil)
+
+        #expect(try await store.session(id: session.id) == nil)
+        #expect(await service.sessionStatus(id: session.id) == .unknown)
+    }
+
+    /// A session already saved (by an earlier close or the syncer) is still finished without a
+    /// report, keeping what it recorded.
+    @Test func closeWithoutAReportFinishesASavedSession() async throws {
+        items.add(.book())
+        files.addAll(for: .book())
+        let service = service(now: Self.start.addingTimeInterval(120))
+        let session = try await service.startSession(itemID: "book", episodeID: nil)
+        try await store.saveSession(
+            PendingLocalSessionDTO(
+                id: session.id, key: Self.key("book"), userId: "user", mediaType: .book, displayTitle: "Dune",
+                duration: 250, startTime: 0, startedAt: Self.start, updatedAt: Self.start, timeListening: 30,
+                currentTime: 40))
+
+        try await service.closeSession(id: session.id, report: nil)
+
+        let saved = try #require(try await store.session(id: session.id))
+        #expect(!saved.isActive && saved.timeListening == 30 && saved.currentTime == 40)
+        #expect(saved.updatedAt == Self.start.addingTimeInterval(120))
+    }
+
+    /// Saved sessions of every connection share one store: another connection's with the same id
+    /// is neither owned nor replaced.
+    @Test func anotherConnectionsSessionIsNotOwnedOrReplaced() async throws {
+        let otherKey = MediaKey(serverConnectionID: UUID(), libraryItemId: "book")
+        let other = PendingLocalSessionDTO(
+            id: "shared", key: otherKey, userId: "other", mediaType: .book, displayTitle: "Other", duration: 250,
+            startTime: 0, startedAt: Self.start, updatedAt: Self.start, timeListening: 30, currentTime: 40)
+        try await store.saveSession(other)
+        let service = service(now: Self.start.addingTimeInterval(120))
+
+        #expect(await !service.owns(sessionID: "shared"))
+        #expect(await service.sessionStatus(id: "shared") == .unknown)
+        try await service.closeSession(
+            id: "shared", report: PlaybackSyncReport(currentTime: 90, timeListened: 50, duration: 250))
+        try await service.closeSession(id: "shared", report: nil)
+
+        #expect(try await store.session(id: "shared") == other)
     }
 
     static func key(_ item: String, episode: String? = nil) -> MediaKey {
