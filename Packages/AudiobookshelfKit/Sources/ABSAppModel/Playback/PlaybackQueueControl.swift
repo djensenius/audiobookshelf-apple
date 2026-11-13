@@ -57,6 +57,20 @@ public final class PlaybackQueueControl: PlaybackQueueReading {
         scope?.editQueue { $0.clear() }
     }
 
+    /// Replaces the queue with `items`, in order, once the player has accepted a start of `started` (play-all, #354):
+    /// it is the loaded media, starting or loaded, without an error. The current media isn't queued (``isCurrent(_:)``).
+    ///
+    /// - Returns: `false`, leaving the queue as it was, when `started` is another connection's, the start failed,
+    ///   was cancelled or was replaced by another media, or the session's scope is gone or has retired.
+    @discardableResult
+    public func replace(with items: [QueueItem], afterStarting started: MediaKey) -> Bool {
+        guard started.serverConnectionID == serverConnectionID, let playback = scope?.playback,
+            playback.mediaKey == started, playback.error == nil,
+            playback.phase == .starting || playback.phase == .loaded
+        else { return false }
+        return edit { $0.replace(with: items.filter { !isCurrent($0) }) }
+    }
+
     /// Applies `change` through the scope; `false` when it wasn't applied, because the scope is
     /// gone or has retired.
     func edit(_ change: (PlaybackQueue) -> Void) -> Bool {

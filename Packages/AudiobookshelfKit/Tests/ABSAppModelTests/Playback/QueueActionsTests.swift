@@ -188,4 +188,64 @@ struct QueueActionsTests {
         #expect(!queue.add(item("c"), at: .end))
         #expect(queue.items.map(\.id) == ["a|"])
     }
+
+    // MARK: Replacing the queue (play-all)
+
+    /// A scope whose player has accepted a start of `started`.
+    private func startedScope(_ started: String, items: [QueueItem]) throws -> (
+        QueueScope, PlaybackQueueControl, MediaKey
+    ) {
+        let scope = QueueScope(items: items)
+        let queue = try #require(PlaybackQueueControl(scope: scope))
+        let key = item(started).key(serverConnectionID: queue.serverConnectionID)
+        scope.control.mediaKey = key
+        scope.control.phase = .starting
+        return (scope, queue, key)
+    }
+
+    @Test func anAcceptedStartReplacesTheQueueInOrderWithoutTheCurrentMediaOrDuplicates() throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x"), item("y")])
+
+        #expect(queue.replace(with: [item("b"), item("a"), item("c"), item("b")], afterStarting: started))
+        #expect(queue.items.map(\.id) == ["b|", "c|"])
+        #expect(scope.queueStore.saved[queue.serverConnectionID]?.map(\.id) == ["b|", "c|"])
+
+        scope.control.phase = .loaded
+        #expect(queue.replace(with: [], afterStarting: started))
+        #expect(queue.items.isEmpty)
+    }
+
+    /// A start that failed, was cancelled (unloaded), was superseded by other media, or is another
+    /// connection's leaves the previous queue.
+    @Test func anUnacceptedStartKeepsThePreviousQueue() throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        let replacement = [item("b"), item("c")]
+
+        scope.control.error = .recoveryExhausted
+        #expect(!queue.replace(with: replacement, afterStarting: started))
+        scope.control.error = nil
+
+        scope.control.phase = .unloaded
+        #expect(!queue.replace(with: replacement, afterStarting: started))
+        scope.control.phase = .idle
+        #expect(!queue.replace(with: replacement, afterStarting: started))
+        scope.control.phase = .starting
+
+        scope.control.mediaKey = item("other").key(serverConnectionID: queue.serverConnectionID)
+        #expect(!queue.replace(with: replacement, afterStarting: started))
+        scope.control.mediaKey = started
+
+        let elsewhere = item("a").key(serverConnectionID: UUID())
+        #expect(!queue.replace(with: replacement, afterStarting: elsewhere))
+
+        #expect(queue.items.map(\.id) == ["x|"])
+    }
+
+    @Test func aRetiredSessionsQueueIsntReplaced() throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        scope.retire(reason: .signOut)
+
+        #expect(!queue.replace(with: [item("b")], afterStarting: started))
+        #expect(queue.items.map(\.id) == ["x|"])
+    }
 }

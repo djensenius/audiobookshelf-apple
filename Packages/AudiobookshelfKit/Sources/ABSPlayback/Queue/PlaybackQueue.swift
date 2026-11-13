@@ -136,6 +136,14 @@ public final class PlaybackQueue: PlaybackQueueReading {
         update { $0.removeAll() }
     }
 
+    /// Replaces the whole queue with `items`, in one change; a media listed twice is queued once, where it is
+    /// first listed.
+    public func replace(with items: [QueueItem]) {
+        var seen = Set<QueueItem.ID>()
+        let unique = items.filter { seen.insert($0.id).inserted }
+        update { $0 = unique }
+    }
+
     /// Makes every later change a no-op, even through a reference kept from before.
     func retire() {
         isRetired = true

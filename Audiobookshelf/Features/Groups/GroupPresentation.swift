@@ -1,6 +1,7 @@
 import ABSAppModel
 import ABSCore
 import ABSData
+import ABSPlayback
 import ABSUI
 import Foundation
 
@@ -31,6 +32,9 @@ struct GroupPlayAll: Hashable {
     let isEnabled: Bool
     /// The member playing now, which the button pauses; `nil` while none plays.
     var playing: GroupMember?
+    /// What Play queues once ``next`` has started: the playable members after it that aren't finished
+    /// (``GroupDetailModel/queue(after:)``).
+    var queued: [QueueItem] = []
 
     /// The button's title: Pause while a member plays, else Play.
     var titleKey: String { playing == nil ? "ButtonPlay" : "ButtonPause" }
@@ -168,7 +172,9 @@ enum GroupPresentation {
             let target = GroupPlayTarget(itemID: key.libraryItemId, episodeID: key.episodeId)
             return members.first { $0.target == target }
         }
-        return GroupPlayAll(next: next, isEnabled: playing != nil || (canPlay && next != nil), playing: playing)
+        return GroupPlayAll(
+            next: next, isEnabled: playing != nil || (canPlay && next != nil), playing: playing,
+            queued: next.map { model.queue(after: $0.target) } ?? [])
     }
 
     /// The button as VoiceOver reads it: the action, then what it plays or pauses.
@@ -192,16 +198,31 @@ enum GroupPresentation {
         return starts.begin()
     }
 
-    /// Plays the member play-all starts through `play`, like a card's Play; does nothing while a member plays, which
-    /// ``tap(_:starts:pause:)`` pauses instead.
+    /// Plays the member play-all starts through `play`, like a card's Play, then hands its media on the connection
+    /// `serverID` and ``GroupPlayAll/queued`` to `requeue`, which replaces the play queue once the player has
+    /// accepted that start (``PlaybackQueueControl/replace(with:afterStarting:)``). Legacy plays only that member.
     ///
-    /// Legacy plays only that member. TODO(#354): queue the playable members after it once the app has a
-    /// `PlaybackQueue`.
+    /// Does nothing while a member plays, which ``tap(_:starts:pause:)`` pauses instead, so Play never queues again
+    /// then. A failed or cancelled start, or one without a connection, leaves the queue alone.
     ///
     /// - Returns: The failure message's key; `nil` when it started, was cancelled or had nothing to play.
     @MainActor
-    static func performPlayAll(_ playAll: GroupPlayAll, play: PlayItemAction?) async -> String? {
-        guard playAll.playing == nil, playAll.isEnabled, let next = playAll.next else { return nil }
-        return await ItemCardActions.perform(.play, on: next.summary, actions: NoOpItemActions(), play: play)
+    static func performPlayAll(
+        _ playAll: GroupPlayAll, play: PlayItemAction?, serverID: UUID? = nil,
+        requeue: (@MainActor (_ started: MediaKey, _ queued: [QueueItem]) -> Void)? = nil
+    ) async -> String? {
+        guard playAll.playing == nil, playAll.isEnabled, let next = playAll.next, let play else { return nil }
+        do {
+            try await play(itemID: next.target.itemID, episodeID: next.target.episodeID)
+        } catch is CancellationError {
+            return nil
+        } catch {
+            return ItemCardActions.failureMessageKey(for: .play)
+        }
+        guard !Task.isCancelled, let serverID, let requeue else { return nil }
+        requeue(
+            MediaKey(serverConnectionID: serverID, libraryItemId: next.target.itemID, episodeId: next.target.episodeID),
+            playAll.queued)
+        return nil
     }
 }
