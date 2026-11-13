@@ -124,8 +124,9 @@
         }
     }
 
-    /// The split arrangement's secondary pane: chapters, Up Next and bookmarks, one at a time.
-    /// Bookmarks only show where the toolbar would show them.
+    /// The split arrangement's secondary pane: chapters, Up Next (``QueueList``, with its Edit and
+    /// Clear in a bar under it, since the player's toolbar isn't its own) and bookmarks, one at a
+    /// time. Bookmarks only show where the toolbar would show them.
     struct PlayerDetailsPane: View {
         let model: PlayerViewModel
         @Binding var tab: PlayerDetailsTab
@@ -151,14 +152,7 @@
                 case .chapters:
                     ChaptersPane(model: model, onSelect: {})
                 case .upNext:
-                    // The queue isn't built yet (#60), like the shell's queue inspector.
-                    ContentUnavailableView {
-                        Label {
-                            Text(verbatim: L10n.string("MessageNoItems"))
-                        } icon: {
-                            Image(systemName: "list.bullet")
-                        }
-                    }
+                    QueueList(controls: .bar)
                 case .bookmarks:
                     BookmarksPane(model: model, editor: $bookmarkEditor, onSelect: {})
                 }
@@ -230,6 +224,12 @@
 
     #Preview("Details pane") {
         @Previewable @State var tab = PlayerDetailsTab.chapters
+        @Previewable @State var editor: BookmarkEditorTarget?
+        PlayerDetailsPane(model: .preview(at: 9_500), tab: $tab, bookmarkEditor: $editor)
+    }
+
+    #Preview("Details pane, Up Next") {
+        @Previewable @State var tab = PlayerDetailsTab.upNext
         @Previewable @State var editor: BookmarkEditorTarget?
         PlayerDetailsPane(model: .preview(at: 9_500), tab: $tab, bookmarkEditor: $editor)
     }

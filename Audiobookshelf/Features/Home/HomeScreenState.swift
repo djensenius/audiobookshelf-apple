@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSAppModel
 import ABSCore
 import ABSUI
@@ -170,7 +171,7 @@ struct HomeRefreshSchedule {
         return request(libraryID: libraryID, hasLoaded: hasLoaded, now: now, force: force)
     }
 
-    /// What a trigger does with the libraries list while no library is selected.
+    /// What a trigger does with the libraries list.
     enum LibrariesRequest: Equatable {
         /// Reload the list now.
         case now
@@ -245,10 +246,73 @@ struct HomeRefreshSchedule {
         of store: LibraryStore, for trigger: Trigger, isConnected: () -> Bool,
         pollInterval: Duration = .milliseconds(100)
     ) async {
-        switch librariesRequest(
-            for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
-            isConnected: isConnected())
-        {
+        await reload(
+            store,
+            as: librariesRequest(
+                for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
+                isConnected: isConnected()),
+            isConnected: isConnected, pollInterval: pollInterval)
+    }
+
+    /// Whether a shelves request's `error` says the server refused the library itself: it no
+    /// longer exists (404) or the user lost access to it (403). Any other failure (no network, a
+    /// timeout, a server error) says nothing about the libraries list.
+    static func refusesLibrary(_ error: (any Error)?) -> Bool {
+        guard let error = error as? APIError else { return false }
+        switch error {
+        case .notFound, .forbidden: return true
+        default: return false
+        }
+    }
+
+    /// What `trigger` does with the libraries list once it requested, or didn't, the selected
+    /// library's shelves; `nil` for nothing. The list is reloaded only when it may be out of
+    /// date, so the scene's selection (`SceneLibrarySelection`) replaces a library that is gone
+    /// with the initial one (#569): when the list's last request failed (a launch without the
+    /// server keeps a saved library unchecked, and it may be gone), or the server refused the
+    /// library's shelves (``refusesLibrary(_:)``: deleted, or the user lost access). Only on the
+    /// load trigger and the user's refresh, at most once each, never on scene activation or
+    /// without the server, so a server whose list keeps failing isn't polled. Behind a libraries
+    /// request in flight it waits, and reloads only if that one fails.
+    ///
+    /// - Parameters:
+    ///   - librariesFailed: The store's last libraries request failed.
+    ///   - librariesLoading: The store is loading the libraries.
+    ///   - shelvesRefused: The server refused the library's shelves (``refusesLibrary(_:)``).
+    ///   - isConnected: The server can be used (no connection banner).
+    static func librariesRequestAfterShelves(
+        for trigger: Trigger, librariesFailed: Bool, librariesLoading: Bool, shelvesRefused: Bool, isConnected: Bool
+    ) -> LibrariesRequest? {
+        guard isConnected, trigger != .sceneActivation, librariesFailed || shelvesRefused else { return nil }
+        return librariesLoading ? .afterInFlight : .now
+    }
+
+    /// Reloads `store`'s libraries list as ``librariesRequestAfterShelves(for:librariesFailed:librariesLoading:shelvesRefused:isConnected:)``
+    /// decides for `trigger`, after the selected library's shelves ended with `shelvesError`.
+    /// Nothing once the trigger's task is cancelled: the trigger changed and runs again.
+    ///
+    /// - Parameter isConnected: Whether the server can be used now (no connection banner).
+    @MainActor
+    static func updateLibrariesAfterShelves(
+        of store: LibraryStore, shelvesError: (any Error)?, for trigger: Trigger, isConnected: () -> Bool,
+        pollInterval: Duration = .milliseconds(100)
+    ) async {
+        guard !Task.isCancelled else { return }
+        await reload(
+            store,
+            as: librariesRequestAfterShelves(
+                for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
+                shelvesRefused: refusesLibrary(shelvesError), isConnected: isConnected()),
+            isConnected: isConnected, pollInterval: pollInterval)
+    }
+
+    /// Makes `request` of `store`: behind a libraries request in flight, waits for it and reloads
+    /// the list at most once (``retryAfterInFlight(isLoading:failed:isConnected:pollInterval:retry:)``).
+    @MainActor
+    private static func reload(
+        _ store: LibraryStore, as request: LibrariesRequest?, isConnected: () -> Bool, pollInterval: Duration
+    ) async {
+        switch request {
         case nil:
             return
         case .now:

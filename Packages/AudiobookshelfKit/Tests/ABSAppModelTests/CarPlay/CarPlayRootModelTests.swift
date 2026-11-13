@@ -12,7 +12,7 @@ private let carAccountB = SessionIdentity(
     connectionID: UUID(uuidString: "00000000-0000-0000-0000-00000000000B") ?? UUID(), userID: "user-1")
 private let labels = CarPlayLabels(
     continueListening: "Continue", libraries: "Libraries", books: "Books", podcasts: "Podcasts", series: "Series",
-    authors: "Authors", more: "More")
+    authors: "Authors", latest: "Latest", more: "More")
 
 private func key(_ identity: SessionIdentity) -> LibraryConnectionKey {
     LibraryConnectionKey(connectionID: identity.connectionID, userID: identity.userID)
@@ -479,6 +479,42 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
         }
     }
 
+    /// Review of #564: a queued row played from Now Playing goes through the same outcome and
+    /// alerts as a tapped row: a block asks (and Stream plays it), a failure says why, and only a
+    /// play that started reports `.started`.
+    @Test func aQueuedPlaySharesTheOutcomeAndAlerts() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            let model = harness.model()
+            await model.update()
+            let row = QueueRow(
+                item: QueueItem(libraryItemID: SampleLibrary.sherlock.id, title: "Sherlock"),
+                serverConnectionID: carAccountA.connectionID)
+
+            harness.playError = Self.needsConfirmation
+            #expect(await model.playQueued(row)?.value == .blocked)
+            #expect(model.alert == .streamingNeedsConfirmation)
+            #expect(harness.plays.value == ["A:\(SampleLibrary.sherlock.id)"])
+            harness.playError = nil
+            #expect(await model.confirmStreaming()?.value == .started)
+            #expect(harness.playback.calls == [.confirmMeteredStreaming])
+
+            harness.playError = .sessionStartFailed(.timedOut)
+            #expect(await model.playQueued(row)?.value == .failed)
+            #expect(model.alert == .sessionStartFailed)
+
+            harness.playError = nil
+            harness.playback.error = nil
+            #expect(await model.playQueued(row)?.value == .started)
+            #expect(model.alert == nil)
+
+            harness.canPlay = false
+            #expect(model.playQueued(row) == nil)
+        }
+    }
+
     /// #544: a play still running when the account signs out (its playback unbound, so it ends
     /// with no error) or signs in again (another session, with its own error) is discarded: no
     /// Now Playing and no alert.
@@ -624,6 +660,81 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
         presenter.didFailToPresent(.playbackFailed)
         #expect(presenter.shown == nil)
         #expect(presenter.request(.playbackFailed) == .present(.playbackFailed))
+    }
+
+    // MARK: - Library and Latest tabs (#80)
+
+    @Test func aRowOfTheLibraryTabPlaysOnlyWhileItsPageShowsIt() async throws {
+        try await withLibrarySettings { settings in
+            let service = FakeCarPlayBrowseService()
+            service.libraryList.value = [makeLibrary("books")]
+            service.books.value = ["books": BrowseFixtures.books(3)]
+            let (store, browse) = await makeBrowse(service, settings: settings, identity: carAccountA)
+            let harness = Harness(store: store)
+            let model = harness.model()
+            let books = CarPlayDestination.items(libraryID: "books")
+            await browse.load(books)
+            let row = try #require(browse.list(books).rows.first)
+
+            // Not on the page it says it came from, or from another account's browse model.
+            #expect(model.play(row, in: books, offset: 1, of: browse) == nil)
+            let (_, other) = await makeBrowse(service, settings: settings, identity: carAccountB)
+            await other.load(books)
+            #expect(model.play(row, in: books, offset: 0, of: other) == nil)
+            #expect(harness.plays.value.isEmpty)
+
+            #expect(await model.play(row, in: books, offset: 0, of: browse)?.value == .started)
+            #expect(harness.plays.value == ["A:books-0"])
+        }
+    }
+
+    @Test func aLatestEpisodeBlockedOnAMeteredNetworkAsksToStream() async throws {
+        try await withLibrarySettings { settings in
+            let service = FakeCarPlayBrowseService()
+            service.libraryList.value = [makeLibrary("pods", mediaType: .podcast)]
+            service.recent.value = ["pods": [BrowseFixtures.recent("e1")]]
+            let (store, browse) = await makeBrowse(service, settings: settings, identity: carAccountA)
+            let harness = Harness(store: store)
+            harness.playError = .streamingNeedsConfirmation(
+                .cellular,
+                key: MediaKey(serverConnectionID: carAccountA.connectionID, libraryItemId: "pod", episodeId: "e1"))
+            let model = harness.model()
+            let latest = try #require(browse.latestLibraryID.map { CarPlayDestination.latestEpisodes(libraryID: $0) })
+            await browse.load(latest)
+            let row = try #require(browse.list(latest).rows.first)
+            #expect(await model.play(row, in: latest, offset: 0, of: browse)?.value == .blocked)
+            #expect(model.alert == .streamingNeedsConfirmation)
+            harness.playError = nil
+            #expect(await model.confirmStreaming()?.value == .started)
+            #expect(harness.playback.calls.contains(.confirmMeteredStreaming))
+        }
+    }
+
+    @Test func browsingStaysOpenWhileTheContinueTabReloadsButNotAfterTheAccountChanges() async throws {
+        try await withLibrarySettings { settings in
+            let service = FakeCarPlayBrowseService()
+            service.libraryList.value = [makeLibrary("books"), makeLibrary("talk", mediaType: .podcast)]
+            let (store, browse) = await makeBrowse(service, settings: settings, identity: carAccountA)
+            let harness = Harness(store: store)
+            let model = harness.model()
+            await model.update()
+            #expect(model.content != .loading)
+            #expect(browse.keepsBrowsing(for: model.loadTrigger.identity))
+
+            // Opening another library in CarPlay reloads the Continue tab for it: the lists
+            // pushed to get there stay open.
+            let talk = try #require(browse.list(.libraries).rows.first { $0.id == "talk" })
+            #expect(browse.open(talk) != nil)
+            #expect(model.loadTrigger.libraryID == "talk")
+            #expect(model.content == .loading)
+            #expect(browse.keepsBrowsing(for: model.loadTrigger.identity))
+
+            // Signing out or switching accounts closes them.
+            harness.gate = .connect
+            #expect(!browse.keepsBrowsing(for: model.loadTrigger.identity))
+            harness.gate = .ready(carAccountB, isOffline: false)
+            #expect(!browse.keepsBrowsing(for: model.loadTrigger.identity))
+        }
     }
 
     private static let sherlockKey = MediaKey(

@@ -34,12 +34,14 @@ public struct CarPlayLabels: Sendable, Hashable {
     public let podcasts: String
     public let series: String
     public let authors: String
+    /// The Latest tab: a podcast library's newest episodes.
+    public let latest: String
     /// The row that shows the next rows of a list, for example "More…".
     public let more: String
 
     public init(
         continueListening: String, libraries: String, books: String, podcasts: String, series: String,
-        authors: String, more: String
+        authors: String, latest: String, more: String
     ) {
         self.continueListening = continueListening
         self.libraries = libraries
@@ -47,6 +49,7 @@ public struct CarPlayLabels: Sendable, Hashable {
         self.podcasts = podcasts
         self.series = series
         self.authors = authors
+        self.latest = latest
         self.more = more
     }
 }
@@ -66,11 +69,13 @@ public enum CarPlayDestination: Sendable, Hashable {
     case seriesBooks(libraryID: String, seriesID: String)
     case authorBooks(libraryID: String, authorID: String)
     case podcastEpisodes(libraryID: String, itemID: String)
+    /// The Latest tab's root: a podcast library's newest episodes (#80).
+    case latestEpisodes(libraryID: String)
 
     /// The list's level in its tab's stack; the tab's root is 1.
     public var depth: Int {
         switch self {
-        case .continueListening, .libraries: 1
+        case .continueListening, .libraries, .latestEpisodes: 1
         case .library: 2
         case .items, .series, .authors: 3
         case .seriesBooks, .authorBooks, .podcastEpisodes: 4
@@ -84,6 +89,7 @@ public enum CarPlayDestination: Sendable, Hashable {
         case .library(let id, _): id
         case .items(let id), .series(let id), .authors(let id): id
         case .seriesBooks(let id, _), .authorBooks(let id, _), .podcastEpisodes(let id, _): id
+        case .latestEpisodes(let id): id
         }
     }
 }

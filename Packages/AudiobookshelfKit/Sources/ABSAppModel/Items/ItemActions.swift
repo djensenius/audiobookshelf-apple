@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSPlayback
 import Foundation
 
 /// The actions on a library item that change the user's progress. Play, add to playlist and
@@ -44,6 +45,14 @@ public struct NoOpItemActions: ItemActionPerforming {
     public func markNotFinished(_ target: ItemActionTarget) async throws {}
     public func hideFromContinueListening(_ target: ItemActionTarget) async throws {}
     public func discardProgress(_ target: ItemActionTarget) async throws {}
+}
+
+/// Why ``ProgressItemActions`` refused an action.
+public enum ItemActionError: Error, Equatable {
+    /// The item or episode is the player's: its session would write its own position back over the
+    /// change, so marking it finished or not finished, or discarding its progress, waits until the
+    /// player is closed.
+    case itemInPlayer
 }
 
 /// Sends a progress change (`PATCH /api/me/progress/:item[/:episode]`) or deletion
@@ -96,6 +105,19 @@ extension APIClient: ProgressWriting {
 ///   was committed, `localSync` (``ItemActionLocalSync``) updates the local playback database,
 ///   still in the key's queue, so the syncer's pending values can't undo the change. It isn't
 ///   called for a failed or rolled-back action, or for hiding; its errors are logged, not thrown.
+///   It also runs for a request the server accepted after the session ended (sign-out or account
+///   switch), since it's bound to the account's connection; the action then leaves the ended
+///   session's cache alone and throws `CancellationError`.
+/// - Marking finished or not finished and discarding are refused with
+///   ``ItemActionError/itemInPlayer`` while `isInPlayer` says the item or episode is in the player
+///   (playing, paused, or restored and not loaded yet), checked when the action's turn in the queue
+///   comes and before anything changes: the player's session keeps writing its own position
+///   locally and to the server, so it could undo the change. Closing the player first is the
+///   user's choice; hiding only touches Continue Listening and isn't refused.
+/// - Before that check, these actions take `lease` for the item or episode (``MediaLeases``,
+///   shared with playback), which waits for a closed session's final `/close` and position write
+///   to settle, and hold it through the server request and the local sync, so a playback start
+///   of the same media waits for the action instead of starting from the old position.
 @MainActor
 public final class ProgressItemActions: ItemActionPerforming {
     private struct Tail {
@@ -105,7 +127,10 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     private let cache: ProgressCache
     private let writer: any ProgressWriting
-    private let localSync: (any ItemActionLocalSync)?
+    /// Updates the local playback database after an accepted action; `nil` updates nothing.
+    public let localSync: (any ItemActionLocalSync)?
+    private let isInPlayer: @MainActor (ItemActionTarget) -> Bool
+    private let lease: @MainActor (ItemActionTarget) async -> MediaLease?
     private let now: @Sendable () -> Date
     private let sessionToken: ProgressCache.SessionToken
     private var tails: [String: Tail] = [:]
@@ -115,11 +140,15 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     public init(
         cache: ProgressCache, writer: any ProgressWriting, localSync: (any ItemActionLocalSync)? = nil,
+        isInPlayer: @escaping @MainActor (ItemActionTarget) -> Bool = { _ in false },
+        lease: @escaping @MainActor (ItemActionTarget) async -> MediaLease? = { _ in nil },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
+        self.lease = lease
         self.cache = cache
         self.writer = writer
         self.localSync = localSync
+        self.isInPlayer = isInPlayer
         self.now = now
         self.sessionToken = cache.sessionToken()
     }
@@ -166,8 +195,11 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     public func discardProgress(_ target: ItemActionTarget) async throws {
         try await enqueue(target) { session in
+            let lease = try await self.claim(target, session: session)
+            defer { lease?.release() }
             guard try await self.discard(target, session: session) else { return }
             await self.syncLocally { try await $0.didDiscard(target) }
+            guard self.cache.isCurrent(session) else { throw CancellationError() }
         }
     }
 
@@ -197,9 +229,28 @@ public final class ProgressItemActions: ItemActionPerforming {
         optimistic: @escaping @MainActor (MediaProgress?, Date) -> MediaProgress?
     ) async throws {
         try await enqueue(target) { session in
+            // An action with a local part changes the position the player's session writes.
+            let lease = local != nil ? try await self.claim(target, session: session) : nil
+            defer { lease?.release() }
             try await self.perform(target, update: update, optimistic: optimistic, session: session)
             await self.syncLocally(local)
+            guard self.cache.isCurrent(session) else { throw CancellationError() }
         }
+    }
+
+    /// Takes the item's lease (after its closing sessions settled), then cancels if `session` ended
+    /// during the wait, and only then refuses the player's item.
+    private func claim(_ target: ItemActionTarget, session: ProgressCache.SessionToken) async throws -> MediaLease? {
+        let lease = await lease(target)
+        guard cache.isCurrent(session) else {
+            lease?.release()
+            throw CancellationError()
+        }
+        guard !isInPlayer(target) else {
+            lease?.release()
+            throw ItemActionError.itemInPlayer
+        }
+        return lease
     }
 
     /// Runs `local` on ``localSync``, logging a failure: the server already has the change.
@@ -256,11 +307,12 @@ public final class ProgressItemActions: ItemActionPerforming {
             if let applied { cache.rollbackOptimistic(applied, to: before, token: session) }
             throw error
         }
-        guard cache.isCurrent(session) else { throw CancellationError() }
-        if let applied { cache.commitOptimistic(applied, token: session) }
+        // Accepted: an ended session's cache isn't touched, but the caller still syncs locally.
+        if let applied, cache.isCurrent(session) { cache.commitOptimistic(applied, token: session) }
     }
 
-    /// Returns whether the server's progress is gone; `false` when there was nothing to discard.
+    /// Returns whether the server's progress is gone, also once the session ended during the
+    /// DELETE; `false` when there was nothing to discard.
     private func discard(_ target: ItemActionTarget, session: ProgressCache.SessionToken) async throws -> Bool {
         guard cache.isCurrent(session) else { throw CancellationError() }
         guard let before = cache.progress(libraryItemID: target.libraryItemID, episodeID: target.episodeID) else {
@@ -285,8 +337,7 @@ public final class ProgressItemActions: ItemActionPerforming {
             cache.rollbackOptimistic(removal, to: before, token: session)
             throw error
         }
-        guard cache.isCurrent(session) else { throw CancellationError() }
-        cache.commitOptimistic(removal, token: session)
+        if cache.isCurrent(session) { cache.commitOptimistic(removal, token: session) }
         return true
     }
 }

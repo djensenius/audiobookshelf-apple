@@ -72,10 +72,16 @@ struct QueueInspector: View {
 /// The running session's queue (`\.playbackQueue`) as ``QueueContent``: its changes go to the
 /// queue, and a tap plays the row through `\.playItem`, which takes it out of the queue once its
 /// session starts. A play that fails leaves the row queued; the player reports the failure
-/// (`errorMessageKey`), which the presenting ``QueueSheet`` or ``QueueInspector`` layer shows.
+/// (`errorMessageKey`), which the presenting ``QueueSheet`` or ``QueueInspector`` layer shows, or,
+/// in ``PlayerDetailsPane``, the full player around it.
 struct QueueList: View {
+    private let controls: QueueContent.Controls
     @Environment(\.playbackQueue) private var queue
     @Environment(\.playItem) private var playItem
+
+    init(controls: QueueContent.Controls = .toolbar) {
+        self.controls = controls
+    }
 
     var body: some View {
         let queue = queue
@@ -86,7 +92,8 @@ struct QueueList: View {
             remove: { queue?.remove(id: $0) },
             removeOffsets: { queue?.remove(atOffsets: $0) },
             move: { queue?.move(fromOffsets: $0, toOffset: $1) },
-            clear: { queue?.clear() }
+            clear: { queue?.clear() },
+            controls: controls
         )
     }
 
@@ -100,6 +107,14 @@ struct QueueList: View {
 /// The queue's rows, with swipe or context-menu removal, drag to reorder and Clear (after a
 /// confirmation); an empty queue says so. Has no model, so previews pass rows and no-op actions.
 struct QueueContent: View {
+    /// Where Edit and Clear go.
+    enum Controls {
+        /// The enclosing navigation bar, in a sheet or an inspector of its own.
+        case toolbar
+        /// A bar under the list, for a pane that shares its window's toolbar (``PlayerDetailsPane``).
+        case bar
+    }
+
     let rows: [QueueRow]
     /// Whether tapping a row plays it; `false` between sessions.
     let canPlay: Bool
@@ -108,7 +123,12 @@ struct QueueContent: View {
     let removeOffsets: (IndexSet) -> Void
     let move: (IndexSet, Int) -> Void
     let clear: () -> Void
+    var controls = Controls.toolbar
     @State private var confirmsClear = false
+    #if os(iOS)
+        /// The list's edit mode with ``Controls/bar``, which has no navigation bar to provide one.
+        @State private var editMode = EditMode.inactive
+    #endif
 
     var body: some View {
         Group {
@@ -124,21 +144,7 @@ struct QueueContent: View {
                 list
             }
         }
-        .toolbar {
-            #if os(iOS)
-                ToolbarItem(placement: .topBarLeading) {
-                    if !rows.isEmpty { EditButton() }
-                }
-            #endif
-            ToolbarItem(placement: .destructiveAction) {
-                Button(role: .destructive) {
-                    confirmsClear = true
-                } label: {
-                    Text(verbatim: L10n.string("ButtonClearQueue"))
-                }
-                .disabled(rows.isEmpty)
-            }
-        }
+        .modifier(placedControls)
         .confirmationDialog(
             Text(verbatim: L10n.string("MessageConfirmClearQueue")), isPresented: $confirmsClear,
             titleVisibility: .visible
@@ -178,6 +184,73 @@ struct QueueContent: View {
             .onDelete(perform: removeOffsets)
             .onMove(perform: move)
         }
+    }
+
+    private var placedControls: QueueControls {
+        #if os(iOS)
+            QueueControls(
+                placement: controls, isEmpty: rows.isEmpty, confirmsClear: $confirmsClear, editMode: $editMode)
+        #else
+            QueueControls(placement: controls, isEmpty: rows.isEmpty, confirmsClear: $confirmsClear)
+        #endif
+    }
+}
+
+/// ``QueueContent``'s Edit (iOS, while it has rows) and Clear buttons, in the navigation bar or in
+/// a bar under the content.
+private struct QueueControls: ViewModifier {
+    let placement: QueueContent.Controls
+    let isEmpty: Bool
+    @Binding var confirmsClear: Bool
+    #if os(iOS)
+        @Binding var editMode: EditMode
+    #endif
+
+    func body(content: Content) -> some View {
+        switch placement {
+        case .toolbar:
+            content.toolbar {
+                #if os(iOS)
+                    ToolbarItem(placement: .topBarLeading) {
+                        if !isEmpty { EditButton() }
+                    }
+                #endif
+                ToolbarItem(placement: .destructiveAction) { clearButton }
+            }
+        case .bar:
+            #if os(iOS)
+                content
+                    .safeAreaInset(edge: .bottom, spacing: 0) {
+                        HStack {
+                            if !isEmpty { EditButton() }
+                            Spacer()
+                            clearButton
+                        }
+                        .padding()
+                    }
+                    .environment(\.editMode, $editMode)
+                    .onChange(of: isEmpty) { _, isEmpty in
+                        if isEmpty { editMode = .inactive }
+                    }
+            #else
+                content.safeAreaInset(edge: .bottom, spacing: 0) {
+                    HStack {
+                        Spacer()
+                        clearButton
+                    }
+                    .padding()
+                }
+            #endif
+        }
+    }
+
+    private var clearButton: some View {
+        Button(role: .destructive) {
+            confirmsClear = true
+        } label: {
+            Text(verbatim: L10n.string("ButtonClearQueue"))
+        }
+        .disabled(isEmpty)
     }
 }
 
@@ -253,6 +326,12 @@ private struct QueueRowView: View {
                 rows: [], canPlay: false, play: { _ in }, remove: { _ in }, removeOffsets: { _ in },
                 move: { _, _ in }, clear: {})
         }
+    }
+
+    #Preview("Bar") {
+        QueueContent(
+            rows: QueueRow.previews, canPlay: true, play: { _ in }, remove: { _ in }, removeOffsets: { _ in },
+            move: { _, _ in }, clear: {}, controls: .bar)
     }
 
     #Preview("Accessibility size") {

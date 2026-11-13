@@ -97,9 +97,9 @@ private struct HomeScreen: View {
         // With the client, the online revision and the connection too: a reconnect, whether it
         // attaches a client after an offline start without one or keeps the offline session's,
         // or the server answering again, loads again even when the library is unchanged, and
-        // retries a failed load or refresh even while the shelves are fresh, or, with no library
-        // yet, a failed libraries list, waiting for either in flight. Losing the connection runs
-        // it too, and makes no request.
+        // retries a failed load or refresh even while the shelves are fresh, and a failed
+        // libraries list, waiting for either in flight. Losing the connection runs it too, and
+        // makes no request.
         .task(
             id: HomeLoadTrigger(
                 libraryID: libraryID, connection: store.connectedKey, onlineRevision: store.onlineRevision,
@@ -126,13 +126,30 @@ private struct HomeScreen: View {
 
     /// Loads the shelves, or reloads them, as ``HomeRefreshSchedule`` decides for `trigger`:
     /// nothing without the server. Without a library, the libraries list instead, which selects
-    /// one once loaded.
+    /// one once loaded. With one, the list too after it failed or the server refused the shelves,
+    /// so a library that is gone is replaced with the initial one (#569).
     private func update(_ trigger: HomeRefreshSchedule.Trigger) async {
         guard let libraryID = model.libraryID else {
             await HomeRefreshSchedule.updateLibraries(
                 of: store, for: trigger, isConnected: { connectionStatus == nil })
             return
         }
+        if await updateShelves(of: libraryID, for: trigger) {
+            schedule.recordCompletion(
+                of: libraryID,
+                model: .init(
+                    libraryID: model.libraryID, hasLoaded: model.hasLoaded, isLoading: model.isLoading,
+                    hasError: model.error != nil),
+                isCancelled: Task.isCancelled, at: .now)
+        }
+        await HomeRefreshSchedule.updateLibrariesAfterShelves(
+            of: store, shelvesError: model.error, for: trigger, isConnected: { connectionStatus == nil })
+    }
+
+    /// Loads or reloads `libraryID`'s shelves for `trigger`.
+    ///
+    /// - Returns: Whether it requested them.
+    private func updateShelves(of libraryID: String, for trigger: HomeRefreshSchedule.Trigger) async -> Bool {
         if let request = schedule.request(
             for: trigger, libraryID: libraryID, hasLoaded: model.hasLoaded, hasError: model.error != nil,
             isConnected: connectionStatus == nil, now: .now)
@@ -141,25 +158,18 @@ private struct HomeScreen: View {
             case .load: await model.load()
             case .refresh: await model.refresh()
             }
-        } else {
-            // Fresh shelves without an error: a refresh in flight that may have started before
-            // the server answered again is waited for, and retried once if it fails.
-            guard
-                await HomeRefreshSchedule.updateShelvesAfterInFlight(
-                    of: model, for: trigger, isConnected: { connectionStatus == nil })
-            else { return }
+            return true
         }
-        schedule.recordCompletion(
-            of: libraryID,
-            model: .init(
-                libraryID: model.libraryID, hasLoaded: model.hasLoaded, isLoading: model.isLoading,
-                hasError: model.error != nil),
-            isCancelled: Task.isCancelled, at: .now)
+        // Fresh shelves without an error: a refresh in flight that may have started before
+        // the server answered again is waited for, and retried once if it fails.
+        return await HomeRefreshSchedule.updateShelvesAfterInFlight(
+            of: model, for: trigger, isConnected: { connectionStatus == nil })
     }
 
     /// Pull to refresh, the Refresh command and Retry: the libraries while none is selected,
-    /// otherwise the shelves. Without the server, it checks the server again instead. Downloads
-    /// that couldn't be read are read again either way.
+    /// otherwise the shelves, and the libraries too when they may be out of date. Without the
+    /// server, it checks the server again instead. Downloads that couldn't be read are read again
+    /// either way.
     private func refresh() async {
         downloaded?.retry()
         if let connectionBanner, connectionStatus != nil {
