@@ -355,26 +355,72 @@ struct HomeRefreshSchedule {
         ) { await model.refresh() }
     }
 
-    /// Whether Home's load trigger runs when only the connection banner's verified revision
-    /// changed (``ConnectionBannerModel/verifiedRevision``): the server answered a ping after the
-    /// network came back or a ping failed, and Home may have started a request in between while
-    /// the banner assumed it online (#570). Only when that request failed or hasn't ended (the
-    /// trigger then retries it once, or waits for it), or the shelves never loaded, never for
-    /// shelves that loaded, even stale ones.
+    /// What Home does when the connection banner's ping confirms the server
+    /// (``ConnectionBannerModel/verifiedRevision`` bumped) after the banner assumed it online, so
+    /// a request Home made in between may have failed (#570).
+    enum VerificationRequest: Equatable {
+        /// Retry the failed shelves now, as the load trigger does after an error.
+        case shelves
+        /// Wait for the shelves load or refresh in flight, and retry it once if it fails.
+        case shelvesAfterInFlight
+        /// Reload the failed libraries list, or wait for the request in flight and reload it once
+        /// if it fails (``librariesRequest(for:librariesFailed:librariesLoading:isConnected:)``).
+        case libraries
+    }
+
+    /// What a confirming ping does; `nil` for nothing: shelves that loaded, even stale ones, and
+    /// a libraries list that loaded aren't requested again, and nothing is without the server.
+    /// A request in flight is never replaced, only waited for.
     ///
     /// - Parameters:
-    ///   - libraryID: The selected library; without one, only the libraries list counts.
-    ///   - hasLoaded: The model has shelves for `libraryID`.
-    ///   - isLoading: The model is loading them.
+    ///   - libraryID: The model's library; without one, only the libraries list counts.
+    ///   - isLoading: The model is loading or refreshing the shelves.
     ///   - hasError: The model's last load or refresh failed.
     ///   - librariesFailed: The store's last libraries request failed.
     ///   - librariesLoading: The store is loading the libraries.
-    static func retriesOnVerification(
-        libraryID: String?, hasLoaded: Bool, isLoading: Bool, hasError: Bool, librariesFailed: Bool,
-        librariesLoading: Bool
-    ) -> Bool {
-        guard libraryID != nil else { return librariesFailed || librariesLoading }
-        return !hasLoaded || isLoading || hasError || librariesFailed
+    ///   - isConnected: The server can be used (no connection banner).
+    static func verificationRequest(
+        libraryID: String?, isLoading: Bool, hasError: Bool, librariesFailed: Bool, librariesLoading: Bool,
+        isConnected: Bool
+    ) -> VerificationRequest? {
+        guard isConnected else { return nil }
+        if libraryID != nil {
+            if isLoading { return .shelvesAfterInFlight }
+            if hasError { return .shelves }
+        }
+        return librariesFailed || librariesLoading ? .libraries : nil
+    }
+
+    /// Performs ``verificationRequest(libraryID:isLoading:hasError:librariesFailed:librariesLoading:isConnected:)``
+    /// for `model` and `store`.
+    ///
+    /// - Parameters:
+    ///   - isConnected: Whether the server can be used now (no connection banner).
+    ///   - retry: Retries the failed shelves (Home's update for the load trigger).
+    ///   - refreshed: Called after the shelves were retried behind a request in flight, so Home
+    ///     records the completion and checks the libraries list as after its own requests.
+    @MainActor
+    static func updateAfterVerification(
+        of model: HomeModel, store: LibraryStore, isConnected: () -> Bool,
+        pollInterval: Duration = .milliseconds(100), retry: () async -> Void, refreshed: () async -> Void
+    ) async {
+        let request = verificationRequest(
+            libraryID: model.libraryID, isLoading: model.isLoading, hasError: model.error != nil,
+            librariesFailed: store.error != nil, librariesLoading: store.isLoading, isConnected: isConnected())
+        switch request {
+        case nil:
+            return
+        case .shelves:
+            await retry()
+        case .shelvesAfterInFlight:
+            if await updateShelvesAfterInFlight(
+                of: model, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
+            {
+                await refreshed()
+            }
+        case .libraries:
+            await updateLibraries(of: store, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
+        }
     }
 
     /// The model's state when a request it made finished.
