@@ -21,6 +21,10 @@ public protocol ProgressSyncService: Sendable {
     /// `POST /api/session/:id/close`, applying `report` first when given: a retried final close
     /// (#382). Throws `APIError.notFound` once the session is no longer open.
     func closeSession(id: String, report: PlaybackSyncReport?) async throws
+    /// `GET /api/me/item/listening-sessions/:itemID[/:episodeID]`'s first page: the media's
+    /// stored sessions, newest first, which tell whether a close answered 404 counted (#382).
+    /// Throws `APIError.notFound` when the item or episode is gone.
+    func listeningSessions(itemID: String, episodeID: String?) async throws -> ListeningSessionsPage
 }
 
 /// ``ProgressSyncService`` over one connection's ``APIClient``.
@@ -51,6 +55,10 @@ public struct APIProgressSyncService: ProgressSyncService {
 
     public func closeSession(id: String, report: PlaybackSyncReport?) async throws {
         _ = try await client.send(SessionEndpoints.close(sessionID: id, report: report))
+    }
+
+    public func listeningSessions(itemID: String, episodeID: String?) async throws -> ListeningSessionsPage {
+        try await client.send(SessionEndpoints.listeningSessions(itemID: itemID, episodeID: episodeID))
     }
 }
 
