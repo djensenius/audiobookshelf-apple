@@ -71,6 +71,11 @@ enum RssFeedPresentation {
         return feed.map(Content.open) ?? .openForm
     }
 
+    /// The entry's symbol: an open feed's differs, so it isn't told by the tint alone.
+    static func systemImage(isOpen: Bool) -> String {
+        isOpen ? "dot.radiowaves.left.and.right" : "dot.radiowaves.up.forward"
+    }
+
     /// Whether the entry shows a feed as open: the sheet's model once it knows the feed's state
     /// (loaded, opened, closed, a live change, or carried over from the last sheet), else what the
     /// screen fetched (`include=rssfeed`).
@@ -91,63 +96,129 @@ extension View {
         modifier(RssFeedEntry(target: target, isOpen: isOpen, hasEpisodesWithoutPubDate: hasEpisodesWithoutPubDate))
     }
 
-    /// Adds RSS Feed for a book or podcast; nothing when `entry` is `nil`.
+    /// Adds RSS Feed for a podcast to the toolbar; nothing when `entry` is `nil`. Books show it in
+    /// their More menu (``RssFeedEntryButton``) instead.
     func rssFeedEntry(_ entry: RssFeedItemEntry?) -> some View {
         rssFeedEntry(
             entry?.target, isOpen: entry?.isOpen ?? false,
             hasEpisodesWithoutPubDate: entry?.hasEpisodesWithoutPubDate ?? false)
     }
+
+    /// Presents the ``RssFeedSheet`` that `state`'s entry opens, closing it when the account changes or
+    /// the user can no longer manage feeds.
+    func rssFeedSheet(_ state: RssFeedEntryState) -> some View {
+        modifier(RssFeedSheetPresenter(state: state))
+    }
 }
 
+/// What an RSS Feed entry shares between its button, in the toolbar or a menu, and its sheet.
+@MainActor
+@Observable
+final class RssFeedEntryState {
+    /// The last sheet's model, kept after it closes so the entry shows what it last saw.
+    private(set) var model: RssFeedModel?
+    var isPresented = false
+
+    /// Whether the entry for `target` shows its feed as open: what the last sheet knew for that
+    /// target, else what the screen fetched (``RssFeedPresentation/showsOpen(fetched:model:)``).
+    func showsOpen(_ target: RssFeedTarget?, fetched: Bool) -> Bool {
+        RssFeedPresentation.showsOpen(fetched: fetched, model: model?.target == target ? model : nil)
+    }
+
+    /// Opens a fresh sheet for `target`, starting from what the last one knew.
+    func open(_ target: RssFeedTarget, service: any RssFeedService, hasEpisodesWithoutPubDate: Bool) {
+        let fresh = RssFeedModel(target: target, service: service, hasEpisodesWithoutPubDate: hasEpisodesWithoutPubDate)
+        if let model { fresh.seed(from: model) }
+        model = fresh
+        isPresented = true
+    }
+
+    /// Closes the sheet and forgets the last feed, as when the account changes.
+    func reset() {
+        isPresented = false
+        model = nil
+    }
+}
+
+/// RSS Feed's button for admins with a client (``RssFeedPresentation/showsEntry(userType:hasClient:)``),
+/// opening the sheet through `state`; nothing when `target` is `nil`. An open feed shows a different
+/// symbol and the tint, and in a menu, which drops both the tint and the accessibility value, says
+/// so under the title.
+struct RssFeedEntryButton: View {
+    let target: RssFeedTarget?
+    var isOpen = false
+    var hasEpisodesWithoutPubDate = false
+    let state: RssFeedEntryState
+    /// In a menu, where an open feed reads as a subtitle.
+    var inMenu = false
+    @Environment(AccountManager.self) private var accounts: AccountManager?
+
+    var body: some View {
+        if let target, let client = accounts?.client,
+            RssFeedPresentation.showsEntry(userType: accounts?.authorization?.user.type, hasClient: true)
+        {
+            let open = state.showsOpen(target, fetched: isOpen)
+            Button {
+                state.open(target, service: client, hasEpisodesWithoutPubDate: hasEpisodesWithoutPubDate)
+            } label: {
+                Label {
+                    Text(verbatim: L10n.string("HeaderRSSFeed"))
+                    if inMenu, open {
+                        Text(verbatim: L10n.string("LabelRSSFeedOpen"))
+                    }
+                } icon: {
+                    // Open shows a different symbol as well as the tint, not colour alone.
+                    Image(systemName: RssFeedPresentation.systemImage(isOpen: open))
+                        .foregroundStyle(open ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
+                }
+            }
+            .help(Text(verbatim: L10n.string(open ? "LabelRSSFeedOpen" : "HeaderRSSFeed")))
+            .accessibilityValue(open ? Text(verbatim: L10n.string("LabelRSSFeedOpen")) : Text(verbatim: ""))
+        }
+    }
+}
+
+/// RSS Feed in the toolbar (``RssFeedEntryButton``) with its sheet.
 private struct RssFeedEntry: ViewModifier {
     let target: RssFeedTarget?
     let isOpen: Bool
     let hasEpisodesWithoutPubDate: Bool
     @Environment(AccountManager.self) private var accounts: AccountManager?
-    @State private var isPresented = false
-    /// The last sheet's model, kept after it closes so the entry shows what it last saw.
-    @State private var model: RssFeedModel?
+    @State private var state = RssFeedEntryState()
 
     func body(content: Content) -> some View {
-        let client = accounts?.client
         let shows = RssFeedPresentation.showsEntry(
-            userType: accounts?.authorization?.user.type, hasClient: client != nil)
-        let open = RssFeedPresentation.showsOpen(fetched: isOpen, model: model?.target == target ? model : nil)
+            userType: accounts?.authorization?.user.type, hasClient: accounts?.client != nil)
         content
             .toolbar {
-                if let target, let client, shows {
+                if target != nil, shows {
                     ToolbarItem(placement: .primaryAction) {
-                        Button {
-                            // A fresh sheet each time, as before, starting from what the last one knew.
-                            let fresh = RssFeedModel(
-                                target: target, service: client, hasEpisodesWithoutPubDate: hasEpisodesWithoutPubDate)
-                            if let model { fresh.seed(from: model) }
-                            model = fresh
-                            isPresented = true
-                        } label: {
-                            Label {
-                                Text(verbatim: L10n.string("HeaderRSSFeed"))
-                            } icon: {
-                                // Open shows a different symbol as well as the tint, not colour alone.
-                                Image(systemName: open ? "dot.radiowaves.left.and.right" : "dot.radiowaves.up.forward")
-                                    .foregroundStyle(open ? AnyShapeStyle(.tint) : AnyShapeStyle(.primary))
-                            }
-                        }
-                        .help(Text(verbatim: L10n.string(open ? "LabelRSSFeedOpen" : "HeaderRSSFeed")))
-                        .accessibilityValue(open ? Text(verbatim: L10n.string("LabelRSSFeedOpen")) : Text(verbatim: ""))
+                        RssFeedEntryButton(
+                            target: target, isOpen: isOpen, hasEpisodesWithoutPubDate: hasEpisodesWithoutPubDate,
+                            state: state)
                     }
                 }
             }
-            .sheet(isPresented: $isPresented) {
-                if let model {
+            .rssFeedSheet(state)
+    }
+}
+
+/// Shows `state`'s sheet; it closes when the account changes or the entry stops showing.
+private struct RssFeedSheetPresenter: ViewModifier {
+    @Bindable var state: RssFeedEntryState
+    @Environment(AccountManager.self) private var accounts: AccountManager?
+
+    func body(content: Content) -> some View {
+        let shows = RssFeedPresentation.showsEntry(
+            userType: accounts?.authorization?.user.type, hasClient: accounts?.client != nil)
+        content
+            .sheet(isPresented: $state.isPresented) {
+                if let model = state.model {
                     RssFeedSheet(model: model)
                 }
             }
-            .onChange(of: accounts?.activeConnection?.id) {
-                isPresented = false
-                model = nil
-            }
-            .onChange(of: shows) { _, shows in if !shows { isPresented = false } }
+            .onChange(of: accounts?.activeConnection?.id) { state.reset() }
+            .onChange(of: shows) { _, shows in if !shows { state.isPresented = false } }
     }
 }
 
