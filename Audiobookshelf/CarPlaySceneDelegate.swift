@@ -24,7 +24,7 @@
     /// its next page in place, and a book or episode plays like a Continue row. The Latest tab is
     /// shown while the account has a podcast library. Each list reloads when it shows again.
     final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate,
-        CPInterfaceControllerDelegate
+        CPInterfaceControllerDelegate, CPTabBarTemplateDelegate
     {
         private var interfaceController: CPInterfaceController?
         private var model: CarPlayRootModel?
@@ -94,6 +94,7 @@
             latest.tabImage = UIImage(systemName: "clock")
             latestTemplate = latest
             let tabs = CPTabBarTemplate(templates: [list, library])
+            tabs.delegate = self
             tabBar = tabs
             interfaceController.setRootTemplate(tabs, animated: false, completion: nil)
             observeContent()
@@ -163,7 +164,8 @@
 
         /// Reloads the shelves when the Continue tab shows again, for example after Now Playing.
         func templateWillAppear(_ aTemplate: CPTemplate, animated: Bool) {
-            refreshBrowse(aTemplate)
+            // Back on the tab bar, from a pushed list or Now Playing: its selected tab shows again.
+            refreshBrowse((aTemplate as? CPTabBarTemplate)?.selectedTemplate ?? aTemplate)
             guard let model, aTemplate is CPTabBarTemplate || aTemplate === continueTemplate else { return }
             if hasShownContinue { Task { await model.refresh() } }
             hasShownContinue = true
@@ -483,8 +485,14 @@
             }
         }
 
+        /// The Library or Latest tab selected: reloads it like a list showing again.
+        func tabBarTemplate(_ tabBarTemplate: CPTabBarTemplate, didSelect selectedTemplate: CPTemplate) {
+            refreshBrowse(selectedTemplate)
+        }
+
         /// Reloads a browse list when it shows again, for example after Now Playing or a pushed
-        /// list; not when it first shows, as it's loading then.
+        /// list; not when it first shows, as it's loading then. A page the refresh emptied goes
+        /// back to the first page, as it has no "More…" to leave it.
         private func refreshBrowse(_ template: CPTemplate) {
             guard let browse, let entry = browseTemplates.first(where: { $0.template === template }) else { return }
             guard entry.hasAppeared else {
@@ -492,7 +500,16 @@
                 return
             }
             let (destination, offset) = (entry.destination, entry.offset)
-            Task { await browse.refresh(destination, offset: offset) }
+            Task { [weak self, weak entry] in
+                await browse.refresh(destination, offset: offset)
+                guard let self, let entry, self.browse === browse, entry.destination == destination,
+                    entry.offset == offset
+                else { return }
+                let reset = browse.offset(of: destination, afterRefreshFrom: offset)
+                guard reset != offset else { return }
+                entry.offset = reset
+                self.observeBrowse()
+            }
         }
 
         // MARK: - Strings

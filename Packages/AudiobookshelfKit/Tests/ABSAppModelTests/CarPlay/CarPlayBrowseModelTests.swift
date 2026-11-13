@@ -315,6 +315,44 @@ private func ids(_ list: CarPlayList) -> [String] { list.rows.map(\.id) }
         }
     }
 
+    @Test func latestPagesWhoseEpisodesAllDropStillOfferMore() async throws {
+        try await withLibrarySettings { settings in
+            let service = FakeCarPlayBrowseService()
+            service.libraryList.value = [makeLibrary("pods", mediaType: .podcast)]
+            // Full pages of episodes with no podcast item, which don't map, then valid ones.
+            let unmapped = (0..<2000).map { BrowseFixtures.recent("x\($0)", podcast: "") }
+            service.recent.value = ["pods": unmapped + [BrowseFixtures.recent("e1")]]
+            let (_, model) = await makeBrowse(service, settings: settings)
+            let latest = CarPlayDestination.latestEpisodes(libraryID: "pods")
+            await model.load(latest)
+            #expect(model.status(latest) == .loaded)
+            let rows = model.list(latest).rows
+            #expect(rows.count == 1)
+            #expect(rows.allSatisfy { if case .more = $0.action { true } else { false } })
+        }
+    }
+
+    @Test func aRefreshThatEmptiesThePageGoesBackToTheFirst() async throws {
+        try await withLibrarySettings { settings in
+            let service = FakeCarPlayBrowseService()
+            service.libraryList.value = [makeLibrary("books")]
+            service.books.value = ["books": BrowseFixtures.books(23)]
+            let (_, model) = await makeBrowse(service, settings: settings, limits: CarPlayLimits(maximumItemCount: 5))
+            let books = CarPlayDestination.items(libraryID: "books")
+            await model.load(books, offset: 8)
+            #expect(!model.list(books, offset: 8).rows.isEmpty)
+            // A page with rows stays.
+            #expect(model.offset(of: books, afterRefreshFrom: 8) == 8)
+
+            // The list shrank below the page: it empties, with no "More…" to leave it.
+            service.books.value = ["books": BrowseFixtures.books(3)]
+            await model.refresh(books, offset: 8)
+            #expect(model.list(books, offset: 8).rows.isEmpty)
+            #expect(model.offset(of: books, afterRefreshFrom: 8) == 0)
+            #expect(model.list(books, offset: 0).rows.count == 3)
+        }
+    }
+
     @Test func aLoadedPageWithNoRowsToShowStillOffersMore() async throws {
         try await withLibrarySettings { settings in
             let service = FakeCarPlayBrowseService()

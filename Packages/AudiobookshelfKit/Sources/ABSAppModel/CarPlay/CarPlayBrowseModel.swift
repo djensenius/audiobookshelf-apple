@@ -49,6 +49,9 @@ public final class CarPlayBrowseModel {
     @ObservationIgnored private let pageSize: Int
     /// The models of the lists opened so far.
     private var sources: [CarPlayDestination: Source] = [:]
+    /// The lists a page has arrived for, even one whose items were all left out (episodes that
+    /// don't map, say): they've loaded, so a list that hasn't ended offers "More…".
+    private var answered: Set<CarPlayDestination> = []
     /// The text of the row that opened a list, as its title.
     @ObservationIgnored private var titles: [CarPlayDestination: String] = [:]
 
@@ -146,7 +149,7 @@ public final class CarPlayBrowseModel {
         default:
             guard let destinationLibrary = destination.libraryID, isKnown(destinationLibrary) else { return .loaded }
             guard let pager = sources[destination]?.pager else { return .loading }
-            if pager.loadedCount > 0 || pager.reachedEnd { return .loaded }
+            if pager.loadedCount > 0 || pager.reachedEnd || answered.contains(destination) { return .loaded }
             return pager.error == nil ? .loading : .failed
         }
     }
@@ -158,6 +161,16 @@ public final class CarPlayBrowseModel {
         list(destination, offset: offset).rows.contains {
             $0.id == row.id && $0.action == row.action && $0.image == row.image && $0.isEnabled
         }
+    }
+
+    /// The offset to show `destination`'s list from after a refresh: `offset`, unless the loaded
+    /// list got shorter and the page from it is empty, with no "More…" to leave it; then the
+    /// first page.
+    public func offset(of destination: CarPlayDestination, afterRefreshFrom offset: Int) -> Int {
+        guard offset > 0, status(destination) == .loaded, list(destination, offset: offset).rows.isEmpty else {
+            return offset
+        }
+        return 0
     }
 
     // MARK: - Navigation and loading
@@ -195,6 +208,7 @@ public final class CarPlayBrowseModel {
             }
             await page.value
             if pager.error != nil { return }
+            if sources[destination]?.pager === pager { answered.insert(destination) }
         }
     }
 
@@ -246,7 +260,10 @@ public final class CarPlayBrowseModel {
 
     private func dropRemovedLibraries() {
         let removed = sources.keys.filter { $0.libraryID.map { !isKnown($0) } ?? false }
-        for destination in removed { sources[destination] = nil }
+        for destination in removed {
+            sources[destination] = nil
+            answered.remove(destination)
+        }
     }
 
     private func title(of destination: CarPlayDestination) -> String {
