@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSPlayback
 import Foundation
 
 /// The actions on a library item that change the user's progress. Play, add to playlist and
@@ -110,6 +111,10 @@ extension APIClient: ProgressWriting {
 ///   comes and before anything changes: the player's session keeps writing its own position
 ///   locally and to the server, so it could undo the change. Closing the player first is the
 ///   user's choice; hiding only touches Continue Listening and isn't refused.
+/// - Before that check, these actions take `lease` for the item or episode (``MediaLeases``,
+///   shared with playback), which waits for a closed session's final `/close` and position write
+///   to settle, and hold it through the server request and the local sync, so a playback start
+///   of the same media waits for the action instead of starting from the old position.
 @MainActor
 public final class ProgressItemActions: ItemActionPerforming {
     private struct Tail {
@@ -122,6 +127,7 @@ public final class ProgressItemActions: ItemActionPerforming {
     /// Updates the local playback database after an accepted action; `nil` updates nothing.
     public let localSync: (any ItemActionLocalSync)?
     private let isInPlayer: @MainActor (ItemActionTarget) -> Bool
+    private let lease: @MainActor (ItemActionTarget) async -> MediaLease?
     private let now: @Sendable () -> Date
     private let sessionToken: ProgressCache.SessionToken
     private var tails: [String: Tail] = [:]
@@ -132,8 +138,10 @@ public final class ProgressItemActions: ItemActionPerforming {
     public init(
         cache: ProgressCache, writer: any ProgressWriting, localSync: (any ItemActionLocalSync)? = nil,
         isInPlayer: @escaping @MainActor (ItemActionTarget) -> Bool = { _ in false },
+        lease: @escaping @MainActor (ItemActionTarget) async -> MediaLease? = { _ in nil },
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
+        self.lease = lease
         self.cache = cache
         self.writer = writer
         self.localSync = localSync
@@ -184,7 +192,8 @@ public final class ProgressItemActions: ItemActionPerforming {
 
     public func discardProgress(_ target: ItemActionTarget) async throws {
         try await enqueue(target) { session in
-            try self.checkNotInPlayer(target)
+            let lease = try await self.claim(target)
+            defer { lease?.release() }
             guard try await self.discard(target, session: session) else { return }
             await self.syncLocally { try await $0.didDiscard(target) }
         }
@@ -217,14 +226,21 @@ public final class ProgressItemActions: ItemActionPerforming {
     ) async throws {
         try await enqueue(target) { session in
             // An action with a local part changes the position the player's session writes.
-            if local != nil { try self.checkNotInPlayer(target) }
+            let lease = local != nil ? try await self.claim(target) : nil
+            defer { lease?.release() }
             try await self.perform(target, update: update, optimistic: optimistic, session: session)
             await self.syncLocally(local)
         }
     }
 
-    private func checkNotInPlayer(_ target: ItemActionTarget) throws {
-        if isInPlayer(target) { throw ItemActionError.itemInPlayer }
+    /// Takes the item's lease (after its closing sessions settled), then refuses the player's item.
+    private func claim(_ target: ItemActionTarget) async throws -> MediaLease? {
+        let lease = await lease(target)
+        guard !isInPlayer(target) else {
+            lease?.release()
+            throw ItemActionError.itemInPlayer
+        }
+        return lease
     }
 
     /// Runs `local` on ``localSync``, logging a failure: the server already has the change.

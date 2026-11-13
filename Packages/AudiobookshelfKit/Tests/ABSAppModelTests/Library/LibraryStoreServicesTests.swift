@@ -1,5 +1,7 @@
 import ABSAPI
 import ABSCore
+import ABSData
+import ABSPlayback
 import Foundation
 import Testing
 
@@ -349,6 +351,7 @@ private let forwardings: [StoreServiceForwarding] = [
         try await withLibrarySettings { settings in
             let syncs = Locked<[UUID]>([])
             let asked = Locked<[String]>([])
+            let leases = MediaLeases()
             let store = LibraryStore(
                 settings: settings,
                 itemActionLocalSync: { key in
@@ -358,7 +361,8 @@ private let forwardings: [StoreServiceForwarding] = [
                 itemInPlayer: { key, target in
                     asked.value.append("\(key.userID):\(target.libraryItemID)")
                     return target.libraryItemID == "playing"
-                })
+                },
+                mediaLeases: leases)
             let writes = Locked<[String]>([])
             await store.connect(client: WritingClient(name: "a", writes: writes), connectionKey: serverA)
             let shared = try #require(store.itemActions(for: serverA))
@@ -371,6 +375,16 @@ private let forwardings: [StoreServiceForwarding] = [
             try await shared.markFinished(ItemActionTarget(libraryItemID: "li"))
             #expect(asked.value == ["\(serverA.userID):playing", "\(serverA.userID):li"])
             #expect(writes.value == ["a:li"])
+
+            // The account's media in the shared leases: a closing session holds its action.
+            let closing = leases.acquire(
+                MediaKey(serverConnectionID: serverA.connectionID, libraryItemId: "li"), for: .closingSession)
+            let action = Task { try await shared.markFinished(ItemActionTarget(libraryItemID: "li")) }
+            for _ in 0..<50 { await Task.yield() }
+            #expect(writes.value == ["a:li"])
+            closing.release()
+            try await action.value
+            #expect(writes.value == ["a:li", "a:li"])
         }
     }
 

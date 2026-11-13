@@ -1,5 +1,7 @@
 import ABSAPI
 import ABSCore
+import ABSData
+import ABSPlayback
 import Foundation
 import Observation
 
@@ -65,10 +67,12 @@ public final class LibraryStore {
     /// Each account's latest shared item actions; see ``itemActions(for:)``. Kept after the
     /// account's session ends, so its next session continues its pending queue.
     @ObservationIgnored private var sharedItemActions: [LibraryConnectionKey: ProgressItemActions] = [:]
-    /// The local sync of each account's shared item actions; see ``init(settings:itemActionLocalSync:itemInPlayer:)``.
+    /// The local sync of each account's shared item actions; see ``init(settings:itemActionLocalSync:itemInPlayer:mediaLeases:)``.
     @ObservationIgnored private let itemActionLocalSync: @MainActor (LibraryConnectionKey) -> (any ItemActionLocalSync)?
-    /// Whether an account's item or episode is in the player; see ``init(settings:itemActionLocalSync:itemInPlayer:)``.
+    /// Whether an account's item or episode is in the player; see ``init(settings:itemActionLocalSync:itemInPlayer:mediaLeases:)``.
     @ObservationIgnored private let itemInPlayer: @MainActor (LibraryConnectionKey, ItemActionTarget) -> Bool
+    /// Shared with playback; see ``init(settings:itemActionLocalSync:itemInPlayer:mediaLeases:)``.
+    @ObservationIgnored private let mediaLeases: MediaLeases?
     /// Told of each view preferences save (``observeViewPreferences(connectionKey:owner:_:)``).
     @ObservationIgnored private var viewPreferencesObservers: [ViewPreferencesObserver] = []
     /// Told of each socket change (``observeLibraryChanges(connectionKey:owner:_:)``).
@@ -80,12 +84,17 @@ public final class LibraryStore {
     ///     none.
     ///   - itemInPlayer: Whether the account's item or episode is in the player, so its progress
     ///     actions are refused (``ProgressItemActions``); the default says none is.
+    ///   - mediaLeases: The playback coordinators' ``MediaLeases``: the progress actions wait for a
+    ///     closing session of their media to settle and hold the media against a start until
+    ///     they're done; `nil` (the default) for none.
     public init(
         settings: AppSettings,
         itemActionLocalSync: @escaping @MainActor (LibraryConnectionKey) -> (any ItemActionLocalSync)? = { _ in nil },
-        itemInPlayer: @escaping @MainActor (LibraryConnectionKey, ItemActionTarget) -> Bool = { _, _ in false }
+        itemInPlayer: @escaping @MainActor (LibraryConnectionKey, ItemActionTarget) -> Bool = { _, _ in false },
+        mediaLeases: MediaLeases? = nil
     ) {
         self.settings = settings
+        self.mediaLeases = mediaLeases
         self.itemActionLocalSync = itemActionLocalSync
         self.itemInPlayer = itemInPlayer
     }
@@ -283,13 +292,21 @@ public final class LibraryStore {
     ///
     /// Its per-item queue keeps actions on the same item in order only within one instance, so
     /// screens and windows share the session's ``itemActions(for:)`` instead of building their own.
-    /// They refuse the progress actions on the account's item in the player (`itemInPlayer`).
+    /// They refuse the progress actions on the account's item in the player (`itemInPlayer`), and
+    /// hold its media in `mediaLeases` while they run.
     public func makeItemActions(localSync: (any ItemActionLocalSync)? = nil) -> ProgressItemActions? {
         guard let connectionKey else { return nil }
         let itemInPlayer = itemInPlayer
+        let mediaLeases = mediaLeases
         return ProgressItemActions(
             cache: progress, writer: LibraryStoreServices(store: self, connectionKey: connectionKey),
-            localSync: localSync, isInPlayer: { itemInPlayer(connectionKey, $0) })
+            localSync: localSync, isInPlayer: { itemInPlayer(connectionKey, $0) },
+            lease: { target in
+                let key = MediaKey(
+                    serverConnectionID: connectionKey.connectionID, libraryItemId: target.libraryItemID,
+                    episodeId: target.episodeID)
+                return await mediaLeases?.acquire(key, for: .progressAction, after: .closingSession)
+            })
     }
 
     /// The one ``ProgressItemActions`` of the account session `connectionKey`, shared by every

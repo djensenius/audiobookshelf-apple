@@ -164,6 +164,7 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private let lastPlayedStore: any LastPlayedStoring
     @ObservationIgnored private let now: @Sendable () -> Date
     @ObservationIgnored private let sleep: @Sendable (Duration) async -> Void
+    @ObservationIgnored private let mediaLeases: MediaLeases?
     @ObservationIgnored private let backgroundActivity: any BackgroundActivity
 
     // MARK: Bookkeeping
@@ -262,6 +263,9 @@ public final class PlaybackCoordinator {
     ///   - recoveryWait: Times recovery's backoff (tests replace it).
     ///   - networkPaths: The network path recovery waits on (`SystemNetworkPathSource`); `nil`
     ///     treats it as always satisfied.
+    ///   - mediaLeases: Shared with the progress actions (#368): each closing session's media is
+    ///     held until its close settles, and a start waits for an action on its media. `nil`
+    ///     holds and waits for nothing.
     public init(
         engine: any AudioEngineProtocol, sessions: any PlaybackSessionService, progressStore: any LocalProgressReading,
         settings: any PlaybackSettingsProviding, policy: any StreamingPolicyChecking,
@@ -269,8 +273,9 @@ public final class PlaybackCoordinator {
         sleep: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
         backgroundActivity: any BackgroundActivity = NoBackgroundActivity(),
         recoveryWait: @escaping @Sendable (Duration) async -> Void = { try? await Task.sleep(for: $0) },
-        networkPaths: (any NetworkPathSource)? = nil
+        networkPaths: (any NetworkPathSource)? = nil, mediaLeases: MediaLeases? = nil
     ) {
+        self.mediaLeases = mediaLeases
         self.backgroundActivity = backgroundActivity
         self.engine = engine
         self.sessions = sessions
@@ -424,6 +429,12 @@ public final class PlaybackCoordinator {
         }
         let started: StartedSession
         do {
+            // A progress action on this media (#368) finishes first, so the start reads its result.
+            if let mediaLeases, mediaLeases.isHeld(key, by: .progressAction) {
+                await mediaLeases.waitUntilFree(key, of: .progressAction)
+                try Task.checkCancellation()
+                guard current == generation else { return }
+            }
             guard
                 let result = try await startSessionSerially(
                     itemID: itemID, episodeID: episodeID, generation: current, prepared: prepared)
@@ -438,7 +449,10 @@ public final class PlaybackCoordinator {
             return fail(Self.sessionError(error), generation: current)
         }
         let session = started.session
-        guard current == generation else { return closeInBackground(sessionID: session.id, report: nil) }
+        guard current == generation else {
+            closeInBackground(sessionID: session.id, report: nil)
+            return
+        }
 
         let source: AudioEngineSource
         let stream: ResolvedStream
@@ -455,7 +469,10 @@ public final class PlaybackCoordinator {
             }
             return fail(Self.streamError(error), generation: current)
         }
-        guard current == generation else { return closeInBackground(sessionID: session.id, report: nil) }
+        guard current == generation else {
+            closeInBackground(sessionID: session.id, report: nil)
+            return
+        }
         // From here the coordinator owns the session: whoever replaces it closes it.
         self.session = session
         streamAccessToken = stream.accessToken
@@ -1344,26 +1361,40 @@ public final class PlaybackCoordinator {
                 sessionID: session.id, key: key, currentTime: unloadedPosition, duration: unloadedDuration,
                 wasLoaded: wasLoaded, reason: reason)
             let handoff = wasLoaded ? finalCloseReport?(closing) : nil
-            closeInBackground(sessionID: session.id, handoff: handoff, wasLoaded: wasLoaded)
+            let operation = closeInBackground(sessionID: session.id, handoff: handoff, wasLoaded: wasLoaded)
+            holdUntilSettled(key, operation: operation)
             emit(.sessionWillClose(closing))
         }
     }
 
+    /// Holds `key` for its closing session (``MediaLeases/Holder/closingSession``) until the close's
+    /// transport and its captured position write settle, whatever their outcome.
+    private func holdUntilSettled(_ key: MediaKey, operation: PlaybackCloseOperation?) {
+        guard let mediaLeases, let operation else { return }
+        let lease = mediaLeases.acquire(key, for: .closingSession)
+        Task { @MainActor in
+            _ = try? await operation.transport.wait()
+            if operation.wasLoaded { try? await operation.handoff?.waitForAudioPosition() }
+            lease.release()
+        }
+    }
+
+    @discardableResult
     private func closeInBackground(
         sessionID: String, report: PlaybackSyncReport? = nil,
         handoff: PlaybackCloseHandoff? = nil, wasLoaded: Bool = false
-    ) {
+    ) -> PlaybackCloseOperation? {
         guard closingSessionIDs.insert(sessionID).inserted else {
             // The server reused an ID whose close is pending: that close covers it, not this one.
             handoff?.transport.resolve(.success(false))
-            return
+            return nil
         }
         let operation = PlaybackCloseOperation(sessionID: sessionID, wasLoaded: wasLoaded, handoff: handoff)
         closeOperations.append(operation)
         guard permitsCloseTransport else {
             operation.transport.resolve(.success(false))
             operation.dispatched.resolve(.success(()))
-            return
+            return operation
         }
         let id = UUID()
         let sessions = self.sessions
@@ -1398,6 +1429,7 @@ public final class PlaybackCoordinator {
         }
         closeTasks[id] = task
         operation.task = task
+        return operation
     }
 
     /// Joins closes captured so far, without another callback or request. The deadline bounds

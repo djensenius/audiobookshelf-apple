@@ -1,6 +1,7 @@
 import ABSAPI
 import ABSCore
 import ABSData
+import ABSPlayback
 import Foundation
 import Testing
 
@@ -45,6 +46,29 @@ private struct CountingWriter: ProgressWriting {
     func deleteProgress(id: String) async throws {
         try await base.deleteProgress(id: id)
         writes.value += 1
+    }
+}
+
+/// Holds each write at `gate` until it opens, counting the writes that reached it.
+private struct GatedWriter: ProgressWriting {
+    let base: ScriptedWriter
+    let gate: Gate
+    let entered = Locked(0)
+
+    func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
+        entered.value += 1
+        await gate.wait()
+        try await base.writeProgress(itemID: itemID, episodeID: episodeID, update: update)
+    }
+
+    func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        try await base.progressID(itemID: itemID, episodeID: episodeID)
+    }
+
+    func deleteProgress(id: String) async throws {
+        entered.value += 1
+        await gate.wait()
+        try await base.deleteProgress(id: id)
     }
 }
 
@@ -219,6 +243,88 @@ private func cachedProgress(finished: Bool = false) -> MediaProgress {
         inPlayer.value = nil
         try await actions.markFinished(target)
         #expect(sync.calls.value == ["finished other", "finished item"])
+    }
+
+    private func leasedActions(
+        _ leases: MediaLeases, writer: any ProgressWriting, sync: RecordingSync,
+        inPlayer: Locked<ItemActionTarget?> = Locked(nil)
+    ) -> ProgressItemActions {
+        ProgressItemActions(
+            cache: cache, writer: writer, localSync: sync, isInPlayer: { inPlayer.value == $0 },
+            lease: { target in
+                await leases.acquire(
+                    MediaKey(serverConnectionID: connection, libraryItemId: target.libraryItemID),
+                    for: .progressAction, after: .closingSession)
+            })
+    }
+
+    /// A closed player's final sync and `/close` still in flight (#368): the retried action waits
+    /// for them to settle before it changes anything, and is refused if the item is back in the
+    /// player by then.
+    @Test func progressActionsWaitForTheItemsClosingSession() async throws {
+        let leases = MediaLeases()
+        let sync = RecordingSync()
+        let writes = Locked(0)
+        let inPlayer = Locked<ItemActionTarget?>(nil)
+        let actions = leasedActions(
+            leases, writer: CountingWriter(base: writer, writes: writes), sync: sync, inPlayer: inPlayer)
+        cache.apply(cachedProgress())
+
+        let closing = leases.acquire(key, for: .closingSession)
+        let markFinished = Task { try await actions.markFinished(target) }
+        let discard = Task { try await actions.discardProgress(target) }
+        for _ in 0..<50 { await Task.yield() }
+        #expect(writes.value == 0)
+        #expect(cache.progress(libraryItemID: "item") == cachedProgress())
+
+        closing.release()
+        try await markFinished.value
+        try await discard.value
+        #expect(sync.calls.value == ["finished item", "discard item"])
+        #expect(!leases.isHeld(key, by: .progressAction))
+
+        // Held again, then the item went back into the player: refused once the close settles.
+        let next = leases.acquire(key, for: .closingSession)
+        let retry = Task { try await actions.markFinished(target) }
+        for _ in 0..<20 { await Task.yield() }
+        inPlayer.value = target
+        next.release()
+        await #expect(throws: ItemActionError.itemInPlayer) { try await retry.value }
+        #expect(!leases.isHeld(key, by: .progressAction))
+    }
+
+    /// While the server request is suspended, the action holds the item's lease, so a playback
+    /// start of it (which waits for ``MediaLeases/Holder/progressAction``) can't read the old
+    /// position; the lease is released once the local sync ran.
+    @Test func progressActionsHoldTheItemThroughTheRequestAndLocalSync() async throws {
+        let leases = MediaLeases()
+        let sync = RecordingSync()
+        let gate = Gate()
+        let gated = GatedWriter(base: writer, gate: gate)
+        let actions = leasedActions(leases, writer: gated, sync: sync)
+        cache.apply(cachedProgress())
+
+        let markFinished = Task { try await actions.markFinished(target) }
+        for _ in 0..<1000 where gated.entered.value == 0 { await Task.yield() }
+        #expect(gated.entered.value == 1)
+        #expect(leases.isHeld(key, by: .progressAction))
+        let started = Locked(false)
+        let start = Task {
+            await leases.waitUntilFree(key, of: .progressAction)
+            started.value = true
+        }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(!started.value)
+
+        gate.open()
+        try await markFinished.value
+        await start.value
+        #expect(started.value)
+        #expect(sync.calls.value == ["finished item"])
+
+        // Hiding doesn't touch the position, so it takes no lease.
+        try await actions.hideFromContinueListening(target)
+        #expect(!leases.isHeld(key, by: .progressAction))
     }
 
     /// The drain sends the old position before finished, so the server ends up finished.

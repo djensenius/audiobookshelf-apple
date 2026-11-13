@@ -226,6 +226,21 @@ struct TestDownloads {
             await #expect(throws: CancellationError.self) {
                 try await actions.markFinished(ItemActionTarget(libraryItemID: "li_1"))
             }
+
+            // A session of the item still closing in the playback's shared leases holds the action.
+            let closing = environment.playback.mediaLeases.acquire(
+                MediaKey(serverConnectionID: account.connectionID, libraryItemId: "li_2"), for: .closingSession)
+            @MainActor final class Flag { var isSet = false }
+            let done = Flag()
+            let held = Task {
+                defer { done.isSet = true }
+                try await actions.markFinished(ItemActionTarget(libraryItemID: "li_2"))
+            }
+            for _ in 0..<50 { await Task.yield() }
+            // Still waiting: without the leases it would have failed on the missing client by now.
+            #expect(!done.isSet)
+            closing.release()
+            await #expect(throws: CancellationError.self) { try await held.value }
         }
     }
 
@@ -238,9 +253,10 @@ struct TestDownloads {
 
             let configuration = AppPlayback.configuration(
                 for: request, settings: settings, policy: NetworkPolicy(monitor: NetworkMonitor(), settings: settings),
-                engine: AudioEngine(audioSession: nil))
+                engine: AudioEngine(audioSession: nil), mediaLeases: environment.playback.mediaLeases)
 
             #expect(configuration.networkPaths is SystemNetworkPathSource)
+            #expect(configuration.mediaLeases === environment.playback.mediaLeases)
         }
     }
 
@@ -255,7 +271,8 @@ struct TestDownloads {
 
             let scope = AppPlayback.makeScope(
                 for: request, settings: settings, policy: NetworkPolicy(monitor: NetworkMonitor(), settings: settings),
-                engine: AudioEngine(audioSession: nil), interruptions: interruptions)
+                engine: AudioEngine(audioSession: nil), interruptions: interruptions,
+                mediaLeases: environment.playback.mediaLeases)
             defer { scope.retire(reason: .signOut) }
 
             #expect(interruptions.heldPlayIntent === scope.coordinator)

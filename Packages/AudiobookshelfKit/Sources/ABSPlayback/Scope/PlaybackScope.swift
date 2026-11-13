@@ -83,6 +83,9 @@ public final class PlaybackScope {
         /// The network path recovery waits on; the app sets `SystemNetworkPathSource()`. `nil`
         /// treats it as always satisfied.
         public var networkPaths: (any NetworkPathSource)?
+        /// The per-media exclusion shared with the progress actions (``MediaLeases``), one for
+        /// every scope, like ``writer``; `nil` holds nothing.
+        public var mediaLeases: MediaLeases?
 
         public init(
             connectionID: UUID, client: APIClient?, features: ServerFeatures?,
@@ -162,7 +165,8 @@ public final class PlaybackScope {
             engine: configuration.engine, sessions: services, progressStore: configuration.writer,
             settings: configuration.settings, policy: configuration.policy,
             lastPlayedStore: configuration.lastPlayed(configuration.connectionID),
-            backgroundActivity: configuration.backgroundActivity, networkPaths: configuration.networkPaths)
+            backgroundActivity: configuration.backgroundActivity, networkPaths: configuration.networkPaths,
+            mediaLeases: configuration.mediaLeases)
         let syncer = ProgressSyncer(
             source: coordinator, service: services, store: configuration.writer,
             tickInterval: configuration.tickInterval, paths: nil)
