@@ -105,12 +105,29 @@ struct LocalPlaybackSessionServiceTests {
         }
     }
 
-    @Test func doesNotStartWhenAFileIsMissing() async throws {
+    /// ADR 0007 §7: a download with a missing file is an error, not "not downloaded".
+    @Test func aDownloadWithAMissingFileThrowsFilesMissing() async throws {
         items.add(.book())
         files.add("book/1.mp3")
 
-        await #expect(throws: LocalPlaybackError.notDownloaded) {
+        await #expect(throws: LocalPlaybackError.downloadFilesMissing(Self.key("book"))) {
             try await service().startSession(itemID: "book", episodeID: nil)
+        }
+    }
+
+    /// No item, an ebook-only book download, or another episode of a downloaded show.
+    @Test func mediaWithoutADownloadIsNotDownloaded() async throws {
+        var ebookOnly = LocalLibraryItemDTO.book()
+        ebookOnly.files.removeAll { $0.kind == .audio }
+        items.add(ebookOnly)
+        items.add(.podcast())
+        files.addAll(for: .podcast())
+        let service = service()
+
+        for (item, episode) in [("missing", nil), ("book", nil), ("show", "ep3")] as [(String, String?)] {
+            await #expect(throws: LocalPlaybackError.notDownloaded) {
+                try await service.startSession(itemID: item, episodeID: episode)
+            }
         }
     }
 

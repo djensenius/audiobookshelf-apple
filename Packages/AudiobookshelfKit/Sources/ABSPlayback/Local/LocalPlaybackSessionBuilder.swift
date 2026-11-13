@@ -39,6 +39,15 @@ public enum LocalPlaybackSessionBuilder {
         playableMedia(of: item, episodeID: episodeID)?.tracks.compactMap(\.contentUrl)
     }
 
+    /// Whether the item holds a completed download of the book's audio or of episode `episodeID`:
+    /// an audio file recorded for it, or for an episode, the episode in the snapshot (which lists
+    /// only downloaded episodes). An ebook-only book download has none.
+    public static func hasDownload(of item: LocalLibraryItemDTO, episodeID: String?) -> Bool {
+        let audioFiles = item.files.filter { $0.kind == .audio }
+        guard let episodeID else { return audioFiles.contains { $0.episodeId == nil } }
+        return item.media.episodes.contains { $0.id == episodeID } || audioFiles.contains { $0.episodeId == episodeID }
+    }
+
     private struct PlayableMedia {
         var tracks: [AudioTrack]
         var chapters: [Chapter]

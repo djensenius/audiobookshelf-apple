@@ -67,17 +67,48 @@ struct PreferringLocalSessionServiceTests {
         #expect(remote.calls == ["start book", "resolve remote-book", "close remote-book"])
     }
 
-    /// A download whose file is gone streams instead.
-    @Test func streamsWhenADownloadedFileIsMissing() async throws {
+    /// ADR 0007 §7: a download with a missing file never streams silently.
+    @Test func aDownloadWithAMissingFileThrowsWithoutStreaming() async throws {
         items.add(.book())
         files.addAll(for: .book())
         files.remove("book/1.mp3")
         let service = service()
 
+        await #expect(throws: LocalPlaybackError.downloadFilesMissing(LocalPlaybackSessionServiceTests.key("book"))) {
+            try await service.startSession(itemID: "book", episodeID: nil)
+        }
+
+        #expect(remote.calls.isEmpty)
+        #expect(try await store.pendingSessions(for: LocalPlaybackSessionServiceTests.connection).isEmpty)
+    }
+
+    /// "Stream instead" streams that media's next start only; the one after checks the download again.
+    @Test func streamInsteadStreamsTheNextStartOnly() async throws {
+        items.add(.book())
+        files.addAll(for: .book())
+        files.remove("book/1.mp3")
+        let service = service()
+
+        service.streamInstead(LocalPlaybackSessionServiceTests.key("other"))
+        service.streamInstead(LocalPlaybackSessionServiceTests.key("book"))
         let session = try await service.startSession(itemID: "book", episodeID: nil)
 
         #expect(session.playMethod == .directPlay && remote.calls == ["start book"])
-        #expect(try await store.pendingSessions(for: LocalPlaybackSessionServiceTests.connection).isEmpty)
+        await #expect(throws: LocalPlaybackError.downloadFilesMissing(LocalPlaybackSessionServiceTests.key("book"))) {
+            try await service.startSession(itemID: "book", episodeID: nil)
+        }
+        #expect(remote.calls == ["start book"])
+    }
+
+    /// A book downloaded only as an ebook has no audio download, so it streams.
+    @Test func anEbookOnlyDownloadStreams() async throws {
+        var ebookOnly = LocalLibraryItemDTO.book()
+        ebookOnly.files.removeAll { $0.kind == .audio }
+        items.add(ebookOnly)
+
+        let session = try await service().startSession(itemID: "book", episodeID: nil)
+
+        #expect(session.playMethod == .directPlay && remote.calls == ["start book"])
     }
 
     /// The server's progress still wins when it answers; offline, downloaded media gets the

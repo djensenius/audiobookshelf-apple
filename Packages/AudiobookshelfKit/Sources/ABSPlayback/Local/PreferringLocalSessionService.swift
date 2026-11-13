@@ -1,21 +1,33 @@
 import ABSAPI
 import ABSCore
+import ABSData
 import Foundation
-import os
-
-private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "PreferringLocalSessionService")
+import Synchronization
 
 /// ``PlaybackSessionService`` that plays downloaded media from this device and streams the rest
-/// (ADR 0007, decision 7): a start goes to `local` when every file of a completed download of the
-/// media exists, and to `remote` otherwise, including when a file is missing. Each later call goes
-/// to the service that owns the session.
+/// (ADR 0007, decision 7). A start:
 ///
-/// ``mediaProgress(itemID:episodeID:)`` asks `remote` first even for downloaded media, so newer
-/// server progress still wins before a local start; when it fails (for example offline), downloaded
-/// media gets the progress this device last saw from the server.
-public struct PreferringLocalSessionService: PlaybackSessionService {
+/// - streams media with no completed download (``LocalPlaybackError/notDownloaded``);
+/// - plays a completed download locally when every file it plays exists;
+/// - otherwise throws ``LocalPlaybackError/downloadFilesMissing(_:)`` and contacts no server: a
+///   download never falls back to streaming silently. The caller shows the error with a "Stream
+///   instead" action, which calls ``streamInstead(_:)`` and starts again.
+///
+/// Any other local failure (a store error, cancellation) is thrown as is, never streamed: past the
+/// download lookup the media may be downloaded.
+///
+/// Each later call goes to the service that owns the session. ``mediaProgress(itemID:episodeID:)``
+/// asks `remote` first even for downloaded media, so newer server progress still wins before a
+/// local start; when it fails (for example offline), downloaded media gets the progress this device
+/// last saw from the server.
+///
+/// A forced transcode (#533's `startSession(…, forceTranscode:)`, not on main yet) must always
+/// stream; add that forward here when it lands.
+public final class PreferringLocalSessionService: PlaybackSessionService {
     public let local: LocalPlaybackSessionService
     public let remote: any PlaybackSessionService
+    /// The media whose next start streams although it is downloaded.
+    private let streamingInstead = Mutex<Set<MediaKey>>([])
 
     /// `local` and `remote` must serve the same connection.
     public init(local: LocalPlaybackSessionService, remote: any PlaybackSessionService) {
@@ -24,17 +36,23 @@ public struct PreferringLocalSessionService: PlaybackSessionService {
         self.remote = remote
     }
 
+    /// The user chose "Stream instead" for `key` after ``LocalPlaybackError/downloadFilesMissing(_:)``:
+    /// its next start, and only that one, is a normal server session. A later start checks the
+    /// download again.
+    public func streamInstead(_ key: MediaKey) {
+        _ = streamingInstead.withLock { $0.insert(key) }
+    }
+
     public var serverConnectionID: UUID { remote.serverConnectionID }
 
     public func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
+        let key = MediaKey(serverConnectionID: serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
+        if streamingInstead.withLock({ $0.remove(key) != nil }) {
+            return try await remote.startSession(itemID: itemID, episodeID: episodeID)
+        }
         do {
             return try await local.startSession(itemID: itemID, episodeID: episodeID)
         } catch LocalPlaybackError.notDownloaded {
-            return try await remote.startSession(itemID: itemID, episodeID: episodeID)
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch {
-            logger.error("Local session failed to start, streaming instead: \(String(describing: error))")
             return try await remote.startSession(itemID: itemID, episodeID: episodeID)
         }
     }

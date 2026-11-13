@@ -13,8 +13,12 @@ extension LocalItemStore: LocalItemReading {}
 
 /// Why ``LocalPlaybackSessionService`` can't start a session.
 public enum LocalPlaybackError: Error, Sendable, Hashable {
-    /// The media has no completed download on this device, or one of its files is missing.
+    /// The media has no completed download on this device: it streams.
     case notDownloaded
+    /// The media has a completed download, but a file it plays is missing or unreadable. ADR 0007
+    /// §7: a download never falls back to streaming silently, so this is shown with a "Stream
+    /// instead" action (``PreferringLocalSessionService/streamInstead(_:)``).
+    case downloadFilesMissing(MediaKey)
 }
 
 /// ``PlaybackSessionService`` for downloaded media on one connection (ADR 0007, decision 7). It
@@ -23,8 +27,8 @@ public enum LocalPlaybackError: Error, Sendable, Hashable {
 ///
 /// - ``startSession(itemID:episodeID:)`` builds the session with ``LocalPlaybackSessionBuilder``:
 ///   play method local, a new UUIDv4 id, `deviceInfo`, and the saved local position (legacy
-///   parity). It throws ``LocalPlaybackError/notDownloaded`` unless every file the media plays
-///   exists.
+///   parity). It throws ``LocalPlaybackError/notDownloaded`` without a download of the media, and
+///   ``LocalPlaybackError/downloadFilesMissing(_:)`` when one of its files is missing.
 /// - ``resolveStream(for:)`` returns the files' URLs, with no transport or token.
 /// - ``mediaProgress(itemID:episodeID:)`` is the server progress this device last saw for the
 ///   media (the local row's server baseline), never the local position: the coordinator takes this
@@ -65,12 +69,21 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
         self.now = now
     }
 
-    /// The downloaded item, when every file the book or episode `episodeID` plays exists.
+    /// The downloaded item when every file the book or episode `episodeID` plays exists; `nil` when
+    /// the media has no download (``LocalPlaybackSessionBuilder/hasDownload(of:episodeID:)``).
+    ///
+    /// - Throws: ``LocalPlaybackError/downloadFilesMissing(_:)`` when it has one but a file it plays
+    ///   is missing, has no file record, or its path is invalid.
     public func playableItem(itemID: String, episodeID: String?) async throws -> LocalLibraryItemDTO? {
         guard let item = try await items.item(serverConnectionID: serverConnectionID, libraryItemId: itemID),
-            let paths = LocalPlaybackSessionBuilder.relativePaths(of: item, episodeID: episodeID),
-            paths.allSatisfy({ (try? fileURL($0)).map(fileExists) == true })
+            LocalPlaybackSessionBuilder.hasDownload(of: item, episodeID: episodeID)
         else { return nil }
+        guard let paths = LocalPlaybackSessionBuilder.relativePaths(of: item, episodeID: episodeID),
+            paths.allSatisfy({ (try? fileURL($0)).map(fileExists) == true })
+        else {
+            throw LocalPlaybackError.downloadFilesMissing(
+                MediaKey(serverConnectionID: serverConnectionID, libraryItemId: itemID, episodeId: episodeID))
+        }
         return item
     }
 
