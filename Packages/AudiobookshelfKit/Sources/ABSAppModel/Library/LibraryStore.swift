@@ -62,6 +62,9 @@ public final class LibraryStore {
     @ObservationIgnored private var latestDetailRequests: [String: Int] = [:]
     /// Services already logged as missing from the client, so each is logged once.
     @ObservationIgnored private var loggedUnavailableServices: Set<String> = []
+    /// Each account's latest shared item actions; see ``itemActions(for:)``. Kept after the
+    /// account's session ends, so its next session continues its pending queue.
+    @ObservationIgnored private var sharedItemActions: [LibraryConnectionKey: ProgressItemActions] = [:]
     /// Told of each view preferences save (``observeViewPreferences(connectionKey:owner:_:)``).
     @ObservationIgnored private var viewPreferencesObservers: [ViewPreferencesObserver] = []
     /// Told of each socket change (``observeLibraryChanges(connectionKey:owner:_:)``).
@@ -255,6 +258,44 @@ public final class LibraryStore {
     public func makeServices() -> LibraryStoreServices? {
         guard client != nil, let connectionKey else { return nil }
         return LibraryStoreServices(store: self, connectionKey: connectionKey)
+    }
+
+    /// The progress actions (``ProgressItemActions``) for the account the store serves, or `nil`
+    /// when it serves none. They change ``progress`` and write through the store's current client
+    /// (``LibraryStoreServices``), so a reconnect retargets them; offline without a client, or
+    /// after a ``clear()`` or an account switch, a write fails and is rolled back.
+    ///
+    /// Its per-item queue keeps actions on the same item in order only within one instance, so
+    /// screens and windows share the session's ``itemActions(for:)`` instead of building their own.
+    public func makeItemActions(localSync: (any ItemActionLocalSync)? = nil) -> ProgressItemActions? {
+        guard let connectionKey else { return nil }
+        return ProgressItemActions(
+            cache: progress, writer: LibraryStoreServices(store: self, connectionKey: connectionKey),
+            localSync: localSync)
+    }
+
+    /// The one ``ProgressItemActions`` of the account session `connectionKey`, shared by every
+    /// window, or `nil` while the store doesn't serve that account. Built on first use and again
+    /// once its progress session ended (a ``clear()``, so also a switch or a failed switch's
+    /// restart), so a restarted session never acts through the previous one's stale token; an
+    /// ordinary reconnect keeps it. A replacement continues the per-item queue of the same
+    /// account's previous actions only: another account's progress is independent.
+    public func itemActions(for connectionKey: LibraryConnectionKey) -> ProgressItemActions? {
+        guard self.connectionKey == connectionKey else { return nil }
+        let previous = sharedItemActions[connectionKey]
+        if let previous, previous.isCurrentSession { return previous }
+        let actions = makeItemActions()
+        // A write of the account's ended session may still be in flight: the new actions run after it.
+        if let previous { actions?.continueQueue(of: previous) }
+        sharedItemActions[connectionKey] = actions
+        return actions
+    }
+
+    /// Item actions for the account the store serves now, to inject into a window: each action
+    /// runs on that account's shared ``itemActions(for:)``, so every window shares one per-item
+    /// queue, and fails with `CancellationError` once the store serves another account.
+    public func sessionItemActions() -> SessionItemActions? {
+        connectionKey.map { SessionItemActions(store: self, connectionKey: $0) }
     }
 
     /// The store's current client as `Service` and ``clear()`` generation while it still serves
@@ -590,5 +631,50 @@ extension LibraryStoreServices: PlaylistEditingService {
     }
     public func deletePlaylist(id: String) async throws {
         try await send((any PlaylistEditingService).self) { try await $0.deletePlaylist(id: id) }
+    }
+}
+
+// MARK: ProgressWriting
+
+/// Lets ``LibraryStore/makeItemActions(localSync:)``'s actions write through the store's current
+/// client, so they follow a reconnect and stop at a clear or an account switch.
+extension LibraryStoreServices: ProgressWriting {
+    public func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
+        try await send((any ProgressWriting).self) {
+            try await $0.writeProgress(itemID: itemID, episodeID: episodeID, update: update)
+        }
+    }
+    public func progressID(itemID: String, episodeID: String?) async throws -> String? {
+        try await send((any ProgressWriting).self) { try await $0.progressID(itemID: itemID, episodeID: episodeID) }
+    }
+    public func deleteProgress(id: String) async throws {
+        try await send((any ProgressWriting).self) { try await $0.deleteProgress(id: id) }
+    }
+}
+
+// MARK: SessionItemActions
+
+/// A window's item actions for one account: forwards each action to the store's shared
+/// ``LibraryStore/itemActions(for:)`` for the account, resolved when the action runs.
+public struct SessionItemActions: ItemActionPerforming {
+    let store: LibraryStore
+    public let connectionKey: LibraryConnectionKey
+
+    private func current() throws -> ProgressItemActions {
+        guard let actions = store.itemActions(for: connectionKey) else { throw CancellationError() }
+        return actions
+    }
+
+    public func markFinished(_ target: ItemActionTarget) async throws {
+        try await current().markFinished(target)
+    }
+    public func markNotFinished(_ target: ItemActionTarget) async throws {
+        try await current().markNotFinished(target)
+    }
+    public func hideFromContinueListening(_ target: ItemActionTarget) async throws {
+        try await current().hideFromContinueListening(target)
+    }
+    public func discardProgress(_ target: ItemActionTarget) async throws {
+        try await current().discardProgress(target)
     }
 }
