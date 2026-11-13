@@ -98,8 +98,8 @@ private struct HomeScreen: View {
         // attaches a client after an offline start without one or keeps the offline session's,
         // or the server answering again, loads again even when the library is unchanged, and
         // retries a failed load or refresh even while the shelves are fresh, or, with no library
-        // yet, a failed libraries list, waiting for one in flight. Losing the connection runs it
-        // too, and makes no request.
+        // yet, a failed libraries list, waiting for either in flight. Losing the connection runs
+        // it too, and makes no request.
         .task(
             id: HomeLoadTrigger(
                 libraryID: libraryID, connection: store.connectedKey, onlineRevision: store.onlineRevision,
@@ -133,14 +133,21 @@ private struct HomeScreen: View {
                 of: store, for: trigger, isConnected: { connectionStatus == nil })
             return
         }
-        guard
-            let request = schedule.request(
-                for: trigger, libraryID: libraryID, hasLoaded: model.hasLoaded, hasError: model.error != nil,
-                isConnected: connectionStatus == nil, now: .now)
-        else { return }
-        switch request {
-        case .load: await model.load()
-        case .refresh: await model.refresh()
+        if let request = schedule.request(
+            for: trigger, libraryID: libraryID, hasLoaded: model.hasLoaded, hasError: model.error != nil,
+            isConnected: connectionStatus == nil, now: .now)
+        {
+            switch request {
+            case .load: await model.load()
+            case .refresh: await model.refresh()
+            }
+        } else {
+            // Fresh shelves without an error: a refresh in flight that may have started before
+            // the server answered again is waited for, and retried once if it fails.
+            guard
+                await HomeRefreshSchedule.updateShelvesAfterInFlight(
+                    of: model, for: trigger, isConnected: { connectionStatus == nil })
+            else { return }
         }
         schedule.recordCompletion(
             of: libraryID,

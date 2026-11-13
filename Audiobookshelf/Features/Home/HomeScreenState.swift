@@ -175,7 +175,7 @@ struct HomeRefreshSchedule {
         /// Reload the list now.
         case now
         /// Wait for the libraries request in flight, then reload the list once if it failed
-        /// (``retriesLibrariesAfterInFlight(failed:isConnected:isCancelled:)``).
+        /// (``retriesAfterInFlight(failed:isConnected:isCancelled:)``).
         case afterInFlight
     }
 
@@ -205,18 +205,39 @@ struct HomeRefreshSchedule {
         }
     }
 
-    /// Whether to reload the libraries list once the request ``LibrariesRequest/afterInFlight``
-    /// waited for has ended: only when it failed, the server can still be used and the trigger's
-    /// task wasn't cancelled (Home disappeared, or the trigger changed and runs again).
-    static func retriesLibrariesAfterInFlight(failed: Bool, isConnected: Bool, isCancelled: Bool) -> Bool {
+    /// Whether to reload the libraries list or the shelves once the request in flight that a
+    /// trigger waited for has ended (``LibrariesRequest/afterInFlight``,
+    /// ``waitsForShelvesInFlight(for:isLoading:isConnected:)``): only when it failed, the server
+    /// can still be used and the trigger's task wasn't cancelled (Home disappeared, or the trigger
+    /// changed and runs again).
+    static func retriesAfterInFlight(failed: Bool, isConnected: Bool, isCancelled: Bool) -> Bool {
         failed && isConnected && !isCancelled
     }
 
+    /// Waits for a request in flight, checking `isLoading` every `pollInterval` until it ends or
+    /// the calling task is cancelled, then runs `retry` at most once
+    /// (``retriesAfterInFlight(failed:isConnected:isCancelled:)``), so a server that keeps failing
+    /// isn't asked again until the next trigger or Retry.
+    ///
+    /// - Returns: Whether it ran `retry`.
+    @MainActor
+    @discardableResult
+    static func retryAfterInFlight(
+        isLoading: () -> Bool, failed: () -> Bool, isConnected: () -> Bool, pollInterval: Duration,
+        retry: () async -> Void
+    ) async -> Bool {
+        while isLoading(), !Task.isCancelled {
+            try? await Task.sleep(for: pollInterval)
+        }
+        guard retriesAfterInFlight(failed: failed(), isConnected: isConnected(), isCancelled: Task.isCancelled)
+        else { return false }
+        await retry()
+        return true
+    }
+
     /// Reloads `store`'s libraries list as ``librariesRequest(for:librariesFailed:librariesLoading:isConnected:)``
-    /// decides for `trigger`, while no library is selected. Behind a request in flight it checks
-    /// every `pollInterval` until that request ends or the calling task is cancelled, then reloads
-    /// the list at most once (``retriesLibrariesAfterInFlight(failed:isConnected:isCancelled:)``),
-    /// so a server whose list keeps failing isn't asked again until the next trigger or Retry.
+    /// decides for `trigger`, while no library is selected. Behind a request in flight it waits,
+    /// then reloads the list at most once (``retryAfterInFlight(isLoading:failed:isConnected:pollInterval:retry:)``).
     ///
     /// - Parameter isConnected: Whether the server can be used now (no connection banner).
     @MainActor
@@ -233,15 +254,41 @@ struct HomeRefreshSchedule {
         case .now:
             await store.refresh()
         case .afterInFlight:
-            while store.isLoading, !Task.isCancelled {
-                try? await Task.sleep(for: pollInterval)
-            }
-            if retriesLibrariesAfterInFlight(
-                failed: store.error != nil, isConnected: isConnected(), isCancelled: Task.isCancelled)
-            {
-                await store.refresh()
-            }
+            await retryAfterInFlight(
+                isLoading: { store.isLoading }, failed: { store.error != nil }, isConnected: isConnected,
+                pollInterval: pollInterval
+            ) { await store.refresh() }
         }
+    }
+
+    /// Whether `trigger`, when it makes no shelves request of its own
+    /// (``request(for:libraryID:hasLoaded:hasError:isConnected:now:)`` is `nil`: fresh shelves
+    /// without an error), waits for the load or refresh in flight and reloads the shelves once if
+    /// it fails. Only the load trigger, with the server: that request may have started before the
+    /// server answered again (pull to refresh, the Refresh command or Retry, which the trigger
+    /// doesn't cancel), and its failure would otherwise stay up until the next refresh. A trigger
+    /// that makes a request supersedes the one in flight instead.
+    static func waitsForShelvesInFlight(for trigger: Trigger, isLoading: Bool, isConnected: Bool) -> Bool {
+        trigger == .loadTrigger && isLoading && isConnected
+    }
+
+    /// Behind `model`'s load or refresh in flight that `trigger` doesn't replace
+    /// (``waitsForShelvesInFlight(for:isLoading:isConnected:)``), waits for it and refreshes the
+    /// shelves at most once (``retryAfterInFlight(isLoading:failed:isConnected:pollInterval:retry:)``).
+    ///
+    /// - Parameter isConnected: Whether the server can be used now (no connection banner).
+    /// - Returns: Whether it refreshed the shelves, so the caller records the completion.
+    @MainActor
+    static func updateShelvesAfterInFlight(
+        of model: HomeModel, for trigger: Trigger, isConnected: () -> Bool,
+        pollInterval: Duration = .milliseconds(100)
+    ) async -> Bool {
+        guard waitsForShelvesInFlight(for: trigger, isLoading: model.isLoading, isConnected: isConnected())
+        else { return false }
+        return await retryAfterInFlight(
+            isLoading: { model.isLoading }, failed: { model.error != nil }, isConnected: isConnected,
+            pollInterval: pollInterval
+        ) { await model.refresh() }
     }
 
     /// The model's state when a request it made finished.

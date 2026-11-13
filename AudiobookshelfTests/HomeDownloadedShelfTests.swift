@@ -18,20 +18,23 @@ private struct EmptyLibraryService: LibraryService {
     func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> { throw Unused() }
 }
 
-/// Answers each libraries request as scripted, holding a `.held` one until ``answer(succeeds:)``,
-/// and counts them; requests past the script fail.
+/// Answers each libraries request and each shelves request as scripted, holding a `.held` one
+/// until ``answer(succeeds:)``, and counts them; requests past their script fail.
 private actor ScriptedLibraries: LibraryService {
     enum Outcome { case fails, succeeds, held }
     struct Failure: Error {}
     struct Unused: Error {}
 
     private var outcomes: [Outcome]
+    private var shelfOutcomes: [Outcome]
     private(set) var requests = 0
+    private(set) var shelvesRequests = 0
     private let answers: AsyncStream<Bool>
     private let answersContinuation: AsyncStream<Bool>.Continuation
 
-    init(_ outcomes: [Outcome]) {
+    init(_ outcomes: [Outcome] = [], shelves: [Outcome] = []) {
         self.outcomes = outcomes
+        shelfOutcomes = shelves
         let (answers, continuation) = AsyncStream.makeStream(of: Bool.self)
         self.answers = answers
         answersContinuation = continuation
@@ -39,7 +42,17 @@ private actor ScriptedLibraries: LibraryService {
 
     func libraries() async throws -> [Library] {
         requests += 1
-        let outcome = outcomes.isEmpty ? .fails : outcomes.removeFirst()
+        try await respond(outcomes.isEmpty ? .fails : outcomes.removeFirst())
+        return []
+    }
+
+    func personalizedShelves(libraryID: String) async throws -> [Shelf] {
+        shelvesRequests += 1
+        try await respond(shelfOutcomes.isEmpty ? .fails : shelfOutcomes.removeFirst())
+        return []
+    }
+
+    private func respond(_ outcome: Outcome) async throws {
         var succeeds = outcome == .succeeds
         if outcome == .held {
             for await answer in answers {
@@ -48,16 +61,14 @@ private actor ScriptedLibraries: LibraryService {
             }
         }
         guard succeeds else { throw Failure() }
-        return []
     }
 
-    /// Ends the held request: with no libraries, or a failure.
+    /// Ends the held request: with nothing, or a failure.
     nonisolated func answer(succeeds: Bool) {
         answersContinuation.yield(succeeds)
     }
 
     func library(id: String) async throws -> LibraryWithFilterData { throw Unused() }
-    func personalizedShelves(libraryID: String) async throws -> [Shelf] { [] }
     func items(libraryID: String, query: LibraryQuery) async throws -> PagedResults<LibraryItem> { throw Unused() }
 }
 
@@ -291,7 +302,7 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
             for connected in [false, true] {
                 for cancelled in [false, true] {
                     #expect(
-                        HomeRefreshSchedule.retriesLibrariesAfterInFlight(
+                        HomeRefreshSchedule.retriesAfterInFlight(
                             failed: failed, isConnected: connected, isCancelled: cancelled)
                             == (failed && connected && !cancelled),
                         "failed \(failed), connected \(connected), cancelled \(cancelled)")
@@ -349,6 +360,77 @@ private actor ItemLibraries: ItemDetailService, PlaylistEditingService {
 
     @Test func aLibrariesRequestInFlightIsntRetriedOnceTheTriggerIsCancelled() async throws {
         #expect(try await librariesRequests(inFlightSucceeds: false, cancels: true) == 2)
+    }
+
+    /// With fresh shelves and no error, the load trigger makes no request of its own. Only it
+    /// waits for a load or refresh in flight (pull to refresh, the Refresh command or Retry, which
+    /// may have started before the server answered again), and only with the server.
+    @Test func onlyTheLoadTriggerWaitsForAShelvesRefreshInFlight() {
+        for trigger in HomeRefreshSchedule.Trigger.allCases {
+            for loading in [false, true] {
+                for connected in [false, true] {
+                    #expect(
+                        HomeRefreshSchedule.waitsForShelvesInFlight(
+                            for: trigger, isLoading: loading, isConnected: connected)
+                            == (trigger == .loadTrigger && loading && connected),
+                        "\(trigger), loading \(loading), connected \(connected)")
+                }
+            }
+        }
+    }
+
+    /// The shelves requests made in all when the shelves loaded, a refresh started (pull to
+    /// refresh, before the connection went), and Home's load trigger fires on the reconnect while
+    /// that refresh is in flight, with fresh shelves and no error; then the connection drops, if
+    /// asked, and the refresh ends with shelves or a failure. The load is request 1, the refresh
+    /// in flight request 2, so 3 is exactly one reload, which succeeds. Also whether Home's
+    /// shelves end without an error, and whether the helper reports its reload.
+    private func shelvesRequests(
+        inFlightSucceeds succeeds: Bool, dropsConnection: Bool = false
+    ) async throws -> (requests: Int, cleared: Bool, refreshed: Bool) {
+        let service = ScriptedLibraries(shelves: [.succeeds, .held, .succeeds])
+        let suiteName = "HomeDownloadedShelfTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = LibraryStore(settings: AppSettings(defaults: defaults))
+        store.attach(client: service, connectionKey: LibraryConnectionKey(connectionID: connectionID, userID: "u"))
+        let model = HomeModel(store: store, libraryID: "lib")
+        await model.load()
+        #expect(model.hasLoaded && model.error == nil && !model.isLoading)
+
+        let inFlight = Task { await model.refresh() }
+        while !model.isLoading { await Task.yield() }
+        let connection = UsableConnection()
+        // Runs until it waits, so it decides while the refresh is in flight.
+        let update = Task.immediate { @MainActor in
+            await HomeRefreshSchedule.updateShelvesAfterInFlight(
+                of: model, for: .loadTrigger, isConnected: { connection.isUsable }, pollInterval: .milliseconds(5))
+        }
+        #expect(model.isLoading)
+        if dropsConnection { connection.isUsable = false }
+        service.answer(succeeds: succeeds)
+        await inFlight.value
+        let refreshed = await update.value
+        #expect(!model.isLoading)
+        return (await service.shelvesRequests, model.error == nil, refreshed)
+    }
+
+    @Test func aShelvesRefreshInFlightOnTheLoadTriggerThatFailsIsRetriedOnce() async throws {
+        let result = try await shelvesRequests(inFlightSucceeds: false)
+        #expect(result.requests == 3)
+        #expect(result.cleared && result.refreshed)
+    }
+
+    @Test func aShelvesRefreshInFlightOnTheLoadTriggerThatSucceedsIsntRetried() async throws {
+        let result = try await shelvesRequests(inFlightSucceeds: true)
+        #expect(result.requests == 2)
+        #expect(result.cleared && !result.refreshed)
+    }
+
+    @Test func aShelvesRefreshInFlightIsntRetriedOnceTheConnectionDrops() async throws {
+        let result = try await shelvesRequests(inFlightSucceeds: false, dropsConnection: true)
+        #expect(result.requests == 2)
+        #expect(!result.cleared && !result.refreshed)
     }
 
     /// Losing the connection runs Home's load trigger again: no trigger, not even pull to refresh,
