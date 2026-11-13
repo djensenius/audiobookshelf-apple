@@ -13,6 +13,13 @@ import Observation
 ///   ``DownloadRequestOutcome/denied(_:)``, without queueing anything. After the user agrees,
 ///   ``confirmMeteredDownload(item:episodeID:connectionID:)`` queues it, as the legacy confirm
 ///   dialog did. Once approved, the download keeps going on the metered path.
+/// - Both belong to the account session running when they're called (``DownloadRequestSessions``):
+///   without one for the connection, or if its user may not download (`permissions.download`),
+///   they return ``DownloadRequestOutcome/rejected(_:)`` at once. If that session ends while the
+///   request waits for the path, or a sign-out, expiry or removal stops the connection's downloads
+///   before its record is saved (``DownloadManager/quiesceGeneration()``), nothing is queued and it
+///   returns ``DownloadRequestError/sessionEnded``. A switch away that comes later still saves the
+///   record; a switch keeps the connection's downloads running anyway.
 /// - Under ``CellularPolicy/ask``, transfers the user didn't start now aren't asked about: the
 ///   engine's retries, resumes at relaunch, restarts, and new tasks after a path change all run
 ///   with the flags ``CellularPolicy/ask`` allows. A resume or retry the user starts (#75) must go
@@ -64,6 +71,7 @@ public final class DownloadsController {
     @ObservationIgnored private let policy: NetworkPolicy
     @ObservationIgnored private let storedRecords: @Sendable () async throws -> [DownloadRecordDTO]
     @ObservationIgnored private let pathTimeout: Duration
+    @ObservationIgnored private let sessions: @MainActor (UUID) -> DownloadRequestSession?
     /// The first ``start()``'s work; later calls wait for it.
     @ObservationIgnored private var startup: Task<Void, Never>?
     @ObservationIgnored private var tasks: [Task<Void, Never>] = []
@@ -84,6 +92,8 @@ public final class DownloadsController {
     ///     to requests.
     ///   - storedRecords: the records stored when ``start()`` runs, for example
     ///     `DownloadStore.allRecords()`.
+    ///   - sessions: the running session of a connection, or `nil`, for example
+    ///     ``DownloadRequestSessions/session(for:)``.
     ///   - pathTimeout: how long a request waits for the first network path before it is allowed.
     public init(
         manager: any DownloadManaging,
@@ -91,9 +101,11 @@ public final class DownloadsController {
         settings: AppSettings,
         networkAccess: DownloadNetworkAccess,
         storedRecords: @escaping @Sendable () async throws -> [DownloadRecordDTO],
+        sessions: @escaping @MainActor (UUID) -> DownloadRequestSession?,
         pathTimeout: Duration = .milliseconds(500)
     ) {
         self.manager = manager
+        self.sessions = sessions
         self.settings = settings
         self.networkAccess = networkAccess
         policy = NetworkPolicy(
@@ -184,8 +196,13 @@ public final class DownloadsController {
     ///
     /// - Parameter item: an expanded item (`ItemEndpoints.item(id:)`) of the server `connectionID`.
     public func request(item: LibraryItem, episodeID: String?, connectionID: UUID) async -> DownloadRequestOutcome {
-        switch await gate(waitingForPath: true) {
-        case .allowed: await enqueue(item: item, episodeID: episodeID, connectionID: connectionID)
+        let begun: BegunRequest
+        switch await begin(connectionID: connectionID) {
+        case .success(let request): begun = request
+        case .failure(let error): return .rejected(error)
+        }
+        return switch await gate(waitingForPath: true) {
+        case .allowed: await enqueue(item: item, episodeID: episodeID, connectionID: connectionID, begun: begun)
         case .askUser(let reason): .needsConfirmation(reason)
         case .denied(let reason): .denied(reason)
         }
@@ -196,8 +213,19 @@ public final class DownloadsController {
     public func confirmMeteredDownload(
         item: LibraryItem, episodeID: String?, connectionID: UUID
     ) async -> DownloadRequestOutcome {
+        let begun: BegunRequest
+        switch await begin(connectionID: connectionID) {
+        case .success(let request): begun = request
+        case .failure(let error): return .rejected(error)
+        }
         if case .denied(let reason) = await gate(waitingForPath: false) { return .denied(reason) }
-        return await enqueue(item: item, episodeID: episodeID, connectionID: connectionID)
+        return await enqueue(item: item, episodeID: episodeID, connectionID: connectionID, begun: begun)
+    }
+
+    /// Whether a request for `connectionID` would be let through now: one of its sessions is
+    /// running and its user may download. Screens show their download actions by it.
+    public func canRequest(connectionID: UUID) -> Bool {
+        sessions(connectionID)?.canDownload == true
     }
 
     /// Whether a download the user starts may go ahead on the current path under the download
@@ -207,12 +235,37 @@ public final class DownloadsController {
         waitingForPath ? await policy.canDownload(waitingUpTo: pathTimeout) : policy.canDownload()
     }
 
-    private func enqueue(item: LibraryItem, episodeID: String?, connectionID: UUID) async -> DownloadRequestOutcome {
+    /// The session a request began in, and the manager's quiesce generation then.
+    private struct BegunRequest {
+        let sessionID: UInt64
+        let generation: Int
+    }
+
+    /// The request's session, if one is running for `connectionID` and its user may download. The
+    /// generation is taken first, so a quiesce that began after it is caught when the record is
+    /// saved, whenever the session is seen to end.
+    private func begin(connectionID: UUID) async -> Result<BegunRequest, DownloadRequestError> {
+        let generation = await manager.quiesceGeneration()
+        guard let session = sessions(connectionID) else { return .failure(.sessionEnded) }
+        guard session.canDownload else { return .failure(.notPermitted) }
+        return .success(BegunRequest(sessionID: session.sessionID, generation: generation))
+    }
+
+    private func enqueue(
+        item: LibraryItem, episodeID: String?, connectionID: UUID, begun: BegunRequest
+    ) async -> DownloadRequestOutcome {
+        // The path wait, or the user's decision, may have outlasted the session or the permission.
+        guard let session = sessions(connectionID), session.sessionID == begun.sessionID else {
+            return .rejected(.sessionEnded)
+        }
+        guard session.canDownload else { return .rejected(.notPermitted) }
         do {
             return .started(
                 try await manager.enqueue(
-                    item: item, episodeID: episodeID, connectionID: connectionID, replacingExisting: false))
+                    item: item, episodeID: episodeID, connectionID: connectionID, replacingExisting: false,
+                    unlessQuiescedSince: begun.generation))
         } catch {
+            if case .downloadsStopped = error { return .rejected(.sessionEnded) }
             return .failed(error)
         }
     }

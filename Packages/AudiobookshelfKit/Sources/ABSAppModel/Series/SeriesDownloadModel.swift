@@ -12,6 +12,8 @@ public protocol DownloadRequesting: Sendable {
     /// See ``DownloadsController/confirmMeteredDownload(item:episodeID:connectionID:)``.
     func confirmMeteredDownload(item: LibraryItem, episodeID: String?, connectionID: UUID) async
         -> DownloadRequestOutcome
+    /// See ``DownloadsController/canRequest(connectionID:)``.
+    func canRequest(connectionID: UUID) -> Bool
 }
 
 /// What a screen needs to queue downloads for the signed-in account: the download queue and the
@@ -96,8 +98,10 @@ public struct SeriesDownloadPlan: Sendable, Hashable {
 ///   with ``Prompt/meteredDenied``. Books that couldn't be fetched or queued are counted in
 ///   ``Prompt/queueFailed(count:)``.
 /// - A `CancellationError` (the account signed out or switched), or cancelling the task that runs a
-///   step, ends it without a prompt. Without the user's download permission, nothing is listed or
-///   queued, and losing it while queueing drops the rest of the plan.
+///   step, ends it without a prompt. Without the user's download permission
+///   (``DownloadRequesting/canRequest(connectionID:)``), nothing is listed or queued, and losing it
+///   or the session while queueing (``DownloadRequestOutcome/rejected(_:)``) drops the rest of the
+///   plan.
 /// - Listing stops at a page that adds no new book, and fails past ``maxBooks``, or at a page with
 ///   rows that didn't decode, rather than offering part of the series.
 ///
@@ -132,29 +136,26 @@ public final class SeriesDownloadModel {
     @ObservationIgnored private let access: DownloadAccess
     @ObservationIgnored private let pageSize: Int
     @ObservationIgnored private let maxBooks: Int
-    /// Whether the signed-in user may download, read at each step.
-    @ObservationIgnored private let permitted: @MainActor () -> Bool
     /// The books still to queue once the user confirms.
     @ObservationIgnored private var pending: [String] = []
     @ObservationIgnored private var failures = 0
 
     public init(
         seriesID: String, connectionID: UUID, service: any SeriesAuthorsService & ItemDetailService,
-        access: DownloadAccess, permitted: @escaping @MainActor () -> Bool, pageSize: Int = 50,
+        access: DownloadAccess, pageSize: Int = 50,
         maxBooks: Int = 10_000
     ) {
         self.seriesID = seriesID
         self.connectionID = connectionID
         self.service = service
         self.access = access
-        self.permitted = permitted
         self.pageSize = max(pageSize, 1)
         self.maxBooks = max(maxBooks, 1)
     }
 
     /// Lists the series' books in `libraryID` that aren't downloaded or queued, and prompts.
     public func start(libraryID: String) async {
-        guard !isWorking, permitted() else { return }
+        guard !isWorking, access.requester.canRequest(connectionID: connectionID) else { return }
         isWorking = true
         defer { isWorking = false }
         pending = []
@@ -217,7 +218,7 @@ public final class SeriesDownloadModel {
 
     private func queue(metered: Bool) async {
         guard !isWorking else { return }
-        guard permitted() else { return cancel() }
+        guard access.requester.canRequest(connectionID: connectionID) else { return cancel() }
         isWorking = true
         defer { isWorking = false }
         while let id = pending.first {
@@ -232,8 +233,9 @@ public final class SeriesDownloadModel {
                 pending.removeFirst()
                 continue
             }
-            // The account may have reconnected without download permission during the fetch.
-            guard permitted() else { return cancel() }
+            // The account may have reconnected without download permission during the fetch; the
+            // requester checks again, and rejects the request if the session ended meanwhile.
+            guard access.requester.canRequest(connectionID: connectionID) else { return cancel() }
             let outcome =
                 metered
                 ? await access.requester.confirmMeteredDownload(item: item, episodeID: nil, connectionID: connectionID)
@@ -248,6 +250,8 @@ public final class SeriesDownloadModel {
                 cancel()
                 prompt = .meteredDenied
                 return
+            case .rejected:
+                return cancel()
             case .failed(let error):
                 Log.downloads.error(
                     "Couldn't queue a series book: \(RealtimeBridge.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"

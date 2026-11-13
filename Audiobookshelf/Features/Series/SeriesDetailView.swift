@@ -14,7 +14,6 @@ struct SeriesDetailView: View {
     @Environment(Router.self) private var router: Router?
     @Environment(AppSettings.self) private var settings: AppSettings?
     @Environment(\.downloadAccess) private var downloadAccess
-    @Environment(AccountManager.self) private var accounts: AccountManager?
     @State private var host: BrowseModelHost<SeriesDetailModel>?
     @State private var download: SeriesDownloadModel?
 
@@ -51,12 +50,11 @@ struct SeriesDetailView: View {
         }
     }
 
-    /// Whether the signed-in user of `key`'s account may download (`permissions.download`).
+    /// Whether `key`'s account session is running and its user may download (`permissions.download`), by the
+    /// same check every download request passes (``DownloadRequesting/canRequest(connectionID:)``).
     private func canDownload(_ key: BrowseModelKey?) -> Bool {
-        guard let accounts, let id = key?.connection.connectionID, accounts.activeConnection?.id == id else {
-            return false
-        }
-        return accounts.authorization?.user.permissions.download ?? false
+        guard let id = key?.connection.connectionID else { return false }
+        return downloadAccess?.requester.canRequest(connectionID: id) ?? false
     }
 
     /// The current download model while it serves `key`'s account, else a new one; `nil` when Download Series
@@ -70,11 +68,7 @@ struct SeriesDetailView: View {
         else { return nil }
         if let download, download.connectionID == connectionID { return download }
         return SeriesDownloadModel(
-            seriesID: seriesID, connectionID: connectionID, service: services, access: downloadAccess,
-            permitted: { [accounts] in
-                accounts?.activeConnection?.id == connectionID
-                    && accounts?.authorization?.user.permissions.download == true
-            })
+            seriesID: seriesID, connectionID: connectionID, service: services, access: downloadAccess)
     }
 }
 

@@ -18,6 +18,8 @@ struct AppDownloads {
     let janitor: DownloadJanitor
     let controller: DownloadsController
     let lifecycle: DownloadsLifecycle
+    /// Registered after ``lifecycle``; see ``DownloadRequestSessions``.
+    let sessions: DownloadRequestSessions
     let access: DownloadAccess
 
     /// - Parameters:
@@ -52,9 +54,10 @@ struct AppDownloads {
             manager: manager, connections: ServerConnectionStore(modelContainer: dataStack.container),
             dataStack: dataStack)
         let monitor = NetworkMonitor()
+        let sessions = DownloadRequestSessions(accounts: accounts)
         let controller = DownloadsController(
             manager: manager, monitor: monitor, settings: settings, networkAccess: networkAccess,
-            storedRecords: { try await store.allRecords() })
+            storedRecords: { try await store.allRecords() }, sessions: { sessions.session(for: $0) })
         let lifecycle = DownloadsLifecycle(
             engine: engine, manager: manager,
             records: { try await store.records(serverConnectionID: $0) },
@@ -70,6 +73,7 @@ struct AppDownloads {
             })
         return AppDownloads(
             engine: engine, manager: manager, janitor: janitor, controller: controller, lifecycle: lifecycle,
+            sessions: sessions,
             access: DownloadAccess(
                 requester: controller, status: StoredDownloadStatus(localItems: localItems, records: store)))
     }

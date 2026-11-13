@@ -17,4 +17,7 @@ public enum DownloadRequestOutcome: Sendable, Equatable {
     case denied(MeteredReason)
     /// The manager couldn't queue the download.
     case failed(DownloadManagerError)
+    /// Refused before anything was queued: the user may not download, or the session the request
+    /// was made in ended.
+    case rejected(DownloadRequestError)
 }

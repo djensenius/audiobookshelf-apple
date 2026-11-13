@@ -4,7 +4,7 @@ import Foundation
 
 /// Turns server items and podcast episodes into downloads, and reports what happens to them.
 ///
-/// - ``enqueue(item:episodeID:connectionID:replacingExisting:)`` plans a ``DownloadRecordDTO``
+/// - ``enqueue(item:episodeID:connectionID:replacingExisting:unlessQuiescedSince:)`` plans a ``DownloadRecordDTO``
 ///   (``DownloadPlanner``), skips media that is already queued or downloaded, checks the disk
 ///   space, saves the record and starts its parts on the engine.
 /// - ``pause(recordID:)``, ``resume(recordID:)``, ``retry(recordID:)``, ``cancel(recordID:)``
@@ -20,7 +20,7 @@ import Foundation
 /// Share the ``DownloadStore`` with the engine (one actor, so its compare-and-set holds), and
 /// call ``start()`` before the engine's first `activate()`.
 public actor DownloadManager {
-    /// What ``enqueue(item:episodeID:connectionID:replacingExisting:)`` did.
+    /// What ``enqueue(item:episodeID:connectionID:replacingExisting:unlessQuiescedSince:)`` did.
     public enum EnqueueResult: Sendable, Equatable {
         /// A new download record was saved and its parts started.
         case started(UUID)
@@ -268,20 +268,31 @@ public actor DownloadManager {
     /// can't be read, the download is queued anyway; in both cases the engine's `outOfSpace`
     /// failure catches a full disk.
     ///
+    /// A request the user made in an account's session passes the ``quiesceGeneration()`` taken
+    /// when it began as `generation`: once a sign-out, expiry or removal has stopped the server's
+    /// downloads (``DownloadEngine/quiesce(connectionID:pausing:)``) under way then or since, it
+    /// throws ``DownloadManagerError/downloadsStopped(_:)`` and queues nothing. It checks before
+    /// its first write and again once the new record is saved, as
+    /// ``DownloadEngine/resume(recordID:unlessQuiescedSince:)`` does: a quiesce that begins later
+    /// finds the record queued and pauses it with the others. An existing paused or failed record
+    /// stays paused.
+    ///
     /// - Parameter item: an expanded item (`ItemEndpoints.item(id:)`).
     /// - Throws: a ``DownloadManagerError``.
     public func enqueue(
-        item: LibraryItem, episodeID: String?, connectionID: UUID, replacingExisting: Bool = false
+        item: LibraryItem, episodeID: String?, connectionID: UUID, replacingExisting: Bool = false,
+        unlessQuiescedSince generation: Int? = nil
     ) async throws(DownloadManagerError) -> EnqueueResult {
         let itemKey = MediaKey(serverConnectionID: connectionID, libraryItemId: item.id)
         await beginEnqueuing(itemKey)
         defer { endEnqueuing(itemKey) }
+        try await ensureNotQuiesced(connectionID, since: generation)
         let key = MediaKey(serverConnectionID: connectionID, libraryItemId: item.id, episodeId: episodeID)
         var existing = try await read { try await self.store.record(key: key) }
         // A cover-only record (#326) shares a podcast's item-level key; it isn't this download.
         if existing?.isCoverOnly == true { existing = nil }
         if let record = existing, !replacingExisting {
-            if let result = try await keep(record, item: item) { return result }
+            if let result = try await keep(record, item: item, unlessQuiescedSince: generation) { return result }
             // The record was finalised or deleted meanwhile: plan as if it never existed.
             existing = nil
         }
@@ -326,10 +337,32 @@ public actor DownloadManager {
             _ = try await read { try await self.store.deleteRecord(existing.id) }
         }
         let record = try await read { try await self.store.upsertRecord(plan).record }
+        if let generation, await engine.hasQuiesced(connectionID: connectionID, since: generation) {
+            // One that can't be deleted is paused instead, so no activation starts it.
+            do {
+                _ = try await read { try await self.store.deleteRecord(record.id) }
+            } catch {
+                _ = try? await read { try await self.store.setState(.paused, forRecord: record.id) }
+            }
+            throw .downloadsStopped(connectionID)
+        }
         track(record)
         emit(.recordChanged(record))
         await engine.start(partIDs: record.parts.map(\.id))
         return .started(record.id)
+    }
+
+    /// The engine's quiesce count now, for the `unlessQuiescedSince` of
+    /// ``enqueue(item:episodeID:connectionID:replacingExisting:unlessQuiescedSince:)``.
+    public func quiesceGeneration() async -> Int {
+        await engine.quiesceGeneration()
+    }
+
+    /// Throws ``DownloadManagerError/downloadsStopped(_:)`` if a quiesce of `connectionID` was under
+    /// way at, or began since, `generation`.
+    private func ensureNotQuiesced(_ connectionID: UUID, since generation: Int?) async throws(DownloadManagerError) {
+        guard let generation, await engine.hasQuiesced(connectionID: connectionID, since: generation) else { return }
+        throw .downloadsStopped(connectionID)
     }
 
     /// Waits until no other enqueue, control or deletion of the item is under way, then claims it.
@@ -362,14 +395,23 @@ public actor DownloadManager {
     /// Keeps an existing record, resuming it when it is paused or failed and its remaining bytes
     /// fit; `nil` when the record is gone by the time it is resumed.
     private func keep(
-        _ record: DownloadRecordDTO, item: LibraryItem
+        _ record: DownloadRecordDTO, item: LibraryItem, unlessQuiescedSince generation: Int?
     ) async throws(DownloadManagerError) -> EnqueueResult? {
         if tracked[record.id] == nil { track(record) }
         switch record.state {
         case .paused, .failed:
             // The disk may have filled since it was queued (it may have failed `outOfSpace`).
             try await checkCapacity(for: record, item: item)
-            guard try await read({ try await self.engine.resume(recordID: record.id) }) else {
+            let resumed = try await read {
+                if let generation {
+                    try await self.engine.resume(recordID: record.id, unlessQuiescedSince: generation)
+                } else {
+                    try await self.engine.resume(recordID: record.id)
+                }
+            }
+            guard resumed else {
+                // Kept paused by a quiesce, so it still exists; else finalised or deleted.
+                try await ensureNotQuiesced(record.key.serverConnectionID, since: generation)
                 forget(record.id)
                 return nil
             }
@@ -540,7 +582,7 @@ public actor DownloadManager {
 
     /// The key of a downloaded book, for a record that wasn't tracked. An episode's key can't be
     /// told from its local item, so an episode record the manager never tracked (saved after
-    /// ``start()`` by something other than ``enqueue(item:episodeID:connectionID:replacingExisting:)``,
+    /// ``start()`` by something other than ``enqueue(item:episodeID:connectionID:replacingExisting:unlessQuiescedSince:)``,
     /// and gone before any of its updates was handled) completes without a
     /// ``DownloadManagerEvent/completed(recordID:itemID:key:)`` event.
     private func bookKey(ofLocalItem itemID: UUID) async -> MediaKey? {

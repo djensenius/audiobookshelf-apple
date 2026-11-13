@@ -788,6 +788,83 @@ import Testing
         #expect(await manager.subscriberCount == 1)
     }
 
+    // MARK: - Stopped downloads (#492)
+
+    @Test func aRequestFromBeforeAQuiesceQueuesNothing() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let generation = await manager.quiesceGeneration()
+        await fixture.engine.quiesce(since: generation)
+
+        await #expect(throws: DownloadManagerError.downloadsStopped(fixture.connectionID)) {
+            try await manager.enqueue(
+                item: LibraryItemFixtures.book(), episodeID: nil, connectionID: fixture.connectionID,
+                unlessQuiescedSince: generation)
+        }
+        #expect(try await fixture.store.allRecords().isEmpty)
+        #expect(await fixture.engine.started.isEmpty)
+    }
+
+    /// A quiesce that begins after the first check, and pauses what's queued before this record
+    /// is saved, is caught by the check after the save.
+    @Test func aQuiesceDuringTheEnqueueDeletesTheNewRecord() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let events = await manager.events()
+        let generation = await manager.quiesceGeneration()
+        await fixture.engine.quiesce(afterNextCheckSince: generation)
+
+        await #expect(throws: DownloadManagerError.downloadsStopped(fixture.connectionID)) {
+            try await manager.enqueue(
+                item: LibraryItemFixtures.book(), episodeID: nil, connectionID: fixture.connectionID,
+                unlessQuiescedSince: generation)
+        }
+        #expect(try await fixture.store.allRecords().isEmpty)
+        #expect(await fixture.engine.started.isEmpty)
+        // Nothing was reported, so the next event is the next enqueue's.
+        let item = LibraryItemFixtures.book()
+        _ = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(await events.next { _ in true } == .recordChanged(record))
+    }
+
+    @Test func aPausedRecordStaysPausedAfterAQuiesce() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let item = LibraryItemFixtures.book()
+        guard
+            case .started(let recordID) = try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID)
+        else {
+            Issue.record("Not started")
+            return
+        }
+        try await fixture.store.setState(.paused, forRecord: recordID)
+        let generation = await manager.quiesceGeneration()
+        await fixture.engine.quiesce(afterNextCheckSince: generation)
+
+        await #expect(throws: DownloadManagerError.downloadsStopped(fixture.connectionID)) {
+            try await manager.enqueue(
+                item: item, episodeID: nil, connectionID: fixture.connectionID, unlessQuiescedSince: generation)
+        }
+        #expect(try await fixture.store.record(id: recordID)?.state == .paused)
+        #expect(await fixture.engine.resumed.isEmpty)
+    }
+
+    /// The control: without a generation, a quiesce doesn't stop the enqueue (internal callers).
+    @Test func withoutAGenerationAQuiesceIsIgnored() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        await fixture.engine.quiesce(since: await manager.quiesceGeneration())
+        let item = LibraryItemFixtures.book()
+
+        let result = try await manager.enqueue(item: item, episodeID: nil, connectionID: fixture.connectionID)
+
+        let record = try #require(try await fixture.store.record(key: fixture.key(item)))
+        #expect(result == .started(record.id))
+        #expect(await fixture.engine.started == [record.parts.map(\.id)])
+    }
+
     @Test func readsTheVolumeCapacity() throws {
         let root = FileManager.default.temporaryDirectory.appending(path: "capacity-\(UUID().uuidString)")
         // The downloads folder doesn't exist yet: its volume is still found.
