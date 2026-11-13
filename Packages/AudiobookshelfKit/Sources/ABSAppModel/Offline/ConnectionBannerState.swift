@@ -57,6 +57,10 @@ public struct ConnectionReachability: Sendable, Hashable {
         case pathChanged(isOnline: Bool)
         /// The user asked to try again, or a check is wanted now, such as at launch.
         case retry
+        /// The online path was replaced by another online one: another interface, or a new
+        /// `onlineEpoch` showing an offline path the stream coalesced away. Checks the server as
+        /// ``retry`` does, and the next ping to succeed bumps ``verifiedRevision``.
+        case routeChanged
         /// A scheduled ping started.
         case pingStarted(attempt: UInt64)
         case pingSucceeded(attempt: UInt64)
@@ -119,6 +123,10 @@ public struct ConnectionReachability: Sendable, Hashable {
             attempt += 1
             if case .serverUnreachable = state { state = .serverUnreachable(retryAt: nil) }
             return .ping(attempt: attempt, delay: .zero)
+        case .routeChanged:
+            guard isNetworkOnline else { return .none }
+            isVerified = false
+            return reduce(.retry)
         case .pingStarted(let started):
             guard started == attempt, case .serverUnreachable = state else { return .none }
             state = .serverUnreachable(retryAt: nil)

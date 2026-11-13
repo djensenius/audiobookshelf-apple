@@ -361,7 +361,8 @@ struct HomeRefreshSchedule {
     enum VerificationRequest: Equatable {
         /// Retry the failed shelves now, as the load trigger does after an error.
         case shelves
-        /// Wait for the shelves load or refresh in flight, and retry it once if it fails.
+        /// Wait for the shelves load or refresh in flight, and retry it once if it fails; then
+        /// the libraries list as ``libraries`` does, unless that retry's completion checked it.
         case shelvesAfterInFlight
         /// Reload the failed libraries list, or wait for the request in flight and reload it once
         /// if it fails (``librariesRequest(for:librariesFailed:librariesLoading:isConnected:)``).
@@ -416,7 +417,12 @@ struct HomeRefreshSchedule {
             if await updateShelvesAfterInFlight(
                 of: model, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
             {
+                // Home's completion checks the libraries list as after its own requests.
                 await refreshed()
+            } else if !Task.isCancelled {
+                // The list may have failed meanwhile, or still be in flight.
+                await updateLibraries(
+                    of: store, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
             }
         case .libraries:
             await updateLibraries(of: store, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
@@ -449,6 +455,30 @@ struct HomeRefreshSchedule {
     /// Records a successful load or refresh of `libraryID`.
     mutating func markLoaded(libraryID: String, at date: Date) {
         loaded = (libraryID, date)
+    }
+}
+
+/// Which of the connection banner's verified revisions Home has handled
+/// (``HomeRefreshSchedule/updateAfterVerification(of:store:isConnected:pollInterval:retry:refreshed:)``).
+/// The revision Home first sees is handled already; a later one stays pending until its recovery
+/// finishes without being cancelled (Home left), so Home handles it when it appears again. That
+/// repeats nothing that completed: the recovery only retries what still failed or is in flight.
+struct HomeVerificationTracker {
+    private(set) var handled: UInt64?
+
+    /// Whether `revision` needs recovery; the first revision seen is recorded as handled.
+    mutating func needsRecovery(_ revision: UInt64) -> Bool {
+        guard let handled else {
+            handled = revision
+            return false
+        }
+        return handled != revision
+    }
+
+    /// Records `revision`'s recovery as finished, unless it was cancelled.
+    mutating func finish(_ revision: UInt64, isCancelled: Bool) {
+        guard !isCancelled else { return }
+        handled = revision
     }
 }
 

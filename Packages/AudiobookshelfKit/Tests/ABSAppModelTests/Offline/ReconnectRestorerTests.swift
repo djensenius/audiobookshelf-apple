@@ -210,4 +210,21 @@ private final class Account {
         run.cancel()
         await run.value
     }
+
+    /// A disconnect seen only as two online snapshots with different `onlineEpoch`s still bumps
+    /// the verified revision once the server answers (#570).
+    @Test func twoOnlineSnapshotsOfDifferentEpochsBumpTheVerifiedRevision() async {
+        let (paths, feed) = AsyncStream.makeStream(of: NetworkPath.self)
+        let model = ConnectionBannerModel(paths: { paths }, ping: {}, clock: ManualClock())
+        let run = Task { await model.run() }
+        feed.yield(.wifi)
+        #expect(await eventually { model.verifiedRevision == 1 })
+        var reconnected = NetworkPath.wifi
+        reconnected.onlineEpoch = 1
+        feed.yield(reconnected)
+        #expect(await eventually { model.verifiedRevision == 2 })
+        #expect(model.state == .online)
+        run.cancel()
+        await run.value
+    }
 }

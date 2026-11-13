@@ -104,6 +104,23 @@ import Testing
         #expect(reachability.state == .online && reachability.verifiedRevision == 3)
     }
 
+    /// Another online route (a disconnect the path stream coalesced into a new `onlineEpoch`)
+    /// checks the server as a retry does, and its confirming ping bumps the revision again.
+    @Test func aRouteChangeChecksAgainAndItsConfirmationBumpsTheRevision() {
+        var reachability = ConnectionReachability()
+        _ = reachability.reduce(.retry)
+        _ = reachability.reduce(.pingSucceeded(attempt: 1))
+        #expect(reachability.verifiedRevision == 1)
+
+        #expect(reachability.reduce(.routeChanged) == .ping(attempt: 2, delay: .zero))
+        #expect(reachability.state == .online && reachability.verifiedRevision == 1)
+        _ = reachability.reduce(.pingSucceeded(attempt: 2))
+        #expect(reachability.verifiedRevision == 2)
+
+        _ = reachability.reduce(.pathChanged(isOnline: false))
+        #expect(reachability.reduce(.routeChanged) == .none)
+    }
+
     @Test func statesExplainThemselves() {
         #expect(ConnectionBannerState.online.messageKey == nil)
         #expect(ConnectionBannerState.offline(.noNetwork).messageKey == "MessageNoNetworkConnection")

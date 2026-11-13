@@ -57,8 +57,8 @@ private struct HomeScreen: View {
     /// `nil` without a download stack.
     @State private var downloaded: DownloadedShelfModel?
     @State private var schedule = HomeRefreshSchedule()
-    /// The connection banner's verified revision Home last handled; `nil` before it appeared.
-    @State private var handledVerification: UInt64?
+    /// The connection banner's verified revisions Home has handled.
+    @State private var verifications = HomeVerificationTracker()
     /// The key of the message for the last failed action, kept while the alert is dismissed.
     @State private var failureKey: String?
     @State private var showsFailure = false
@@ -114,15 +114,14 @@ private struct HomeScreen: View {
         // between, or waits for what's in flight, without cancelling the load above (#570).
         .task(id: connectionBanner?.model.verifiedRevision ?? 0) {
             let revision = connectionBanner?.model.verifiedRevision ?? 0
-            let handled = handledVerification
-            handledVerification = revision
-            guard let handled, handled != revision else { return }
+            guard verifications.needsRecovery(revision) else { return }
             await HomeRefreshSchedule.updateAfterVerification(
                 of: model, store: store, isConnected: { connectionStatus == nil },
                 retry: { await update(.loadTrigger) },
                 refreshed: {
                     if let libraryID = model.libraryID { await finishShelves(of: libraryID, for: .loadTrigger) }
                 })
+            verifications.finish(revision, isCancelled: Task.isCancelled)
         }
         // The downloads follow the store live, online and offline.
         .task(id: store.connectionKey?.connectionID) {

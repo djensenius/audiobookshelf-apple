@@ -71,7 +71,7 @@ public final class ConnectionBannerModel {
             guard !Task.isCancelled, generation == runGeneration else { break }
             let wasOffline = state == .offline(.noNetwork)
             send(.pathChanged(isOnline: path.isOnline))
-            if path.isOnline, !wasOffline, let previous, previous != path { send(.retry) }
+            if path.isOnline, !wasOffline, let previous, previous != path { send(.routeChanged) }
             previous = path
         }
         if generation == runGeneration { perform(.cancelPing) }
