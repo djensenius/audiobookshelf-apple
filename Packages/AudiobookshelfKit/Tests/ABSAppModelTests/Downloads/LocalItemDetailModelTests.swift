@@ -83,10 +83,13 @@ private actor FakeLocalStore: DownloadControlling {
     }
 
     func enqueue(
-        item: LibraryItem, episodeID: String?, connectionID: UUID, replacingExisting: Bool
+        item: LibraryItem, episodeID: String?, connectionID: UUID, replacingExisting: Bool,
+        unlessQuiescedSince generation: Int?
     ) async throws(DownloadManagerError) -> DownloadManager.EnqueueResult {
         .started(UUID())
     }
+
+    func quiesceGeneration() async -> Int { 0 }
 
     func restartActiveTransfers() async throws(DownloadManagerError) {}
 
@@ -138,7 +141,7 @@ struct LocalItemDetailModelTests {
         let controller = DownloadsController(
             manager: store, monitor: monitor, settings: AppSettings(defaults: defaults),
             networkAccess: DownloadNetworkAccess(defaults: defaults, treatsExpensiveAsCellular: false),
-            storedRecords: { [] }, pathTimeout: .seconds(30))
+            storedRecords: { [] }, sessions: { _ in nil }, pathTimeout: .seconds(30))
         let updates: (@Sendable (UUID) async throws -> AsyncStream<[LocalLibraryItemDTO]>)? =
             storeUpdates ? { @Sendable connectionID in await store.updates(connectionID) } : nil
         let services = DownloadsServices(
