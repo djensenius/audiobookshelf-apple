@@ -81,4 +81,8 @@ final class ScopePlayback: PlayerPlaybackControlling {
     func declineMeteredStreaming() {
         coordinator.declineMeteredStreaming()
     }
+
+    func handleStreamReset(sessionID: String) {
+        coordinator.handleStreamReset(sessionID: sessionID)
+    }
 }

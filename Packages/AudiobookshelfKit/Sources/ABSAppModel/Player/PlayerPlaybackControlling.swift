@@ -46,6 +46,14 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     func confirmMeteredStreaming() async
     /// Clears a `.streamingNeedsConfirmation` error without playing.
     func declineMeteredStreaming()
+    /// The server restarted the transcode of session `sessionID` (`stream_reset`); see
+    /// ``PlaybackCoordinator/handleStreamReset(sessionID:)``.
+    func handleStreamReset(sessionID: String)
+}
+
+extension PlayerPlaybackControlling {
+    /// Fakes and previews stream nothing, so there is nothing to reset.
+    public func handleStreamReset(sessionID: String) {}
 }
 
 extension PlaybackCoordinator: PlayerPlaybackControlling {}
