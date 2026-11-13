@@ -2,6 +2,7 @@ import ABSAppModel
 import ABSCore
 import ABSData
 import ABSDownloads
+import ABSPlayback
 import ABSUI
 import Foundation
 import Testing
@@ -172,15 +173,56 @@ struct TestDownloads {
     }
 
     /// The data environment's one progress writer, which the participant hands every account's
-    /// scope, so a retired scope's late write can't replace a newer one.
+    /// scope, so a retired scope's late write can't replace a newer one. It's the same store
+    /// downloads link progress through (ADR 0003: one shared writer).
     @Test func playbackHoldsOneWriter() async throws {
         try await withSettings { settings in
             let environment = AppEnvironment(
                 settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
 
-            #expect(environment.playback.writer != nil)
+            let writer = try #require(environment.playback.writer)
+            #expect(writer === environment.localProgress)
             #expect(environment.playback.participant != nil)
         }
+    }
+
+    /// Each scope's recovery waits on the system's network path, not an always-online one.
+    @Test func playbackScopesWaitOnTheNetworkPath() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+            let request = try scopeRequest(environment)
+
+            let configuration = AppPlayback.configuration(
+                for: request, settings: settings, policy: NetworkPolicy(monitor: NetworkMonitor(), settings: settings),
+                engine: AudioEngine(audioSession: nil))
+
+            #expect(configuration.networkPaths is SystemNetworkPathSource)
+        }
+    }
+
+    /// The audio session's interruption handler gets the scope's coordinator, so an interruption
+    /// also cancels a play the coordinator holds outside the engine (recovery, the initial load).
+    @Test func playbackInterruptionsReachTheScopesCoordinator() async throws {
+        try await withSettings { settings in
+            let environment = AppEnvironment(
+                settings: settings, storeLocation: .inMemory, keychain: ConnectTestKeychain(), downloadsRoot: nil)
+            let request = try scopeRequest(environment)
+            let interruptions = AudioInterruptionHandler()
+
+            let scope = AppPlayback.makeScope(
+                for: request, settings: settings, policy: NetworkPolicy(monitor: NetworkMonitor(), settings: settings),
+                engine: AudioEngine(audioSession: nil), interruptions: interruptions)
+            defer { scope.retire(reason: .signOut) }
+
+            #expect(interruptions.heldPlayIntent === scope.coordinator)
+        }
+    }
+
+    private func scopeRequest(_ environment: AppEnvironment) throws -> PlaybackScopeRequest {
+        PlaybackScopeRequest(
+            connectionID: UUID(), client: nil, features: nil, deviceIdentifiers: environment.deviceIdentifiers,
+            writer: try #require(environment.localProgress))
     }
 
     @Test func keepsTheDeviceIdentifierInTheInjectedKeychain() async throws {
