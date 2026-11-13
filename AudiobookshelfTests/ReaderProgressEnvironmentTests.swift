@@ -69,7 +69,7 @@ private func render(_ view: some View) {
             makeScope: {
                 AppPlayback.makeScope(
                     for: $0, settings: settings, policy: NetworkPolicy(monitor: NetworkMonitor(), settings: settings),
-                    engine: AudioEngine(audioSession: nil), interruptions: nil)
+                    engine: AudioEngine(audioSession: nil), interruptions: nil, mediaLeases: nil)
             })
         await participant.sessionDidStart(
             SessionContext(identity: accountA, client: nil, isOffline: true, sessionID: 1))
