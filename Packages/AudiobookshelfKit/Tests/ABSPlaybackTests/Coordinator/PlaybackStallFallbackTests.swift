@@ -422,4 +422,82 @@ struct PlaybackStallFallbackTests {
         #expect(coordinator.isPlaying)
         #expect(coordinator.error == nil)
     }
+
+    // MARK: - Metered consent
+
+    /// A decode error on A's direct play, whose HLS fallback rebuild the policy then blocks ("ask"
+    /// on a metered path).
+    private func blockTheFallback() async {
+        h.recoverySleep.elapsesImmediately = true
+        await playAt600()
+        h.policy.decision = .askUser(.cellular)
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.decode)))
+        await settle { coordinator.error != nil }
+        #expect(coordinator.error == .streamingNeedsConfirmation(.cellular, key: h.key("A")))
+        // Blocked before its `/play`.
+        #expect(service.forcedTranscodes == [false])
+        #expect(coordinator.phase == .unloaded)
+    }
+
+    /// "Stream anyway" on a blocked fallback starts its HLS transcode at once: the direct play that
+    /// failed isn't loaded again first.
+    @Test func confirmingABlockedFallbackStartsItsTranscode() async {
+        await blockTheFallback()
+
+        await coordinator.confirmMeteredStreaming()
+
+        #expect(coordinator.error == nil)
+        #expect(service.forcedTranscodes == [false, true])
+        #expect(engine.loads.count == 2)
+        // An HLS source, where recovery stopped.
+        #expect(engine.loads.last?.source.seekTolerance == 0.5)
+        #expect(engine.loads.last?.time == 600)
+        #expect(coordinator.isPlaying)
+    }
+
+    /// A play the policy blocked is confirmed as direct play, including one that replaced a blocked
+    /// fallback (of another item).
+    @Test(arguments: [false, true])
+    func confirmingABlockedPlayStartsDirectPlay(afterABlockedFallback: Bool) async {
+        if afterABlockedFallback { await blockTheFallback() }
+        h.policy.decision = .askUser(.cellular)
+        await coordinator.play(itemID: "B", startTime: 100)
+        #expect(coordinator.error == .streamingNeedsConfirmation(.cellular, key: h.key("B")))
+
+        await coordinator.confirmMeteredStreaming()
+
+        #expect(service.forcedTranscodes == (afterABlockedFallback ? [false, false] : [false]))
+        #expect(coordinator.mediaKey == h.key("B"))
+        #expect(engine.loads.last?.source.seekTolerance == 0)
+        #expect(coordinator.isPlaying)
+    }
+
+    enum PlayAfterABlockedFallback: CaseIterable {
+        /// The user cancelled the confirmation, then played the item.
+        case afterDeclining
+        /// The user played the item while the confirmation was still showing.
+        case instead
+    }
+
+    /// Only "Stream anyway" keeps a blocked fallback: the user's own play of the item starts direct
+    /// play again, and a later confirmation replays nothing.
+    @Test(arguments: PlayAfterABlockedFallback.allCases)
+    func aUsersPlayAfterABlockedFallbackStartsDirectPlay(play: PlayAfterABlockedFallback) async {
+        await blockTheFallback()
+        if play == .afterDeclining {
+            coordinator.declineMeteredStreaming()
+            #expect(coordinator.error == nil)
+        }
+        // Back on an unmetered path.
+        h.policy.decision = .allowed
+
+        await coordinator.play(itemID: "A", startTime: 600)
+
+        #expect(service.forcedTranscodes == [false, false])
+        #expect(engine.loads.last?.source.seekTolerance == 0)
+        #expect(coordinator.error == nil)
+        #expect(coordinator.isPlaying)
+        await coordinator.confirmMeteredStreaming()
+        #expect(service.forcedTranscodes == [false, false])
+    }
 }

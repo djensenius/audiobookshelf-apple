@@ -76,8 +76,9 @@ public final class PlaybackCoordinator {
     /// The media a play is checking the streaming policy for, before it commits (a loading hint).
     public private(set) var pendingPlayKey: MediaKey?
     /// The play that ``error``'s `.streamingNeedsConfirmation` blocked, which
-    /// ``confirmMeteredStreaming()`` replays.
-    private var blockedPlay: (key: MediaKey, startTime: Double?)?
+    /// ``confirmMeteredStreaming()`` replays; `forceTranscode` for a blocked recovery rebuild's HLS
+    /// fallback, which the replay keeps.
+    private var blockedPlay: (key: MediaKey, startTime: Double?, forceTranscode: Bool)?
     private var unloadedPosition: Double = 0
     private var unloadedDuration: Double = 0
     /// Where playback is or is going. An interrupted seek leaves the engine's own time behind
@@ -344,6 +345,17 @@ public final class PlaybackCoordinator {
     public func play(
         itemID: String, episodeID: String? = nil, startTime: Double? = nil, allowingMeteredNetwork: Bool = false
     ) async {
+        await play(
+            itemID: itemID, episodeID: episodeID, startTime: startTime,
+            allowingMeteredNetwork: allowingMeteredNetwork, forceTranscode: false)
+    }
+
+    /// ``play(itemID:episodeID:startTime:allowingMeteredNetwork:)``; `forceTranscode` asks `/play`
+    /// for an HLS transcode, which only ``confirmMeteredStreaming()`` does, replaying a blocked
+    /// fallback. A user's play never forces one.
+    private func play(
+        itemID: String, episodeID: String?, startTime: Double?, allowingMeteredNetwork: Bool, forceTranscode: Bool
+    ) async {
         guard !isRetired else { return }
         let key = MediaKey(
             serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
@@ -395,21 +407,22 @@ public final class PlaybackCoordinator {
         case .denied(let reason): return block(.streamingNotAllowed(reason, key: key))
         }
         meteredConsent = allowingMeteredNetwork ? key : nil
-        await start(key: key, startTime: startTime, prepared: nil)
+        await start(key: key, startTime: startTime, prepared: nil, forceTranscode: forceTranscode)
     }
 
     /// The user agreed to stream on a metered network: replays the play (or queue advance) that
     /// ``error``'s ``PlaybackCoordinatorError/streamingNeedsConfirmation(_:key:)`` blocked, with
-    /// its item, episode and start time, allowing the metered path. Does nothing unless that is
-    /// still the error, so a confirmation shown for another failure, an earlier block or a
-    /// stopped (or retired) coordinator plays nothing. The policy is checked again: "never"
-    /// still blocks.
+    /// its item, episode and start time, allowing the metered path. A blocked recovery rebuild's
+    /// HLS fallback stays forced, so the direct play that failed isn't loaded again. Does nothing
+    /// unless that is still the error, so a confirmation shown for another failure, an earlier
+    /// block or a stopped (or retired) coordinator plays nothing. The policy is checked again:
+    /// "never" still blocks.
     public func confirmMeteredStreaming() async {
         guard case .streamingNeedsConfirmation(_, let key) = error, let blockedPlay, blockedPlay.key == key
         else { return }
         await play(
             itemID: key.libraryItemId, episodeID: key.episodeId, startTime: blockedPlay.startTime,
-            allowingMeteredNetwork: true)
+            allowingMeteredNetwork: true, forceTranscode: blockedPlay.forceTranscode)
     }
 
     /// The user declined to stream on a metered network: clears the
@@ -1406,8 +1419,9 @@ public final class PlaybackCoordinator {
         case .allowed: break
         case .askUser where meteredConsent == key: break
         case .askUser(let reason):
-            // ``confirmMeteredStreaming()`` plays it again where recovery stopped.
-            blockedPlay = (key, target)
+            // ``confirmMeteredStreaming()`` plays it again where recovery stopped, keeping a forced
+            // transcode.
+            blockedPlay = (key, target, forceTranscode || transcodeForced)
             return .failed(.streamingNeedsConfirmation(reason, key: key), generation: generation)
         case .denied(let reason): return .failed(.streamingNotAllowed(reason, key: key), generation: generation)
         }
@@ -1448,7 +1462,7 @@ public final class PlaybackCoordinator {
     /// ``confirmMeteredStreaming()``.
     private func block(_ error: PlaybackCoordinatorError, startTime: Double? = nil) {
         if case .streamingNeedsConfirmation(_, let key) = error {
-            blockedPlay = (key, startTime)
+            blockedPlay = (key, startTime, false)
         } else {
             blockedPlay = nil
         }
