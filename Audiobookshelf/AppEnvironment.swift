@@ -106,6 +106,10 @@ final class AppEnvironment {
                 manager.credentialsExpired = { [weak downloadsLifecycle = downloads.lifecycle] in
                     downloadsLifecycle?.connectionExpired($0)
                 }
+                // A sign-in over a saved session stops the downloads using the old one, then resumes them.
+                manager.credentialsReplaced = { [weak downloadsLifecycle = downloads.lifecycle] in
+                    downloadsLifecycle?.credentialsReplaced($0)
+                }
             }
         } catch {
             let reason = Log.redact(String(describing: error))
