@@ -28,6 +28,7 @@ final class AccountSessionAdapter: AccountSessionSource {
 
     func restore() async throws { await accounts.restoreSession() }
     func logout() async -> URL? { await accounts.logout() }
+    func logout(connectionID: UUID) async -> URL? { await accounts.logout(connectionID: connectionID) }
     func `switch`(to connectionID: UUID) async throws { try await accounts.switch(to: connectionID) }
     func remove(_ connectionID: UUID) async throws -> URL? { try await accounts.remove(connectionID) }
     func connectionID(for account: HandoffAccount) async -> UUID? { await accounts.connectionID(for: account) }

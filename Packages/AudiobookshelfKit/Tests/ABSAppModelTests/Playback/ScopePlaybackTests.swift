@@ -67,7 +67,7 @@ private final class InstantEngine: AudioEngineProtocol {
 private struct BookServer: PlaybackSessionService, ProgressSyncService {
     let serverConnectionID: UUID
 
-    func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
+    func startSession(itemID: String, episodeID: String?, forceTranscode: Bool) async throws -> PlaybackSession {
         PlaybackSession(
             id: "s-\(itemID)", libraryItemId: itemID, episodeId: episodeID, mediaType: .book,
             displayTitle: "Title \(itemID)", duration: 3600, currentTime: 0,

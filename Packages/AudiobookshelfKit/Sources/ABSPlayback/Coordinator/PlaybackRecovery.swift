@@ -16,8 +16,10 @@ enum PlaybackRecoveryAction: Sendable, Hashable {
     case rebuild
     /// The 401 path: one token refresh, then a rebuild.
     case refresh
-    /// Not recoverable: shown at once. Decode and unsupported formats belong to the direct-play
-    /// to HLS fallback, which isn't built yet.
+    /// A decode or format error: on direct play, one rebuild with `forceTranscode` (the direct-play
+    /// to HLS fallback); on HLS, or once that fallback has run, shown at once.
+    case transcode
+    /// Not recoverable: shown at once.
     case fatal
 }
 
@@ -30,7 +32,8 @@ extension PlaybackFailure {
         case .http: .fatal
         case .unknown: .retry
         case .network: .rebuild
-        case .tls, .decode, .unsupported, .cancelled: .fatal
+        case .decode, .unsupported: .transcode
+        case .tls, .cancelled: .fatal
         }
     }
 }
@@ -57,9 +60,13 @@ struct PlaybackRecoveryHost {
     var reseek: (_ target: Double) async -> SeekResult
     /// Starts the engine after a successful re-seek.
     var play: () -> Void
-    /// Closes the session and starts a new one at `target`, playing only if `playing`. The attempt
-    /// takes the next generation (`generation() + 1`) at once, before suspending.
-    var rebuild: (_ target: Double, _ playing: Bool) async -> PlaybackRecoveryRebuild
+    /// Closes the session and starts a new one at `target`, playing only if `playing`, as an HLS
+    /// transcode if `forceTranscode`. The attempt takes the next generation (`generation() + 1`)
+    /// at once, before suspending.
+    var rebuild: (_ target: Double, _ playing: Bool, _ forceTranscode: Bool) async -> PlaybackRecoveryRebuild
+    /// Whether the direct-play to HLS fallback can still run: the item is direct play from the
+    /// server (never downloaded files), and no forced transcode has run since the user's start.
+    var canTranscode: () -> Bool
     /// Refreshes the access token once; returns the error that stops recovery, if any.
     var refresh: () async -> PlaybackCoordinatorError?
     /// Looks up the loaded session (`GET /api/session/{id}`); ``PlaybackSessionStatus/unknown``
@@ -81,7 +88,13 @@ struct PlaybackRecoveryHost {
 /// - **401.** The first one in an episode refreshes the token, then rebuilds (counted against the
 ///   rebuild budget). A second one stops with ``PlaybackCoordinatorError/streamRejected``; there is
 ///   never a second refresh. A session lookup whose request refreshed the token spends that one
-///   refresh too (#491).
+///   refresh too (#491). A decode, format or final error during the refresh, or the waits after
+///   it, takes its own step instead of that rebuild.
+/// - **Decode and format errors.** On direct play, one rebuild with `forceTranscode` (the HLS
+///   fallback), counted against the rebuild budget; on HLS, or once the fallback has run since the
+///   user's play, they surface at once.
+/// - **Stalls.** A stall with no error (``PlaybackFailure/stalled``) is retried as a readiness
+///   failure, but playback that resumes on its own before the attempt ends the run unspent.
 /// - **Network and session.** Before each attempt, recovery waits while the network path is
 ///   unsatisfied (no budget is spent offline) for up to ``networkWaitLimit``, then gives up with
 ///   ``PlaybackCoordinatorError/recoveryExhausted``; once the path returns it skips that attempt's
@@ -159,8 +172,10 @@ final class PlaybackRecovery {
     func recover(from failure: PlaybackFailure, generation: Int, wasPlaying: Bool) {
         guard let host else { return }
         if isRunning, var episode, generation == attemptGeneration || episode.generation == generation {
-            // The attempt in flight failed; its run reads the cause when the attempt returns.
-            episode.cause = .failure(failure)
+            // The attempt in flight, or the backoff before it, failed: its run reads the cause before
+            // the attempt or when the attempt returns. A stall during a stream reset's run stays the
+            // reset's, so a playing tick doesn't end its re-seek.
+            if failure != .stalled || episode.cause != .streamReset { episode.cause = .failure(failure) }
             episode.failedDuringAttempt = true
             self.episode = episode
             return
@@ -267,14 +282,30 @@ final class PlaybackRecovery {
         if episode?.playingSince != nil { episode?.playingSince = nil }
     }
 
-    /// A tick while playing at `generation`: ends the episode after ``episodeReset`` of it.
+    /// A tick while playing at `generation`: playback resumed on its own, so a stall's run in flight
+    /// ends, spending no budget before its attempt. Ends the episode after ``episodeReset`` of it.
     func notePlaying(at date: Date, generation: Int) {
+        if isRunning, let episode, episode.generation == generation, episode.cause == .failure(.stalled) {
+            logger.info("A stall resolved before recovery's attempt")
+            token += 1
+            isRunning = false
+        }
         guard !isRunning, let episode, episode.generation == generation else { return }
         guard let since = episode.playingSince else {
             self.episode?.playingSince = date
             return
         }
         if date.timeIntervalSince(since) >= Self.episodeReset { self.episode = nil }
+    }
+
+    /// The item at `generation` played to its end: a run in flight for it (a stall's that cleared
+    /// with no playing tick before the end) ends before its attempt can seek or play the ended
+    /// item again.
+    func noteEnded(generation: Int) {
+        guard isRunning, episode?.generation == generation else { return }
+        logger.info("The item ended while recovery was in flight")
+        token += 1
+        isRunning = false
     }
 
     private func isCurrent(_ run: Int, _ host: PlaybackRecoveryHost) -> Bool {
@@ -290,7 +321,8 @@ final class PlaybackRecovery {
             case .surface(let error): return giveUp(error, host)
             // Out of attempts: never wait for the network first.
             case .rebuild where current.rebuilds >= Self.rebuildDelays.count,
-                .refresh where current.rebuilds >= Self.rebuildDelays.count:
+                .refresh where current.rebuilds >= Self.rebuildDelays.count,
+                .transcode where current.rebuilds >= Self.rebuildDelays.count:
                 return giveUp(.recoveryExhausted, host)
             default: break
             }
@@ -310,7 +342,7 @@ final class PlaybackRecovery {
             switch step {
             case .surface(let error): return giveUp(error, host)
             case .reseek: delay = Self.retryDelays[episode.retries]
-            case .rebuild, .refresh:
+            case .rebuild, .refresh, .transcode:
                 guard episode.rebuilds < Self.rebuildDelays.count else { return giveUp(.recoveryExhausted, host) }
                 delay = Self.rebuildDelays[episode.rebuilds]
             }
@@ -332,6 +364,9 @@ final class PlaybackRecovery {
                 return giveUp(.recoveryExhausted, host)
             }
             guard isCurrent(run, host) else { return }
+            // A failure during the backoff (a decode error's fallback, a 401's refresh, a final
+            // error) may call for another step: start over, with that step's budget and backoff.
+            if let latest = self.episode, self.step(for: latest, session: session) != step { continue }
             switch step {
             case .surface: return
             case .reseek:
@@ -345,18 +380,23 @@ final class PlaybackRecovery {
                 }
             case .refresh:
                 self.episode?.refreshed = true
+                // Failures until now were weighed above; ``rebuildAfterRefresh(_:_:)`` weighs the
+                // ones during the refresh and its waits.
+                self.episode?.failedDuringAttempt = false
                 let error = await host.refresh()
                 guard isCurrent(run, host) else { return }
                 if let error { return giveUp(error, host) }
                 guard await rebuildAfterRefresh(run, host) else { return }
             case .rebuild:
                 guard await rebuild(run, host) else { return }
+            case .transcode:
+                guard await rebuild(run, host, forceTranscode: true) else { return }
             }
         }
     }
 
     private enum Step: Equatable {
-        case reseek, rebuild, refresh
+        case reseek, rebuild, refresh, transcode
         case surface(PlaybackCoordinatorError)
     }
 
@@ -369,6 +409,10 @@ final class PlaybackRecovery {
         case .failure(let failure):
             action = failure.recoveryAction
             if action == .fatal { return .surface(.playback(failure)) }
+            // Once per play, and never from HLS or a download: the error is the media's.
+            if action == .transcode {
+                return host?.canTranscode() == true ? .transcode : .surface(.playback(failure))
+            }
         }
         if action == .refresh || session == .unauthorized {
             return episode.refreshed ? .surface(.streamRejected) : .refresh
@@ -436,14 +480,18 @@ final class PlaybackRecovery {
     /// The rebuild after a refresh, which the path may have dropped during: it waits for the path
     /// (no `/play` offline) and checks the session once it returns; a 401 then, the one refresh
     /// already spent, surfaces. The path may drop again during that lookup, so it is gated again
-    /// before the rebuild (each wait has its own limit, as in ``run(_:host:)``). Returns whether
-    /// the run goes on.
+    /// before the rebuild (each wait has its own limit, as in ``run(_:host:)``). A failure during
+    /// the refresh or those waits that needs its own step takes it instead of the rebuild, which
+    /// would clear it (see ``failedForItsOwnStep``). Returns whether the run goes on.
     private func rebuildAfterRefresh(_ run: Int, _ host: PlaybackRecoveryHost) async -> Bool {
         while true {
             let network = await waitForNetwork(run)
             guard isCurrent(run, host) else { return false }
             switch network {
-            case .online: return await rebuild(run, host)
+            case .online:
+                // Back to the loop, with that step's budget and backoff; the refresh stays spent.
+                if failedForItsOwnStep { return true }
+                return await rebuild(run, host)
             case .timedOut:
                 giveUp(.recoveryExhausted, host)
                 return false
@@ -458,14 +506,28 @@ final class PlaybackRecovery {
         }
     }
 
-    /// One rebuild attempt; returns whether the run goes on (the attempt failed recoverably).
-    private func rebuild(_ run: Int, _ host: PlaybackRecoveryHost) async -> Bool {
+    /// Whether a failure during the attempt in flight calls for something a rebuild doesn't do: a
+    /// decode or format error's HLS fallback (or, on HLS, its error), or a final error. A 401 is
+    /// not one: after a refresh it was the old token's, and the rebuild is its remedy.
+    private var failedForItsOwnStep: Bool {
+        guard let episode, episode.failedDuringAttempt, case .failure(let failure) = episode.cause else {
+            return false
+        }
+        switch failure.recoveryAction {
+        case .transcode, .fatal: return true
+        case .retry, .rebuild, .refresh: return false
+        }
+    }
+
+    /// One rebuild attempt, an HLS transcode if `forceTranscode`; returns whether the run goes on
+    /// (the attempt failed recoverably).
+    private func rebuild(_ run: Int, _ host: PlaybackRecoveryHost, forceTranscode: Bool = false) async -> Bool {
         guard episode != nil else { return false }
         self.episode?.rebuilds += 1
         self.episode?.failedDuringAttempt = false
         let attempt = host.generation() + 1
         attemptGeneration = attempt
-        let outcome = await host.rebuild(host.target(), self.episode?.wantsPlay ?? false)
+        let outcome = await host.rebuild(host.target(), self.episode?.wantsPlay ?? false, forceTranscode)
         // A newer run's rebuild may have replaced the marker meanwhile.
         if attemptGeneration == attempt { attemptGeneration = nil }
         guard run == token else { return false }

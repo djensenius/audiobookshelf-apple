@@ -248,6 +248,90 @@ private func comicData(pages: Int) throws -> Data {
     }
 }
 
+/// A reader restored with its window, before the session's progress seed arrived (#495).
+@MainActor
+@Suite(.timeLimit(.minutes(1))) struct ReaderProgressSeedTests {
+    let fetcher = FakeEbookFetcher()
+    let me = GatedCalls<Void, [MediaProgress]>()
+
+    private func makeParticipant(_ store: LibraryStore) -> LibraryParticipant {
+        LibraryParticipant(
+            store: store, service: { _ in FakeLibraryService() },
+            fetchProgress: { [me] _ in UserProgressResponse(mediaProgress: try await me.call(()), skippedRows: 0) },
+            sleep: { _ in })
+    }
+
+    /// Starts a session as the lifecycle does: start, boundary, then the seed in its own task.
+    private func start(_ participant: LibraryParticipant, isOffline: Bool) async throws -> Task<Void, Never> {
+        let context = SessionContext(
+            identity: SessionIdentity(connectionID: connection, userID: "a"),
+            client: isOffline ? nil : try makeClient(),
+            isOffline: isOffline, sessionID: 1)
+        await participant.sessionDidStart(context)
+        await participant.beginSeed(context)
+        return Task { await participant.seed(context) }
+    }
+
+    private func makeModel(_ store: LibraryStore, progress: EbookProgressModel? = nil) -> ReaderContainerModel {
+        ReaderContainerModel(
+            request: request(), kind: .pdf,
+            loader: EbookFileLoader(directory: readerTemporaryDirectory(), fetcher: fetcher), progress: progress
+        ) {
+            await store.seededProgress(libraryItemID: "book")
+        }
+    }
+
+    @Test func aReaderOpenedBeforeTheSeedOpensAtTheServersLocationOnceItArrives() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            let seed = try await start(makeParticipant(store), isOffline: false)
+            var requests = me.calls.makeAsyncIterator()
+            let request = try #require(await requests.next())
+            // The snapshot a reader took here was empty.
+            #expect(store.progress.progress(libraryItemID: "book") == nil)
+            let model = makeModel(store)
+
+            let load = Task { await model.load() }
+            #expect(await eventually { !fetcher.calls.value.isEmpty })
+            for _ in 0..<50 { await Task.yield() }
+            // The file is there, but the book waits for the seed.
+            #expect(model.content == .loading)
+
+            request.reply.resume(returning: [serverProgress("5")])
+            await seed.value
+            await load.value
+
+            guard case .ready = model.content else {
+                Issue.record("Expected a ready file, got \(model.content)")
+                return
+            }
+            #expect(model.resumePoint == EbookResumePoint(location: .page(5), progress: 0.5, source: .server))
+            #expect(!store.isProgressSeedPending)
+        }
+    }
+
+    @Test func offlineAReaderOpensAtOnceAtTheCachedLocation() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            _ = try await start(makeParticipant(store), isOffline: true)
+            let harness = try ProgressHarness()
+            harness.service.fetchFails.value = true
+            _ = try await harness.store.recordEbookEdit(
+                .init(location: "7", progress: 0.7), for: harness.key,
+                token: harness.store.reserveEbookEdit(for: harness.key), now: t0)
+            let model = makeModel(store, progress: harness.makeProgressModel())
+
+            let load = Task { await model.load() }
+            // Nothing to wait for offline: no seed comes.
+            #expect(await eventually { model.content != .loading })
+            await load.value
+
+            #expect(model.resumePoint.location == .page(7))
+            #expect(model.resumePoint.progress == 0.7)
+        }
+    }
+}
+
 /// A real store and syncer over ``FakeProgressServer``, as in `EbookProgressModelTests`.
 @MainActor
 private struct ProgressHarness {

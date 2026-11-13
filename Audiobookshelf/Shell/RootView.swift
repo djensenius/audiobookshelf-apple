@@ -1,5 +1,6 @@
 import ABSAppModel
 import ABSCore
+import ABSData
 import ABSUI
 import SwiftUI
 
@@ -13,8 +14,9 @@ import SwiftUI
 /// without a store is kept (``PendingLink/init(_:arrivingAt:epoch:)``), and the binding hands the
 /// host a link only while the epoch is the one it arrived in, so a link queued for one account
 /// never opens for another, even when this view didn't render the gates in between.
-/// The lifecycle, accounts and shown `serverID` (``SceneContent/serverID``) are in the
-/// environment of everything below.
+/// The lifecycle, accounts, shown `serverID` (``SceneContent/serverID``) and that connection's
+/// playback history (``playbackHistorySource(_:serverID:)``) are in the environment of everything
+/// below.
 struct RootView: View {
     let lifecycle: SessionLifecycle
     let player: any PlayerSlotState
@@ -26,6 +28,9 @@ struct RootView: View {
     /// The account session's playback, given to the signed-in shell as `\.playItem`,
     /// `\.bookmarkStore` and `\.sleepTimer` (``PlaybackEnvironment``).
     var playback: PlaybackSessionParticipant?
+    /// The app's one history store, read by the shown shell's account only
+    /// (``playbackHistorySource(_:serverID:)``).
+    var playbackHistory: PlaybackHistoryStore?
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var links = SceneLinks()
@@ -40,6 +45,10 @@ struct RootView: View {
             .environment(lifecycle)
             .environment(accounts)
             .environment(\.serverID, SceneContent(lifecycle.gate).serverID)
+            .environment(
+                \.playbackHistorySource,
+                Self.playbackHistorySource(playbackHistory, serverID: SceneContent(lifecycle.gate).serverID)
+            )
             .task { await lifecycle.start() }
             // A count, not the gate: SwiftUI can coalesce the switch's gates. Every window shows it:
             // the switch replaced every window's shell, not only the one it was chosen in.
@@ -109,6 +118,29 @@ struct RootView: View {
             active.id == identity.connectionID, active.userId == identity.userID
         else { return nil }
         return accounts.client
+    }
+
+    /// `store`'s history for the shell showing `serverID`'s connection, for
+    /// `\.playbackHistorySource`; `nil` without a store or a shown shell.
+    ///
+    /// The store is the app's one and keeps every account's history (removing an account keeps
+    /// it). Events are keyed by their connection, which is one user on one server, so the source
+    /// reads only media on `serverID`'s connection: a key on another one, another account's
+    /// media, gets no events. During a switch the outgoing shell keeps its own connection, so it
+    /// still reads only its own account's history.
+    static func playbackHistorySource(
+        _ store: PlaybackHistoryStore?, serverID: UUID?
+    ) -> PlaybackHistoryModel.EventSource? {
+        guard let store, let serverID else { return nil }
+        return { key in
+            guard key.serverConnectionID == serverID else {
+                return AsyncStream {
+                    $0.yield([])
+                    $0.finish()
+                }
+            }
+            return try await store.updates(for: key)
+        }
     }
 
     /// One link waits at a time: the last one received wins, including over a confirmed server

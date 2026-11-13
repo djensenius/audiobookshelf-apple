@@ -17,6 +17,9 @@ import Foundation
 ///   A seed whose session ended, reconnected or reseeded since its boundary is dropped by the
 ///   participant's generation and the token, not only by cancellation. An offline session or
 ///   one without a client doesn't seed; its reconnect does.
+/// - An online attach marks the seed pending on the store (``LibraryStore/isProgressSeedPending``)
+///   and the seed settles it however it ends, so a reader can wait for the seed
+///   (``LibraryStore/seededProgress(libraryItemID:timeout:)``); offline nothing is pending.
 /// - A reconnect attaches the new client from its context, keeping the account's data, and
 ///   refreshes again. Attaching online bumps ``LibraryStore/onlineRevision``, so loads that
 ///   failed offline retry even when the offline session kept its client.
@@ -107,9 +110,11 @@ public final class LibraryParticipant: SessionSeeding {
     }
 
     public func seed(_ context: SessionContext) async {
-        guard sessionID == context.sessionID, let token = seedToken, let client = context.client,
-            !context.isOffline
-        else { return }
+        guard sessionID == context.sessionID, let token = seedToken else { return }
+        // However the seed ends, readers waiting for it go on, unless a newer session, reconnect
+        // or boundary owns the seed now.
+        defer { if sessionID == context.sessionID, seedToken == token { store.progressSeedSettled() } }
+        guard let client = context.client, !context.isOffline else { return }
         let generation = generation
         var retries = retryDelays[...]
         while true {
@@ -183,7 +188,12 @@ public final class LibraryParticipant: SessionSeeding {
             isOffline: context.isOffline)
         refreshTask?.cancel()
         refreshTask = nil
-        guard context.client != nil, !context.isOffline else { return }
+        guard context.client != nil, !context.isOffline else {
+            store.progressSeedSettled()
+            return
+        }
+        // Before anything suspends: a reader opening now waits for this session's seed.
+        store.progressSeedBegan()
         let store = store
         refreshTask = Task { await store.refresh() }
     }

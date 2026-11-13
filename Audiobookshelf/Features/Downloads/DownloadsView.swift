@@ -29,13 +29,28 @@ struct LocalFolderView: View {
     }
 }
 
-/// A downloaded item (legacy `pages/localMedia/item/_id.vue`). A stub until the Downloads
-/// feature replaces this file.
+/// A downloaded item (legacy `pages/localMedia/item/_id.vue`), by its local ID; see
+/// ``LocalItemDetailView``.
 struct LocalItemView: View {
     let localItemID: String
+    @Environment(\.downloads) private var downloads
 
     var body: some View {
-        FeatureStub(titleKey: "ButtonLocalMedia", systemImage: "internaldrive", details: [localItemID])
+        if let downloads, let id = UUID(uuidString: localItemID) {
+            LocalItemDetailView(itemID: id, services: downloads)
+                .id(id)
+        } else if downloads == nil {
+            DownloadsUnavailableView()
+        } else {
+            ContentUnavailableView {
+                Label {
+                    Text(verbatim: L10n.string("MessageLocalItemNotFound"))
+                } icon: {
+                    Image(systemName: "internaldrive")
+                        .accessibilityHidden(true)
+                }
+            }
+        }
     }
 }
 

@@ -50,6 +50,10 @@ public final class LibraryStore {
 
     /// The account's server progress; cleared with the store.
     public let progress = ProgressCache()
+    /// Whether the session's progress seed may still fill ``progress``: from an online attach
+    /// until the seed has settled (``progressSeedBegan()``, ``progressSeedSettled()``). Offline,
+    /// without a client and after ``clear()`` nothing is pending.
+    public private(set) var isProgressSeedPending = false
 
     @ObservationIgnored private let settings: AppSettings
     /// Bumped by ``clear()``, so responses for an earlier account are dropped.
@@ -60,6 +64,8 @@ public final class LibraryStore {
     /// refresh empties it, so a response requested before the refresh can't bring back a removed
     /// library or an old name.
     @ObservationIgnored private var latestDetailRequests: [String: Int] = [:]
+    /// Readers waiting in ``waitForProgressSeed(timeout:)``.
+    @ObservationIgnored private var progressSeedWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     /// Services already logged as missing from the client, so each is logged once.
     @ObservationIgnored private var loggedUnavailableServices: Set<String> = []
     /// Each account's latest shared item actions; see ``itemActions(for:)``. Kept after the
@@ -171,6 +177,60 @@ public final class LibraryStore {
         defaultLibraryID = nil
         latestDetailRequests = [:]
         progress.clear()
+        progressSeedSettled()
+    }
+
+    // MARK: Progress seed
+
+    /// How long ``waitForProgressSeed(timeout:)`` waits by default: past the seed's retries, so
+    /// only a seed that hangs is cut short.
+    public static let progressSeedTimeout: Duration = .seconds(30)
+
+    /// The seed of an online session is on its way (the session's library participant, at its
+    /// online attach).
+    public func progressSeedBegan() {
+        isProgressSeedPending = true
+    }
+
+    /// The seed was applied, dropped or given up, or won't run: waiting readers go on with what
+    /// ``progress`` has.
+    public func progressSeedSettled() {
+        isProgressSeedPending = false
+        let waiters = progressSeedWaiters
+        progressSeedWaiters = [:]
+        for waiter in waiters.values { waiter.resume() }
+    }
+
+    /// Returns once no progress seed is pending (at once offline), after `timeout`, or when the
+    /// task is cancelled, so what opens at the server's progress (a reader restored with its
+    /// window) reads ``progress`` after the seed rather than before it.
+    public func waitForProgressSeed(timeout: Duration = progressSeedTimeout) async {
+        guard isProgressSeedPending, !Task.isCancelled else { return }
+        let id = UUID()
+        let timer = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            self?.resumeProgressSeedWaiter(id)
+        }
+        defer { timer.cancel() }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard isProgressSeedPending, !Task.isCancelled else { return continuation.resume() }
+                progressSeedWaiters[id] = continuation
+            }
+        } onCancel: {
+            Task { @MainActor [weak self] in self?.resumeProgressSeedWaiter(id) }
+        }
+    }
+
+    /// `libraryItemID`'s progress in ``progress`` once no seed is pending
+    /// (``waitForProgressSeed(timeout:)``).
+    public func seededProgress(libraryItemID: String, timeout: Duration = progressSeedTimeout) async -> MediaProgress? {
+        await waitForProgressSeed(timeout: timeout)
+        return progress.progress(libraryItemID: libraryItemID)
+    }
+
+    private func resumeProgressSeedWaiter(_ id: UUID) {
+        progressSeedWaiters.removeValue(forKey: id)?.resume()
     }
 
     // MARK: Libraries

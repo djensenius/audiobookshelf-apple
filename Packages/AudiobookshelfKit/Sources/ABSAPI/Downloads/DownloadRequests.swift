@@ -7,7 +7,8 @@ import Foundation
 /// query, so the URL that `URLSession` and the store keep holds no credential. `URLSession`
 /// drops `Authorization` on a redirect, but not custom headers, so a background session would
 /// carry those to another server: ABSDownloads checks a download's redirects in the foreground
-/// before its background task starts (#145).
+/// before its background task starts (#145), and a connection with custom headers downloads in
+/// a foreground session whose delegate refuses every hop off the server (#467).
 public enum DownloadRequests {
     /// The token-free API path of a library file's download, which is what a download part
     /// stores as its `serverPath`.

@@ -240,7 +240,7 @@ struct PlaybackRecoveryTests {
     // MARK: - Not recoverable
 
     @Test(arguments: [
-        PlaybackFailure.Kind.http(status: 403), .http(status: 400), .tls, .decode, .unsupported, .cancelled,
+        PlaybackFailure.Kind.http(status: 403), .http(status: 400), .tls, .cancelled,
     ])
     func unrecoverableFailuresSurfaceAtOnce(kind: PlaybackFailure.Kind) async {
         await playAt600()

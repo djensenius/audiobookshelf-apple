@@ -266,6 +266,11 @@ final class StubSessionService: PlaybackSessionService {
         /// Holds the next refresh before it completes.
         var refreshGate: Gate?
         var starts: [String] = []
+        /// Each start's `forceTranscode`, in order; a forced start's session is an HLS transcode
+        /// unless the server ignores the flag.
+        var forcedTranscodes: [Bool] = []
+        var transcodeSessions: Set<String> = []
+        var ignoresForceTranscode = false
         var closes: [String] = []
         var canceledCloses: [String] = []
         var closeReports: [String: PlaybackSyncReport] = [:]
@@ -290,6 +295,7 @@ final class StubSessionService: PlaybackSessionService {
     }
 
     var starts: [String] { state.withLock { $0.starts } }
+    var forcedTranscodes: [Bool] { state.withLock { $0.forcedTranscodes } }
     var closes: [String] { state.withLock { $0.closes } }
     var log: [String] { state.withLock { $0.log } }
     /// The sessions open on the server now.
@@ -313,9 +319,10 @@ final class StubSessionService: PlaybackSessionService {
         return PlaybackSessionCheck(status: status, refreshedToken: state.withLock { $0.sessionRefreshesToken })
     }
 
-    func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
+    func startSession(itemID: String, episodeID: String?, forceTranscode: Bool) async throws -> PlaybackSession {
         // As the API client's request does, a start for a cancelled caller sends nothing and throws.
         try Task.checkCancellation()
+        state.withLock { $0.forcedTranscodes.append(forceTranscode) }
         if let client = state.withLock({ $0.sessionClient }) {
             state.withLock {
                 $0.starts.append(itemID)
@@ -341,6 +348,7 @@ final class StubSessionService: PlaybackSessionService {
         state.withLock { state in
             state.takenOver += state.openSessions
             state.openSessions = [id]
+            if forceTranscode, !state.ignoresForceTranscode { state.transcodeSessions.insert(id) }
         }
         if let session = state.withLock({ $0.sessionOverride }) { return session }
         return PlaybackSession(
@@ -384,8 +392,9 @@ final class StubSessionService: PlaybackSessionService {
                 url: URL(filePath: "/\(session.id)/\(track.index ?? 0)"), mimeType: track.mimeType,
                 startOffset: track.startOffset ?? 0, duration: track.duration, authentication: .session)
         }
+        let kind: StreamPlan.Kind = state.withLock { $0.transcodeSessions.contains(session.id) } ? .hls : .directPlay
         return ResolvedStream(
-            plan: StreamPlan(kind: .directPlay, transport: .urlAsset, tracks: tracks), urls: tracks.map(\.url),
+            plan: StreamPlan(kind: kind, transport: .urlAsset, tracks: tracks), urls: tracks.map(\.url),
             accessToken: "token-\(session.id)")
     }
 

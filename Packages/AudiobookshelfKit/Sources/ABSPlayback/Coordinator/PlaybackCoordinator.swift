@@ -84,8 +84,9 @@ public final class PlaybackCoordinator {
     /// a rebuild began it), or after a stop or a restore.
     @ObservationIgnored public private(set) var startPlayRequest: Int?
     /// The play that ``error``'s `.streamingNeedsConfirmation` blocked, which
-    /// ``confirmMeteredStreaming()`` replays.
-    private var blockedPlay: (key: MediaKey, startTime: Double?)?
+    /// ``confirmMeteredStreaming()`` replays; `forceTranscode` for a blocked recovery rebuild's HLS
+    /// fallback, which the replay keeps.
+    private var blockedPlay: (key: MediaKey, startTime: Double?, forceTranscode: Bool)?
     private var unloadedPosition: Double = 0
     private var unloadedDuration: Double = 0
     /// Where playback is or is going. An interrupted seek leaves the engine's own time behind
@@ -259,6 +260,14 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var meteredConsent: MediaKey?
     /// The access token in the loaded stream's URLs: the one a 401 rejected.
     @ObservationIgnored private var streamAccessToken: String?
+    /// The latest start asked for an HLS transcode (the direct-play to HLS fallback): recovery
+    /// rebuilds keep asking, and the fallback doesn't run again until a new play.
+    @ObservationIgnored private var transcodeForced = false
+    /// The latest start's resolved stream kind, kept after a failed load.
+    @ObservationIgnored private var streamKind: StreamPlan.Kind?
+    /// Whether the latest start plays downloaded files (a local session), kept after a failed load:
+    /// they're never transcoded, so their decode and format errors surface (ADR 0007, decision 7).
+    @ObservationIgnored private var playsLocalFiles = false
 
     /// The last-played record is saved at most this often from time updates.
     static let lastPlayedSaveInterval: TimeInterval = 15
@@ -344,6 +353,17 @@ public final class PlaybackCoordinator {
     public func play(
         itemID: String, episodeID: String? = nil, startTime: Double? = nil, allowingMeteredNetwork: Bool = false
     ) async {
+        await play(
+            itemID: itemID, episodeID: episodeID, startTime: startTime,
+            allowingMeteredNetwork: allowingMeteredNetwork, forceTranscode: false)
+    }
+
+    /// ``play(itemID:episodeID:startTime:allowingMeteredNetwork:)``; `forceTranscode` asks `/play`
+    /// for an HLS transcode, which only ``confirmMeteredStreaming()`` does, replaying a blocked
+    /// fallback. A user's play never forces one.
+    private func play(
+        itemID: String, episodeID: String?, startTime: Double?, allowingMeteredNetwork: Bool, forceTranscode: Bool
+    ) async {
         guard !isRetired else { return }
         let key = MediaKey(
             serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
@@ -395,21 +415,23 @@ public final class PlaybackCoordinator {
         case .denied(let reason): return block(.streamingNotAllowed(reason, key: key))
         }
         meteredConsent = allowingMeteredNetwork ? key : nil
-        await start(key: key, startTime: startTime, prepared: nil, playRequest: check)
+        await start(
+            key: key, startTime: startTime, prepared: nil, forceTranscode: forceTranscode, playRequest: check)
     }
 
     /// The user agreed to stream on a metered network: replays the play (or queue advance) that
     /// ``error``'s ``PlaybackCoordinatorError/streamingNeedsConfirmation(_:key:)`` blocked, with
-    /// its item, episode and start time, allowing the metered path. Does nothing unless that is
-    /// still the error, so a confirmation shown for another failure, an earlier block or a
-    /// stopped (or retired) coordinator plays nothing. The policy is checked again: "never"
-    /// still blocks.
+    /// its item, episode and start time, allowing the metered path. A blocked recovery rebuild's
+    /// HLS fallback stays forced, so the direct play that failed isn't loaded again. Does nothing
+    /// unless that is still the error, so a confirmation shown for another failure, an earlier
+    /// block or a stopped (or retired) coordinator plays nothing. The policy is checked again:
+    /// "never" still blocks.
     public func confirmMeteredStreaming() async {
         guard case .streamingNeedsConfirmation(_, let key) = error, let blockedPlay, blockedPlay.key == key
         else { return }
         await play(
             itemID: key.libraryItemId, episodeID: key.episodeId, startTime: blockedPlay.startTime,
-            allowingMeteredNetwork: true)
+            allowingMeteredNetwork: true, forceTranscode: blockedPlay.forceTranscode)
     }
 
     /// The user declined to stream on a metered network: clears the
@@ -422,9 +444,11 @@ public final class PlaybackCoordinator {
     }
 
     /// Everything after a play passed the streaming policy. A `prepared` start (an auto-advance)
-    /// reuses its server progress instead of fetching it.
+    /// reuses its server progress instead of fetching it. `forceTranscode` asks `/play` for an HLS
+    /// transcode (a recovery rebuild's, ``transcodeForced``).
     private func start(
-        key: MediaKey, startTime: Double?, prepared: PreparedNextItem?, playing: Bool = true, playRequest: Int? = nil
+        key: MediaKey, startTime: Double?, prepared: PreparedNextItem?, playing: Bool = true,
+        forceTranscode: Bool = false, playRequest: Int? = nil
     ) async {
         // Consent is for one item: an auto-advance (or anything else) starting another drops it,
         // so coming back to the item later asks again; its own rebuilds keep it.
@@ -434,6 +458,9 @@ public final class PlaybackCoordinator {
         generation += 1
         let current = generation
         startPlayRequest = playRequest
+        transcodeForced = forceTranscode
+        streamKind = nil
+        playsLocalFiles = false
         // Retain pending old closes, but not a lifetime history of completed user sessions.
         closeOperations.removeAll {
             $0.transport.result != nil && ($0.handoff == nil || $0.handoff?.position.result != nil)
@@ -473,7 +500,8 @@ public final class PlaybackCoordinator {
         do {
             guard
                 let result = try await startSessionSerially(
-                    itemID: itemID, episodeID: episodeID, generation: current, prepared: prepared)
+                    itemID: itemID, episodeID: episodeID, generation: current, prepared: prepared,
+                    forceTranscode: forceTranscode)
             else { return }
             started = result
         } catch is CancellationError {
@@ -506,6 +534,8 @@ public final class PlaybackCoordinator {
         // From here the coordinator owns the session: whoever replaces it closes it.
         self.session = session
         streamAccessToken = stream.accessToken
+        streamKind = stream.plan.kind
+        playsLocalFiles = session.playMethod == .local
         // From here teardown can capture this known session without waiting for the engine load.
         opening.resolve(.success(()))
         pendingOpenings[openingID] = nil
@@ -599,7 +629,20 @@ public final class PlaybackCoordinator {
         } catch {
             guard current == generation else { return }
             tearDown(reason: .loadFailed)
-            return fail(PlaybackCoordinatorError(engineError: error), generation: current)
+            let failed = PlaybackCoordinatorError(engineError: error)
+            // A decode or format error on direct play falls back to HLS through recovery (ADR 0007);
+            // a recovery attempt's own failure is its run's to decide.
+            if current != recoveryAttempt, case .playback(let failure) = failed, failure.recoveryAction == .transcode,
+                canTranscode
+            {
+                // Seeks and jumps during the load are where the fallback starts.
+                let base = Self.clamp(pendingStartTime ?? unloadedPosition, to: unloadedDuration)
+                unloadedPosition = Self.clamp(base + pendingJumpOffset, to: unloadedDuration)
+                pendingStartTime = unloadedPosition
+                pendingJumpOffset = 0
+                return recovery.recover(from: failure, generation: current, wasPlaying: playWhenLoaded)
+            }
+            return fail(failed, generation: current)
         }
         guard current == generation else { return }
         // Admit only after a successful load. Invalidation prevents a new submission, not an
@@ -901,7 +944,8 @@ public final class PlaybackCoordinator {
     /// Replaces a session the server no longer has (its `/sync` answered 404, as after a server
     /// restart) with a new one for the same media at ``currentTime``, playing only if playback was
     /// requested: an explicit start, like recovery's rebuild, so neither server progress nor
-    /// auto-rewind moves it (#184). Does nothing unless `sessionID` is still the loaded session,
+    /// auto-rewind moves it (#184). A forced transcode (the HLS fallback) stays forced, as for a
+    /// rebuild. Does nothing unless `sessionID` is still the loaded session,
     /// or while a play waits on its streaming-policy check or recovery is rebuilding.
     public func replaceGoneSession(_ sessionID: String) async {
         guard !isRetired, phase == .loaded, session?.id == sessionID, let key = mediaKey, pendingPlayKey == nil,
@@ -911,7 +955,9 @@ public final class PlaybackCoordinator {
         // A play an interruption held still holds it on the new session (`start` takes
         // `generation + 1` at once).
         if heldPlay?.generation == generation { heldPlay?.generation = generation + 1 }
-        await start(key: key, startTime: currentTime, prepared: nil, playing: isPlaybackRequested)
+        await start(
+            key: key, startTime: currentTime, prepared: nil, playing: isPlaybackRequested,
+            forceTranscode: transcodeForced)
     }
 
     /// Ordinary user stop remains reusable and clears LastPlayed. Account end permanently
@@ -1063,6 +1109,9 @@ public final class PlaybackCoordinator {
         case .trackChanged:
             break
         case .endOfMedia:
+            // Before the observers and the advance: a stall that cleared into the end, with no
+            // playing tick to end its run, must not seek or play the ended item again.
+            recovery.noteEnded(generation: generation)
             reachedEnd = true
             lastPlayedAt = now()
             saveLastPlayed()
@@ -1081,6 +1130,10 @@ public final class PlaybackCoordinator {
             let error = PlaybackCoordinatorError(engineError: failure)
             self.error = error
             emit(.failed(error))
+        case .stalled:
+            // Retried like a readiness failure; a tick while playing first cancels it (ADR 0007).
+            recovery.recover(
+                from: .stalled, generation: generation, wasPlaying: engine.isPlaybackRequested || resumingIntent != nil)
         case .outputLost:
             break
         }
@@ -1328,9 +1381,11 @@ public final class PlaybackCoordinator {
                 return await engine.seek(to: engine.timeline?.clamp(target) ?? target)
             },
             play: { [weak self] in self?.startEngine() },
-            rebuild: { [weak self] target, playing in
-                await self?.rebuildForRecovery(at: target, playing: playing) ?? .superseded
+            rebuild: { [weak self] target, playing, forceTranscode in
+                await self?.rebuildForRecovery(at: target, playing: playing, forceTranscode: forceTranscode)
+                    ?? .superseded
             },
+            canTranscode: { [weak self] in self?.canTranscode ?? false },
             refresh: { [weak self, sessions] in
                 do {
                     try await sessions.refreshStreamAccess(replacing: self?.streamAccessToken)
@@ -1368,15 +1423,18 @@ public final class PlaybackCoordinator {
     /// start, so neither server progress nor auto-rewind moves it). Takes `generation + 1` at once.
     /// The path and setting now decide first, as for an auto-advance (no waiting): a block leaves
     /// the item as it is and recovery gives up with it, unless the user agreed to this item on a
-    /// metered network.
-    private func rebuildForRecovery(at target: Double, playing: Bool) async -> PlaybackRecoveryRebuild {
+    /// metered network. A forced transcode stays forced (ADR 0007).
+    private func rebuildForRecovery(
+        at target: Double, playing: Bool, forceTranscode: Bool
+    ) async -> PlaybackRecoveryRebuild {
         guard let key = mediaKey, phase == .loaded || phase == .unloaded else { return .superseded }
         switch policy.currentStreamingDecision() {
         case .allowed: break
         case .askUser where meteredConsent == key: break
         case .askUser(let reason):
-            // ``confirmMeteredStreaming()`` plays it again where recovery stopped.
-            blockedPlay = (key, target)
+            // ``confirmMeteredStreaming()`` plays it again where recovery stopped, keeping a forced
+            // transcode.
+            blockedPlay = (key, target, forceTranscode || transcodeForced)
             return .failed(.streamingNeedsConfirmation(reason, key: key), generation: generation)
         case .denied(let reason): return .failed(.streamingNotAllowed(reason, key: key), generation: generation)
         }
@@ -1391,12 +1449,18 @@ public final class PlaybackCoordinator {
                 recoveryAttemptError = nil
             }
         }
-        await start(key: key, startTime: target, prepared: nil, playing: playing)
+        await start(
+            key: key, startTime: target, prepared: nil, playing: playing,
+            forceTranscode: forceTranscode || transcodeForced)
         guard generation == attempt else { return .superseded }
         if phase == .loaded { return .recovered(generation: attempt) }
         guard let error = recoveryAttemptError else { return .superseded }
         return .failed(error, generation: attempt)
     }
+
+    /// Whether the direct-play to HLS fallback can run: the latest start resolved direct play from
+    /// the server, not downloaded files, and didn't force a transcode (once per play).
+    private var canTranscode: Bool { streamKind == .directPlay && !playsLocalFiles && !transcodeForced }
 
     /// The item that was to follow a switch failed or was abandoned: release the audio session the
     /// switch kept, so other apps' audio can resume.
@@ -1411,7 +1475,7 @@ public final class PlaybackCoordinator {
     /// ``confirmMeteredStreaming()``.
     private func block(_ error: PlaybackCoordinatorError, startTime: Double? = nil) {
         if case .streamingNeedsConfirmation(_, let key) = error {
-            blockedPlay = (key, startTime)
+            blockedPlay = (key, startTime, false)
         } else {
             blockedPlay = nil
         }
@@ -1603,7 +1667,7 @@ public final class PlaybackCoordinator {
     /// returns, before the caller registers the close of a stale session, so the next start's
     /// ``waitForCloses()`` sees it.
     private func startSessionSerially(
-        itemID: String, episodeID: String?, generation: Int, prepared: PreparedNextItem?
+        itemID: String, episodeID: String?, generation: Int, prepared: PreparedNextItem?, forceTranscode: Bool
     ) async throws -> StartedSession? {
         await startGate.acquire()
         defer { startGate.release() }
@@ -1621,7 +1685,8 @@ public final class PlaybackCoordinator {
             try Task.checkCancellation()
             if let prepared {
                 // Prepared before the end: only `/play` is left.
-                let session = try await sessions.startSession(itemID: itemID, episodeID: episodeID)
+                let session = try await sessions.startSession(
+                    itemID: itemID, episodeID: episodeID, forceTranscode: forceTranscode)
                 return StartedSession(
                     session: session, serverProgress: prepared.serverProgress,
                     progressCapture: prepared.progressCapture)
@@ -1630,7 +1695,8 @@ public final class PlaybackCoordinator {
             try Task.checkCancellation()
             // After the closes: a restart must see the previous final report.
             async let serverProgress = Self.serverProgress(sessions, itemID: itemID, episodeID: episodeID)
-            let session = try await sessions.startSession(itemID: itemID, episodeID: episodeID)
+            let session = try await sessions.startSession(
+                itemID: itemID, episodeID: episodeID, forceTranscode: forceTranscode)
             return StartedSession(session: session, serverProgress: await serverProgress, progressCapture: capture)
         }
         startTask = task

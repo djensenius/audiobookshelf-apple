@@ -197,6 +197,61 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .connect)
     }
 
+    /// What a reconnect ahead of a queued sign-out leaves the source in.
+    enum ReconnectOutcome: CaseIterable {
+        /// Signed out by itself, as for an unsupported version, which keeps the tokens.
+        case signedOut
+        /// Signed in to another account meanwhile.
+        case otherAccount
+        /// Back online.
+        case online
+    }
+
+    /// A sign-out queued behind a reconnect that signed the source out by itself still signs out
+    /// of the session's connection, with or without the session it was chosen from; never once
+    /// another account is active (control), or when the sign-out ran normally (control).
+    @Test(.timeLimit(.minutes(1)), arguments: ReconnectOutcome.allCases, [true, false])
+    func aSignOutQueuedBehindAReconnectSignsOutOfItsConnection(outcome: ReconnectOutcome, chosen: Bool) async throws {
+        let harness = Harness(restoredPhase: .active(identityA, isOffline: true))
+        try await harness.started()
+        let origin = try #require(harness.lifecycle.readySession)
+        let bodyGate = Gate()
+        defer { bodyGate.open() }
+        let reconnecting = Task { [log = harness.log, source = harness.source, lifecycle = harness.lifecycle] in
+            await lifecycle.reconnect(origin) {
+                log.record("reconnect")
+                await bodyGate.wait()
+                switch outcome {
+                case .signedOut: source.phase = .signedOut
+                case .otherAccount: source.phase = .active(identityB, isOffline: false)
+                case .online: source.phase = .active(identityA, isOffline: false)
+                }
+            }
+        }
+        try #require(await eventually { harness.log.entries.contains("reconnect") })
+        let signingOut = Task { await harness.lifecycle.signOut(of: chosen ? origin : nil) }
+        for _ in 0..<20 { await Task.yield() }
+        bodyGate.open()
+        #expect(await reconnecting.value)
+        let url = await signingOut.value
+
+        switch outcome {
+        case .signedOut:
+            #expect(harness.log.count(of: "accounts.logout(a)") == 1)
+            #expect(url == URL(string: "https://idp.example/logout/a"))
+            #expect(harness.lifecycle.gate == .connect)
+        case .otherAccount:
+            #expect(!harness.log.entries.contains("accounts.logout(a)"))
+            // Chosen from the ended session, it does nothing; otherwise it signs out of the
+            // running one, as before.
+            #expect(harness.log.count(of: "accounts.logout") == (chosen ? 0 : 1))
+        case .online:
+            // The ordinary sign-out, through `logout()`.
+            #expect(harness.log.count(of: "accounts.logout") == 1)
+            #expect(!harness.log.entries.contains("accounts.logout(a)"))
+        }
+    }
+
     // MARK: Sign out
 
     @Test func signOutFlushesThenEndsInReverseThenClearsThenLogsOut() async throws {
@@ -1061,7 +1116,8 @@ private func teardown(_ reason: String) -> [String] {
         switch operation {
         case "signOut":
             await harness.lifecycle.signOut()
-            expected = []
+            // The source decides whether the connection the expiry ended has anything to sign out.
+            expected = ["accounts.logout(a)"]
         case "switch":
             try await harness.lifecycle.switchAccount(to: identityB.connectionID)
             #expect(await eventually { harness.log.entries.contains("library.seed(b)") })

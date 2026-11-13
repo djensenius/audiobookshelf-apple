@@ -164,8 +164,9 @@ import Testing
     }
 
     /// A background session follows a redirect of the transfer (or of a resumed transfer's
-    /// `Range` request) without asking, so a connection with custom headers is refused for good
-    /// before any request, the preflight's included: the headers go nowhere (follow-up #467).
+    /// `Range` request) without asking, so without a foreground session (#467) a connection with
+    /// custom headers is refused for good before any request, the preflight's included: the
+    /// headers go nowhere.
     @Test func customHeadersFailWithoutARequest() async throws {
         let harness = try await DownloadHarness(customHeaders: ["CF-Access-Client-Secret": "secret"]) { _ in
             .status(200)

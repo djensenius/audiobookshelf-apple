@@ -29,10 +29,12 @@ public enum LocalPlaybackError: Error, Sendable, Hashable {
 /// plays the files on this device and never contacts the server; the sessions it closes are kept
 /// as ``PendingLocalSessionDTO``s for ``LocalSessionUploader``.
 ///
-/// - ``startSession(itemID:episodeID:)`` builds the session with ``LocalPlaybackSessionBuilder``:
-///   play method local, a new UUIDv4 id, `deviceInfo`, and the saved local position (legacy
-///   parity). It throws ``LocalPlaybackError/notDownloaded`` without a download of the media, and
-///   ``LocalPlaybackError/downloadFilesMissing(_:)`` when one of its files is missing.
+/// - ``startSession(itemID:episodeID:forceTranscode:)`` builds the session with
+///   ``LocalPlaybackSessionBuilder``: play method local, a new UUIDv4 id, `deviceInfo`, and the
+///   saved local position (legacy parity). It throws ``LocalPlaybackError/notDownloaded`` without
+///   a download of the media, and ``LocalPlaybackError/downloadFilesMissing(_:)`` when one of its
+///   files is missing. Only a server transcodes, so `forceTranscode` is ignored here; the
+///   coordinator never forces one for downloaded files.
 /// - ``resolveStream(for:)`` returns the files' URLs, with no transport or token.
 /// - ``mediaProgress(itemID:episodeID:)`` throws ``LocalPlaybackError/serverProgressUnavailable``:
 ///   the coordinator takes its answer as the server's, so on failure it reads local progress itself.
@@ -109,7 +111,9 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
         return session
     }
 
-    public func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
+    public func startSession(itemID: String, episodeID: String?, forceTranscode _: Bool) async throws
+        -> PlaybackSession
+    {
         guard let item = try await playableItem(itemID: itemID, episodeID: episodeID) else {
             throw LocalPlaybackError.notDownloaded
         }

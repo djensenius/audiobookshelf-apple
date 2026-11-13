@@ -97,6 +97,33 @@ struct PlaybackStreamResetTests {
         #expect(!coordinator.isPlaybackRequested)
     }
 
+    /// A stall while the reset's run waits is the reset's: playback resuming on its own doesn't
+    /// end the re-seek, as it ends a stall's own run (Part of #527).
+    @Test func aStallDuringAResetKeepsItsReseek() async {
+        h.recoverySleep.isManual = true
+        await playAt600()
+        let seeks = engine.seeks.count
+
+        coordinator.handleStreamReset(sessionID: "A-1")
+        await settle { h.recoverySleep.waitingCount == 1 }
+        // The restarted transcode stalls the player, which then plays again before the delay ends.
+        engine.state = .buffering
+        engine.onEvent?(.stalled)
+        engine.state = .playing
+        engine.onEvent?(.tick(600))
+        h.recoverySleep.fireOldest()
+        await settle { engine.seeks.count == seeks + 1 }
+        await drain()
+
+        #expect(Array(engine.seeks.dropFirst(seeks)) == [600])
+        #expect(coordinator.isPlaying)
+        #expect(coordinator.error == nil)
+        #expect(service.starts == ["A"])
+        #expect(lookups.isEmpty)
+        #expect(h.recoverySleep.durations == [.milliseconds(500)])
+        #expect(h.recoverySleep.waitingCount == 0)
+    }
+
     @Test func aResetDuringReadinessRetriesRestartsTheirBackoff() async {
         h.recoverySleep.isManual = true
         await playAt600()

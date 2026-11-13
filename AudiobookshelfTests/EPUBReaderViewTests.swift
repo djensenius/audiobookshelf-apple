@@ -119,6 +119,97 @@ import WebKit
             #expect(second !== first)
         }
 
+        /// The page's table of contents reaches the sheet, decoded, with the section the reader
+        /// shows marked; a page's failure to read it lists nothing rather than loading for good.
+        @Test(arguments: [false, true])
+        func thePagesContentsReachTheSheet(fails: Bool) async throws {
+            let request = EbookFileRequest(
+                connectionID: UUID(), itemID: "book", fileIno: "1", fileExtension: "epub", version: "1")
+            let loader = EbookFileLoader(
+                directory: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString),
+                fetcher: NoEbookFetcher())
+            let model = ReaderContainerModel(
+                request: request, kind: .epub, loader: loader, progress: nil, serverProgress: nil)
+            let session = EPUBReaderSession(
+                model: model, fileURL: URL(filePath: "/nonexistent/book.epub"),
+                payload: ReaderSettingsPayload(settings: ReaderSettings(), resolvedAppearance: .light, layout: .single))
+            func post(_ json: String) { session.controller.onEvent(Data(json.utf8)) }
+
+            post(
+                fails
+                    ? #"{"type":"error","message":"no nav","phase":"toc"}"#
+                    : #"""
+                    {"type":"toc","items":[{"id":"1","label":"One","href":"c1.xhtml",
+                      "subitems":[{"id":"1a","label":"Two","href":"c2.xhtml"}]}]}
+                    """#)
+            for _ in 0..<200 where session.contents.contents == nil { try await Task.sleep(for: .milliseconds(10)) }
+            let contents = try #require(session.contents.contents)
+            #expect(contents.entries.map(\.label) == (fails ? [] : ["One", "Two"]))
+            #expect(contents.entries.map(\.level) == (fails ? [] : [0, 1]))
+
+            post(
+                #"{"type":"relocated","startCfi":"a","endCfi":"b","progress":0.1,"href":"c2.xhtml","atStart":false,"atEnd":false}"#
+            )
+            #expect(session.contents.currentEntryID == (fails ? nil : 1))
+            if let entry = contents.entries.first {
+                session.contents.isPresented = true
+                session.show(entry)
+                #expect(!session.contents.isPresented)
+            }
+        }
+
+        /// The page lists its contents before the book has opened: an entry chosen then isn't
+        /// dropped but shown once it has; one chosen after goes straight to the book.
+        @Test func anEntryChosenWhileTheBookOpensIsShownOnceItHas() async throws {
+            let request = EbookFileRequest(
+                connectionID: UUID(), itemID: "book", fileIno: "1", fileExtension: "epub", version: "1")
+            let loader = EbookFileLoader(
+                directory: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString),
+                fetcher: NoEbookFetcher())
+            let model = ReaderContainerModel(
+                request: request, kind: .epub, loader: loader, progress: nil, serverProgress: nil)
+            let session = EPUBReaderSession(
+                model: model, fileURL: URL(filePath: "/nonexistent/book.epub"),
+                payload: ReaderSettingsPayload(settings: ReaderSettings(), resolvedAppearance: .light, layout: .single))
+            let first = EPUBContentsEntry(id: 0, label: "One", href: "c1.xhtml", level: 0)
+            let second = EPUBContentsEntry(id: 1, label: "Two", href: "c2.xhtml#a", level: 0)
+
+            session.contents.isPresented = true
+            session.show(second)
+            session.show(first)
+            #expect(!session.contents.isPresented)
+            #expect(session.pendingDestination == .display(target: "c1.xhtml"))
+
+            session.didOpen()
+            #expect(session.pendingDestination == nil)
+            session.show(second)
+            #expect(session.pendingDestination == nil)
+        }
+
+        /// A `toc` message JSON can't hold (nested too deeply) reaches the session as the contents
+        /// failing, so the sheet says there are none rather than loading for good.
+        @Test func aTOCTheBridgeCannotCarryEndsTheSheetsLoading() async throws {
+            let request = EbookFileRequest(
+                connectionID: UUID(), itemID: "book", fileIno: "1", fileExtension: "epub", version: "1")
+            let loader = EbookFileLoader(
+                directory: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString),
+                fetcher: NoEbookFetcher())
+            let model = ReaderContainerModel(
+                request: request, kind: .epub, loader: loader, progress: nil, serverProgress: nil)
+            let session = EPUBReaderSession(
+                model: model, fileURL: URL(filePath: "/nonexistent/book.epub"),
+                payload: ReaderSettingsPayload(settings: ReaderSettings(), resolvedAppearance: .light, layout: .single))
+            let handler = EPUBMessageHandler { session.controller.onEvent($0) }
+            var item: [String: Any] = ["id": "deep", "label": "Deep", "href": "c1.xhtml"]
+            for _ in 0..<300 { item = ["id": "level", "label": "Level", "href": "c1.xhtml", "subitems": [item]] }
+            let body: [String: Any] = ["type": "toc", "items": [item]]
+            #expect(EPUBMessageHandler.json(from: body) == nil)
+
+            handler.receive(body)
+
+            #expect(session.contents.contents == EPUBTableOfContents([]))
+        }
+
         /// A reader that goes away (dismissed, or replaced on an account switch) closes its page,
         /// so a command the page could never finish off screen doesn't keep it alive.
         @Test func goingAwayClosesThePage() async throws {

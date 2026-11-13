@@ -1,5 +1,6 @@
 import ABSAppModel
 import ABSCore
+import ABSData
 import ABSPlayback
 
 /// Runs the shared playback intents (`AudiobookshelfShared/Intents`) on the app's player, the
@@ -12,6 +13,8 @@ final class PlaybackIntentHandler: PlaybackIntentHandling {
     private let settings: AppSettings
     private let sleepTimer: @MainActor () -> (any SleepTimerStarting)?
     private let ready: @MainActor () async -> Void
+    private let playItem: @MainActor () -> PlayItemAction?
+    private let library: @MainActor () -> LibraryStore?
 
     /// - Parameters:
     ///   - playback: The signed-in account's playback (``CurrentPlayback`` in the app).
@@ -21,15 +24,22 @@ final class PlaybackIntentHandler: PlaybackIntentHandling {
     ///   - ready: Awaited before each command. An intent can launch the app without a scene, and
     ///     only scenes start the session lifecycle, so the app passes `SessionLifecycle.start()`,
     ///     which restores the saved account's session and last-played item once.
+    ///   - playItem: The running session's play action, read for each play intent.
+    ///   - library: The library store, whose account the entity queries search and play intents
+    ///     check an item against.
     init(
         playback: any PlayerPlaybackControlling, settings: AppSettings,
         sleepTimer: @escaping @MainActor () -> (any SleepTimerStarting)? = { nil },
-        ready: @escaping @MainActor () async -> Void = {}
+        ready: @escaping @MainActor () async -> Void = {},
+        playItem: @escaping @MainActor () -> PlayItemAction? = { nil },
+        library: @escaping @MainActor () -> LibraryStore? = { nil }
     ) {
         self.playback = playback
         self.settings = settings
         self.sleepTimer = sleepTimer
         self.ready = ready
+        self.playItem = playItem
+        self.library = library
     }
 
     /// The performer, once `ready` has returned.
@@ -87,6 +97,23 @@ final class PlaybackIntentHandler: PlaybackIntentHandling {
     }
 }
 
+extension PlaybackIntentHandler: PlayableEntityHandling {
+    func catalog() async -> PlayableEntityCatalog? {
+        await ready()
+        return library().map { PlayableEntityCatalog(source: LibraryStoreEntitySource(store: $0)) }
+    }
+
+    func play(_ key: MediaKey) async throws {
+        do throws(PlaybackIntentFailure) {
+            let performer = await performer()
+            try await performer.play(
+                key, activeConnectionID: library()?.connectionKey?.connectionID, playItem: playItem())
+        } catch {
+            throw PlaybackIntentError(error)
+        }
+    }
+}
+
 extension PlaybackIntentError {
     /// The dialog for a ``PlaybackIntentPerformer`` failure.
     init(_ failure: PlaybackIntentFailure) {
@@ -97,6 +124,7 @@ extension PlaybackIntentError {
         case .noChapterEnd: self = .noChapterEnd
         case .jumpFailed: self = .jumpFailed
         case .playbackFailed: self = .playbackFailed
+        case .itemUnavailable: self = .itemUnavailable
         }
     }
 }

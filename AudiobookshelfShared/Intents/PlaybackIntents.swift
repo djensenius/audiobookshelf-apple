@@ -47,6 +47,8 @@ enum PlaybackIntentError: Error, Equatable, CustomLocalizedStringResourceConvert
     case jumpFailed
     /// Playback didn't start (blocked by the streaming setting, or failed); the app shows why.
     case playbackFailed
+    /// The book or episode isn't on the signed-in account, or nobody is signed in.
+    case itemUnavailable
 
     var localizedStringResource: LocalizedStringResource {
         switch self {
@@ -57,6 +59,7 @@ enum PlaybackIntentError: Error, Equatable, CustomLocalizedStringResourceConvert
         case .noChapterEnd: LocalizedStringResource("IntentErrorNoChapterEnd", table: "AppIntents")
         case .jumpFailed: LocalizedStringResource("IntentErrorJumpFailed", table: "AppIntents")
         case .playbackFailed: LocalizedStringResource("IntentErrorPlaybackFailed", table: "AppIntents")
+        case .itemUnavailable: LocalizedStringResource("IntentErrorItemUnavailable", table: "AppIntents")
         }
     }
 }
