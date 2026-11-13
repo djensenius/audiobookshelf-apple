@@ -6,24 +6,38 @@ import SwiftUI
 /// device signed in to the same account can continue it. The payload names the active account
 /// by its server address and user ID, never by its local connection ID; with no active
 /// connection, IDs a receiver would reject, or a shell that isn't the active account's,
-/// nothing is published.
+/// nothing is published. Only the screen on top of the selected tab's stack publishes
+/// (``isFrontmost(itemID:episodeID:in:owner:)``).
 struct HandoffPublishing: ViewModifier {
     let itemID: String
     let episodeID: String?
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(SessionLifecycle.self) private var lifecycle: SessionLifecycle?
+    @Environment(Router.self) private var router: Router?
+    @Environment(\.navigationTab) private var owner
 
     func body(content: Content) -> some View {
+        let isFrontmost = Self.isFrontmost(itemID: itemID, episodeID: episodeID, in: router, owner: owner)
         let account = lifecycle.flatMap {
             Self.account(active: accounts?.activeConnection, shown: SceneContent($0.gate))
         }
-        let userInfo = account.flatMap {
+        let userInfo = account.flatMap { isFrontmost ? $0 : nil }.flatMap {
             DeepLink.handoffUserInfo(itemID: itemID, episodeID: episodeID, account: $0)
         }
         content.userActivity(DeepLink.handoffActivityType, isActive: userInfo != nil) { activity in
             activity.isEligibleForHandoff = true
             activity.userInfo = userInfo
         }
+    }
+
+    /// Whether this item or episode screen tops the selected tab's stack, as for ⌘R
+    /// (``RefreshCommandPlacement/isFrontmost(in:owner:isVisible:)``). macOS keeps a hidden tab's
+    /// screens appeared, and a covered screen stays in its stack, so neither publishes. Without
+    /// a router (previews), it does.
+    @MainActor
+    static func isFrontmost(itemID: String, episodeID: String?, in router: Router?, owner: AppTab?) -> Bool {
+        let route = episodeID.map { Route.episode(itemID: itemID, episodeID: $0) } ?? .item(id: itemID)
+        return RefreshCommandPlacement.pushed(route).isFrontmost(in: router, owner: owner, isVisible: true)
     }
 
     /// The account to name in the activity: the active connection's, only while it is the

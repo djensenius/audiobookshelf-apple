@@ -213,6 +213,28 @@ private final class Recorder: SessionParticipant {
         }
     }
 
+    @Test func handoffPublishesOnlyTheSelectedTabsTopScreen() {
+        let router = Router()
+        let shown = { (itemID: String, episodeID: String?, owner: AppTab?) in
+            HandoffPublishing.isFrontmost(itemID: itemID, episodeID: episodeID, in: router, owner: owner)
+        }
+        router[path: .home] = [.item(id: "li_1")]
+        #expect(shown("li_1", nil, .home))
+        #expect(!shown("li_2", nil, .home))
+        // The same item kept appeared in a hidden tab (macOS), or that tab selected away from.
+        #expect(!shown("li_1", nil, .series))
+        router.selectedTab = .series
+        #expect(!shown("li_1", nil, .home))
+        // Covered by a screen pushed on top of it.
+        router.selectedTab = .home
+        router[path: .home].append(.episode(itemID: "li_1", episodeID: "ep_1"))
+        #expect(!shown("li_1", nil, .home))
+        #expect(shown("li_1", "ep_1", .home))
+        #expect(!shown("li_1", "ep_2", .home))
+        // Previews have no router.
+        #expect(HandoffPublishing.isFrontmost(itemID: "li_1", episodeID: nil, in: nil, owner: nil))
+    }
+
     // MARK: Account session adapter
 
     @Test func adapterReportsRestoringUntilTheServerAnswers() async throws {
