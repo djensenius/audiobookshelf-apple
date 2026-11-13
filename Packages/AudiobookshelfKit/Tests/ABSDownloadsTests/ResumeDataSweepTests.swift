@@ -61,6 +61,43 @@ import Testing
         #expect(!exists(orphan))
     }
 
+    /// A fallback store (not the App Group's) doesn't list the downloads the resume data belongs
+    /// to, so an engine told not to sweep keeps every blob, even with no record at all.
+    @Test func anEngineOnAFallbackStoreDeletesNoBlob() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partIDs = [UUID(), UUID()]
+        for partID in partIDs {
+            try harness.vault.seal(Data("resume".utf8), partID: partID, credentialTag: Data("tag".utf8))
+        }
+
+        #expect(await harness.makeEngine(sweepsOrphanedResumeData: false).activate())
+
+        #expect(
+            partIDs.allSatisfy {
+                FileManager.default.fileExists(atPath: harness.vault.fileURL(partID: $0).path(percentEncoded: false))
+            })
+    }
+
+    /// The session outlives a failed sweep, so the same engine's next activation sweeps again.
+    @Test func aFailedSweepIsRetriedOnTheNextActivation() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let orphan = UUID()
+        try harness.vault.seal(Data("resume".utf8), partID: orphan, credentialTag: Data("tag".utf8))
+        let blob = harness.vault.fileURL(partID: orphan).path(percentEncoded: false)
+        let folder = harness.locations.resumeDataRoot.path(percentEncoded: false)
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: folder)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder) }
+        let engine = harness.makeEngine()
+
+        #expect(await engine.activate())
+        try #require(FileManager.default.fileExists(atPath: blob))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: folder)
+        await engine.deactivate()
+        #expect(await engine.activate())
+
+        #expect(!FileManager.default.fileExists(atPath: blob))
+    }
+
     /// Only `<part id>.bin` files are swept, and a missing folder is nothing to do.
     @Test func theSweepLeavesOtherFilesAndAMissingFolder() throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: "sweep-\(UUID().uuidString)")
