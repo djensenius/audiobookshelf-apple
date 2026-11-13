@@ -74,7 +74,9 @@ struct ReaderContainer: View {
     }
 
     var body: some View {
-        Group {
+        // A container, not a `Group`, whose modifiers go to the children it shows: the load, the
+        // flush and the release belong to the reader, not to the loading view giving way to it.
+        ZStack {
             if let model {
                 ReaderContent(model: model, title: presentation.title, serverURL: serverURL, close: close)
             } else if isUnavailable {
@@ -297,7 +299,8 @@ private struct PDFReaderHost: View {
     @State private var failure: PDFDocumentLoadError?
 
     var body: some View {
-        Group {
+        // A container, so the load belongs to the reader rather than its loading view.
+        ZStack {
             if let document {
                 let pageCount = document.pageCount
                 PDFReaderView(
