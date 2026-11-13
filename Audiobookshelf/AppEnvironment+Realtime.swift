@@ -1,5 +1,6 @@
 import ABSAppModel
 import ABSCore
+import ABSData
 
 /// The realtime socket (#59), built once by ``AppEnvironment``: one ``RealtimeBridge`` that every
 /// account session starts and stops, registered at ``SessionStage/progressSource`` after playback,
@@ -16,14 +17,14 @@ struct AppRealtime {
     private let monitor: NetworkMonitor
 
     static func make(
-        library: LibraryParticipant, accounts: AccountManager, playback: AppPlayback, lifecycle: SessionLifecycle
+        library: LibraryParticipant, accounts: AccountManager, playback: AppPlayback,
+        localProgress: LocalProgressStore?, lifecycle: SessionLifecycle
     ) -> AppRealtime {
         let bridge = RealtimeBridge(progress: library.store.progress)
         bridge.route(
             library: library.store, accounts: accounts,
             bookmarks: { [weak participant = playback.participant] in participant?.bookmarks },
-            // The writer the playback scopes share, so its edits order the socket's merges.
-            playback: playback.current, localProgress: playback.writer)
+            playback: playback.current, localProgress: localProgress)
         lifecycle.register(bridge, stage: .progressSource)
         let monitor = NetworkMonitor()
         monitor.start()

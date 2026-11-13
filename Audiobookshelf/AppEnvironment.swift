@@ -133,7 +133,8 @@ final class AppEnvironment {
         // Realtime (#59), after playback: the socket stops before the playback scope retires.
         if realtime, let accounts, let library {
             self.realtime = AppRealtime.make(
-                library: library, accounts: accounts, playback: playback, lifecycle: lifecycle)
+                library: library, accounts: accounts, playback: playback, localProgress: localProgress,
+                lifecycle: lifecycle)
         } else {
             self.realtime = nil
         }
