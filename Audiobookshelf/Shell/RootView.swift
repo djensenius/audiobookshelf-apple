@@ -115,25 +115,22 @@ struct RootView: View {
             // sign-in presented from it isn't torn down. It is the same case as a ready session,
             // so the shell, its router and its scene storage survive until the identity changes.
             // A confirmed switch's link, opened after it with the new account's epoch.
-            SceneRouterHost(
-                identity: identity, player: player, pendingLink: opensLinks ? linkBinding : .constant(nil),
-                reopen: LinkReopener(
-                    beginSwitch: { links.beginSwitch(with: $0, epoch: lifecycle.linkEpoch) },
-                    finishSwitch: {
-                        links.finishSwitch($0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
-                    })
-            )
-            .environment(\.imagePipeline, imagePipeline)
+            // The store, progress reader and item actions only while the store serves this
+            // shell's account: during a switch the outgoing shell stays up after the store
+            // attached the next account, and must not build services, read progress or act for
+            // it with its own library and item IDs. Built once per shell, so once per session.
+            AccountShell(store: servedStore(for: identity)) {
+                SceneRouterHost(
+                    identity: identity, player: player, pendingLink: opensLinks ? linkBinding : .constant(nil),
+                    reopen: LinkReopener(
+                        beginSwitch: { links.beginSwitch(with: $0, epoch: lifecycle.linkEpoch) },
+                        finishSwitch: {
+                            links.finishSwitch($0, gate: lifecycle.gate, epoch: lifecycle.linkEpoch)
+                        })
+                )
+                .environment(\.imagePipeline, imagePipeline)
+            }
             .id(identity)
-            // Only while the store serves this shell's account: during a switch the outgoing
-            // shell stays up after the store attached the next account, and must not build
-            // services or read progress for it with its own library and item IDs.
-            .environment(\.libraryStore, servedStore(for: identity))
-            .environment(
-                \.itemProgressReader,
-                servedStore(for: identity).map { BrowsePresentation.progressReader($0.progress) }
-                    ?? .none
-            )
             // `AccountManager` is observable, so a sign-in, switch, reconnect or sign-out updates it.
             .environment(\.statsService, Self.statsService(accounts, for: identity))
         case .storeUnavailable:
