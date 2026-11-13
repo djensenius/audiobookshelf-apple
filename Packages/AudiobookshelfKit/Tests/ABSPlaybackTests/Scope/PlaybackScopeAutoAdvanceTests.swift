@@ -82,16 +82,16 @@ struct PlaybackScopeAutoAdvanceTests {
         await playA()
         let connectionID = s.h.connectionID
 
-        scope.progressDidChange(for: MediaKey(serverConnectionID: connectionID, libraryItemId: "Other"))
+        scope.progressDidChange(for: MediaKey(serverConnectionID: connectionID, libraryItemId: "Other"), kind: .updated)
         await settle()
         #expect(policyChecks == 2)
 
-        scope.progressDidChange(for: MediaKey(serverConnectionID: connectionID, libraryItemId: "B"))
+        scope.progressDidChange(for: MediaKey(serverConnectionID: connectionID, libraryItemId: "B"), kind: .updated)
         await settle()
         #expect(policyChecks == 3)
 
         scope.retire(reason: .signOut)
-        scope.progressDidChange(for: MediaKey(serverConnectionID: connectionID, libraryItemId: "B"))
+        scope.progressDidChange(for: MediaKey(serverConnectionID: connectionID, libraryItemId: "B"), kind: .updated)
         await settle()
         #expect(policyChecks == 3)
     }

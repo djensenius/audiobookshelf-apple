@@ -19,6 +19,7 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
     private struct Change: Equatable {
         let item: String
         let episode: String?
+        var kind: ProgressChangeKind = .updated
     }
 
     private final class Recorder {
@@ -27,7 +28,7 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
 
     private func recording(_ cache: ProgressCache) -> Recorder {
         let recorder = Recorder()
-        cache.onChange = { recorder.changes.append(Change(item: $0, episode: $1)) }
+        cache.onChange = { recorder.changes.append(Change(item: $0, episode: $1, kind: $2)) }
         return recorder
     }
 
@@ -39,7 +40,30 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
         cache.apply(progress("podcast", episode: "e1", currentTime: 2, lastUpdate: 20))
         cache.remove(libraryItemID: "podcast", episodeID: "e1")
 
-        #expect(recorder.changes == Array(repeating: Change(item: "podcast", episode: "e1"), count: 3))
+        #expect(
+            recorder.changes == [
+                Change(item: "podcast", episode: "e1"), Change(item: "podcast", episode: "e1"),
+                Change(item: "podcast", episode: "e1", kind: .reset),
+            ])
+    }
+
+    /// Only a change back to unfinished is a reset: a finish, a new position or hiding isn't.
+    @Test func onlyUnfinishingIsAReset() {
+        let cache = ProgressCache()
+        let recorder = recording(cache)
+        var value = progress("book", currentTime: 1, lastUpdate: 10)
+        cache.apply(value)
+        value.isFinished = true
+        value.lastUpdate = 20
+        cache.apply(value)
+        value.hideFromContinueListening = true
+        value.lastUpdate = 30
+        cache.apply(value)
+        value.isFinished = false
+        value.lastUpdate = 40
+        cache.apply(value)
+
+        #expect(recorder.changes.map(\.kind) == [.updated, .updated, .updated, .reset])
     }
 
     /// An update the cache keeps out, a read, or removing nothing changes no value.
@@ -87,7 +111,8 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
         let update = try #require(cache.applyOptimistic(progress("book", currentTime: 9, lastUpdate: 30), token: token))
         cache.rollbackOptimistic(update, to: nil, token: token)
 
-        #expect(recorder.changes == [Change(item: "book", episode: nil), Change(item: "book", episode: nil)])
+        #expect(
+            recorder.changes == [Change(item: "book", episode: nil), Change(item: "book", episode: nil, kind: .reset)])
     }
 
     /// An action reports its media again once the server and the local database have it, so a
@@ -97,7 +122,7 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
         let cache = ProgressCache()
         cache.apply(progress("podcast", episode: "e2", currentTime: 5, lastUpdate: 10))
         let log = Locked<[String]>([])
-        cache.onChange = { item, episode in log.value.append("change \(item) \(episode ?? "-")") }
+        cache.onChange = { item, episode, _ in log.value.append("change \(item) \(episode ?? "-")") }
         let writer = LoggingWriter(log: log)
         let actions = ProgressItemActions(cache: cache, writer: writer, localSync: LoggingSync(log: log))
         let target = ItemActionTarget(libraryItemID: "podcast", episodeID: "e2", duration: 60)
@@ -114,6 +139,26 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
         writer.fails.value = true
         await #expect(throws: LoggingWriter.Failure.self) { try await actions.markFinished(target) }
         #expect(log.value == ["change podcast e2", "change podcast e2", "write", "change podcast e2"])
+    }
+
+    /// Each action's settled report carries the kind of its change: hiding a finished episode is
+    /// no reset, so auto-advance keeps it skipped; marking it not finished or discarding it is.
+    @Test func settledReportsCarryTheActionsKind() async throws {
+        let cache = ProgressCache()
+        let log = Locked<[String]>([])
+        cache.onChange = { _, _, kind in log.value.append("\(kind)") }
+        let actions = ProgressItemActions(
+            cache: cache, writer: LoggingWriter(log: Locked([])), localSync: LoggingSync(log: Locked([])))
+        let target = ItemActionTarget(libraryItemID: "podcast", episodeID: "e2", duration: 60)
+
+        try await actions.markFinished(target)
+        try await actions.hideFromContinueListening(target)
+        #expect(log.value == ["updated", "updated", "updated", "updated"])
+
+        log.value = []
+        try await actions.markNotFinished(target)
+        try await actions.discardProgress(target)
+        #expect(log.value == ["reset", "reset", "reset", "reset"])
     }
 
     /// Clearing ends the account's session; it reports nothing.

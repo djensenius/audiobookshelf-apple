@@ -63,7 +63,7 @@ private final class FakeScope: PlaybackScopeHandle {
 
     private(set) var progressChanges: [MediaKey] = []
 
-    func progressDidChange(for key: MediaKey) {
+    func progressDidChange(for key: MediaKey, kind: ProgressChangeKind) {
         progressChanges.append(key)
     }
 
@@ -324,7 +324,7 @@ private struct Harness {
         try await harness.started()
         let scopeA = try #require(harness.scopes.last)
 
-        harness.participant.progressDidChange(libraryItemID: "P", episodeID: "e2")
+        harness.participant.progressDidChange(libraryItemID: "P", episodeID: "e2", kind: .updated)
         #expect(
             scopeA.progressChanges == [
                 MediaKey(serverConnectionID: identityA.connectionID, libraryItemId: "P", episodeId: "e2")
@@ -333,13 +333,13 @@ private struct Harness {
         try await harness.lifecycle.switchAccount(to: identityB.connectionID)
         #expect(await eventually { harness.log.entries.contains("b.restore") })
         let scopeB = try #require(harness.scopes.last)
-        harness.participant.progressDidChange(libraryItemID: "book", episodeID: nil)
+        harness.participant.progressDidChange(libraryItemID: "book", episodeID: nil, kind: .updated)
         #expect(scopeA.progressChanges.count == 1)
         #expect(scopeB.progressChanges == [MediaKey(serverConnectionID: identityB.connectionID, libraryItemId: "book")])
 
         await harness.lifecycle.signOut()
         #expect(await eventually { harness.log.entries.contains("b.finished") })
-        harness.participant.progressDidChange(libraryItemID: "book", episodeID: nil)
+        harness.participant.progressDidChange(libraryItemID: "book", episodeID: nil, kind: .updated)
         #expect(scopeB.progressChanges.count == 1)
     }
 

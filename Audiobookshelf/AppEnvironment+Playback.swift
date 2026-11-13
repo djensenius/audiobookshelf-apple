@@ -85,7 +85,9 @@ struct AppPlayback {
     /// the socket, actions on other screens), so a finish elsewhere changes what plays next
     /// (#160). The cache and the participant both serve the active account.
     func follow(_ progress: ProgressCache) {
-        progress.onChange = { [weak participant] in participant?.progressDidChange(libraryItemID: $0, episodeID: $1) }
+        progress.onChange = { [weak participant] in
+            participant?.progressDidChange(libraryItemID: $0, episodeID: $1, kind: $2)
+        }
     }
 
     /// One account session's scope, over an engine of its own. The connection's last-played record

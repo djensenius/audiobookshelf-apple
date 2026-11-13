@@ -178,14 +178,14 @@ struct AutoAdvancePreparationTests {
         #expect(progressReads.last == a.key("P", episode: "e2"))
 
         a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e2"])
-        a.advancer.progressDidChange(for: a.key("P", episode: "e2"))
+        a.advancer.progressDidChange(for: a.key("P", episode: "e2"), kind: .updated)
         await a.advancer.waitForPreparation()
         #expect(a.episodes.fetches == 2)
         #expect(progressReads.last == a.key("P", episode: "e3"))
 
         // Unrelated progress, or the current episode's own, changes nothing.
-        a.advancer.progressDidChange(for: a.key("Other"))
-        a.advancer.progressDidChange(for: a.key("P", episode: "e1"))
+        a.advancer.progressDidChange(for: a.key("Other"), kind: .updated)
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .updated)
         await a.advancer.waitForPreparation()
         #expect(a.episodes.fetches == 2)
 

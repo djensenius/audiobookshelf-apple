@@ -1153,8 +1153,9 @@ public final class PlaybackCoordinator {
         return PreparedNextItem(key: key, decision: decision, serverProgress: progress, progressCapture: capture)
     }
 
-    /// Starts the next item after `key` ended, holding background activity from now until the
-    /// start succeeds, fails or is cancelled. A play, pause, seek, stop or detach before the
+    /// Starts the next item after `key` ended, holding background activity from now until its
+    /// audio plays (after any initial seek the engine retries) or the start fails or is
+    /// cancelled (``holdUntilAudioPlays(generation:)``). A play, pause, seek, stop or detach before the
     /// start cancels it, as does any play request, even one the streaming policy blocks. Once the
     /// start has begun it is an ordinary play: a pause loads the next item paused, and a detach
     /// leaves it to finish.
@@ -1196,7 +1197,7 @@ public final class PlaybackCoordinator {
         guard generation == attempt, policyCheck == ended.playRequest, pendingPlayKey == nil,
             phase == .unloaded, mediaKey == next.key, error == nil,
             nextItemProvider?.isStillNext(next.key) == false
-        else { return }
+        else { return await holdUntilAudioPlays(generation: generation) }
         generation += 1
         mediaKey = key
         restoredRecord = lastPlayedStore.load().flatMap { $0.key == key ? $0 : nil }
@@ -1208,6 +1209,36 @@ public final class PlaybackCoordinator {
         pendingStartTime = nil
         pendingJumpOffset = 0
         emit(.itemChanged(key))
+    }
+
+    /// Returns once the started item's audio plays, or once nothing will play it: the engine
+    /// dropped the request (a pause, stop or failure), another play or a stop took over
+    /// (`generation`), the coordinator retired, or the advance was cancelled. A start can return
+    /// with the engine still buffering: an interrupted initial seek leaves `play()` to retry it
+    /// asynchronously, and the background activity must outlast that, or the app may be
+    /// suspended before the audio that keeps it running starts.
+    private func holdUntilAudioPlays(generation started: Int) async {
+        while !Task.isCancelled, !isRetired, generation == started, phase == .loaded,
+            engine.isPlaybackRequested, engine.state != .playing
+        {
+            await Self.nextChange { [self] in
+                // `generation` isn't observed; another play or a stop changes the phase or item.
+                _ = (phase, mediaKey, isRetired, engine.isPlaybackRequested, engine.state)
+            }
+        }
+    }
+
+    /// Waits for a change to anything `read` reads, or for cancellation.
+    private static func nextChange(_ read: @escaping () -> Void) async {
+        let once = ResumeOnce()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                once.set(continuation)
+                withObservationTracking(read) { once.resume() }
+            }
+        } onCancel: {
+            once.resume()
+        }
     }
 
     /// What the advance must find unchanged when the item ended: the generation, the resume
@@ -1782,5 +1813,29 @@ private final class FirstFinish: Sendable {
             return state.waiter
         }
         waiter?.resume()
+    }
+}
+
+/// A continuation resumed once, by whichever of its callers comes first, even before it is set.
+private final class ResumeOnce: Sendable {
+    private let state = Mutex<(continuation: CheckedContinuation<Void, Never>?, isResumed: Bool)>((nil, false))
+
+    func set(_ continuation: CheckedContinuation<Void, Never>) {
+        let resumeNow = state.withLock { state in
+            if state.isResumed { return true }
+            state.continuation = continuation
+            return false
+        }
+        if resumeNow { continuation.resume() }
+    }
+
+    func resume() {
+        let continuation = state.withLock { state -> CheckedContinuation<Void, Never>? in
+            guard !state.isResumed else { return nil }
+            state.isResumed = true
+            defer { state.continuation = nil }
+            return state.continuation
+        }
+        continuation?.resume()
     }
 }

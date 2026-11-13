@@ -14,7 +14,7 @@ private let logger = Log.playback
 /// remain (iOS can suspend the app once audio stops): when an item loads; once on entering its
 /// last chapter and once in its last ``nearEndWindow`` seconds (re-armed by a resume, which
 /// refreshes at once inside them, and by a seek out of them); and again when the queue changes,
-/// when ``progressDidChange(for:)`` concerns the next item or the current podcast, or on
+/// when ``progressDidChange(for:kind:)`` concerns the next item or the current podcast, or on
 /// ``connectionDidChange()``. Each preparation replaces the one in flight. Only when no
 /// preparation younger than ``maximumPreparationAge`` is ready at the end is anything fetched
 /// after it, under the coordinator's background activity.
@@ -98,12 +98,13 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
 
     /// Progress changed for `key` (synced, or from another device): prepares again when it is the
     /// next item, or an episode of the current podcast (finishing one changes which is next).
-    /// The current item's own progress changes nothing. An episode that ended here and changed
-    /// since is no longer assumed finished.
-    public func progressDidChange(for key: MediaKey) {
+    /// The current item's own progress changes nothing. An episode that ended here is no longer
+    /// assumed finished once its progress is reset (marked not finished or discarded); a new
+    /// position or hiding it keeps it skipped, as its finish may not have reached the server.
+    public func progressDidChange(for key: MediaKey, kind: ProgressChangeKind) {
         guard key != current, key.serverConnectionID == queue.serverConnectionID else { return }
         // Even with nothing loaded: playing again later must not skip it.
-        endedEpisodes.remove(key)
+        if kind == .reset { endedEpisodes.remove(key) }
         guard let current else { return }
         let samePodcast =
             current.episodeId != nil && key.episodeId != nil && key.libraryItemId == current.libraryItemId

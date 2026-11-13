@@ -167,6 +167,42 @@ struct RealtimeRoutingTests {
         }
     }
 
+    /// The cache reports a socket update before its local merge, which waits for the merges
+    /// before it; once merged it reports again, with the same kind, so auto-advance prepares from
+    /// the merged local progress (#554).
+    @Test func socketProgressReportsAgainOnceMergedLocally() async throws {
+        try await withLibrarySettings { settings in
+            let container = try DataStack(location: .inMemory).container
+            let local = LocalProgressStore(modelContainer: container)
+            let context = ModelContext(container)
+            for episode in ["e1", "e2"] {
+                let key = MediaKey(
+                    serverConnectionID: identityA.connectionID, libraryItemId: "podcast", episodeId: episode)
+                context.insert(
+                    LocalMediaProgress(
+                        key: key.rawValue, serverConnectionID: key.serverConnectionID,
+                        libraryItemId: key.libraryItemId, episodeId: episode))
+            }
+            try context.save()
+            let routed = RoutedBridge(settings: settings, localProgress: local)
+            let changes = Recorder<String>()
+            routed.store.progress.onChange = { _, episode, kind in changes.append("\(episode ?? "-") \(kind)") }
+            let socket = try await routed.start()
+
+            // e1's merge comes first; e2's waits for it.
+            await routed.send(progressUpdate("podcast", episode: "e1", currentTime: 4, lastUpdate: 1_000), on: socket)
+            await routed.send(
+                progressUpdate("podcast", episode: "e2", currentTime: 9, isFinished: true, lastUpdate: 1_000),
+                on: socket)
+            await routed.bridge.mergeTask?.value
+
+            let e2 = MediaKey(serverConnectionID: identityA.connectionID, libraryItemId: "podcast", episodeId: "e2")
+            #expect(try await local.progress(for: e2)?.isFinished == true)
+            #expect(changes.values.filter { $0.hasPrefix("e2") } == ["e2 updated", "e2 updated"])
+            #expect(changes.values.last == "e2 updated")
+        }
+    }
+
     @Test func networkPathChangesReconnectTheSocket() async throws {
         try await withLibrarySettings { settings in
             let routed = RoutedBridge(settings: settings)

@@ -35,7 +35,7 @@ public final class ProgressCache {
         var value: MediaProgress? {
             didSet {
                 guard oldValue != value, let changed = value ?? oldValue else { return }
-                owner?.valueDidChange(changed)
+                owner?.valueDidChange(changed, kind: ProgressChangeKind(from: oldValue, to: value))
             }
         }
         /// The cache to tell of value changes (``ProgressCache/onChange``).
@@ -86,11 +86,14 @@ public final class ProgressCache {
     public private(set) var revision = 0
 
     /// Called after an entry's progress is stored, replaced or removed, however it changed (an
-    /// apply, a seed, an optimistic action or its rollback), with its item and episode; not for
-    /// ``clear()``, which ends the account's session. An optimistic action that succeeds reports
-    /// again once settled (``reportSettled(_:episodeID:token:)``). The app forwards it to playback's
+    /// apply, a seed, an optimistic action or its rollback), with its item and episode and the
+    /// change's kind; not for ``clear()``, which ends the account's session. A change also
+    /// reports again once the server and the local database have it: an optimistic action that
+    /// succeeds, and a socket update once merged locally
+    /// (``reportSettled(_:episodeID:kind:token:)``). The app forwards it to playback's
     /// auto-advance, which prepares the next item again when it concerns it (#160).
-    public var onChange: (@MainActor (_ libraryItemID: String, _ episodeID: String?) -> Void)?
+    public var onChange:
+        (@MainActor (_ libraryItemID: String, _ episodeID: String?, _ kind: ProgressChangeKind) -> Void)?
     private var isClearing = false
 
     public init() {}
@@ -368,19 +371,20 @@ public final class ProgressCache {
         return entry
     }
 
-    /// Reports `libraryItemID` and `episodeID` to ``onChange`` again once an action that changed
-    /// them optimistically has reached the server and the local database
-    /// (``ProgressItemActions``). The optimistic change was reported before either had it, so
-    /// what it prompted may have read the old progress, and committing changes no value. Nothing
+    /// Reports `libraryItemID` and `episodeID` to ``onChange`` again, with the `kind` of the
+    /// change first reported, once the server and the local database have it: after an action
+    /// that changed them optimistically (``ProgressItemActions``), or after a socket update's
+    /// local merge (``RealtimeBridge``). The first report came before either had it, so what it
+    /// prompted may have read the old progress, and neither step changes a value here. Nothing
     /// once `token`'s session has ended.
-    func reportSettled(_ libraryItemID: String, episodeID: String?, token: SessionToken) {
+    func reportSettled(_ libraryItemID: String, episodeID: String?, kind: ProgressChangeKind, token: SessionToken) {
         guard isCurrent(token) else { return }
-        onChange?(libraryItemID, episodeID)
+        onChange?(libraryItemID, episodeID, kind)
     }
 
-    fileprivate func valueDidChange(_ progress: MediaProgress) {
+    fileprivate func valueDidChange(_ progress: MediaProgress, kind: ProgressChangeKind) {
         guard !isClearing else { return }
-        onChange?(progress.libraryItemId, progress.episodeId)
+        onChange?(progress.libraryItemId, progress.episodeId, kind)
     }
 
     /// Whether `candidate` may replace `existing`: it is at least as recent. Equal timestamps

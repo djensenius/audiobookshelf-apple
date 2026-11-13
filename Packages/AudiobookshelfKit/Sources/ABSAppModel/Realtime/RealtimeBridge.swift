@@ -351,16 +351,20 @@ public final class RealtimeBridge: SessionParticipant {
         {
             return
         }
-        merge(incoming)
-        if Self.supersedes(incoming, cached) { progress.apply(incoming) }
+        let supersedes = Self.supersedes(incoming, cached)
+        merge(incoming, kind: supersedes ? ProgressChangeKind(from: cached, to: incoming) : .updated)
+        if supersedes { progress.apply(incoming) }
         if isOpen, let snapshot, let onRemoteProgress, Self.offersJump(update, to: snapshot, cached: cached) {
             onRemoteProgress(update)
         }
     }
 
     /// Merges dated `progress` into ``localProgress`` as a `.socket` value, after the merges before
-    /// it. A merge still waiting when the session ends is dropped.
-    private func merge(_ progress: MediaProgress) {
+    /// it. A merge still waiting when the session ends is dropped. Once merged, the media is
+    /// reported to ``ProgressCache/onChange`` again as a `kind` change, so the auto-advance
+    /// prepares again from the merged local progress: the cache's own report came before the
+    /// merge (#160).
+    private func merge(_ progress: MediaProgress, kind: ProgressChangeKind) {
         guard let store = localProgress, let identity, let lastUpdate = progress.lastUpdate else { return }
         let key = MediaKey(
             serverConnectionID: identity.connectionID, libraryItemId: progress.libraryItemId,
@@ -372,6 +376,8 @@ public final class RealtimeBridge: SessionParticipant {
             ebookLocation: progress.ebookLocation, ebookProgress: progress.ebookProgress,
             lastUpdate: Date(timeIntervalSince1970: Double(lastUpdate) / 1000))
         let generation = generation
+        let cache = self.progress
+        let session = cache.sessionToken()
         let previous = mergeTask
         mergeTask = Task { [weak self] in
             let capturedAt = await store.captureGeneration()
@@ -379,6 +385,8 @@ public final class RealtimeBridge: SessionParticipant {
             guard let self, generation == self.generation else { return }
             do {
                 try await store.applyServerProgress([key: server], capturedAt: capturedAt, source: .socket)
+                guard generation == self.generation else { return }
+                cache.reportSettled(progress.libraryItemId, episodeID: progress.episodeId, kind: kind, token: session)
             } catch {
                 Log.realtime.error(
                     "Couldn't merge socket progress: \(Self.logSummary(of: error), privacy: .public) \(String(describing: error), privacy: .private)"

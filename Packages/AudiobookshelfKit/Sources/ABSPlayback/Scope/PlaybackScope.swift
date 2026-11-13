@@ -58,7 +58,7 @@ public struct PlaybackProgressUpdate: Sendable, Equatable {
 ///   coordinator (``AccountPlaybackServices``); the scope and its playback carry on.
 /// - **Auto-advance freshness (#160).** The advancer prepares the next item again after a
 ///   reconnect, on each change of the configured network path, and on
-///   ``progressDidChange(for:)``, until the scope retires.
+///   ``progressDidChange(for:kind:)``, until the scope retires.
 /// - **Sleep timer.** The configured ``sleepTimer`` (#185) is attached to the coordinator, which
 ///   asks it before playback starts and tells it of item changes and seeks, until the scope
 ///   retires, which detaches and cancels it. The release detaches it again, as a backstop.
@@ -400,9 +400,9 @@ public final class PlaybackScope {
     /// Progress changed for `key` (a seed, the socket, or an action on another screen): the
     /// advancer prepares again when it is the next item or an episode of the playing podcast.
     /// Nothing after retirement.
-    public func progressDidChange(for key: MediaKey) {
+    public func progressDidChange(for key: MediaKey, kind: ProgressChangeKind) {
         guard !isRetired else { return }
-        advancer?.progressDidChange(for: key)
+        advancer?.progressDidChange(for: key, kind: kind)
     }
 
     /// Saves the loaded item as the last-played record. Local only.

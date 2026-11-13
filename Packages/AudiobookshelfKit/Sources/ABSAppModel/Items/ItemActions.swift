@@ -97,7 +97,7 @@ extension APIClient: ProgressWriting {
 ///   still in the key's queue, so the syncer's pending values can't undo the change. It isn't
 ///   called for a failed or rolled-back action, or for hiding; its errors are logged, not thrown.
 /// - After that, an action that changed the cache reports its media to
-///   ``ProgressCache/onChange`` again (``ProgressCache/reportSettled(_:episodeID:token:)``), so
+///   ``ProgressCache/onChange`` again (``ProgressCache/reportSettled(_:episodeID:kind:token:)``), so
 ///   what the optimistic change prompted (auto-advance's preparation, #160) runs again against
 ///   the server's and the local database's new progress.
 @MainActor
@@ -172,7 +172,7 @@ public final class ProgressItemActions: ItemActionPerforming {
         try await enqueue(target) { session in
             guard try await self.discard(target, session: session) else { return }
             await self.syncLocally { try await $0.didDiscard(target) }
-            self.cache.reportSettled(target.libraryItemID, episodeID: target.episodeID, token: session)
+            self.cache.reportSettled(target.libraryItemID, episodeID: target.episodeID, kind: .reset, token: session)
         }
     }
 
@@ -202,9 +202,12 @@ public final class ProgressItemActions: ItemActionPerforming {
         optimistic: @escaping @MainActor (MediaProgress?, Date) -> MediaProgress?
     ) async throws {
         try await enqueue(target) { session in
-            let changed = try await self.perform(target, update: update, optimistic: optimistic, session: session)
+            let change = try await self.perform(target, update: update, optimistic: optimistic, session: session)
             await self.syncLocally(local)
-            if changed { self.cache.reportSettled(target.libraryItemID, episodeID: target.episodeID, token: session) }
+            if let change {
+                self.cache.reportSettled(
+                    target.libraryItemID, episodeID: target.episodeID, kind: change, token: session)
+            }
         }
     }
 
@@ -246,14 +249,15 @@ public final class ProgressItemActions: ItemActionPerforming {
         try result.get()
     }
 
-    /// Returns whether the cache took an optimistic value.
+    /// Returns the kind of the optimistic change, or `nil` when the cache took none.
     private func perform(
         _ target: ItemActionTarget, update: MediaProgressUpdate,
         optimistic: (MediaProgress?, Date) -> MediaProgress?, session: ProgressCache.SessionToken
-    ) async throws -> Bool {
+    ) async throws -> ProgressChangeKind? {
         guard cache.isCurrent(session) else { throw CancellationError() }
         let before = cache.progress(libraryItemID: target.libraryItemID, episodeID: target.episodeID)
-        let applied = optimistic(before, now()).flatMap { cache.applyOptimistic($0, token: session) }
+        let value = optimistic(before, now())
+        let applied = value.flatMap { cache.applyOptimistic($0, token: session) }
         guard cache.isCurrent(session) else { throw CancellationError() }
         do {
             try await writer.writeProgress(
@@ -265,7 +269,7 @@ public final class ProgressItemActions: ItemActionPerforming {
         }
         guard cache.isCurrent(session) else { throw CancellationError() }
         if let applied { cache.commitOptimistic(applied, token: session) }
-        return applied != nil
+        return applied.map { _ in ProgressChangeKind(from: before, to: value) }
     }
 
     /// Returns whether the server's progress is gone; `false` when there was nothing to discard.

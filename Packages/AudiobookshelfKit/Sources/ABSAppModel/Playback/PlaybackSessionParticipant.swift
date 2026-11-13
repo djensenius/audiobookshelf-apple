@@ -24,7 +24,7 @@ public protocol PlaybackScopeHandle: AnyObject, Sendable {
     func editQueue(_ edit: (PlaybackQueue) -> Void)
     func reconnect(client: APIClient?, features: ServerFeatures?)
     /// Progress changed for `key`; the auto-advance prepares again if it concerns it (#160).
-    func progressDidChange(for key: MediaKey)
+    func progressDidChange(for key: MediaKey, kind: ProgressChangeKind)
     /// Saves the last-played record; local only.
     func saveLocally()
     /// Hears where playback is, for the library's progress cache, until ``retire(reason:)``.
@@ -113,7 +113,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     @ObservationIgnored private var scope: (any PlaybackScopeHandle)?
     /// The running scope's session.
     @ObservationIgnored private var scopeSessionID: UInt64?
-    /// The running scope's connection, for ``progressDidChange(libraryItemID:episodeID:)``.
+    /// The running scope's connection, for ``progressDidChange(libraryItemID:episodeID:kind:)``.
     @ObservationIgnored private var scopeConnectionID: UUID?
     /// The session whose retirement ``lastEnd`` reports.
     @ObservationIgnored private var latestEndedSessionID: UInt64?
@@ -270,10 +270,11 @@ public final class PlaybackSessionParticipant: SessionParticipant {
 
     /// The library's progress for an item or episode changed (``ProgressCache/onChange``): tells
     /// the running scope, as progress on its account. Nothing between sessions.
-    public func progressDidChange(libraryItemID: String, episodeID: String?) {
+    public func progressDidChange(libraryItemID: String, episodeID: String?, kind: ProgressChangeKind) {
         guard let scope, let scopeConnectionID else { return }
         scope.progressDidChange(
-            for: MediaKey(serverConnectionID: scopeConnectionID, libraryItemId: libraryItemID, episodeId: episodeID))
+            for: MediaKey(serverConnectionID: scopeConnectionID, libraryItemId: libraryItemID, episodeId: episodeID),
+            kind: kind)
     }
 
     public func flush() async {

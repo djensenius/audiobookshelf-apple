@@ -113,11 +113,26 @@ struct AutoAdvanceTests {
         await a.finish()
         await a.advancer.waitForPreparation()
 
-        a.advancer.progressDidChange(for: a.key("P", episode: "e1"))
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
         await a.advancer.waitForPreparation()
         await a.finish()
 
         #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
+    /// Any other change to an episode that ended here (hidden from Continue Listening, a new
+    /// position) keeps it skipped: its finish may not have reached the server yet (#554).
+    @Test func episodeUpdatedAfterEndingHereStaysSkipped() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        await a.advancer.waitForPreparation()
+
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .updated)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
     }
 
     /// Marked unfinished while nothing is loaded: still no longer skipped once playing again.
@@ -127,7 +142,7 @@ struct AutoAdvanceTests {
         await a.finish()
         coordinator.stop()
 
-        a.advancer.progressDidChange(for: a.key("P", episode: "e1"))
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
         await a.play("P", episode: "e2")
         await a.finish()
 
@@ -396,6 +411,41 @@ struct AutoAdvanceTests {
         let begin = try #require(a.service.log.firstIndex(of: "begin activity"))
         let start = try #require(a.service.log.firstIndex(of: "start B"))
         #expect(begin < start)
+    }
+
+    /// The next item's initial seek was interrupted, so its start returns with the engine still
+    /// buffering while the engine retries the seek: the activity lasts until the audio plays,
+    /// or the app could be suspended first (#554).
+    @Test func activityLastsUntilTheNextItemPlays() async {
+        a.enqueue("B")
+        await a.play("A")
+        a.h.engine.interruptedLoads = 1
+
+        a.h.engine.finish()
+        await yieldUntil { coordinator.mediaKey == a.key("B") && a.h.engine.state == .buffering }
+        for _ in 0..<100 { await Task.yield() }
+        #expect(a.activity.active == 1)
+
+        _ = await a.h.engine.seek(to: a.h.engine.pendingSeekTarget ?? 0)
+        await coordinator.waitForAutoAdvance()
+
+        #expect(a.h.engine.state == .playing)
+        #expect(a.activity.active == 0)
+    }
+
+    /// A pause while the initial seek is pending ends the activity: nothing will play.
+    @Test func activityEndsWhenPausedBeforeTheNextItemPlays() async {
+        a.enqueue("B")
+        await a.play("A")
+        a.h.engine.interruptedLoads = 1
+        a.h.engine.finish()
+        await yieldUntil { coordinator.mediaKey == a.key("B") && a.h.engine.state == .buffering }
+
+        coordinator.pause()
+        await coordinator.waitForAutoAdvance()
+
+        #expect(a.activity.begun.count == 1)
+        #expect(a.activity.active == 0)
     }
 }
 
