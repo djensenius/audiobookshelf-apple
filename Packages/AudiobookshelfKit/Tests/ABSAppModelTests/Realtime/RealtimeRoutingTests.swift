@@ -167,6 +167,25 @@ struct RealtimeRoutingTests {
         }
     }
 
+    /// The server sends every stream's reset to every socket; the playback matches the ID against
+    /// its own session (``PlaybackCoordinator/handleStreamReset(sessionID:)``), so the bridge
+    /// forwards each one, once, and nothing else.
+    @Test func streamResetsReachThePlaybackOnce() async throws {
+        try await withLibrarySettings { settings in
+            let routed = RoutedBridge(settings: settings)
+            let socket = try await routed.start()
+
+            await routed.send(progressUpdate("book", currentTime: 30, lastUpdate: 200), on: socket)
+            #expect(routed.playback.calls.isEmpty)
+
+            await routed.send(.streamReset(StreamReset(streamId: "ses-1", startTime: 1206)), on: socket)
+            await routed.send(.streamReset(StreamReset(streamId: "someone-elses")), on: socket)
+
+            #expect(
+                routed.playback.calls == [.streamReset(sessionID: "ses-1"), .streamReset(sessionID: "someone-elses")])
+        }
+    }
+
     @Test func networkPathChangesReconnectTheSocket() async throws {
         try await withLibrarySettings { settings in
             let routed = RoutedBridge(settings: settings)

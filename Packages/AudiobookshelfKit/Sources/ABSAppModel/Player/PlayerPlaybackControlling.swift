@@ -40,6 +40,14 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     @discardableResult func jumpOutcome(by offset: Double) async -> JumpOutcome
     func setRate(_ rate: Double)
     func stop(reason: PlaybackStopReason)
+    /// The server restarted the transcode of session `sessionID` (`stream_reset`); see
+    /// ``PlaybackCoordinator/handleStreamReset(sessionID:)``.
+    func handleStreamReset(sessionID: String)
+}
+
+extension PlayerPlaybackControlling {
+    /// Fakes and previews stream nothing, so there is nothing to reset.
+    public func handleStreamReset(sessionID: String) {}
 }
 
 extension PlaybackCoordinator: PlayerPlaybackControlling {}

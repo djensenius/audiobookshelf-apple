@@ -1,5 +1,6 @@
 import ABSCore
 import ABSData
+import ABSRealtime
 import Foundation
 
 extension RealtimeBridge {
@@ -10,7 +11,8 @@ extension RealtimeBridge {
     ///   bookmarks.
     /// - Library changes go to ``LibraryStore/applyLibraryChange(_:connectionKey:)``.
     /// - `playback` tells the bridge what the player has open, so echoes of this device's own
-    ///   playback sync are recognized.
+    ///   playback sync are recognized, and takes stream resets, which it applies only to its own
+    ///   session (``PlaybackCoordinator/handleStreamReset(sessionID:)``).
     /// - `localProgress` takes socket progress for media with a local row (ADR 0003).
     ///
     /// - Parameter bookmarks: The running session's bookmark store, or `nil` between sessions.
@@ -24,6 +26,7 @@ extension RealtimeBridge {
         }
         onLibraryChange = { [weak library] in library?.applyLibraryChange($0, connectionKey: $1) }
         playbackSnapshot = { [weak playback] in playback.flatMap(Self.snapshot(of:)) }
+        onStreamReset = { [weak playback] in playback?.handleStreamReset(sessionID: $0.streamId) }
         self.localProgress = localProgress
     }
 

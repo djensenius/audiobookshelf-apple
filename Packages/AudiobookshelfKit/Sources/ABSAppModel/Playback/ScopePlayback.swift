@@ -68,4 +68,8 @@ final class ScopePlayback: PlayerPlaybackControlling {
     func stop(reason: PlaybackStopReason) {
         coordinator.stop(reason: reason)
     }
+
+    func handleStreamReset(sessionID: String) {
+        coordinator.handleStreamReset(sessionID: sessionID)
+    }
 }

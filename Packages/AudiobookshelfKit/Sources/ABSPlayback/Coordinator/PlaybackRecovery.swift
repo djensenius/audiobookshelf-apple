@@ -88,6 +88,8 @@ struct PlaybackRecoveryHost {
 ///   backoff. Before a re-seek, and after the path returns, it checks the session (see
 ///   ``PlaybackRecoveryAction``).
 /// - **One run at a time.** A failure while a run is in flight only updates its cause.
+/// - **Stream reset.** The server restarted the session's transcode (``streamReset(generation:wasPlaying:)``):
+///   re-seek to the target with the segment-readiness backoff restarted, once per episode.
 /// - **Supersession.** Each await rechecks the generation and the run's token: a stopped, replaced
 ///   or restarted item is never recovered. A user seek while loaded takes over
 ///   (``yieldToSeek()``); one while unloaded moves ``PlaybackRecoveryHost/target``, which every
@@ -109,6 +111,8 @@ final class PlaybackRecovery {
         case failure(PlaybackFailure)
         /// A rebuild's `/play` failed transiently: rebuild again.
         case rebuildFailed
+        /// The server restarted the session's transcode: a segment-readiness retry.
+        case streamReset
     }
 
     private struct Episode {
@@ -124,6 +128,8 @@ final class PlaybackRecovery {
         var playingSince: Date?
         /// A failure arrived while the attempt in flight was awaited: the attempt failed.
         var failedDuringAttempt = false
+        /// A stream reset restarted the backoff; the episode takes no other.
+        var streamReset = false
     }
 
     @ObservationIgnored var host: PlaybackRecoveryHost?
@@ -172,6 +178,49 @@ final class PlaybackRecovery {
         let run = token
         isRunning = true
         Task { await self.run(run, host: host) }
+    }
+
+    /// The server restarted the transcode of the session loaded at `generation` (`stream_reset`,
+    /// ADR 0007): re-seek to ``PlaybackRecoveryHost/target`` after the first segment-readiness
+    /// delay, restarting that backoff, and play if `wasPlaying`. It supersedes a readiness run in
+    /// flight; on a healthy item it starts an episode. Once per episode: ignored after one, after
+    /// a rebuild (the item is new, so recovery only rebuilds), and during a run for a network loss,
+    /// a 401 or a rebuild. Returns whether it applied.
+    @discardableResult
+    func streamReset(generation: Int, wasPlaying: Bool) -> Bool {
+        guard let host, generation != attemptGeneration else { return false }
+        if var episode, episode.generation == generation {
+            guard !episode.streamReset, episode.rebuilds == 0, !isRunning || Self.isReadiness(episode.cause) else {
+                return false
+            }
+            episode.cause = .streamReset
+            episode.retries = 0
+            episode.streamReset = true
+            episode.wantsPlay = wasPlaying
+            episode.playingSince = nil
+            episode.failedDuringAttempt = false
+            self.episode = episode
+        } else {
+            lastEpisodeID += 1
+            episode = Episode(
+                id: lastEpisodeID, generation: generation, cause: .streamReset, wantsPlay: wasPlaying,
+                streamReset: true)
+        }
+        // A run in flight (if any) is superseded.
+        token += 1
+        let run = token
+        isRunning = true
+        Task { await self.run(run, host: host) }
+        return true
+    }
+
+    /// Whether `cause` takes segment-readiness retries.
+    private static func isReadiness(_ cause: Cause) -> Bool {
+        switch cause {
+        case .failure(let failure): failure.recoveryAction == .retry
+        case .streamReset: true
+        case .rebuildFailed: false
+        }
     }
 
     /// A user seek while loaded takes over the run in flight; returns whether it should play once
@@ -300,9 +349,14 @@ final class PlaybackRecovery {
 
     /// The next attempt for `episode`, given what the session check found.
     private func step(for episode: Episode, session: PlaybackSessionStatus = .unknown) -> Step {
-        guard case .failure(let failure) = episode.cause else { return .rebuild }
-        let action = failure.recoveryAction
-        if action == .fatal { return .surface(.playback(failure)) }
+        let action: PlaybackRecoveryAction
+        switch episode.cause {
+        case .rebuildFailed: return .rebuild
+        case .streamReset: action = .retry
+        case .failure(let failure):
+            action = failure.recoveryAction
+            if action == .fatal { return .surface(.playback(failure)) }
+        }
         if action == .refresh || session == .unauthorized {
             return episode.refreshed ? .surface(.streamRejected) : .refresh
         }
@@ -315,7 +369,8 @@ final class PlaybackRecovery {
         }
     }
 
-    /// Whether the session decides the next attempt: before a re-seek, or one that could be.
+    /// Whether the session decides the next attempt: before a re-seek, or one that could be. Not
+    /// after a stream reset: the server just reported the session's stream.
     private func needsSessionCheck(_ episode: Episode) -> Bool {
         guard episode.rebuilds == 0, case .failure(let failure) = episode.cause else { return false }
         return step(for: episode) == .reseek || failure.recoveryAction == .rebuild

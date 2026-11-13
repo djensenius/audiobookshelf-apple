@@ -18,6 +18,7 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
         case jump(Double)
         case setRate(Double)
         case stop(PlaybackStopReason)
+        case streamReset(sessionID: String)
     }
 
     var phase: PlaybackCoordinator.Phase = .idle
@@ -106,6 +107,10 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
         timeline = nil
         isPlaying = false
         isPlaybackRequested = false
+    }
+
+    func handleStreamReset(sessionID: String) {
+        calls.append(.streamReset(sessionID: sessionID))
     }
 
     // MARK: Fixtures

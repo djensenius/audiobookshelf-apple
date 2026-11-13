@@ -81,4 +81,8 @@ public final class CurrentPlayback: PlayerPlaybackControlling {
     public func stop(reason: PlaybackStopReason) {
         current?.stop(reason: reason)
     }
+
+    public func handleStreamReset(sessionID: String) {
+        current?.handleStreamReset(sessionID: sessionID)
+    }
 }
