@@ -6,8 +6,8 @@ import SwiftUI
 /// legacy player's top bar and menu). Each slot lives in its sheet's file and sets `sheet` to present it;
 /// More is the ``PlayerOptionsMenu``.
 ///
-/// While the player is split, its details pane shows chapters and bookmarks, so the bar leaves
-/// them out (ADR 0004: sheets only when not split).
+/// While the player is split, its details pane shows chapters, the queue and bookmarks, so the bar
+/// leaves them out (ADR 0004: sheets only when not split).
 struct PlayerActionsBar: ToolbarContent {
     let model: PlayerViewModel
     @Binding var sheet: PlayerSheet?
@@ -28,7 +28,9 @@ struct PlayerActionsBar: ToolbarContent {
                 BookmarksSlot(model: model, sheet: $sheet)
             }
             SleepTimerSlot(model: model, sheet: $sheet)
-            QueueSlot(sheet: $sheet)
+            if showsDetailSlots {
+                QueueSlot(sheet: $sheet)
+            }
             PlayerOptionsMenu(model: model)
         }
     }
