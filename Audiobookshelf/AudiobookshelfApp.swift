@@ -45,6 +45,7 @@ struct AudiobookshelfApp: App {
             .environment(\.ebookCredentials, ebookCredentials)
             .environment(\.downloadAccess, environment.downloads?.access)
             .environment(\.currentPlayback, environment.playback.current)
+            .environment(\.remoteProgressOffer, environment.realtime?.offer)
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {

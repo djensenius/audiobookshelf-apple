@@ -55,6 +55,7 @@ struct MainTabView<Root: View>: View {
         // Above the tabs and sidebar while the network or the server is unavailable (#76).
         .modifier(ConnectionBannerHost())
         .modifier(PlayerSlot(router: router, player: player))
+        .modifier(RemoteProgressOfferHost())
         .modifier(SceneLibrarySync(router: router))
         .onChange(of: horizontalSizeClass) { _, sizeClass in
             router.normalize(isCompact: sizeClass == .compact)
