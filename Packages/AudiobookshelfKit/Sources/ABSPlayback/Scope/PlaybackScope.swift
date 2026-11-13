@@ -233,6 +233,14 @@ public final class PlaybackScope {
         await claimSystemPrimaryOnceActive()
     }
 
+    /// Streams the play the user confirmed on a metered network
+    /// (``PlaybackCoordinator/confirmMeteredStreaming()``), then claims the system's primary Now
+    /// Playing session, as a user play does.
+    public func confirmMeteredStreaming() async {
+        await coordinator.confirmMeteredStreaming()
+        await claimSystemPrimaryOnceActive()
+    }
+
     /// After a user play or resume: claims the system's primary session if playback is requested
     /// without an error (a pause during the play's seek leaves none to claim). Playback may
     /// still be on its way (an initial seek or a load before the audio session activates); the
