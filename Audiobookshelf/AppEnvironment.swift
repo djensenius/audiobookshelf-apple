@@ -118,14 +118,16 @@ final class AppEnvironment {
         self.lifecycle = lifecycle
         let deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
         self.deviceIdentifiers = deviceIdentifiers
+        // Before playback, whose progress reaches the library's cache.
+        let library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
+        self.library = library
         let playback = AppPlayback.make(
             writer: localProgress, accounts: accounts, lifecycle: lifecycle, settings: settings,
-            deviceIdentifiers: deviceIdentifiers)
+            deviceIdentifiers: deviceIdentifiers, library: library)
         self.playback = playback
         self.player = playback.player
         self.downloads = downloads
         downloads?.lifecycle.launch()
-        self.library = accounts.map { Self.makeLibrary(settings: settings, accounts: $0, lifecycle: lifecycle) }
 
         // Images (#182).
         let images = ImageServices(

@@ -30,9 +30,10 @@ struct AppPlayback {
     ///     too (ADR 0003); without it (or without `accounts`) there is no participant, and the
     ///     player stays idle.
     ///   - deviceIdentifiers: The process-wide device ID for playback sessions (ADR 0007).
+    ///   - library: Hears each session's playback progress, for its progress cache (#184).
     static func make(
         writer: LocalProgressStore?, accounts: AccountManager?, lifecycle: SessionLifecycle, settings: AppSettings,
-        deviceIdentifiers: any DeviceIdentifying
+        deviceIdentifiers: any DeviceIdentifying, library: LibraryParticipant? = nil
     ) -> AppPlayback {
         let current = CurrentPlayback()
         let player = PlayerViewModel(playback: current, settings: settings)
@@ -56,6 +57,9 @@ struct AppPlayback {
                     guard let gate = lifecycle?.gate, case .ready(_, let isOffline) = gate else { return false }
                     return isOffline
                 })
+            },
+            progressSink: { [weak library] update, context in
+                library?.applyPlaybackProgress(update, sessionID: context.sessionID)
             },
             makeScope: { Self.makeScope(for: $0, settings: settings, policy: policy) })
         lifecycle.register(participant, stage: .progressSource)
