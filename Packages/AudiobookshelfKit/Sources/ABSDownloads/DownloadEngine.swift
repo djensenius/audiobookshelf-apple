@@ -1717,8 +1717,8 @@ public actor DownloadEngine {
         }
         await persistIdle(partID) {
             try await $0.setPartState(
-                .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData,
-                retryCount: failure)
+                .failed, partID: partID, taskIdentifier: nil, error: message, errorCode: code.rawValue,
+                hasResumeData: context.hasResumeData, retryCount: failure)
         }
         updateContinuation.yield(
             .partFailed(partID: partID, recordID: context.recordID, code: code, message: message, willRetry: true))
@@ -1818,8 +1818,8 @@ public actor DownloadEngine {
         await saveRecordFailure(context.recordID, ownsFailure: isReplayedAttempt)
         await persistIdle(partID) {
             try await $0.setPartState(
-                .failed, partID: partID, taskIdentifier: nil, error: message, hasResumeData: context.hasResumeData,
-                retryCount: retryCount)
+                .failed, partID: partID, taskIdentifier: nil, error: message, errorCode: code.rawValue,
+                hasResumeData: context.hasResumeData, retryCount: retryCount)
         }
         if let beforeStoppingSiblings { await beforeStoppingSiblings(partID) }
         let siblings = contexts.filter { $0.value.recordID == context.recordID && $0.key != partID }.map(\.key)
