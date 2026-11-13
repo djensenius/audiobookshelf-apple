@@ -103,6 +103,8 @@ struct AudiobookshelfApp: App {
             // The full player; only ``PlayerSlot`` opens it, with a session.
             Window(Text(verbatim: L10n.string("HeaderNowPlaying")), id: NowPlayingWindow.id) {
                 NowPlayingWindow(player: environment.player)
+                    // For the account its Handoff activity names (``PlayerHandoffPublishing``).
+                    .environment(environment.accounts)
                     .environment(settings)
                     .environment(\.imagePipeline, environment.images.pipeline)
                     .environment(\.libraryStore, environment.library?.store)

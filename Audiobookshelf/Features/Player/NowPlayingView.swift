@@ -9,7 +9,8 @@ import SwiftUI
 /// presents one ``PlayerSheet`` at a time, per window.
 ///
 /// iOS presents it as a full-screen cover on every size (ADR 0004); ``PlayerSlot`` closes it
-/// when playback closes. On macOS it's the ``NowPlayingWindow``, which closes itself.
+/// when playback closes. On macOS it's the ``NowPlayingWindow``, which closes itself. Either way it
+/// publishes the playing item and position for Handoff (``PlayerHandoffPublishing``).
 ///
 /// From iOS 27.1 it follows the display (#84, ``PlayerLayout``): a split with the details on a
 /// regular display, the controls on the bottom half in laptop pose, and the transport in the
@@ -62,6 +63,7 @@ struct NowPlayingView: View {
         .sheet(item: $sheet) { sheet in
             PlayerSheetContent(sheet: sheet, model: model) { self.sheet = nil }
         }
+        .publishesPlayerHandoff(model)
     }
 
     @ViewBuilder

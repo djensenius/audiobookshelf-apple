@@ -298,10 +298,16 @@ The legacy app registers the `audiobookshelf` URL scheme (`ios/App/App/Info.plis
 
 **Handoff**
 
-- The item and episode screens publish `.userActivity("org.davidjensenius.Audiobookshelf.item")` with the payload below (`HandoffPublishing`, applied in `RouteDestination`; #504). The player doesn't publish yet (#219).
+- The item and episode screens publish `.userActivity("org.davidjensenius.Audiobookshelf.item")` with the payload below (`HandoffPublishing`, applied in `RouteDestination`; #504).
   - Only the screen on top of the selected tab's stack publishes, as for ⌘R. On macOS a hidden tab's screens stay appeared, and a covered screen stays in its stack, so neither of those publishes.
   - The activity names the active account only while it's the account of the shell on screen. During a switch the outgoing shell publishes nothing, because its IDs belong to the outgoing account. With no active connection, or with IDs a receiver would reject, nothing is published either.
   - The activity is eligible for Handoff only. `isEligibleForSearch` and `isEligibleForPrediction` stay off: Spotlight and Siri suggestions come from App Intents and entities (P5-10 #87), not from browsing history.
+- The full player publishes the same activity for the book or podcast episode it plays, with its `position` (`PlayerHandoffPublishing`, applied in `NowPlayingView`; #219). The `userInfo` comes from `DeepLink.handoffUserInfo(playing:position:active:)`.
+  - It is the top screen while shown: on iOS the item and episode screens under its cover stop publishing while `Router.isFullPlayerPresented` is on, so the two never compete. On macOS the Now Playing window is its own scene and publishes while it is the key window. Closing the player stops it.
+  - It names the active connection's account only while the playing media (`MediaKey.serverConnectionID`) is on that connection. During a switch the player still holds the outgoing account's item, so it publishes nothing.
+  - The position is whole seconds. A position that isn't finite or is past 10,000,000 is left out, and the activity opens the item instead.
+  - The view's body doesn't read the position, which changes on every playback tick. The activity's update reads it when SwiftUI saves the activity, and the body changes, marking the activity to be saved again, when the item, the account or play/pause change, and every 15 seconds while the player is shown. A seek is reflected within that time.
+  - Like the item and episode screens' activity, it is eligible for Handoff only.
 - `RootView.onContinueUserActivity` reads the activity with `HandoffActivity(userInfo:)` and resolves its account (below) before the link joins the links from `onOpenURL`.
 - The activity type is listed in `NSUserActivityTypes` in `Audiobookshelf/Info.plist`, which the system requires before it delivers the activity. `AppEnvironmentTests` checks it.
 - The intents and entities side of Handoff is in P5-10 #87.
@@ -311,7 +317,7 @@ The legacy app registers the `audiobookshelf` URL scheme (`ios/App/App/Info.plis
 | --- | --- | --- |
 | `item` | string, required | The library item's ID |
 | `episode` | string | The podcast episode's ID. Empty counts as absent |
-| `position` | number | Seconds, from 0 to 10,000,000. An activity with a position becomes a `play` link, which asks before it plays. A value that isn't a number in range (a Boolean isn't one) is ignored, and the activity opens the item |
+| `position` | number | Seconds, from 0 to 10,000,000. Only the player publishes it. An activity with a position becomes a `play` link, which asks before it plays. A value that isn't a number in range (a Boolean isn't one) is ignored, and the activity opens the item |
 | `library` | string | Not used. The item opens in the active library |
 
 IDs follow the URL rules. A present but invalid `item` or `episode` rejects the activity.
@@ -335,7 +341,7 @@ IDs follow the URL rules. A present but invalid `item` or `episode` rejects the 
 - The lookup is asynchronous, so `SceneLinks` orders the links by arrival. A Handoff activity reserves its place when it arrives (`reserveArrival()`) and is kept with the gate and link epoch from that moment.
   - It is the newest link even if it turns out to open nothing, so on arrival it drops the waiting link and a confirmed switch's link, and the host drops the server switch its dialog or router asks about (`handoffArrivals`, `ServerSwitchPrompt.supersede(in:)`).
   - Its result is stale, and does nothing, if another link arrived while it resolved (the newer link wins) or the session changed (the epoch moved on). That holds for both results: a stale link isn't kept, not even for a confirmed switch's next account, and a stale `accountNotSignedIn` shows no alert.
-- Publishing from the player is a follow-up (#219).
+- A continued player activity opens its item or episode screen and sets `Router.pendingPlayLink` with the position, like a `play/` URL with `t=`. No screen shows the play-link confirmation yet, so for now it only opens the screen. Playing from the position waits for that confirmation, which URLs need too; it is never started without one.
 
 ### State restoration
 

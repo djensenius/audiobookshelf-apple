@@ -279,6 +279,11 @@ private final class Recorder: SessionParticipant {
         #expect(!shown("li_1", nil, .home))
         #expect(shown("li_1", "ep_1", .home))
         #expect(!shown("li_1", "ep_2", .home))
+        // Under the full player's cover (iOS), which publishes the playing item instead.
+        router.isFullPlayerPresented = true
+        #expect(!shown("li_1", "ep_1", .home))
+        router.isFullPlayerPresented = false
+        #expect(shown("li_1", "ep_1", .home))
         // Previews have no router.
         #expect(HandoffPublishing.isFrontmost(itemID: "li_1", episodeID: nil, in: nil, owner: nil))
     }
