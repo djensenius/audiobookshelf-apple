@@ -297,7 +297,8 @@ struct HomeRefreshSchedule {
     ///
     /// - Parameters:
     ///   - isConnected: Whether the server can be used now (no connection banner).
-    ///   - refreshCount: As for ``updateLibraries(of:for:isConnected:pollInterval:since:)``.
+    ///   - refreshCount: As for ``updateLibraries(of:for:isConnected:pollInterval:since:)``, but
+    ///     ignored when the server refused the shelves.
     /// - Returns: Whether it reloaded the list, or waited for the request in flight to retry it.
     @MainActor
     @discardableResult
@@ -306,10 +307,15 @@ struct HomeRefreshSchedule {
         pollInterval: Duration = .milliseconds(100), since refreshCount: Int? = nil
     ) async -> Bool {
         guard !Task.isCancelled else { return false }
+        let shelvesRefused = refusesLibrary(shelvesError)
         let request = librariesRequestAfterShelves(
             for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
-            shelvesRefused: refusesLibrary(shelvesError), isConnected: isConnected())
-        await reload(store, as: request, isConnected: isConnected, pollInterval: pollInterval, since: refreshCount)
+            shelvesRefused: shelvesRefused, isConnected: isConnected())
+        // A refusal is news about the list, not a failure to retry: a request that ended before
+        // it doesn't recover it, so `since` only guards against retrying a failed list again.
+        await reload(
+            store, as: request, isConnected: isConnected, pollInterval: pollInterval,
+            since: shelvesRefused ? nil : refreshCount)
         return request != nil
     }
 
