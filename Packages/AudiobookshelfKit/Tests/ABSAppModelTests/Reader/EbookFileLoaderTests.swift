@@ -385,6 +385,60 @@ private func request(_ itemID: String = "li_1", ino: String? = "ino_1", version:
         #expect(remaining == 1)
     }
 
+    @Test func aCopyPublishedByAnotherLoaderMeanwhileIsUsed() async throws {
+        let directory = readerTemporaryDirectory()
+        let fetcher = PublishingFetcher()
+        let loader = EbookFileLoader(directory: directory, fetcher: fetcher)
+        fetcher.destination.value = loader.cacheURL(for: request())
+
+        let loaded = try await loader.load(request())
+
+        #expect(loaded.origin == .fetched)
+        #expect(try Data(contentsOf: loaded.url) == Data("theirs".utf8))
+        let partials = directory.appending(path: ".partial").appending(path: EbookFileLoader.launchID)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: partials.path).isEmpty)
+        // Negative control: with no competing copy, this loader's own download is published.
+        fetcher.destination.value = nil
+        let own = try await loader.load(request("li_2"))
+        #expect(try Data(contentsOf: own.url) == Data("mine".utf8))
+    }
+
+    @Test func concurrentPrunesDeleteOnlyWhatTheBudgetNeeds() async throws {
+        for budget in [10, 16] {
+            for _ in 0..<20 {
+                let directory = readerTemporaryDirectory()
+                let first = EbookFileLoader(directory: directory, fetcher: FakeEbookFetcher(), maxTotalBytes: budget)
+                let second = EbookFileLoader(directory: directory, fetcher: FakeEbookFetcher(), maxTotalBytes: budget)
+                let files = [first.cacheURL(for: request("li_1")), first.cacheURL(for: request("li_2"))]
+                try FileManager.default.createDirectory(
+                    at: files[0].deletingLastPathComponent(), withIntermediateDirectories: true)
+                for (age, file) in files.enumerated() {
+                    try Data(count: 8).write(to: file)
+                    try FileManager.default.setAttributes(
+                        [.modificationDate: Date(timeIntervalSinceNow: Double(age) - 10)], ofItemAtPath: file.path)
+                }
+
+                async let a: Void = first.prune(keeping: nil)
+                async let b: Void = second.prune(keeping: nil)
+                _ = await (a, b)
+
+                // Negative control: a budget that fits both deletes neither.
+                let remaining = files.filter { FileManager.default.fileExists(atPath: $0.path) }
+                #expect(remaining == (budget == 10 ? [files[1]] : files))
+            }
+        }
+    }
+
+    @Test func removingAMissingCopyDoesNotCountAsFreed() throws {
+        let directory = readerTemporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let file = directory.appending(path: "book.epub")
+        try Data(count: 8).write(to: file)
+        // Negative control: an existing unpinned copy is removed.
+        #expect(EbookFileLoader.pins.removeIfUnpinned(file))
+        #expect(!EbookFileLoader.pins.removeIfUnpinned(file))
+    }
+
     @Test func partialsFromEarlierLaunchesAreReclaimed() async throws {
         let directory = readerTemporaryDirectory()
         let partials = directory.appending(path: ".partial")
@@ -547,5 +601,18 @@ final class HoldingURLProtocol: URLProtocol {
     override func stopLoading() {
         guard let url = request.url, let host = url.host() else { return }
         _ = Self.hosts.withLock { $0[host]?.stopped.insert(url.path()) }
+    }
+}
+
+/// Stands in for another loader publishing the same book while this one downloads it.
+private final class PublishingFetcher: EbookFileFetching {
+    let destination = Locked<URL?>(nil)
+
+    func downloadEbook(itemID: String, fileIno: String?, to partial: URL, maxBytes: Int) async throws {
+        try Data("mine".utf8).write(to: partial)
+        guard let destination = destination.value else { return }
+        try FileManager.default.createDirectory(
+            at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("theirs".utf8).write(to: destination)
     }
 }

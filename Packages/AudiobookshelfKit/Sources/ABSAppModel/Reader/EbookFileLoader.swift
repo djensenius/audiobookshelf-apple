@@ -240,10 +240,12 @@ public actor EbookFileLoader {
             guard size <= cap else { throw EbookFileLoadError.tooLarge }
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: url.path) {
-                _ = try FileManager.default.replaceItemAt(url, withItemAt: partial)
-            } else {
+            do {
+                // Fails rather than replacing a copy another loader published meanwhile.
                 try FileManager.default.moveItem(at: partial, to: url)
+            } catch  where FileManager.default.fileExists(atPath: url.path) {
+                // Copies are only published complete, so theirs is the same book.
+                try? FileManager.default.removeItem(at: partial)
             }
         } catch {
             try? FileManager.default.removeItem(at: partial)
@@ -314,9 +316,17 @@ public actor EbookFileLoader {
     /// The cached copies open in this process, by every loader, with how many times each is open.
     static let pins = EbookCachePins()
 
+    /// Held for a whole prune pass, so passes by different loaders don't act on each other's
+    /// stale sizes and delete more than needed.
+    private static let pruning = Mutex(())
+
     /// Deletes the least recently used copies, other than `kept` and pinned ones, until the cache
     /// fits.
-    private func prune(keeping kept: URL?) {
+    func prune(keeping kept: URL?) {
+        Self.pruning.withLock { _ in prunePass(keeping: kept) }
+    }
+
+    private func prunePass(keeping kept: URL?) {
         let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey, .isRegularFileKey]
         // Skips the hidden partial folder, whose files are still being written.
         guard
@@ -385,7 +395,8 @@ final class EbookCachePins: Sendable {
     }
 
     /// Deletes the copy unless it's pinned, under the lock ``pin(_:)`` takes, so a loader can't
-    /// pin and return it between the check and the deletion. Returns whether it was deleted.
+    /// pin and return it between the check and the deletion. Returns whether it was deleted, so
+    /// `false` for a copy that's already gone.
     func removeIfUnpinned(_ url: URL) -> Bool {
         counts.withLock { counts in
             guard counts[Self.key(url)] == nil else { return false }

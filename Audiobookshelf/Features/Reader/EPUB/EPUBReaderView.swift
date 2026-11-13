@@ -90,7 +90,8 @@ final class EPUBReaderSession {
     private func handle(_ data: Data) {
         let event: EPUBBridgeEvent
         do {
-            event = try EPUBBridgeEvent.decode(data)
+            // The table of contents isn't shown yet, so its tree isn't decoded.
+            event = try EPUBBridgeEvent.decode(data, skipping: ["toc"])
         } catch {
             Self.log.error("Undecodable reader event: \(String(describing: error), privacy: .public)")
             return
