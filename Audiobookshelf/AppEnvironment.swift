@@ -33,6 +33,9 @@ final class AppEnvironment {
     /// ``AuthGate/storeUnavailable(_:)``, because nothing can be restored or saved.
     let dataStack: DataStack?
     let accounts: AccountManager?
+    /// The one writer of local listening progress (`LocalProgressStore` must be shared), or `nil`
+    /// when the store couldn't be opened. Downloads link their progress rows in it (#74).
+    let localProgress: LocalProgressStore?
     let lifecycle: SessionLifecycle
     /// The stable device ID for playback sessions (ADR 0007), kept in the same Keychain as the
     /// accounts. It doesn't need the store, so it exists even when ``dataStack`` is `nil`.
@@ -54,7 +57,7 @@ final class AppEnvironment {
     /// - Parameters:
     ///   - settings: The settings every scene shares.
     ///   - storeLocation: Where the store lives; tests and previews pass `.inMemory`.
-    ///   - downloadsRoot: Where downloads live (``AppDownloads/make(dataStack:accounts:settings:root:makeSession:)``);
+    ///   - downloadsRoot: Where downloads live (``AppDownloads/make(dataStack:accounts:settings:root:makeSession:progress:)``);
     ///     tests pass a temporary directory, and `nil` leaves out the download stack.
     ///   - makeDownloadSession: The download engine's session; tests pass a non-background one.
     ///   - covers: Where the cover pipeline fetches and caches covers.
@@ -68,6 +71,7 @@ final class AppEnvironment {
     ) {
         let dataStack: DataStack?
         let accounts: AccountManager?
+        let localProgress: LocalProgressStore?
         let lifecycle: SessionLifecycle
         var downloads: AppDownloads?
         do {
@@ -77,12 +81,15 @@ final class AppEnvironment {
                 validator: ServerValidator(sessionConfiguration: sessionConfiguration),
                 openID: OIDCLoginService(sessionConfiguration: sessionConfiguration),
                 sessionConfiguration: sessionConfiguration, settings: settings)
+            let progress = LocalProgressStore(modelContainer: stack.container)
             downloads = downloadsRoot.map {
                 AppDownloads.make(
-                    dataStack: stack, accounts: manager, settings: settings, root: $0, makeSession: makeDownloadSession)
+                    dataStack: stack, accounts: manager, settings: settings, root: $0, makeSession: makeDownloadSession,
+                    progress: progress)
             }
             dataStack = stack
             accounts = manager
+            localProgress = progress
             lifecycle = SessionLifecycle(source: AccountSessionAdapter(accounts: manager))
             if let downloads {
                 lifecycle.register(downloads.lifecycle, stage: .connect)
@@ -100,11 +107,13 @@ final class AppEnvironment {
             Log.data.fault("The on-device store couldn't be opened: \(reason, privacy: .public)")
             dataStack = nil
             accounts = nil
+            localProgress = nil
             lifecycle = SessionLifecycle(storeUnavailable: error)
         }
         self.settings = settings
         self.dataStack = dataStack
         self.accounts = accounts
+        self.localProgress = localProgress
         self.lifecycle = lifecycle
         let deviceIdentifiers = DeviceIdentifierStore(keychain: keychain)
         self.deviceIdentifiers = deviceIdentifiers
