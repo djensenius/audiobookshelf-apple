@@ -21,7 +21,9 @@ public protocol WidgetTimelineReloading: AnyObject {
 ///   snapshot's connection is removed while another one is active (``followRemovals(of:)``). A
 ///   switch keeps it: the widget still opens that item, asking to switch back. It also clears
 ///   it when the launch's restore ends signed out (``followLaunch(of:)``), or a switch to its
-///   connection does (``followRejectedSwitches(of:)``), since then no session starts or ends.
+///   connection does (``followRejectedSwitches(of:)``), since then no session starts or ends,
+///   and when its connection's credentials expire while it isn't the running session's
+///   (``connectionExpired(_:)``), or its running session ends as a switch after they did.
 /// - It ignores snapshots for any connection but the running session's, so a tick from the
 ///   ending session can't write the snapshot back after a sign-out cleared it.
 @MainActor
@@ -35,6 +37,9 @@ public final class WidgetSnapshotWriter: SessionParticipant {
     private let sleep: @Sendable (TimeInterval) async throws -> Void
     /// The running session's connection; `nil` when none runs.
     private var connectionID: UUID?
+    /// The running session's credentials expired (``connectionExpired(_:)``), so its end clears
+    /// the snapshot even if that end is a switch.
+    private var runningSessionExpired = false
     /// The snapshot on disk, or `nil` when there is none.
     private var written: WidgetSnapshot?
     private var lastWrite: Date?
@@ -172,10 +177,24 @@ public final class WidgetSnapshotWriter: SessionParticipant {
         }
     }
 
+    /// Clears the snapshot when `connectionID`'s credentials expire (`AccountManager`'s
+    /// `credentialsExpired`) and the snapshot is that connection's: the widget mustn't keep
+    /// showing an account that's signed out until it's removed. The running session's expiry is
+    /// left to its end (``sessionWillEnd(_:)``), so the widget reloads once; that clears it even if
+    /// the session ends as a switch. Another connection's expiry keeps the snapshot.
+    public func connectionExpired(_ connectionID: UUID) {
+        if connectionID == self.connectionID {
+            runningSessionExpired = true
+            return
+        }
+        if let written, written.serverID == connectionID { clear() }
+    }
+
     // MARK: - SessionParticipant
 
     public func sessionDidStart(_ context: SessionContext) async {
         connectionID = context.identity.connectionID
+        runningSessionExpired = false
     }
 
     /// Writes a throttled position now, on background or before the session ends, so the app
@@ -187,11 +206,14 @@ public final class WidgetSnapshotWriter: SessionParticipant {
     }
 
     public func sessionWillEnd(_ reason: SessionEndReason) async {
+        let expired = runningSessionExpired
         connectionID = nil
+        runningSessionExpired = false
         cancelTrailingWrite()
         switch reason {
         case .signOut, .removed, .expired: clear()
-        case .switch: break
+        // Its credentials expired while the switch began: it's signed out now.
+        case .switch: if expired { clear() }
         }
     }
 
