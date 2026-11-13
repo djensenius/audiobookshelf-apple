@@ -24,8 +24,11 @@ public struct APIPlaybackSessionService: PlaybackSessionService {
         self.streamingConfiguration = streamingConfiguration
     }
 
-    public func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
-        let request = await PlaybackDeviceInfo.startRequest(deviceIdentifiers: deviceIdentifiers)
+    public func startSession(itemID: String, episodeID: String?, forceTranscode: Bool) async throws
+        -> PlaybackSession
+    {
+        let request = await PlaybackDeviceInfo.startRequest(
+            deviceIdentifiers: deviceIdentifiers, forceTranscode: forceTranscode)
         return try await client.send(SessionEndpoints.start(itemID: itemID, episodeID: episodeID, request: request))
     }
 

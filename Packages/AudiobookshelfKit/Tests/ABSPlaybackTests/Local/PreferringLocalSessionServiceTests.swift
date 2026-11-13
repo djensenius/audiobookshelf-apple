@@ -44,6 +44,18 @@ struct PreferringLocalSessionServiceTests {
         #expect(remote.calls.isEmpty)
     }
 
+    /// The direct-play to HLS fallback after a decode or format error: only the server transcodes.
+    @Test func aForcedTranscodeOfADownloadedBookStreams() async throws {
+        items.add(.book())
+        files.addAll(for: .book())
+        let service = service()
+
+        let session = try await service.startSession(itemID: "book", episodeID: nil, forceTranscode: true)
+
+        #expect(session.id == "remote-book")
+        #expect(remote.calls == ["start book transcode"])
+    }
+
     @Test func playsADownloadedEpisodeOnlyForThatEpisode() async throws {
         items.add(.podcast())
         files.addAll(for: .podcast())
@@ -141,8 +153,9 @@ final class RemoteSessions: PlaybackSessionService {
 
     private func record(_ call: String) { state.withLock { $0.calls.append(call) } }
 
-    func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
-        record(["start", itemID, episodeID].compactMap(\.self).joined(separator: " "))
+    func startSession(itemID: String, episodeID: String?, forceTranscode: Bool) async throws -> PlaybackSession {
+        record(
+            ["start", itemID, episodeID, forceTranscode ? "transcode" : nil].compactMap(\.self).joined(separator: " "))
         return PlaybackSession(
             id: "remote-\(itemID)", libraryItemId: itemID, episodeId: episodeID, mediaType: .book,
             audioTracks: [AudioTrack(index: 1, startOffset: 0, duration: 10)])

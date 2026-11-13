@@ -56,6 +56,11 @@ extension PlaybackFailure {
     static let readinessTimedOut = PlaybackFailure(
         kind: .unknown, domain: "ABSPlayback.AudioEngine", code: -1, description: "The item never became ready")
 
+    /// The playing item stalled with no error (``AudioEngineEvent/stalled``): retried like
+    /// ``readinessTimedOut``, unless playback resumes on its own first.
+    static let stalled = PlaybackFailure(
+        kind: .unknown, domain: "ABSPlayback.AudioEngine", code: -2, description: "Playback stalled")
+
     /// An `AVPlayerItemErrorLogEvent`'s fields (that class cannot be created in tests).
     struct ErrorLogEntry: Sendable, Hashable {
         var domain: String

@@ -21,8 +21,10 @@ import Synchronization
 /// local start; when it fails (for example offline), the error reaches the coordinator, which then
 /// reads local progress itself rather than taking a cache for a server answer.
 ///
-/// A forced transcode (#533's `startSession(…, forceTranscode:)`, not on main yet) must always
-/// stream; add that forward here when it lands.
+/// A forced transcode (the direct-play to HLS fallback after a decode or format error) always
+/// streams: only the server transcodes. The coordinator forces one only for a session it streamed
+/// (such as a "Stream instead" start), never for downloaded files, whose decode and format errors
+/// surface instead, so recovery never streams a download.
 public final class PreferringLocalSessionService: PlaybackSessionService {
     public let local: LocalPlaybackSessionService
     public let remote: any PlaybackSessionService
@@ -45,7 +47,12 @@ public final class PreferringLocalSessionService: PlaybackSessionService {
 
     public var serverConnectionID: UUID { remote.serverConnectionID }
 
-    public func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
+    public func startSession(itemID: String, episodeID: String?, forceTranscode: Bool) async throws
+        -> PlaybackSession
+    {
+        if forceTranscode {
+            return try await remote.startSession(itemID: itemID, episodeID: episodeID, forceTranscode: true)
+        }
         let key = MediaKey(serverConnectionID: serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
         if streamingInstead.withLock({ $0.remove(key) != nil }) {
             return try await remote.startSession(itemID: itemID, episodeID: episodeID)
