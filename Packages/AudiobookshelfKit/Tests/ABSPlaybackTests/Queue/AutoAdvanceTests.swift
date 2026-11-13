@@ -254,6 +254,89 @@ struct AutoAdvanceTests {
         #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
     }
 
+    /// The server's finish of an episode first seen in a near-end refresh is this play's own
+    /// (synced near the end), not a baseline: a listing after the end with it confirms the end, so
+    /// a discard or mark-not-finished after it makes the episode eligible again (#554).
+    @Test func nearEndRefreshesFinishIsNoBaselineForTheEnd() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": Date()])
+        a.h.engine.onEvent?(.tick(3590))
+        await a.advancer.waitForPreparation()
+        #expect(a.episodes.fetches == 2)
+
+        await a.finish()
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
+    /// Opens `gate` and waits until the superseded fetch it held has returned to the advancer.
+    private func release(_ gate: Gate, returns: Int) async {
+        gate.open()
+        while a.episodes.state.withLock({ $0.returns }) < returns { await Task.yield() }
+        for _ in 0..<20 { await Task.yield() }
+    }
+
+    /// Waits until the fetch the advancer started has reached its gate.
+    private func waitForFetch(_ count: Int) async {
+        while a.episodes.fetches < count { await Task.yield() }
+    }
+
+    /// A superseded listing returning late with the episode finished confirms nothing: the
+    /// episode stays skipped after a reset (#554).
+    @Test func staleListingDoesntConfirmAnEnd() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        await a.finish()
+        await a.advancer.waitForPreparation()
+        let gate = Gate()
+        a.episodes.state.withLock { $0.gate = gate }
+        a.advancer.connectionDidChange()
+        await waitForFetch(3)
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": Date()])
+        await release(gate, returns: 4)
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
+    }
+
+    /// A superseded load-time listing returning late, with a finish newer than the playing
+    /// episode's, sets no baseline: the same finish after the end confirms it, so a reset makes
+    /// the episode eligible again (#554).
+    @Test func staleListingSetsNoBaseline() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        let gate = Gate()
+        a.episodes.state.withLock { $0.gate = gate }
+        await a.coordinator.play(itemID: "P", episodeID: "e1")
+        await waitForFetch(1)
+        a.advancer.progressDidChange(for: a.key("P", episode: "e2"), kind: .updated)
+        await a.advancer.waitForPreparation()
+
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": Date()])
+        await release(gate, returns: 2)
+        await a.finish()
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e2"))
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
+    }
+
     /// The server can show the finish while the episode is still loaded; a later reset counts.
     /// Ending it here again makes the finish unconfirmed again.
     @Test func finishConfirmedWhileLoadedCountsUntilItEndsAgain() async {

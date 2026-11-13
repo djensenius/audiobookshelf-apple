@@ -39,13 +39,14 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     private var confirmedEndings: Set<MediaKey> = []
     /// Bumped by every end, so a listing requested before one isn't evidence of its finish.
     private var endings = 0
-    /// The server's latest finish of each episode seen in a listing requested before its play's
-    /// end, from its load on: a finish the server shows after the end confirms that end only when
-    /// it is later. Server times are only compared with server times, so the device's clock
-    /// doesn't matter.
+    /// The server's finish of each episode from before its play began (in the listing held when
+    /// it was loaded, or the first one fetched after): a finish the server shows after the end
+    /// confirms that end only when it is later. Server times are only compared with server times,
+    /// so the device's clock doesn't matter.
     private var finishBaselines: [MediaKey: Date] = [:]
-    /// The current item ended in this play.
-    private var currentHasEnded = false
+    /// The current item's baseline can still be taken: from its load until a listing gives it,
+    /// a near-end refresh (whose listing may hold this play's own finish) or its end.
+    private var takesBaseline = false
     /// When the last preparation finished, with or without a next item.
     private var preparedAt: TimeInterval = 0
     /// Near-end refreshes done since the load, a resume or a seek out of them.
@@ -199,7 +200,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
             queue.remove(key)
         case .loaded:
             current = coordinator?.mediaKey
-            currentHasEnded = false
+            takesBaseline = true
             rearmOnStart = false
             // Loading inside a trigger prepares anyway.
             refreshed = nearEndTriggers(at: coordinator?.currentTime ?? 0)
@@ -216,7 +217,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         case .tick(let time):
             refreshIfNearEnd(at: time)
         case .ended:
-            currentHasEnded = true
+            takesBaseline = false
             if let current, current.episodeId != nil {
                 endedEpisodes.insert(current)
                 endings += 1
@@ -233,6 +234,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         let due = nearEndTriggers(at: time).subtracting(refreshed)
         guard !due.isEmpty else { return }
         refreshed.formUnion(due)
+        takesBaseline = false
         // The earlier preparation stays usable until this one replaces it.
         recompute(refetchListing: true, keepPrepared: true)
     }
@@ -322,14 +324,18 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
             try Task.checkCancellation()
             let ended = endedEpisodes.filter { $0.libraryItemId == key.libraryItemId }.compactMap(\.episodeId)
             let endings = endings
-            let playing = currentHasEnded ? nil : current
+            let playing = takesBaseline ? current : nil
             listing = try await episodes.listing(
                 podcastItemID: key.libraryItemId, excluding: Set(ended).union([episodeID]))
-            // Requested while the current episode played: its server finish is a baseline.
-            if let playing, playing.libraryItemId == key.libraryItemId, let id = playing.episodeId,
-                let finishedAt = listing.serverFinishedAt[id]
-            {
-                finishBaselines[playing] = max(finishBaselines[playing] ?? finishedAt, finishedAt)
+            // A superseded request's listing may be older than what has happened since.
+            guard self.revision == revision, !Task.isCancelled else { return nil }
+            // Requested before this play could finish the current episode: its server finish is
+            // the baseline.
+            if let playing, playing.libraryItemId == key.libraryItemId, let id = playing.episodeId {
+                takesBaseline = false
+                if let finishedAt = listing.serverFinishedAt[id] {
+                    finishBaselines[playing] = max(finishBaselines[playing] ?? finishedAt, finishedAt)
+                }
             }
             // The server's finishes, requested after these ends and later than their baselines,
             // confirm them; a baseline's own or an undated finish, the local unsynced flags and
@@ -344,7 +350,6 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
                     confirmedEndings.insert(ended)
                 }
             }
-            guard self.revision == revision else { return nil }
             self.listing = (key.libraryItemId, listing)
         }
         for ended in endedEpisodes where ended.libraryItemId == key.libraryItemId {

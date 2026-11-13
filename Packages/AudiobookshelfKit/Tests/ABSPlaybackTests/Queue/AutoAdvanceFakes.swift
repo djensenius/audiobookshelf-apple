@@ -36,6 +36,8 @@ final class StubEpisodeSource: PodcastEpisodeSource {
     struct State {
         var listings: [String: PodcastEpisodeListing] = [:]
         var fetches = 0
+        /// Fetches that have returned (or thrown).
+        var returns = 0
         var gate: Gate?
         var error: APIError?
     }
@@ -52,6 +54,7 @@ final class StubEpisodeSource: PodcastEpisodeSource {
         }
         await gate?.wait()
         return try state.withLock { state in
+            state.returns += 1
             if let error = state.error { throw error }
             return state.listings[podcastItemID]
                 ?? PodcastEpisodeListing(
