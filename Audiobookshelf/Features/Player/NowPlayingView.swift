@@ -129,7 +129,7 @@ struct NowPlayingView: View {
         .scrollBounceBehavior(.basedOnSize)
     }
 
-    /// ``PlayerActionsBar`` in the bottom toolbar, without chapters and bookmarks while the
+    /// ``PlayerActionsBar`` in the bottom toolbar, without chapters, the queue and bookmarks while the
     /// details pane shows them, or, with the transport in the toolbar's vertical bar,
     /// ``PlayerVerticalToolbar``.
     @ViewBuilder

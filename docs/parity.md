@@ -139,7 +139,7 @@ merged are In progress (#183) until the app can play.
 | Sleep timer: auto-sleep window, rewind, shake to reset and sensitivity, reset feedback, almost-done chime, fade-out | `SleepTimer` | #55, #147, #183 | In progress (#183) | |
 | Media-control seeking | `NowPlayingController` | #183 | In progress (#183) | |
 | Lock Screen, remote commands, Now Playing | `NowPlayingController`, `NowPlayingBridge` | #54, #183 | In progress (#183) | #54 closed; app wiring moved to #183. |
-| Queue, next episode | `PlaybackQueue` | #60, #156 | In progress (#60) | The auto-advance core and queue composition (PR #445) are merged; the queue sheet (#156) is not started. |
+| Queue, next episode | `PlaybackQueue` | #60, #156 | In progress (#60) | The auto-advance core and queue composition (PR #445) are merged, and so are the queue sheet, the queue inspector and "Play next" / "Add to queue" (#156). The iPhone Duo player's Up Next pane shows the queue (#84). |
 | Haptics | ABSUI `Haptics` | #147 | In progress (#183) | |
 | Cast and routes | ABSUI `RoutePicker` (AirPlay) | #183 | In progress (#183) | Cast was never confirmed in legacy; AirPlay only. |
 | Close player | `MiniPlayerView`, `PlayerSlot` | #183 | In progress (#183) | |
