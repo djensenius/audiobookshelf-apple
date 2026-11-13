@@ -23,6 +23,9 @@ public struct DownloadsServices {
     public let localFileURL: @Sendable (String) -> URL?
     /// The bytes still available for downloads, as ``StorageCapacityProviding`` reports them.
     public let availableCapacity: @Sendable () async throws -> Int64
+    /// Whether a connection's downloads continue only while the app is open, as
+    /// ``DownloadAccess/onlyWhileOpen`` tells.
+    public let onlyWhileOpen: @Sendable (UUID) async -> Bool
 
     public init(
         controller: DownloadsController, control: any DownloadControlling,
@@ -30,7 +33,8 @@ public struct DownloadsServices {
         localItems: @escaping @Sendable (UUID) async throws -> [LocalLibraryItemDTO],
         localItem: @escaping @Sendable (UUID) async throws -> LocalLibraryItemDTO? = { _ in nil },
         localFileURL: @escaping @Sendable (String) -> URL? = { _ in nil },
-        availableCapacity: @escaping @Sendable () async throws -> Int64
+        availableCapacity: @escaping @Sendable () async throws -> Int64,
+        onlyWhileOpen: @escaping @Sendable (UUID) async -> Bool = { _ in false }
     ) {
         self.controller = controller
         self.control = control
@@ -39,6 +43,7 @@ public struct DownloadsServices {
         self.localItem = localItem
         self.localFileURL = localFileURL
         self.availableCapacity = availableCapacity
+        self.onlyWhileOpen = onlyWhileOpen
     }
 }
 
@@ -87,6 +92,9 @@ public final class DownloadsTabModel {
     public var downloadedBytes: Int64? { isLoaded && loadError == nil ? listing.downloadedBytes : nil }
     /// The bytes still available for downloads, or `nil` while unknown.
     public private(set) var availableBytes: Int64?
+    /// Whether the connection's downloads continue only while the app is open
+    /// (``DownloadsServices/onlyWhileOpen``), as last read.
+    public private(set) var onlyWhileOpen = false
     public var notice: Notice?
     /// The records and local items with an action under way, whose controls are disabled.
     public private(set) var busy: Set<UUID> = []
@@ -120,6 +128,7 @@ public final class DownloadsTabModel {
             items = []
             loadError = nil
             isLoaded = false
+            onlyWhileOpen = false
         }
         // Its first snapshot is the items as they are, so it is read once, then again after
         // every write: a completed download, or a deletion in any window.
@@ -143,6 +152,7 @@ public final class DownloadsTabModel {
         await services.controller.retryLoadingStoredRecords()
         guard let connectionID else {
             items = []
+            onlyWhileOpen = false
             isLoaded = true
             reloaded?()
             return
@@ -156,6 +166,7 @@ public final class DownloadsTabModel {
             result = .failure(error)
         }
         let available = try? await capacity()
+        let onlyWhileOpen = await services.onlyWhileOpen(connectionID)
         guard generation == readGeneration, connectionID == self.connectionID else { return }
         switch result {
         case .success(let fresh):
@@ -167,6 +178,7 @@ public final class DownloadsTabModel {
                 "Couldn't read the downloaded items: \(Log.redact(String(describing: error)), privacy: .public)")
         }
         availableBytes = available
+        self.onlyWhileOpen = onlyWhileOpen
         isLoaded = true
         reloaded?()
     }

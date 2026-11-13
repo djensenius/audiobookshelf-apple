@@ -63,7 +63,7 @@ import Testing
 
     private func model(
         books: [LibraryItem], skipping: Set<String> = [], requester: Requester, pageSize: Int = 50,
-        service: Service = Service()
+        service: Service = Service(), onlyWhileOpen: Bool = false
     ) -> SeriesDownloadModel {
         var service = service
         service.books.booksHandler = { _, query in
@@ -74,7 +74,8 @@ import Testing
         }
         return SeriesDownloadModel(
             seriesID: "ser_1", connectionID: connection, service: service,
-            access: DownloadAccess(requester: requester, status: Status(ids: skipping)),
+            access: DownloadAccess(
+                requester: requester, status: Status(ids: skipping), onlyWhileOpen: { _ in onlyWhileOpen }),
             pageSize: pageSize)
     }
 
@@ -89,6 +90,17 @@ import Testing
         #expect(requester.requested.map(\.id) == ["a", "c"])
         #expect(requester.requested.allSatisfy { !$0.metered && $0.connectionID == connection })
         #expect(model.prompt == nil && !model.isWorking)
+    }
+
+    /// The confirmation notes downloads that continue only while the app is open (#467).
+    @Test func startReadsWhetherDownloadsContinueOnlyWhileOpen() async {
+        let foreground = model(books: [Self.book("a")], requester: Requester(), onlyWhileOpen: true)
+        await foreground.start(libraryID: "lib")
+        #expect(foreground.onlyWhileOpen)
+
+        let background = model(books: [Self.book("a")], requester: Requester())
+        await background.start(libraryID: "lib")
+        #expect(!background.onlyWhileOpen)
     }
 
     @Test func pagesWithTheSeriesFilterAndNoCollapse() async {

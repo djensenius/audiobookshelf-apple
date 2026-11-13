@@ -141,6 +141,9 @@ struct DownloadsList: View {
                     }
                     .font(.caption)
                 }
+            } footer: {
+                // Only while downloads are listed: the notice is about transfers under way.
+                if model.onlyWhileOpen { DownloadsWhileAppOpenNotice() }
             }
         }
     }

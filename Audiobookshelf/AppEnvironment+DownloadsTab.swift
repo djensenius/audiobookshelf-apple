@@ -23,6 +23,7 @@ extension AppEnvironment {
             localItems: { try await LocalItemStore(modelContainer: container).items(serverConnectionID: $0) },
             localItem: { try await LocalItemStore(modelContainer: container).item(id: $0) },
             localFileURL: { try? locations.fileURL(forRelativePath: $0) },
-            availableCapacity: { try capacity.availableCapacity() })
+            availableCapacity: { try capacity.availableCapacity() },
+            onlyWhileOpen: downloads.access.onlyWhileOpen)
     }
 }

@@ -46,9 +46,12 @@ struct AppDownloads {
         // One instance for the engine and the controller, so the controller knows when metered
         // access was handed out.
         let networkAccess = DownloadNetworkAccess(defaults: settings.defaults)
+        // The engine's credentials also tell screens which connections download only while the
+        // app is open, by the engine's own test (``DownloadCredentials/usesForegroundSession``).
+        let credentials = AccountDownloadCredentials { try await accounts.downloadAccess(for: $0, read: $1) }
         let engine = DownloadEngine(
             store: store, localItems: localItems,
-            credentials: AccountDownloadCredentials { try await accounts.downloadAccess(for: $0, read: $1) },
+            credentials: credentials,
             vault: ResumeDataVault(directory: locations.resumeDataRoot),
             sweepsOrphanedResumeData: dataStack.resolvedLocation == .appGroup, locations: locations,
             networkAccess: networkAccess.provider, makeSession: makeSession)
@@ -82,7 +85,8 @@ struct AppDownloads {
             engine: engine, manager: manager, localItems: localItems, janitor: janitor, controller: controller,
             lifecycle: lifecycle, sessions: sessions,
             access: DownloadAccess(
-                requester: controller, status: StoredDownloadStatus(localItems: localItems, records: store)),
+                requester: controller, status: StoredDownloadStatus(localItems: localItems, records: store),
+                onlyWhileOpen: { await credentials.usesForegroundSession(for: $0) }),
             covers: LocalDownloadedCovers(store: localItems, locations: locations))
     }
 }

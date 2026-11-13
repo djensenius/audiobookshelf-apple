@@ -107,7 +107,7 @@ and [#184](https://github.com/djensenius/audiobookshelf-apple/issues/184) land.
 | `connect.vue`, `ServerConnectForm` | `ConnectFlowView`, `ServerAddressView`, `LoginView` | #40 | Done | |
 | Multi-server | `ServerListView`, `AccountManager` | #38 | Done | Hardening follow-ups: #227, #312, #349. |
 | OIDC | `WebAuthenticationSessionAuthenticator` | #31 | Done | |
-| `CustomHeadersModal` | `CustomHeadersEditor` | #40 | Done | Streaming with custom headers: #148 (PR #433 merged, PR #473 open). Downloads with custom headers: #467, foreground session in progress (the "only while the app is open" notice remains). |
+| `CustomHeadersModal` | `CustomHeadersEditor` | #40 | Done | Streaming with custom headers: #148 (PR #433 merged, PR #473 open). Downloads with custom headers: #467, foreground session done; the "only while the app is open" notice is on Downloads and the Download Series confirmation (item detail button follows #576). |
 
 ### Settings, stats and logs
 

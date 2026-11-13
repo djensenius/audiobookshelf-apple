@@ -1442,7 +1442,7 @@ public actor DownloadEngine {
             // Custom headers only go to the foreground session, whose delegate refuses a redirect
             // off the server. Without one they are refused before any request is made, so the
             // headers never reach the preflight or a background transfer.
-            isForeground = !credentials.configuration.customHeaders.isEmpty
+            isForeground = credentials.usesForegroundSession
             guard !isForeground || makeForegroundSession != nil else { throw CustomHeadersRefused() }
             var fresh = try DownloadRequests.request(
                 path: context.serverPath, configuration: credentials.configuration,
