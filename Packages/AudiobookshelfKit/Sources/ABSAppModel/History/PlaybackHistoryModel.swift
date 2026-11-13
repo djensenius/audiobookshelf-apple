@@ -79,7 +79,7 @@ public final class PlaybackHistoryModel {
     public var isEmpty: Bool { sections.isEmpty }
 
     @ObservationIgnored private let source: EventSource
-    @ObservationIgnored private let playFromTime: PlayFromTime
+    @ObservationIgnored private let playFromTime: PlayFromTime?
     @ObservationIgnored private let calendar: Calendar
     @ObservationIgnored private let locale: Locale
     @ObservationIgnored private let now: @Sendable () -> Date
@@ -87,13 +87,14 @@ public final class PlaybackHistoryModel {
     @ObservationIgnored private var events: [PlaybackHistoryEventDTO] = []
 
     /// - Parameters:
+    ///   - playFromTime: `nil` while there is no player: no row can be played.
     ///   - calendar: Groups events into days, in the calendar's time zone.
     ///   - locale: Formats dates and times.
     ///   - now: Decides which day is today.
     public init(
         mediaKey: MediaKey,
         source: @escaping EventSource,
-        playFromTime: @escaping PlayFromTime,
+        playFromTime: PlayFromTime?,
         calendar: Calendar = .autoupdatingCurrent,
         locale: Locale = .autoupdatingCurrent,
         now: @escaping @Sendable () -> Date = { .now }
@@ -110,7 +111,7 @@ public final class PlaybackHistoryModel {
     public convenience init(
         mediaKey: MediaKey,
         store: PlaybackHistoryStore,
-        playFromTime: @escaping PlayFromTime,
+        playFromTime: PlayFromTime?,
         calendar: Calendar = .autoupdatingCurrent,
         locale: Locale = .autoupdatingCurrent,
         now: @escaping @Sendable () -> Date = { .now }
@@ -158,10 +159,15 @@ public final class PlaybackHistoryModel {
         sections = group(events)
     }
 
-    /// Plays the media from the row's position. Ignored for a row without one, or while an
-    /// earlier call is starting playback.
+    /// Whether ``play(from:)`` can play `row`: it has a position, and there is a player.
+    public func canPlay(_ row: Row) -> Bool {
+        row.position != nil && playFromTime != nil
+    }
+
+    /// Plays the media from the row's position. Ignored for a row ``canPlay(_:)`` rejects, or
+    /// while an earlier call is starting playback.
     public func play(from row: Row) async {
-        guard let position = row.position, !isStartingPlayback else { return }
+        guard let position = row.position, let playFromTime, !isStartingPlayback else { return }
         isStartingPlayback = true
         defer { isStartingPlayback = false }
         await playFromTime(mediaKey, position)
