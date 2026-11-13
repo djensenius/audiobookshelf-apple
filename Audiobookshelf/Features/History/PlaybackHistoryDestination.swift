@@ -14,7 +14,8 @@ extension EnvironmentValues {
 /// episode, on the active server connection (`\.serverID`), reading `\.playbackHistorySource`.
 /// Tapping an event plays from its position through `\.playItem`, which seeks in the current
 /// session when the media is already loaded (legacy `history.vue`'s `play-item` with a start
-/// time). Signed out, it says no server is connected.
+/// time); without a player the events are shown but can't be played. Signed out, it says no
+/// server is connected.
 struct PlaybackHistoryDestination: View {
     let itemID: String
     let episodeID: String?
@@ -59,23 +60,25 @@ struct PlaybackHistoryDestination: View {
     }
 
     /// The model for `mediaKey`'s events from `source` (none without one), playing from an
-    /// event's position with `playItem` (nothing without one).
+    /// event's position with `playItem`; without one, no row can be played.
     static func model(
         mediaKey: MediaKey, source: PlaybackHistoryModel.EventSource?, playItem: PlayItemAction?
     ) -> PlaybackHistoryModel {
         PlaybackHistoryModel(
-            mediaKey: mediaKey,
-            source: source ?? noHistory,
-            playFromTime: { key, position in
-                guard let playItem else { return }
-                do {
-                    try await playItem(itemID: key.libraryItemId, episodeID: key.episodeId, startTime: position)
-                } catch {
-                    Log.playback.error(
-                        "Couldn't play history position of \(key.libraryItemId, privacy: .private(mask: .hash)): \(error, privacy: .private)"
-                    )
-                }
-            })
+            mediaKey: mediaKey, source: source ?? noHistory, playFromTime: playItem.map(playFromTime))
+    }
+
+    /// Plays an event's media from its position with `playItem`, logging a failure.
+    private static func playFromTime(_ playItem: PlayItemAction) -> PlaybackHistoryModel.PlayFromTime {
+        { key, position in
+            do {
+                try await playItem(itemID: key.libraryItemId, episodeID: key.episodeId, startTime: position)
+            } catch {
+                Log.playback.error(
+                    "Couldn't play history position of \(key.libraryItemId, privacy: .private(mask: .hash)): \(error, privacy: .private)"
+                )
+            }
+        }
     }
 }
 
