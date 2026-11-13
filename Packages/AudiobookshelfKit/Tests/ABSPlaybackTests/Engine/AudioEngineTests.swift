@@ -278,6 +278,29 @@ struct AudioEngineTests {
         return engine
     }
 
+    /// Posts a stall of `item` as AVFoundation would.
+    private func postStall(of item: AVPlayerItem?) {
+        NotificationCenter.default.post(name: AVPlayerItem.playbackStalledNotification, object: item)
+    }
+
+    @Test(.tags(.realtimeAudio)) func aStallOfThePlayingItemIsReported() async throws {
+        let fixture = try AudioFixture()
+        let engine = makeEngine()
+        var stalls = 0
+        engine.onEvent = { if $0 == .stalled { stalls += 1 } }
+        try await engine.load(fixture.source, at: 4)
+
+        // Paused: there is nothing to recover.
+        postStall(of: engine.player.currentItem)
+        engine.play()
+        // A queued item that isn't playing yet.
+        postStall(of: engine.player.items().last)
+        postStall(of: engine.player.currentItem)
+
+        try await waitUntil { stalls > 0 }
+        #expect(stalls == 1)
+    }
+
     @Test(.tags(.realtimeAudio)) func endOfMediaDuringASeekDoesNotEndPlayback() async throws {
         let fixture = try AudioFixture()
         let engine = makeEngine()

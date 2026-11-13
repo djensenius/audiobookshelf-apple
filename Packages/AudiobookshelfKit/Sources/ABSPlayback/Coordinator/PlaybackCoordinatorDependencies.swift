@@ -8,8 +8,9 @@ import Foundation
 public protocol PlaybackSessionService: Sendable {
     /// The connection the sessions belong to; part of every ``MediaKey`` the coordinator builds.
     var serverConnectionID: UUID { get }
-    /// `POST /api/items/:id/play[/:episodeId]`.
-    func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession
+    /// `POST /api/items/:id/play[/:episodeId]`. `forceTranscode` asks for an HLS transcode, as
+    /// the direct-play to HLS fallback after a decode or format error does (ADR 0007).
+    func startSession(itemID: String, episodeID: String?, forceTranscode: Bool) async throws -> PlaybackSession
     /// The user's server progress for the media, or `nil` when there is none. The coordinator uses
     /// its `currentTime`, `lastUpdate` and `isFinished` together, since the session's own position
     /// comes from a separate request and can differ (its `updatedAt` is just its creation time).
@@ -34,6 +35,13 @@ public protocol PlaybackSessionService: Sendable {
     /// The ``sessionStatus(id:)``, and whether the lookup refreshed the access token. Defaults to
     /// that status and no refresh.
     func sessionCheck(id: String) async -> PlaybackSessionCheck
+}
+
+extension PlaybackSessionService {
+    /// A session without a forced transcode.
+    public func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
+        try await startSession(itemID: itemID, episodeID: episodeID, forceTranscode: false)
+    }
 }
 
 /// A session's stream plan with the URL to load for each of its tracks.

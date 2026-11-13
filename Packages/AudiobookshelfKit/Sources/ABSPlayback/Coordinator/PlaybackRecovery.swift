@@ -16,8 +16,10 @@ enum PlaybackRecoveryAction: Sendable, Hashable {
     case rebuild
     /// The 401 path: one token refresh, then a rebuild.
     case refresh
-    /// Not recoverable: shown at once. Decode and unsupported formats belong to the direct-play
-    /// to HLS fallback, which isn't built yet.
+    /// A decode or format error: on direct play, one rebuild with `forceTranscode` (the direct-play
+    /// to HLS fallback); on HLS, or once that fallback has run, shown at once.
+    case transcode
+    /// Not recoverable: shown at once.
     case fatal
 }
 
@@ -30,7 +32,8 @@ extension PlaybackFailure {
         case .http: .fatal
         case .unknown: .retry
         case .network: .rebuild
-        case .tls, .decode, .unsupported, .cancelled: .fatal
+        case .decode, .unsupported: .transcode
+        case .tls, .cancelled: .fatal
         }
     }
 }
@@ -57,9 +60,13 @@ struct PlaybackRecoveryHost {
     var reseek: (_ target: Double) async -> SeekResult
     /// Starts the engine after a successful re-seek.
     var play: () -> Void
-    /// Closes the session and starts a new one at `target`, playing only if `playing`. The attempt
-    /// takes the next generation (`generation() + 1`) at once, before suspending.
-    var rebuild: (_ target: Double, _ playing: Bool) async -> PlaybackRecoveryRebuild
+    /// Closes the session and starts a new one at `target`, playing only if `playing`, as an HLS
+    /// transcode if `forceTranscode`. The attempt takes the next generation (`generation() + 1`)
+    /// at once, before suspending.
+    var rebuild: (_ target: Double, _ playing: Bool, _ forceTranscode: Bool) async -> PlaybackRecoveryRebuild
+    /// Whether the direct-play to HLS fallback can still run: the item is direct play, and no
+    /// forced transcode has run since the user's start.
+    var canTranscode: () -> Bool
     /// Refreshes the access token once; returns the error that stops recovery, if any.
     var refresh: () async -> PlaybackCoordinatorError?
     /// Looks up the loaded session (`GET /api/session/{id}`); ``PlaybackSessionStatus/unknown``
@@ -82,6 +89,11 @@ struct PlaybackRecoveryHost {
 ///   rebuild budget). A second one stops with ``PlaybackCoordinatorError/streamRejected``; there is
 ///   never a second refresh. A session lookup whose request refreshed the token spends that one
 ///   refresh too (#491).
+/// - **Decode and format errors.** On direct play, one rebuild with `forceTranscode` (the HLS
+///   fallback), counted against the rebuild budget; on HLS, or once the fallback has run since the
+///   user's play, they surface at once.
+/// - **Stalls.** A stall with no error (``PlaybackFailure/stalled``) is retried as a readiness
+///   failure, but playback that resumes on its own before the attempt ends the run unspent.
 /// - **Network and session.** Before each attempt, recovery waits while the network path is
 ///   unsatisfied (no budget is spent offline) for up to ``networkWaitLimit``, then gives up with
 ///   ``PlaybackCoordinatorError/recoveryExhausted``; once the path returns it skips that attempt's
@@ -207,8 +219,14 @@ final class PlaybackRecovery {
         if episode?.playingSince != nil { episode?.playingSince = nil }
     }
 
-    /// A tick while playing at `generation`: ends the episode after ``episodeReset`` of it.
+    /// A tick while playing at `generation`: playback resumed on its own, so a stall's run in flight
+    /// ends, spending no budget before its attempt. Ends the episode after ``episodeReset`` of it.
     func notePlaying(at date: Date, generation: Int) {
+        if isRunning, let episode, episode.generation == generation, episode.cause == .failure(.stalled) {
+            logger.info("A stall resolved before recovery's attempt")
+            token += 1
+            isRunning = false
+        }
         guard !isRunning, let episode, episode.generation == generation else { return }
         guard let since = episode.playingSince else {
             self.episode?.playingSince = date
@@ -230,7 +248,8 @@ final class PlaybackRecovery {
             case .surface(let error): return giveUp(error, host)
             // Out of attempts: never wait for the network first.
             case .rebuild where current.rebuilds >= Self.rebuildDelays.count,
-                .refresh where current.rebuilds >= Self.rebuildDelays.count:
+                .refresh where current.rebuilds >= Self.rebuildDelays.count,
+                .transcode where current.rebuilds >= Self.rebuildDelays.count:
                 return giveUp(.recoveryExhausted, host)
             default: break
             }
@@ -250,7 +269,7 @@ final class PlaybackRecovery {
             switch step {
             case .surface(let error): return giveUp(error, host)
             case .reseek: delay = Self.retryDelays[episode.retries]
-            case .rebuild, .refresh:
+            case .rebuild, .refresh, .transcode:
                 guard episode.rebuilds < Self.rebuildDelays.count else { return giveUp(.recoveryExhausted, host) }
                 delay = Self.rebuildDelays[episode.rebuilds]
             }
@@ -289,12 +308,14 @@ final class PlaybackRecovery {
                 guard await rebuildAfterRefresh(run, host) else { return }
             case .rebuild:
                 guard await rebuild(run, host) else { return }
+            case .transcode:
+                guard await rebuild(run, host, forceTranscode: true) else { return }
             }
         }
     }
 
     private enum Step: Equatable {
-        case reseek, rebuild, refresh
+        case reseek, rebuild, refresh, transcode
         case surface(PlaybackCoordinatorError)
     }
 
@@ -303,6 +324,8 @@ final class PlaybackRecovery {
         guard case .failure(let failure) = episode.cause else { return .rebuild }
         let action = failure.recoveryAction
         if action == .fatal { return .surface(.playback(failure)) }
+        // Once per play, and never from HLS: the error is the media's.
+        if action == .transcode { return host?.canTranscode() == true ? .transcode : .surface(.playback(failure)) }
         if action == .refresh || session == .unauthorized {
             return episode.refreshed ? .surface(.streamRejected) : .refresh
         }
@@ -387,14 +410,15 @@ final class PlaybackRecovery {
         }
     }
 
-    /// One rebuild attempt; returns whether the run goes on (the attempt failed recoverably).
-    private func rebuild(_ run: Int, _ host: PlaybackRecoveryHost) async -> Bool {
+    /// One rebuild attempt, an HLS transcode if `forceTranscode`; returns whether the run goes on
+    /// (the attempt failed recoverably).
+    private func rebuild(_ run: Int, _ host: PlaybackRecoveryHost, forceTranscode: Bool = false) async -> Bool {
         guard episode != nil else { return false }
         self.episode?.rebuilds += 1
         self.episode?.failedDuringAttempt = false
         let attempt = host.generation() + 1
         attemptGeneration = attempt
-        let outcome = await host.rebuild(host.target(), self.episode?.wantsPlay ?? false)
+        let outcome = await host.rebuild(host.target(), self.episode?.wantsPlay ?? false, forceTranscode)
         // A newer run's rebuild may have replaced the marker meanwhile.
         if attemptGeneration == attempt { attemptGeneration = nil }
         guard run == token else { return false }

@@ -606,6 +606,12 @@ public final class AudioEngine: AudioEngineProtocol {
                 let error = notification.userInfo?[AVPlayerItemFailedToPlayToEndTimeErrorKey] as? NSError
                 MainActor.assumeIsolated { self?.itemFailedToPlayToEnd(id, error: error) }
             },
+            center.addObserver(forName: AVPlayerItem.playbackStalledNotification, object: nil, queue: .main) {
+                [weak self] notification in
+                guard let object = notification.object else { return }
+                let id = ObjectIdentifier(object as AnyObject)
+                MainActor.assumeIsolated { self?.itemStalled(id) }
+            },
         ]
     }
 
@@ -694,5 +700,17 @@ public final class AudioEngine: AudioEngineProtocol {
     private func itemFailedToPlayToEnd(_ id: ObjectIdentifier, error: NSError?) {
         guard let entry = queued[id] else { return }
         reportItemFailure(trackIndex: entry.trackIndex, item: entry.item, error: error)
+    }
+
+    /// The playing item ran out of media with no error. A failure, or a seek (which owns the
+    /// item until it lands), takes precedence; so does a pause.
+    private func itemStalled(_ id: ObjectIdentifier) {
+        guard let entry = queued[id], entry.item === player.currentItem, failure == nil, pendingItemFailure == nil,
+            !hasEnded, !isSeeking, pendingSeekTarget == nil, isPlaybackRequested
+        else { return }
+        // The `timeControlStatus` KVO hop may not have run yet: a tick queued behind this must not
+        // read as playback that resumed.
+        refreshState()
+        onEvent?(.stalled)
     }
 }

@@ -96,6 +96,9 @@ public enum AudioEngineEvent: Sendable, Hashable {
     /// The last track played to its end.
     case endOfMedia
     case failed(AudioEngineError)
+    /// The playing item stalled with no error (`AVPlayerItemPlaybackStalled`): it ran out of
+    /// buffered media while play was requested, and no seek was in flight.
+    case stalled
     /// The audio output went away (``AudioEngineProtocol/pauseForOutputLoss()``), even if nothing
     /// was playing, so a play intent held outside the engine (recovery, a resume awaiting its
     /// seek) is dropped rather than restarting audio on the speaker.

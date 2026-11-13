@@ -82,9 +82,11 @@ public final class AccountPlaybackServices: PlaybackSessionService, ProgressSync
     // MARK: PlaybackSessionService
 
     /// Throws ``APIError/notAuthenticated`` without a client or features.
-    public func startSession(itemID: String, episodeID: String?) async throws -> PlaybackSession {
+    public func startSession(itemID: String, episodeID: String?, forceTranscode: Bool) async throws
+        -> PlaybackSession
+    {
         guard let service = sessionService() else { throw APIError.notAuthenticated }
-        return try await service.startSession(itemID: itemID, episodeID: episodeID)
+        return try await service.startSession(itemID: itemID, episodeID: episodeID, forceTranscode: forceTranscode)
     }
 
     public func mediaProgress(itemID: String, episodeID: String?) async throws -> MediaProgress? {
