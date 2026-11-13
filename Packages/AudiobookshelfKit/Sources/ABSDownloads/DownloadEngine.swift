@@ -245,8 +245,17 @@ public actor DownloadEngine {
     /// the check passes and the resume starts them itself. A guarded resume that fails while the
     /// record may still be queued leaves it here until it is known not to be: paused again (by
     /// the resume's rollback, the next activation's restart, or a pause), deleted, or resumed; or
-    /// until the next activation finds no quiesce since the resume's generation, the value here.
-    private var validatingResumes: [UUID: Int] = [:]
+    /// until the next activation finds no quiesce since the resume's generation, unless the
+    /// resume was a new record's (``resumeNewRecord(recordID:unlessQuiescedSince:)``).
+    private var validatingResumes: [UUID: GuardedResume] = [:]
+
+    /// A guarded resume in ``validatingResumes``.
+    private struct GuardedResume {
+        /// The `unlessQuiescedSince` generation.
+        let generation: Int
+        /// Whether it is ``resumeNewRecord(recordID:unlessQuiescedSince:)``'s.
+        let isNewRecord: Bool
+    }
     /// The connections of the failures for good under way, from the start of their handling
     /// until their replay has started, and the ``quiesce(connectionID:pausing:)`` calls waiting
     /// for them.
@@ -593,6 +602,18 @@ public actor DownloadEngine {
         try await serialized(recordID) { try await $0.performResume(recordID, unlessQuiescedSince: generation) }
     }
 
+    /// ``resume(recordID:unlessQuiescedSince:)`` for a record just saved for a request
+    /// (``DownloadManager/enqueue(item:episodeID:connectionID:replacingExisting:unlessQuiescedSince:)``),
+    /// which deletes it when this throws. A failure that may leave it queued keeps it
+    /// unlaunchable until it is paused again or deleted: an activation pauses it rather than
+    /// starting it, even without a quiesce, so no transfer outlives the failed request.
+    @discardableResult
+    public func resumeNewRecord(recordID: UUID, unlessQuiescedSince generation: Int) async throws -> Bool {
+        try await serialized(recordID) {
+            try await $0.performResume(recordID, unlessQuiescedSince: generation, isNewRecord: true)
+        }
+    }
+
     /// The quiesce count now, for ``resume(recordID:unlessQuiescedSince:)`` and
     /// ``hasQuiesced(connectionID:since:)``.
     public func quiesceGeneration() -> Int {
@@ -605,14 +626,18 @@ public actor DownloadEngine {
         quiescingConnections.contains(connectionID) || lastQuiesces[connectionID, default: 0] > generation
     }
 
-    private func performResume(_ recordID: UUID, unlessQuiescedSince generation: Int?) async throws -> Bool {
+    private func performResume(
+        _ recordID: UUID, unlessQuiescedSince generation: Int?, isNewRecord: Bool = false
+    ) async throws -> Bool {
         resumeGenerations[recordID, default: 0] += 1
         resumingRecords.insert(recordID)
         defer { resumingRecords.remove(recordID) }
         // Until the check below, nothing else may launch the queued record: a quiesce that already
         // passed over it wouldn't stop the transfer. Nor after a failure that may leave it queued,
         // until it is paused again.
-        if let generation { validatingResumes[recordID] = generation }
+        if let generation {
+            validatingResumes[recordID] = GuardedResume(generation: generation, isNewRecord: isNewRecord)
+        }
         let record: DownloadRecordDTO?
         do {
             record = try await store.setState(.queued, forRecord: recordID) ? readRecord(store, recordID) : nil
@@ -1194,7 +1219,8 @@ public actor DownloadEngine {
 
     /// Settles the records failed guarded resumes left unlaunchable, skipping those with a pause
     /// or resume under way (it settles them, or the next activation does). One still queued with
-    /// a quiesce of its server since the resume's generation is paused; without one, it is
+    /// a quiesce of its server since the resume's generation, or from a new record's resume (its
+    /// request failed, and the manager deletes it), is paused; otherwise it is
     /// released to this restart, as an unguarded resume would leave it queued (and as
     /// ``DownloadManager/restartActiveTransfers()`` leaves it after failed resumes). One not
     /// queued is released. Returns the ones it paused.
@@ -1204,11 +1230,12 @@ public actor DownloadEngine {
             // Registered at once, as nothing runs before it: a pause or resume beginning
             // meanwhile waits for it.
             let didPause = try? await serialized(recordID) { engine in
-                guard let generation = engine.validatingResumes[recordID] else { return false }
+                guard let pending = engine.validatingResumes[recordID] else { return false }
                 // Read again: the activation's read may predate the failed resume.
                 let record = try await engine.readRecord(engine.store, recordID)
                 guard let record, record.state == .queued || record.state == .downloading,
-                    engine.hasQuiesced(connectionID: record.key.serverConnectionID, since: generation)
+                    pending.isNewRecord
+                        || engine.hasQuiesced(connectionID: record.key.serverConnectionID, since: pending.generation)
                 else {
                     engine.validatingResumes[recordID] = nil
                     return false

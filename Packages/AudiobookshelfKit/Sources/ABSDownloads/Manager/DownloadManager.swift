@@ -366,7 +366,7 @@ public actor DownloadManager {
         let resumed: Bool
         do throws(DownloadManagerError) {
             resumed = try await read {
-                try await self.engine.resume(recordID: record.id, unlessQuiescedSince: generation)
+                try await self.engine.resumeNewRecord(recordID: record.id, unlessQuiescedSince: generation)
             }
         } catch {
             await discardUnstarted(record.id)
