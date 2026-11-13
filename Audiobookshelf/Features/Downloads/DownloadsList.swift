@@ -44,13 +44,14 @@ struct DownloadsList: View {
 
     @ViewBuilder
     private func content(_ listing: DownloadsListing) -> some View {
+        let isEmpty = mode == .all ? listing.isEmpty : listing.downloads.isEmpty
         if !model.isLoaded, mode == .all {
             LoadingView()
-        } else if mode == .all, model.loadError != nil, listing.isEmpty {
-            ErrorStateView(title: L10n.string("MessageDownloadsLoadFailed")) {
+        } else if isEmpty, let failure = loadFailure {
+            ErrorStateView(title: failure) {
                 Task { await model.reload() }
             }
-        } else if mode == .all ? listing.isEmpty : listing.downloads.isEmpty {
+        } else if isEmpty {
             ContentUnavailableView {
                 Label {
                     Text(verbatim: L10n.string("MessageNoDownloads"))
@@ -66,6 +67,9 @@ struct DownloadsList: View {
                         DownloadsStorageRow(used: listing.downloadedBytes, available: model.availableBytes)
                     }
                 }
+                if model.queueLoadError != nil {
+                    Section { queueLoadFailedRow }
+                }
                 downloadingSection(listing)
                 if mode == .all {
                     booksSection(listing.books)
@@ -73,6 +77,33 @@ struct DownloadsList: View {
                 }
             }
         }
+    }
+
+    /// Why an empty list couldn't be read: the downloaded items (`.all` only), or the stored
+    /// downloads under way; `nil` when both were read.
+    private var loadFailure: String? {
+        if mode == .all, model.loadError != nil { return L10n.string("MessageDownloadsLoadFailed") }
+        return model.queueLoadError != nil ? L10n.string("MessageDownloadQueueLoadFailed") : nil
+    }
+
+    /// Shown above the list when the stored downloads under way couldn't be read, so the queue
+    /// isn't silently missing; Retry reads them again.
+    private var queueLoadFailedRow: some View {
+        HStack(spacing: ABSSpacing.medium) {
+            Label {
+                Text(verbatim: L10n.string("MessageDownloadQueueLoadFailed"))
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
+                    .foregroundStyle(ABSColor.mutedForeground)
+                    .accessibilityHidden(true)
+            }
+            Spacer(minLength: ABSSpacing.small)
+            Button(L10n.string("ButtonRetry")) {
+                Task { await model.reload() }
+            }
+            .buttonStyle(.borderless)
+        }
+        .font(.footnote)
     }
 
     @ViewBuilder
