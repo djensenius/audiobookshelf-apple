@@ -114,7 +114,8 @@ struct LeasedFile: Sendable {
 /// Files live at `<directory>/<serverID>/<ImageKey.fileStem>.<ext>`. Only
 /// the app process writes and evicts. Eviction is least recently used by modification date
 /// (touched on hits at most once a day), skips leased files, and brings the total to 90 % of
-/// the cap.
+/// the cap. Files of the keys passed to ``exemptFromEviction(_:)`` (the widget snapshot's) are
+/// never evicted.
 public actor CoverFileStore {
     public nonisolated let directory: URL
     /// The standardized path of `directory`, the prefix of every lease key.
@@ -140,6 +141,8 @@ public actor CoverFileStore {
     /// only if its folder moved while the pass ran, and ``retire(_:)`` subtracts a file exactly
     /// once whenever it runs.
     private var folderMoves: [UUID: Int] = [:]
+    /// The `<serverID>/<fileStem>` of every key passed to ``exemptFromEviction(_:)``.
+    private var exemptStems: Set<String> = []
     /// The write each path holds, by lease key; absent (`0`) for files from an earlier launch.
     private var versions: [String: Int] = [:]
     private var nextVersion = 1
@@ -254,6 +257,14 @@ public actor CoverFileStore {
             if (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true { return url }
         }
         return nil
+    }
+
+    /// Keeps the files of `keys`, whatever their extension, out of LRU eviction, replacing the
+    /// keys passed before: the covers of the current widget snapshot, which the widget can only
+    /// read from here (ADR 0005, "Widgets"). They still count towards the cap, and are still
+    /// deleted with their server, replaced by a newer write, or discarded if damaged.
+    public func exemptFromEviction(_ keys: Set<ImageKey>) {
+        exemptStems = Set(keys.map { "\($0.serverID.uuidString)/\($0.fileStem)" })
     }
 
     /// The current generation of `serverID`'s folder; pass it to ``insert(moving:for:pathExtension:generation:)``.
@@ -429,7 +440,9 @@ public actor CoverFileStore {
             // Read after the listing, so leases taken while it ran are kept.
             let leased = leases.leasedPaths
             for file in files.sorted(by: { $0.modified < $1.modified }) where totalBytes > limit * 9 / 10 {
-                guard !leased.contains(file.key) else { continue }
+                guard !leased.contains(file.key), !exemptStems.contains(Self.stem(ofLeaseKey: file.key)) else {
+                    continue
+                }
                 remove(file)
             }
         }
@@ -617,6 +630,12 @@ public actor CoverFileStore {
     /// deleted (`/private/var` versus `/var`), so keys taken before and after would differ.
     private static func leaseKey(_ url: URL, root: String) -> String {
         "\(root)/\(url.deletingLastPathComponent().lastPathComponent)/\(url.lastPathComponent)"
+    }
+
+    /// `<serverID>/<fileStem>` of the file at lease key `path`, as ``exemptStems`` holds it.
+    private static func stem(ofLeaseKey path: String) -> String {
+        let url = URL(filePath: path)
+        return "\(url.deletingLastPathComponent().lastPathComponent)/\(url.deletingPathExtension().lastPathComponent)"
     }
 
     /// Measured fresh: a `URL` caches resource values, and its file may have been replaced since.

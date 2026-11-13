@@ -23,6 +23,9 @@ struct RootView: View {
     var library: LibraryParticipant?
     /// Given to the signed-in shell as `\.imagePipeline`; screens outside it see `nil`.
     var imagePipeline: ImagePipeline?
+    /// The account session's playback, given to the signed-in shell as `\.playItem`,
+    /// `\.bookmarkStore` and `\.sleepTimer` (``PlaybackEnvironment``).
+    var playback: PlaybackSessionParticipant?
 
     @Environment(\.scenePhase) private var scenePhase
     @State private var links = SceneLinks()
@@ -73,6 +76,18 @@ struct RootView: View {
     private func servedStore(for identity: SessionIdentity) -> LibraryStore? {
         guard let store = library?.store, store.serves(identity) else { return nil }
         return store
+    }
+
+    /// `participant` while the active account is `identity`'s, `nil` otherwise. During a switch
+    /// the outgoing shell stays up after `accounts` moved on, and must not play, bookmark or time
+    /// with the next account's session.
+    static func playback(
+        _ participant: PlaybackSessionParticipant?, accounts: AccountManager?, for identity: SessionIdentity
+    ) -> PlaybackSessionParticipant? {
+        guard let accounts, let active = accounts.activeConnection,
+            active.id == identity.connectionID, active.userId == identity.userID
+        else { return nil }
+        return participant
     }
 
     /// The active connection's client while it serves `identity`'s account, for `\.statsService`;
@@ -131,6 +146,7 @@ struct RootView: View {
                 .environment(\.imagePipeline, imagePipeline)
             }
             .id(identity)
+            .modifier(PlaybackEnvironment(participant: Self.playback(playback, accounts: accounts, for: identity)))
             // `AccountManager` is observable, so a sign-in, switch, reconnect or sign-out updates it.
             .environment(\.statsService, Self.statsService(accounts, for: identity))
         case .storeUnavailable:

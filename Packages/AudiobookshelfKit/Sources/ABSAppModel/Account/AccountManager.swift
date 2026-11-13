@@ -133,7 +133,8 @@ public final class AccountManager {
     @ObservationIgnored private var removedLogins: [ServerLogin: Int] = [:]
     /// Connections that ``remove(_:)`` is deleting, whose missing session isn't an expiry, with
     /// how many of its calls are, so one that returns doesn't clear another's (see
-    /// ``isRemoving(_:)``).
+    /// ``isRemoving(_:)``). A call stops counting once its delete fails, so an expiry during its
+    /// recovery saves its own sign-out.
     @ObservationIgnored private var removing: [UUID: Int] = [:]
     /// A test seam: ``restoreSession()`` awaits it after loading the connections and before
     /// choosing one, so a test can sign out in that window. The store calls there can't be held
@@ -152,6 +153,13 @@ public final class AccountManager {
     /// A test seam: a call that saves an expiry's skipped or undone sign-out awaits it just before
     /// saving, so a test can sign in again in that window.
     @ObservationIgnored var willSaveSignOutOfExpiry: (@MainActor () async -> Void)?
+    /// A test seam: a call that saved an expiry's skipped or undone sign-out, and is about to clear
+    /// it for a newer sign-in, awaits it just before clearing, so a test can expire that session in
+    /// that window.
+    @ObservationIgnored var willClearSignOutOfExpiry: (@MainActor () async -> Void)?
+    /// A test seam: a ``remove(_:)`` whose delete failed awaits it after saving an expiry's sign-out
+    /// and before reloading the connections, so a test can expire a newer session in that window.
+    @ObservationIgnored var willReloadAfterFailedRemoval: (@MainActor () async -> Void)?
     /// A test seam: ``remove(_:)`` awaits it after signing out locally and finding the connection,
     /// and before deleting its session, so a test can change the state in that window.
     @ObservationIgnored var willDeleteRemovedSession: (@MainActor () async -> Void)?
@@ -476,10 +484,8 @@ public final class AccountManager {
     @discardableResult
     public func remove(_ id: UUID) async throws -> URL? {
         removing[id, default: 0] += 1
-        defer {
-            removing[id, default: 1] -= 1
-            if removing[id] == 0 { removing[id] = nil }
-        }
+        var isCounted = true
+        defer { if isCounted { endRemoving(id) } }
         forgetDownloadClient(id)
         let wasActive = activeConnection?.id == id
         let activeClient = wasActive ? client : nil
@@ -498,6 +504,10 @@ public final class AccountManager {
             removed = try await credentials(for: id).removeAll()
             credentialsRevision += 1
         } catch {
+            // Not removing it any more: an expiry from here on, such as of a newer session while
+            // the sign-out below saves, saves its own, unless another removal of it is running.
+            endRemoving(id)
+            isCounted = false
             // Only the active connection signed out above is put back, and only over the state it
             // left: a failed removal mustn't undo a newer call, another connection activating, or
             // the session expiring.
@@ -508,7 +518,10 @@ public final class AccountManager {
             }
             // An expiry meanwhile didn't save its sign-out, expecting the delete; it failed, so the
             // rejected tokens may still be stored.
-            if await saveSignOutOfExpiry(id, since: expired) { await reloadConnections() }
+            if await saveSignOutOfExpiry(id, since: expired) {
+                await willReloadAfterFailedRemoval?()
+                await reloadConnections()
+            }
             throw error
         }
         // A sign-in to it that started earlier mustn't save it again, even once the store has
@@ -746,9 +759,15 @@ public final class AccountManager {
         state = saved.state
     }
 
-    /// Whether a ``remove(_:)`` of `id` is running.
+    /// Whether a ``remove(_:)`` of `id` is running, and its delete hasn't failed.
     private func isRemoving(_ id: UUID) -> Bool {
         removing[id] != nil
+    }
+
+    /// Stops counting one ``remove(_:)`` of `id`, keeping any other that's running.
+    private func endRemoving(_ id: UUID) {
+        removing[id, default: 1] -= 1
+        if removing[id] == 0 { removing[id] = nil }
     }
 
     /// Whether `id` is being removed or is no longer saved and connected.
@@ -905,12 +924,17 @@ public final class AccountManager {
         // Not for a connection being removed, whose record the removal deletes; if it fails, it
         // saves this then.
         guard deleteFailed, !isRemoving(id) else { return }
+        let logoutBefore = latestLogout
         await willSaveExpiry?()
         guard let savedAt = await saveSignOut(of: id) else { return }
         // A sign-in that saved a newer session while this saved: it clears a sign-out when it marks
         // the connection used, unless that came first, so clear this one by its date. One recorded
         // after this check marks the connection used after this save finished, so that clears it.
-        if signInGenerations[id, default: 0] > generation, expiredGenerations[id, default: 0] <= generation {
+        // Not after a logout meanwhile, whose sign-out this save replaced, as in
+        // `saveSignOutOfExpiry`.
+        if signInGenerations[id, default: 0] > generation, expiredGenerations[id, default: 0] <= generation,
+            latestLogout == logoutBefore
+        {
             _ = try? await store.clearSignedOut(id: id, savedAt: savedAt)
         }
         await reloadConnections()
@@ -938,6 +962,7 @@ public final class AccountManager {
         if signInGenerations[id, default: 0] > expired, expiredGenerations[id, default: 0] <= expired,
             latestLogout == logoutBefore
         {
+            await willClearSignOutOfExpiry?()
             _ = try? await store.clearSignedOut(id: id, savedAt: savedAt)
         }
         return true

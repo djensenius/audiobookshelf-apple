@@ -2185,4 +2185,161 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         await relaunched.restoreSession()
         #expect(relaunched.state.user?.connectionID == id && relaunched.lastError == nil)
     }
+
+    // MARK: - #497
+
+    /// Starts removing the connection, holds it before the delete, then expires its session while
+    /// the Keychain can delete neither that session nor, then, the connection's items. Returns the
+    /// removal and its held delete.
+    private func removeWhileTheSessionExpires(
+        _ manager: AccountManager, harness: Harness, server: FakeServer, id: UUID
+    ) async throws -> (removing: Task<URL?, any Error>, deleting: StubGate) {
+        let client = try #require(manager.client)
+        let deleting = StubGate()
+        manager.willDeleteRemovedSession = { await deleting.pass() }
+        let removing = Task { try await manager.remove(id) }
+        await deleting.arrived()
+        manager.willDeleteRemovedSession = nil
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        server.revokeSession()
+        await #expect(throws: APIError.sessionExpired) { try await client.send(AuthEndpoints.authorize()) }
+        return (removing, deleting)
+    }
+
+    /// Signs in again, then expires that session too, where the Keychain can't delete it.
+    private func signInAndExpireAgain(_ manager: AccountManager, harness: Harness, server: FakeServer) async {
+        harness.keychain.failWrites(with: nil)
+        _ = try? await signIn(manager, to: server)
+        await expireAgain(manager, harness: harness, server: server)
+    }
+
+    private func expireAgain(_ manager: AccountManager, harness: Harness, server: FakeServer) async {
+        guard let client = manager.client else { return }
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed) { data in
+            // The delete keeps the custom headers, so it writes the item without the session.
+            data.map { !String(decoding: $0, as: UTF8.self).contains("accessToken") } ?? true
+        }
+        server.revokeSession()
+        _ = try? await client.send(AuthEndpoints.authorize())
+    }
+
+    /// A failed removal saves the sign-out of an expiry meanwhile. A newer session that expires,
+    /// with a failed delete, while the removal clears that sign-out for it, or once the removal has
+    /// saved it and is reloading the connections, saves its own: the removal stopped counting when
+    /// its delete failed. So the newer tokens aren't restored offline after a relaunch.
+    @Test(arguments: [false, true])
+    func expiryDuringAFailedRemovalsRecoverySavesItsSignOut(duringClear: Bool) async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let held = try await removeWhileTheSessionExpires(manager, harness: harness, server: server, id: id)
+        var expiredAgain = false
+        if duringClear {
+            // Signed in again before the removal saves the sign-out, so the removal then clears it.
+            manager.willSaveSignOutOfExpiry = {
+                manager.willSaveSignOutOfExpiry = nil
+                harness.keychain.failWrites(with: nil)
+                _ = try? await signIn(manager, to: server)
+            }
+            manager.willClearSignOutOfExpiry = {
+                manager.willClearSignOutOfExpiry = nil
+                await self.expireAgain(manager, harness: harness, server: server)
+                expiredAgain = true
+            }
+        } else {
+            manager.willReloadAfterFailedRemoval = {
+                manager.willReloadAfterFailedRemoval = nil
+                await self.signInAndExpireAgain(manager, harness: harness, server: server)
+                expiredAgain = true
+            }
+        }
+        held.deleting.open()
+        await #expect(throws: KeychainError(status: errSecInteractionNotAllowed)) { try await held.removing.value }
+
+        #expect(expiredAgain)
+        #expect(manager.state == .signedOut && manager.lastError == .server(.sessionExpired))
+        #expect(try harness.session(id) != nil)
+        #expect(try await harness.store.connection(id: id)?.signedOutAt != nil)
+        #expect(manager.connections.map(\.id) == [id] && manager.connections.first?.signedOutAt != nil)
+        server.update { $0.isOffline = true }
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        #expect(relaunched.state == .signedOut && relaunched.connections.map(\.id) == [id])
+    }
+
+    /// Unless another removal of the connection is still running: the expiry then leaves its
+    /// sign-out to that removal, which deletes the connection.
+    @Test func expiryDuringAFailedRemovalsRecoveryDefersToAnOverlappingRemoval() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let client = try #require(manager.client)
+        let firstGate = StubGate()
+        let secondGate = StubGate()
+        var arrivals = 0
+        manager.willDeleteRemovedSession = {
+            arrivals += 1
+            await (arrivals == 1 ? firstGate : secondGate).pass()
+        }
+        let firstRemoval = Task { try await manager.remove(id) }
+        await firstGate.arrived()
+        let secondRemoval = Task { try await manager.remove(id) }
+        await secondGate.arrived()
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed)
+        server.revokeSession()
+        await #expect(throws: APIError.sessionExpired) { try await client.send(AuthEndpoints.authorize()) }
+        var expiredAgain = false
+        manager.willReloadAfterFailedRemoval = {
+            manager.willReloadAfterFailedRemoval = nil
+            await self.signInAndExpireAgain(manager, harness: harness, server: server)
+            expiredAgain = true
+        }
+        firstGate.open()
+        await #expect(throws: KeychainError(status: errSecInteractionNotAllowed)) { try await firstRemoval.value }
+
+        #expect(expiredAgain)
+        // The first removal's sign-out was cleared by the sign-in, and the expiry saved none.
+        #expect(try await harness.store.connection(id: id)?.signedOutAt == nil)
+        harness.keychain.failWrites(with: nil)
+        secondGate.open()
+        try await secondRemoval.value
+        #expect(manager.state == .signedOut && manager.connections.isEmpty)
+        #expect(try harness.session(id) == nil)
+    }
+
+    /// A logout of a newer session while an expiry saves its sign-out, where the logout's delete
+    /// fails: the expiry's save replaced the logout's sign-out, so it keeps it, and the tokens
+    /// aren't restored offline after a relaunch.
+    @Test func expiryKeepsItsSignOutOverALogoutWhileItSaved() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let client = try #require(manager.client)
+        harness.keychain.failWrites(with: errSecInteractionNotAllowed) { data in
+            // The delete keeps the custom headers, so it writes the item without the session.
+            data.map { !String(decoding: $0, as: UTF8.self).contains("accessToken") } ?? true
+        }
+        server.revokeSession()
+        var loggedOut = false
+        // After the expiry signed out, before it saves that.
+        manager.willSaveExpiry = {
+            manager.willSaveExpiry = nil
+            _ = try? await signIn(manager, to: server)
+            await manager.logout()
+            loggedOut = true
+        }
+        await #expect(throws: APIError.sessionExpired) { try await client.send(AuthEndpoints.authorize()) }
+
+        #expect(loggedOut)
+        #expect(manager.state == .signedOut)
+        #expect(try harness.session(id) != nil)
+        #expect(try await harness.store.connection(id: id)?.signedOutAt != nil)
+        server.update { $0.isOffline = true }
+        let relaunched = harness.makeManager()
+        await relaunched.restoreSession()
+        #expect(relaunched.state == .signedOut && relaunched.connections.first?.signedOutAt != nil)
+    }
 }
