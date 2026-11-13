@@ -55,6 +55,8 @@ public final class RecentItemsDonor: SessionParticipant {
     /// changes its pending entry, and a session start that converts it (``sessionDidStart(_:)``)
     /// makes earlier ones change nothing.
     private var domainRequests: [UUID: Int] = [:]
+    /// Whether ``sweepOrphanedAccounts(savedConnections:)`` has run with a store it could read.
+    private var sweptOrphans = false
 
     public init(index: any RecentItemsIndexing, defaults: UserDefaults) {
         self.index = index
@@ -155,6 +157,27 @@ public final class RecentItemsDonor: SessionParticipant {
         }
     }
 
+    /// Deletes the items of every account this donor has items for, or evictions pending, that the
+    /// store no longer saves, as after the store was rebuilt or the account was removed in an
+    /// earlier launch: `followRemovals(of:)` only sees a connection leave a list it saw it in.
+    /// Runs once, with the first list it can read; never with ``AccountManager/connections`` alone,
+    /// which is empty until it has loaded. The running session's account is kept, even if the
+    /// read missed it. Deletions go through ``removeItems(of:)``, so they're retried until they
+    /// succeed, and only for these items once the account signs in again.
+    /// - Parameter savedConnections: The saved connections read from the store, or `nil` if it
+    ///   can't be read, which skips the sweep (`AccountManager.savedConnectionIDs()`).
+    public func sweepOrphanedAccounts(savedConnections: @MainActor () async -> Set<UUID>?) async {
+        guard !sweptOrphans, let saved = await savedConnections(), !sweptOrphans else { return }
+        sweptOrphans = true
+        let accounts = [Self.defaultsKey, Self.pendingEvictionsKey].flatMap {
+            (defaults.dictionary(forKey: $0) ?? [:]).keys
+        }
+        let tracked = Set(accounts.compactMap(UUID.init(uuidString:)))
+        for orphan in tracked.subtracting(saved) where orphan != connectionID {
+            removeItems(of: orphan)
+        }
+    }
+
     /// Deletes a connection's items when a switch to it ends signed out (its saved session was
     /// rejected or unreadable): that switch ended the running session with
     /// ``SessionEndReason/switch``, and no session of that connection starts to expire. `rejected`
@@ -180,9 +203,14 @@ public final class RecentItemsDonor: SessionParticipant {
     /// once it leaves ``AccountManager/connections`` (``followRemovals(of:)``), once its
     /// credentials are removed (``AccountManager/credentialsRemoved``, even if the store then keeps
     /// it listed) or expire (``connectionExpired(_:)``), and once the launch's restore of it ends
-    /// signed out (``AccountManager/restoreSignedOut``).
+    /// signed out (``AccountManager/restoreSignedOut``), and those of accounts the store no
+    /// longer saves at launch (``sweepOrphanedAccounts(savedConnections:)``).
     public func follow(accounts: AccountManager) {
         followRemovals { Set(accounts.connections.map(\.id)) }
+        // Accounts the store no longer saves, as after it was rebuilt: read from the store itself.
+        Task { [weak self] in
+            await self?.sweepOrphanedAccounts { await accounts.savedConnectionIDs() }
+        }
         // Weakly: `accounts` outlives the donor's owner.
         let expired = accounts.credentialsExpired
         accounts.credentialsExpired = { [weak self] in

@@ -4,6 +4,7 @@ import ABSData
 import CoreSpotlight
 import Foundation
 import Observation
+import SwiftData
 import Testing
 
 @testable import ABSAppModel
@@ -480,9 +481,107 @@ private func context(_ server: UUID) -> SessionContext {
         #expect(index.writes == [.deleteDomain(serverA)])
     }
 
-    private func makeAccounts() throws -> AccountManager {
+    // MARK: Orphaned accounts
+
+    @Test func aRebuiltStoreDeletesTheOrphanedAccountsItems() async {
+        let donor = await makeDonor()
+        donor.donate(record())
+        await donor.sessionWillEnd(.switch)
+        await donor.sessionDidStart(context(serverB))
+        donor.donate(record("li_9", server: serverB))
+        await donor.settle()
+
+        // Relaunched over a rebuilt store, which saves no connections.
+        let relaunched = await makeDonor(running: nil)
+        await relaunched.sweepOrphanedAccounts { [] }
+        await relaunched.settle()
+
+        #expect(index.searchable.isEmpty)
+        #expect(
+            index.writes.suffix(2).sorted { "\($0)" < "\($1)" } == [.deleteDomain(serverA), .deleteDomain(serverB)])
+        #expect(relaunched.indexedIdentifiers(of: serverA).isEmpty)
+        #expect(relaunched.indexedIdentifiers(of: serverB).isEmpty)
+        #expect(relaunched.pendingDomainDeletions.isEmpty)
+    }
+
+    @Test func anUnreadableStoreDeletesNothing() async {
+        let donor = await makeDonor()
+        donor.donate(record())
+        await donor.settle()
+        index.clearWrites()
+
+        let relaunched = await makeDonor(running: nil)
+        await relaunched.sweepOrphanedAccounts { nil }
+        await relaunched.settle()
+
+        #expect(index.writes.isEmpty)
+        #expect(relaunched.indexedIdentifiers(of: serverA) == [record().id])
+    }
+
+    /// `AccountManager.connections` hasn't loaded at launch: the sweep reads the store instead.
+    @Test func followingTheAccountsKeepsSavedAccountsBeforeTheirListLoads() async throws {
+        let container = try DataStack(location: .inMemory).container
+        let saved = try await ServerConnectionStore(modelContainer: container).upsertLogin(
+            address: try #require(ServerAddress("https://abs.example.com")), userId: "usr_1", username: "user",
+            authMethod: .local, serverVersion: nil)
+        let first = await makeDonor(running: saved.id)
+        first.donate(record(server: saved.id))
+        await first.sessionWillEnd(.switch)
+        await first.sessionDidStart(context(serverB))
+        first.donate(record("li_9", server: serverB))
+        await first.settle()
+        index.clearWrites()
+
+        let accounts = try makeAccounts(container: container)
+        #expect(accounts.connections.isEmpty)
+        let relaunched = await makeDonor(running: nil)
+        relaunched.follow(accounts: accounts)
+
+        #expect(await eventually { index.writes == [.deleteDomain(serverB)] })
+        await relaunched.settle()
+        #expect(relaunched.indexedIdentifiers(of: saved.id) == [record(server: saved.id).id])
+        #expect(index.searchable == [record(server: saved.id).id])
+    }
+
+    @Test func anAccountSignedInAgainIsntWiped() async {
+        // Its sign-out's deletion failed, then it signed in again and played something new.
+        let donor = await makeDonor()
+        donor.donate(record("li_old"))
+        index.failing = [.deleteDomain, .delete]
+        await donor.sessionWillEnd(.signOut)
+        await donor.sessionDidStart(context(serverA))
+        await donor.settle()
+        index.failing = []
+        donor.donate(record("li_new"))
+        // Then switched away, which retries the old item's deletion.
+        await donor.sessionWillEnd(.switch)
+        await donor.sessionDidStart(context(serverB))
+        await donor.settle()
+        let before = index.writes.count
+
+        await donor.sweepOrphanedAccounts { [serverA, serverB] }
+        await donor.settle()
+
+        #expect(index.writes.count == before)
+        #expect(index.searchable == [record("li_new").id])
+        #expect(donor.indexedIdentifiers(of: serverA) == [record("li_new").id])
+        #expect(donor.pendingDomainDeletions.isEmpty && donor.pendingEvictions(of: serverA).isEmpty)
+    }
+
+    @Test func theRunningAccountIsntWipedIfTheReadMissedIt() async {
+        let donor = await makeDonor()
+        donor.donate(record())
+
+        await donor.sweepOrphanedAccounts { [] }
+        await donor.settle()
+
+        #expect(index.searchable == [record().id])
+        #expect(donor.indexedIdentifiers(of: serverA) == [record().id])
+    }
+
+    private func makeAccounts(container: ModelContainer? = nil) throws -> AccountManager {
         AccountManager(
-            store: ServerConnectionStore(modelContainer: try DataStack(location: .inMemory).container),
+            store: ServerConnectionStore(modelContainer: try container ?? DataStack(location: .inMemory).container),
             keychain: InMemoryKeychain(),
             validator: ServerValidator(sessionConfiguration: { StubURLProtocol.sessionConfiguration() }),
             sessionConfiguration: { StubURLProtocol.sessionConfiguration() })
