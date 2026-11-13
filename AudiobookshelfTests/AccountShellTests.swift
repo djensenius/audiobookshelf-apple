@@ -488,8 +488,8 @@ private final class Recorder: SessionParticipant {
         #expect(lifecycle.gate == .ready(b, isOffline: false))
     }
 
-    /// Pins today's behaviour: a wrong password restarts the running session (follow-up).
-    @Test func aWrongPasswordInTheSheetRestartsTheSession() async throws {
+    /// The server checks the password before the account change, so a wrong one ends nothing.
+    @Test func aWrongPasswordInTheSheetKeepsTheSession() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
         let accounts = try #require(environment.accounts)
@@ -510,35 +510,43 @@ private final class Recorder: SessionParticipant {
         await model.signIn()
 
         #expect(model.phase == .login && model.failure != nil)
-        #expect(Array(recorder.events.dropFirst(before)) == [.flush, .end(.switch), .start(a)])
+        #expect(recorder.events.count == before)
         #expect(lifecycle.gate == .ready(a, isOffline: false))
-        // The sheet's own change left A running, so trying again isn't refused as stale.
+        #expect(accounts.activeConnection?.id == a.connectionID && accounts.connections.count == 1)
         #expect(!model.isStale)
         await model.signIn()
-        #expect(Array(recorder.events.dropFirst(before)).count == 6)
+        #expect(model.phase == .login && model.failure != nil)
+        #expect(recorder.events.count == before)
     }
 
-    /// Cancelling the sheet's own sign-in, while its change unwinds, keeps the sheet open.
+    /// Cancelling the sheet's OpenID sign-in, before the server accepted it, keeps the sheet open
+    /// and ends nothing.
     @Test func cancellingTheSheetsSignInKeepsItOpen() async throws {
         let environment = try makeEnvironment()
         let lifecycle = environment.lifecycle
         let accounts = try #require(environment.accounts)
+        let recorder = Recorder()
+        lifecycle.register(recorder, stage: .connect)
         await lifecycle.start()
         let hosts = [Self.host(), Self.host()]
         defer { cleanUp(hosts) }
         let a = try await signIn(accounts, to: hosts[0])
         await waitFor(.ready(a, isOffline: false), in: lifecycle)
+        let before = recorder.events.count
         let model = connectModel(accounts, lifecycle: lifecycle)
         model.startAddingServer()
         model.address = "https://\(hosts[1])"
         await model.submitAddress()
         let signingIn = await heldOpenID(model)
+        // The browser is open, outside the account change.
+        #expect(lifecycle.gate == .ready(a, isOffline: false))
 
         model.cancel()
-        #expect(model.phase == .login && lifecycle.readySession == nil && !model.isStale)
+        #expect(model.phase == .login && !model.isStale)
         await signingIn.value
-        await waitFor(.ready(a, isOffline: false), in: lifecycle)
-        #expect(!model.isStale)
+        #expect(recorder.events.count == before)
+        #expect(lifecycle.gate == .ready(a, isOffline: false) && !model.isStale)
+        #expect(accounts.activeConnection?.id == a.connectionID && accounts.connections.count == 1)
     }
 
     /// Another window's failed switch restarts B; the sheet opened before it closes.
