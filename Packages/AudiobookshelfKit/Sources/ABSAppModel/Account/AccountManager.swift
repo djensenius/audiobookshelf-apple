@@ -332,6 +332,7 @@ public final class AccountManager {
             credentialsRevision += 1
             signInGenerations[connection.id] = stored.generation
             saved = (connection.id, credentials, stored.generation)
+            if stored.replaced != nil { credentialsReplaced?(connection.id) }
             if let replaced = stored.replaced, replaced.refreshToken != session.refreshToken {
                 // Signed in again: end the session this one replaced, best effort.
                 _ = await serverLogout(replaced, client: makeClient(server, credentials: nil))
@@ -666,6 +667,11 @@ public final class AccountManager {
     /// session's end may be a switch. Also for a connection being removed, whose Keychain delete
     /// may still fail, so ``credentialsRemoved`` isn't called; the app serializes the two cleanups.
     @ObservationIgnored public var credentialsExpired: (@MainActor (UUID) -> Void)?
+
+    /// Called when a sign-in saves a session over a connection's saved one, active or not, even if
+    /// the sign-in is then superseded: the transfers under way and the resume data still carry the
+    /// old credentials, so the app stops them and discards it there, then resumes the downloads.
+    @ObservationIgnored public var credentialsReplaced: (@MainActor (UUID) -> Void)?
 
     /// Clients for download credentials of saved connections that aren't active, so a
     /// connection's download parts share one client, with the credentials' generation they were

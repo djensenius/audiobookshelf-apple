@@ -373,7 +373,7 @@
   "MessageStatsRefreshFailed": "Couldn't refresh your stats. Showing the last ones loaded.",
   "MessageStoreUnavailable": "Couldn't open the app's data.",
   "MessageStoreUnavailableHelp": "Quit and reopen Audiobookshelf. If this keeps happening, make sure your device has free storage space.",
-  "MessageStreamingNeedsConfirmation": "This connection is metered, and Streaming using Cellular is set to ask for confirmation. To stream on it, set it to Always in Settings.",
+  "MessageStreamingNeedsConfirmation": "This connection is metered, and Streaming using Cellular is set to ask for confirmation. Stream on it anyway?",
   "MessageSwitchServerFailed": "Couldn't switch servers. Check that the server is reachable, then try again.",
   "MessageSwitchServerForLink": "This link is for {0} on {1}. Switch to that server to open it?",
   "MessageSwitchServerSignedOut": "The server signed you out while switching. Sign in to it again, or choose another server.",
