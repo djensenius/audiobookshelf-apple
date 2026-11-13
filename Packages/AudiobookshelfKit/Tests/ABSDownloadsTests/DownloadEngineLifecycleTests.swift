@@ -1358,6 +1358,90 @@ import Testing
         never.open()
     }
 
+    /// A guarded resume whose read fails after it queued the record, and whose rollback to
+    /// paused fails too, keeps the record unlaunchable: an overlapping activation pauses it
+    /// instead of starting a transfer, and a later resume still starts it.
+    @Test func aGuardedResumeWhoseReadFailsAfterQueueingStaysUnlaunchable() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .paused)
+        let failsRead = Mutex(false)
+        let store = harness.store
+        let engine = harness.makeEngine(readRecord: { store, id in
+            if failsRead.withLock({ $0 }) {
+                failsRead.withLock { $0 = false }
+                // The rollback's write fails too.
+                await store.failNextCommit(with: TestError())
+                throw TestError()
+            }
+            return try await store.record(id: id)
+        })
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        let generation = await engine.quiesceGeneration()
+
+        failsRead.withLock { $0 = true }
+        await #expect(throws: TestError.self) {
+            try await engine.resume(recordID: record.id, unlessQuiescedSince: generation)
+        }
+        #expect(try await store.record(id: record.id)?.state == .queued)
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        #expect(try await store.record(id: record.id)?.state == .paused)
+        #expect(harness.requests.isEmpty)
+
+        #expect(try await engine.resume(recordID: record.id))
+        await harness.waitForRequests(1)
+        #expect(harness.requests.count == 1)
+        never.open()
+    }
+
+    /// A guarded resume that finds a quiesce, and can't pause the record again, keeps it
+    /// unlaunchable: an overlapping activation pauses it instead of starting a transfer past
+    /// the quiesce, and a later guarded resume still starts it.
+    @Test func aGuardedResumeWhosePauseFailsAfterAQuiesceStaysUnlaunchable() async throws {
+        let never = StubGate()
+        let harness = try await DownloadHarness { _ in .status(200, gate: never) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .paused)
+        let holdsRead = Mutex(false)
+        let (reads, readReached) = AsyncStream.makeStream(of: Void.self)
+        let release = StubGate()
+        let store = harness.store
+        let engine = harness.makeEngine(readRecord: { store, id in
+            if holdsRead.withLock({ $0 }) {
+                holdsRead.withLock { $0 = false }
+                readReached.yield()
+                await withCheckedContinuation { continuation in release.run { continuation.resume() } }
+            }
+            return try await store.record(id: id)
+        })
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        let generation = await engine.quiesceGeneration()
+        #expect(await engine.quiesce(connectionID: harness.connectionID))
+
+        holdsRead.withLock { $0 = true }
+        let resume = Task { try await engine.resume(recordID: record.id, unlessQuiescedSince: generation) }
+        for await _ in reads { break }
+        // The pause that follows the quiesce check fails.
+        await store.failNextCommit(with: TestError())
+        release.open()
+        await #expect(throws: TestError.self) { try await resume.value }
+        #expect(try await store.record(id: record.id)?.state == .queued)
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        #expect(try await store.record(id: record.id)?.state == .paused)
+        #expect(harness.requests.isEmpty)
+
+        let later = await engine.quiesceGeneration()
+        #expect(try await engine.resume(recordID: record.id, unlessQuiescedSince: later))
+        await harness.waitForRequests(1)
+        #expect(harness.requests.count == 1)
+        never.open()
+    }
+
     /// A quiesce rejects its server's transfers that survived a relaunch before it waits for
     /// the session, so the activation it waits for (or one beginning once that one failed)
     /// cancels them instead of adopting them.
