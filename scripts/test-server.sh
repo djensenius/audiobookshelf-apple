@@ -382,8 +382,12 @@ export ABS_TEST_SERVER_VERSION="$version"
 if ((search_contract)); then
   if ((!search_only)); then
     log "Ordinary pass: --filter ABSServerContractTests --skip SearchContractTests"
-    swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
+    ABS_PODCAST_WRITE_CONTRACT='' swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
       --filter ABSServerContractTests --skip SearchContractTests
+    # Creating podcasts changes the seeded podcast library that ordinary suites count, so it runs alone.
+    log "Podcast write pass: --filter PodcastCreationContractTests"
+    ABS_PODCAST_WRITE_CONTRACT=1 swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
+      --filter PodcastCreationContractTests
   fi
   # Export only for the second process, after ordinary suites have finished successfully.
   export ABS_SEARCH_CONTRACT_MODE=1 ABS_SEARCH_OWNERSHIP="$search_token" ABS_SEARCH_OWNED_URL="$base_url"
