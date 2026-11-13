@@ -163,6 +163,72 @@ struct PlaybackStallFallbackTests {
         #expect(engine.seeks.count == seeks)
     }
 
+    enum FailureDuringRefresh: CaseIterable {
+        /// None: the refresh's own rebuild.
+        case none
+        /// A decode error on direct play: the HLS fallback instead.
+        case decodeOnDirectPlay
+        /// A decode error on HLS: final.
+        case decodeOnHLS
+        /// A 401: the old token's, so the refresh's rebuild still runs.
+        case unauthorized
+    }
+
+    /// A stall whose session lookup finds the token rejected refreshes it; a failure during that
+    /// refresh is weighed before the rebuild after it, which would clear it.
+    @Test(arguments: FailureDuringRefresh.allCases)
+    func aFailureDuringAStallsRefreshTakesItsOwnStep(failure: FailureDuringRefresh) async {
+        h.recoverySleep.isManual = true
+        if failure == .decodeOnHLS { service.state.withLock { _ = $0.transcodeSessions.insert("A-1") } }
+        await playAt600()
+        let seeks = engine.seeks.count
+        let refresh = Gate()
+        service.state.withLock {
+            $0.sessionStatus = .unauthorized
+            $0.refreshGate = refresh
+        }
+        let decode = Self.failure(.decode)
+
+        stall()
+        await settle { h.recoverySleep.waitingCount == 1 }
+        h.recoverySleep.fireOldest()
+        await settle { service.state.withLock { $0.refreshes } == 1 }
+        switch failure {
+        case .none: break
+        case .decodeOnDirectPlay, .decodeOnHLS: engine.fail(.itemFailed(trackIndex: 0, decode))
+        case .unauthorized: engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 401))))
+        }
+        refresh.open()
+
+        switch failure {
+        case .none, .unauthorized:
+            await settle { service.starts.count == 2 && coordinator.isPlaying }
+            #expect(service.forcedTranscodes == [false, false])
+            #expect(h.recoverySleep.durations == [.seconds(1)])
+            #expect(coordinator.error == nil)
+        case .decodeOnDirectPlay:
+            // The fallback's own backoff, then its forced rebuild: never the unforced one.
+            await settle { h.recoverySleep.waitingCount == 1 }
+            #expect(service.starts == ["A"])
+            h.recoverySleep.fireOldest()
+            await settle { service.starts.count == 2 && coordinator.isPlaying }
+            #expect(service.forcedTranscodes == [false, true])
+            #expect(engine.loads.last?.source.seekTolerance == 0.5)
+            #expect(h.recoverySleep.durations == [.seconds(1), .seconds(1)])
+            #expect(coordinator.error == nil)
+        case .decodeOnHLS:
+            await settle { coordinator.error != nil }
+            #expect(coordinator.error == .playback(decode))
+            #expect(failedEvents == 1)
+            #expect(service.starts == ["A"])
+            #expect(coordinator.phase == .unloaded)
+        }
+        // The one refresh, after the stall's one lookup; not the stall's re-seek.
+        #expect(service.state.withLock { $0.refreshes } == 1)
+        #expect(service.state.withLock { $0.sessionLookups } == ["A-1"])
+        #expect(engine.seeks.count == seeks)
+    }
+
     // MARK: - Direct play to HLS fallback
 
     @Test(arguments: [PlaybackFailure.Kind.decode, .unsupported])

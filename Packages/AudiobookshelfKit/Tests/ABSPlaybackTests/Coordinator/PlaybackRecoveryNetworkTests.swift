@@ -345,6 +345,38 @@ struct PlaybackRecoveryNetworkTests {
         #expect(coordinator.error == nil)
     }
 
+    /// A decode error while the rebuild after the refresh waits for the path is weighed once it
+    /// returns: the HLS fallback, never the refresh's unforced rebuild, and no second refresh.
+    @Test func aDecodeErrorWhileTheRefreshsRebuildWaitsForThePathFallsBackToHLS() async {
+        h.recoverySleep.isManual = true
+        setSession(.gone)
+        await playAt600()
+        let refresh = Gate()
+        service.state.withLock { $0.refreshGate = refresh }
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 401))))
+        await settle { h.recoverySleep.waitingCount == 1 }
+        h.recoverySleep.fireOldest()
+        await settle { service.state.withLock { $0.refreshes } == 1 }
+        paths.isOnline = false
+        refresh.open()
+        await settle { h.recoverySleep.waitingCount == 1 }
+
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.decode)))
+        paths.isOnline = true
+        // The fallback's own backoff, after the lookup the path's return calls for.
+        await settle { h.recoverySleep.waitingCount == 1 && h.recoverySleep.durations.count == 3 }
+        #expect(service.starts == ["A"])
+        #expect(h.recoverySleep.durations == [.seconds(1), .seconds(300), .seconds(1)])
+        h.recoverySleep.fireOldest()
+        await settle { service.starts.count == 2 && engine.isPlaybackRequested }
+
+        #expect(service.forcedTranscodes == [false, true])
+        #expect(lookups == ["A-1"])
+        #expect(service.state.withLock { $0.refreshes } == 1)
+        #expect(engine.loads.last?.time == 600)
+        #expect(coordinator.error == nil)
+    }
+
     // MARK: - A user seek during recovery
 
     @Test func aSeekReplacingOneThatTookOverRecoveryStillPlays() async {

@@ -88,7 +88,8 @@ struct PlaybackRecoveryHost {
 /// - **401.** The first one in an episode refreshes the token, then rebuilds (counted against the
 ///   rebuild budget). A second one stops with ``PlaybackCoordinatorError/streamRejected``; there is
 ///   never a second refresh. A session lookup whose request refreshed the token spends that one
-///   refresh too (#491).
+///   refresh too (#491). A decode, format or final error during the refresh, or the waits after
+///   it, takes its own step instead of that rebuild.
 /// - **Decode and format errors.** On direct play, one rebuild with `forceTranscode` (the HLS
 ///   fallback), counted against the rebuild budget; on HLS, or once the fallback has run since the
 ///   user's play, they surface at once.
@@ -306,6 +307,9 @@ final class PlaybackRecovery {
                 }
             case .refresh:
                 self.episode?.refreshed = true
+                // Failures until now were weighed above; ``rebuildAfterRefresh(_:_:)`` weighs the
+                // ones during the refresh and its waits.
+                self.episode?.failedDuringAttempt = false
                 let error = await host.refresh()
                 guard isCurrent(run, host) else { return }
                 if let error { return giveUp(error, host) }
@@ -392,14 +396,18 @@ final class PlaybackRecovery {
     /// The rebuild after a refresh, which the path may have dropped during: it waits for the path
     /// (no `/play` offline) and checks the session once it returns; a 401 then, the one refresh
     /// already spent, surfaces. The path may drop again during that lookup, so it is gated again
-    /// before the rebuild (each wait has its own limit, as in ``run(_:host:)``). Returns whether
-    /// the run goes on.
+    /// before the rebuild (each wait has its own limit, as in ``run(_:host:)``). A failure during
+    /// the refresh or those waits that needs its own step takes it instead of the rebuild, which
+    /// would clear it (see ``failedForItsOwnStep``). Returns whether the run goes on.
     private func rebuildAfterRefresh(_ run: Int, _ host: PlaybackRecoveryHost) async -> Bool {
         while true {
             let network = await waitForNetwork()
             guard isCurrent(run, host) else { return false }
             switch network {
-            case .online: return await rebuild(run, host)
+            case .online:
+                // Back to the loop, with that step's budget and backoff; the refresh stays spent.
+                if failedForItsOwnStep { return true }
+                return await rebuild(run, host)
             case .timedOut:
                 giveUp(.recoveryExhausted, host)
                 return false
@@ -411,6 +419,19 @@ final class PlaybackRecovery {
                     return false
                 }
             }
+        }
+    }
+
+    /// Whether a failure during the attempt in flight calls for something a rebuild doesn't do: a
+    /// decode or format error's HLS fallback (or, on HLS, its error), or a final error. A 401 is
+    /// not one: after a refresh it was the old token's, and the rebuild is its remedy.
+    private var failedForItsOwnStep: Bool {
+        guard let episode, episode.failedDuringAttempt, case .failure(let failure) = episode.cause else {
+            return false
+        }
+        switch failure.recoveryAction {
+        case .transcode, .fatal: return true
+        case .retry, .rebuild, .refresh: return false
         }
     }
 
