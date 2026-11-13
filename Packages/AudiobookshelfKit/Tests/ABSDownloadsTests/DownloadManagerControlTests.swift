@@ -290,6 +290,41 @@ import Testing
         #expect(try await fixture.store.record(id: book.id)?.state == .paused)
     }
 
+    /// A cancel after a replacement's owned pause is the user's, even when the record's deletion
+    /// fails and leaves it paused: the owned resume then leaves it paused.
+    @Test func aFailedCancelAfterAnOwnedPauseKeepsTheRecordPaused() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        let owner = UUID()
+        #expect(try await manager.pause(recordID: book.id, owner: owner))
+        let store = fixture.store
+        await fixture.engine.onStop { _ in await store.failNextCommit(with: CocoaError(.fileWriteUnknown)) }
+
+        await #expect(throws: DownloadManagerError.storeFailure) { try await manager.cancel(recordID: book.id) }
+        #expect(try await manager.resume(recordID: book.id, owner: owner, unlessQuiescedSince: 0) == false)
+
+        #expect(await fixture.engine.resumed.isEmpty)
+        #expect(try await fixture.store.record(id: book.id)?.state == .paused)
+    }
+
+    /// A user resume takes the record back too: paused again later by other means, a
+    /// replacement's owned pause doesn't take it over.
+    @Test func aUserResumeEndsAnOwnedPause() async throws {
+        let fixture = try await ManagerFixture()
+        let manager = fixture.makeManager()
+        let book = try await enqueue(LibraryItemFixtures.book(), fixture, manager)
+        try await fixture.store.setState(.downloading, forRecord: book.id)
+        #expect(try await manager.pause(recordID: book.id, owner: UUID()))
+
+        #expect(try await manager.resume(recordID: book.id))
+        try await fixture.store.setState(.paused, forRecord: book.id)
+
+        #expect(try await manager.pause(recordID: book.id, owner: UUID()) == false)
+        #expect(await fixture.engine.resumed == [book.id])
+    }
+
     /// A credential replacement's quiesce, under way while a policy restart holds the record
     /// paused, refuses the restart's resume. The cleanup, waiting for the item meanwhile, then
     /// takes the restart's pause over, so the record resumes with the new credentials rather than

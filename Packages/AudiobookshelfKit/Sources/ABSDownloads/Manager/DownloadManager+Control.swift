@@ -93,7 +93,10 @@ extension DownloadManager {
     /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or saved.
     @discardableResult
     public func resume(recordID: UUID) async throws(DownloadManagerError) -> Bool {
-        try await control(recordID, from: [.paused, .failed]) { try await $0.resume(recordID: $1) }
+        try await control(recordID, from: [.paused, .failed]) { engine, recordID in
+            self.systemPauses[recordID] = nil
+            return try await engine.resume(recordID: recordID)
+        }
     }
 
     /// Resumes a paused download, as ``resume(recordID:)`` does, unless a quiesce of its server
@@ -114,7 +117,10 @@ extension DownloadManager {
     /// - Throws: ``DownloadManagerError/storeFailure`` when it couldn't be read or saved.
     @discardableResult
     public func retry(recordID: UUID) async throws(DownloadManagerError) -> Bool {
-        try await control(recordID, from: [.paused, .failed]) { try await $0.resume(recordID: $1) }
+        try await control(recordID, from: [.paused, .failed]) { engine, recordID in
+            self.systemPauses[recordID] = nil
+            return try await engine.resume(recordID: recordID)
+        }
     }
 
     /// Pauses, then resumes, every `downloading` record, for a network policy that just got
@@ -234,6 +240,8 @@ extension DownloadManager {
     public func cancel(recordID: UUID) async throws(DownloadManagerError) -> Bool {
         guard let first = try await read({ try await self.store.record(id: recordID) }) else { return false }
         return try await holdingItem(first.key) { () async throws(DownloadManagerError) -> Bool in
+            // The user's: a system pause of it no longer resumes it, even if the deletion fails.
+            systemPauses[recordID] = nil
             // Read again: a hand-off from another cancel may have added a cover part.
             guard let record = try await read({ try await self.store.record(id: recordID) }),
                 try await read({ try await self.store.setState(.paused, forRecord: recordID) })
