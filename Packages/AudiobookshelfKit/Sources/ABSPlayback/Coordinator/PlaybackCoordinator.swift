@@ -230,8 +230,6 @@ public final class PlaybackCoordinator {
     /// the next stop, or a failed start, deactivates it.
     @ObservationIgnored private var keepsAudioSession = false
     @ObservationIgnored private var closeOperations: [PlaybackCloseOperation] = []
-    /// Each prepared item's ``MediaLeases/actionGeneration(of:)`` as its preparation began (#368).
-    @ObservationIgnored private var preparedActionGenerations: [MediaKey: Int] = [:]
     @ObservationIgnored private var startTask: Task<StartedSession, any Error>?
     @ObservationIgnored private var resolvingTasks: [UUID: Task<ResolvedStream, any Error>] = [:]
     @ObservationIgnored private var pendingOpenings: [UUID: PlaybackCloseResult<Void>] = [:]
@@ -1151,11 +1149,12 @@ public final class PlaybackCoordinator {
     /// capturing local progress as a start does), done ahead of time for the item to follow.
     func prepareStart(for key: MediaKey) async -> PreparedNextItem {
         let actions = mediaLeases?.actionGeneration(of: key)
-        defer { preparedActionGenerations[key] = actions }
         let capture = try? await progressStore.captureStartProgress(for: key)
         let progress = await Self.serverProgress(sessions, itemID: key.libraryItemId, episodeID: key.episodeId)
         let decision = await policy.streamingDecision()
-        return PreparedNextItem(key: key, decision: decision, serverProgress: progress, progressCapture: capture)
+        return PreparedNextItem(
+            key: key, decision: decision, serverProgress: progress, progressCapture: capture,
+            actionGeneration: actions)
     }
 
     /// Starts the next item after `key` ended, holding background activity from now until the
@@ -1588,11 +1587,12 @@ public final class PlaybackCoordinator {
         let progressStore = self.progressStore
         let key = MediaKey(
             serverConnectionID: sessions.serverConnectionID, libraryItemId: itemID, episodeId: episodeID)
-        // A progress action on the item since its preparation began (#368) changed its progress: the
-        // prepared server progress could put back what the action discarded or reset, so it's
-        // fetched again, as an unprepared start does.
-        let actions = preparedActionGenerations.removeValue(forKey: key)
-        let prepared = prepared.flatMap { actions == mediaLeases?.actionGeneration(of: key) ? $0 : nil }
+        // A progress action on the item since this snapshot's preparation began (#368) changed its
+        // progress: the prepared server progress could put back what the action discarded or reset,
+        // so it's fetched again, as an unprepared start does.
+        let prepared = prepared.flatMap {
+            $0.actionGeneration == mediaLeases?.actionGeneration(of: key) ? $0 : nil
+        }
         let task = Task { @MainActor in
             try Task.checkCancellation()
             if let prepared {

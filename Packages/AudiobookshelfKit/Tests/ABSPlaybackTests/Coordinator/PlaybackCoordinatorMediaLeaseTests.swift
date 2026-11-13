@@ -116,6 +116,56 @@ struct PlaybackCoordinatorMediaLeaseTests {
     /// in between, the prepared progress is used as is.
     @Test(arguments: [ProgressAction.discard, .reset, nil])
     func anAutoAdvanceRefetchesProgressAnActionChangedSinceItsPreparation(action: ProgressAction?) async {
+        let advancer = await playAWithBPrepared()
+        let reads = h.service.state.withLock { $0.progressReads.count }
+
+        if let action { apply(action, to: "B") }
+        h.engine.finish()
+        await coordinator.waitForAutoAdvance()
+
+        #expect(coordinator.mediaKey == h.key("B"))
+        #expect(h.engine.loads.last?.time == (action == nil ? 2400 : 0))
+        #expect(h.service.state.withLock { $0.progressReads.count } == reads + (action == nil ? 0 : 1))
+        withExtendedLifetime(advancer) {}
+    }
+
+    /// A near-end refresh of B's preparation, after the action, is still running when A ends: the
+    /// advance's item change cancels it, and it completes while the advance waits for A's close.
+    /// The advance starts from the older preparation the advancer kept, which predates the action,
+    /// so it fetches B's progress again even though the refresh's own preparation is newer.
+    @Test(arguments: [ProgressAction.discard, .reset, nil])
+    func aRefreshCompletingDuringTheCloseWaitDoesntValidateAnOlderPreparation(action: ProgressAction?) async {
+        let advancer = await playAWithBPrepared()
+        if let action { apply(action, to: "B") }
+
+        let refresh = Gate()
+        h.policy.gate = refresh
+        let checks = h.policy.checks
+        h.engine.onEvent?(.tick(1500))
+        await yieldUntil { h.policy.checks == checks + 1 }
+        let close = Gate()
+        h.service.state.withLock { $0.closeGates["A-1"] = close }
+
+        h.engine.finish()
+        let advance = Task { await coordinator.waitForAutoAdvance() }
+        await yieldUntil { h.service.closes == ["A-1"] }
+        refresh.open()
+        await yieldUntil { h.policy.returns == checks + 1 }
+        for _ in 0..<20 { await Task.yield() }
+        close.open()
+        await advance.value
+
+        #expect(coordinator.mediaKey == h.key("B"))
+        #expect(h.engine.loads.last?.time == (action == nil ? 2400 : 0))
+        withExtendedLifetime(advancer) {}
+    }
+
+    enum ProgressAction: Sendable {
+        case discard, reset
+    }
+
+    /// Plays A with B queued after it at 2400 on the server, and waits for B's preparation.
+    private func playAWithBPrepared() async -> PlaybackQueueAdvancer {
         let queue = PlaybackQueue(serverConnectionID: h.connectionID, store: AdvanceQueueStore())
         let clock = h.clock
         let advancer = PlaybackQueueAdvancer(queue: queue, episodes: nil, uptime: { clock.now.timeIntervalSince1970 })
@@ -124,24 +174,15 @@ struct PlaybackCoordinatorMediaLeaseTests {
         setFetchedProgress("B", time: 2400)
         await coordinator.play(itemID: "A")
         await advancer.waitForPreparation()
-        let reads = h.service.state.withLock { $0.progressReads.count }
-
-        if let action {
-            let lease = leases.acquire(h.key("B"), for: .progressAction)
-            h.service.state.withLock { $0.progress["B"] = nil }
-            if action == .reset { setFetchedProgress("B", time: 0) }
-            lease.release()
-        }
-        h.engine.finish()
-        await coordinator.waitForAutoAdvance()
-
-        #expect(coordinator.mediaKey == h.key("B"))
-        #expect(h.engine.loads.last?.time == (action == nil ? 2400 : 0))
-        #expect(h.service.state.withLock { $0.progressReads.count } == reads + (action == nil ? 0 : 1))
+        return advancer
     }
 
-    enum ProgressAction: Sendable {
-        case discard, reset
+    /// The server side of a discard or reset of `itemID`, under its action's lease.
+    private func apply(_ action: ProgressAction, to itemID: String) {
+        let lease = leases.acquire(h.key(itemID), for: .progressAction)
+        h.service.state.withLock { $0.progress[itemID] = nil }
+        if action == .reset { setFetchedProgress(itemID, time: 0) }
+        lease.release()
     }
 
     /// Server progress from `GET /api/me/progress` only (not in `/play`'s session), updated now.
@@ -189,5 +230,83 @@ struct PlaybackCoordinatorMediaLeaseTests {
         defer { closing.release() }
         await coordinator.play(itemID: "A")
         #expect(h.service.starts == ["A"])
+    }
+}
+
+// MARK: - MediaLeases
+
+@MainActor
+private final class Flag {
+    var value = false
+}
+
+@MainActor
+struct MediaLeasesTests {
+    let leases = MediaLeases()
+    let a = MediaKey(serverConnectionID: UUID(), libraryItemId: "a")
+
+    @Test func aLeaseHoldsItsKeyForItsHolderUntilReleased() {
+        let lease = leases.acquire(a, for: .closingSession)
+        #expect(leases.isHeld(a, by: .closingSession))
+        #expect(!leases.isHeld(a, by: .progressAction))
+        #expect(!leases.isHeld(MediaKey(serverConnectionID: UUID(), libraryItemId: "a"), by: .closingSession))
+
+        lease.release()
+        lease.release()
+        #expect(!leases.isHeld(a, by: .closingSession))
+    }
+
+    @Test func theActionGenerationChangesAsAProgressActionTakesAndReleasesItsKey() {
+        let closing = leases.acquire(a, for: .closingSession)
+        closing.release()
+        #expect(leases.actionGeneration(of: a) == 0)
+
+        let action = leases.acquire(a, for: .progressAction)
+        let held = leases.actionGeneration(of: a)
+        #expect(held != 0)
+        action.release()
+        action.release()
+        #expect(leases.actionGeneration(of: a) == held + 1)
+        #expect(leases.actionGeneration(of: MediaKey(serverConnectionID: UUID(), libraryItemId: "a")) == 0)
+    }
+
+    @Test func waitingEndsOnceEveryLeaseOfTheHolderIsReleased() async {
+        let first = leases.acquire(a, for: .closingSession)
+        let second = leases.acquire(a, for: .closingSession)
+        let done = Flag()
+        let wait = Task {
+            await leases.waitUntilFree(a, of: .closingSession)
+            done.value = true
+        }
+        for _ in 0..<20 { await Task.yield() }
+        first.release()
+        for _ in 0..<20 { await Task.yield() }
+        #expect(!done.value)
+
+        second.release()
+        await wait.value
+        #expect(done.value)
+    }
+
+    @Test func acquiringAfterAnotherHolderWaitsForIt() async {
+        let closing = leases.acquire(a, for: .closingSession)
+        let action = Task { await leases.acquire(a, for: .progressAction, after: .closingSession) }
+        for _ in 0..<20 { await Task.yield() }
+        #expect(!leases.isHeld(a, by: .progressAction))
+
+        closing.release()
+        let lease = await action.value
+        #expect(leases.isHeld(a, by: .progressAction))
+        lease.release()
+    }
+
+    @Test func cancellingEndsTheWait() async {
+        let lease = leases.acquire(a, for: .progressAction)
+        defer { lease.release() }
+        let wait = Task { await leases.waitUntilFree(a, of: .progressAction) }
+        for _ in 0..<20 { await Task.yield() }
+        wait.cancel()
+        await wait.value
+        #expect(leases.isHeld(a, by: .progressAction))
     }
 }
