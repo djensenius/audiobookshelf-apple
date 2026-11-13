@@ -70,7 +70,7 @@ private func makeModel(
     calendar: Calendar,
     now: Date,
     source: @escaping PlaybackHistoryModel.EventSource = { _ in AsyncStream { $0.finish() } },
-    play: @escaping PlaybackHistoryModel.PlayFromTime = { _, _ in }
+    play: PlaybackHistoryModel.PlayFromTime? = { _, _ in }
 ) -> PlaybackHistoryModel {
     PlaybackHistoryModel(
         mediaKey: mediaKey, source: source, playFromTime: play, calendar: calendar, locale: usEnglish, now: { now }
@@ -434,6 +434,24 @@ private final class MutableClock: Sendable {
         #expect(calls.map(\.0) == [mediaKey])
         #expect(calls.map(\.1) == [125])
         #expect(model.isStartingPlayback == false)
+    }
+
+    @Test func rowsCanOnlyBePlayedWithAPositionAndAPlayer() async throws {
+        let utc = try calendar("UTC")
+        let now = try date(utc, 2026, 11, 10, 12)
+        let events = [
+            event(.seek, at: now, position: 125), event(.stop, at: now.addingTimeInterval(-1), position: nil),
+        ]
+        let model = makeModel(calendar: utc, now: now)
+        model.apply(events)
+        let rows = try #require(model.sections.first?.rows)
+        #expect(rows.map(model.canPlay) == [true, false])
+
+        let withoutPlayer = makeModel(calendar: utc, now: now, play: nil)
+        withoutPlayer.apply(events)
+        #expect(rows.map(withoutPlayer.canPlay) == [false, false])
+        await withoutPlayer.play(from: rows[0])
+        #expect(withoutPlayer.isStartingPlayback == false)
     }
 
     @Test func ignoresTapsWhilePlaybackStarts() async throws {
