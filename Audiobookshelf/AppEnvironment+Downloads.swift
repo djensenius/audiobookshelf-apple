@@ -23,9 +23,11 @@ struct AppDownloads {
     ///     directory.
     ///   - makeSession: ``DownloadEngine/backgroundSession()`` in the app; tests pass a
     ///     non-background session.
+    ///   - progress: the app's one local progress store (``AppEnvironment/localProgress``),
+    ///     which downloads link their progress rows in.
     static func make(
         dataStack: DataStack, accounts: AccountManager, settings: AppSettings, root: URL,
-        makeSession: @escaping DownloadSessionFactory
+        makeSession: @escaping DownloadSessionFactory, progress: LocalProgressStore
     ) -> AppDownloads {
         let locations = DownloadLocations(root: root)
         let store = DownloadStore(modelContainer: dataStack.container)
@@ -40,7 +42,8 @@ struct AppDownloads {
             networkAccess: networkAccess.provider, makeSession: makeSession)
         let manager = DownloadManager(
             store: store, localItems: localItems, engine: engine, locations: locations,
-            capacity: VolumeStorageCapacity(locations: locations))
+            capacity: VolumeStorageCapacity(locations: locations),
+            progressLinking: LocalProgressStoreLinker(store: progress))
         // Takes the stack, so only the App Group store is swept (ADR 0003).
         let janitor = DownloadJanitor(
             manager: manager, connections: ServerConnectionStore(modelContainer: dataStack.container),

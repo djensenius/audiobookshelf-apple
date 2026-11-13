@@ -409,6 +409,7 @@ ArrangementView { primary } secondary: { secondary }
 - *Amended by #84:* an active vertical `.division` splits the player at any size class, so a compact window across the fold never gets the column, whose scrubber and transport would cross the hinge.
 - **Player panes.** Primary is Now Playing: artwork, title, chapter, scrubber and transport. Secondary is Chapters, Up Next, Bookmarks or Description.
 - **Detail panes.** Primary is the cover, metadata and actions. Secondary is the description, chapters, tracks or episodes.
+- *Amended by #85:* item and episode detail split only across a `.division` running down through them, inactive or not, so folding and unfolding doesn't rebuild them (`DetailArrangement`). Each side needs room for the text column (320 pt) inside its own safe-area edge, such as a sidebar's or a vertical toolbar's; otherwise, and on an iPad or a Mac, the detail keeps its scroll view. The primary is the cover, title, actions, progress and metadata (an episode's cover, title, Play and progress); the secondary is the description and the chapter, track and ebook tables (the show notes). As for the player, there is no 27.0 `ViewThatFits` fallback: below iOS 27.1 and on macOS the detail is unchanged.
 
 **Laptop pose**
 

@@ -4,11 +4,15 @@ import ABSData
 import Foundation
 import WidgetKit
 
-/// Reloads widget timelines through `WidgetCenter`.
+/// Reloads widget timelines through `WidgetCenter`. A new Continue Listening snapshot also
+/// reloads the play/pause control, whose state is the snapshot's play flag.
 @MainActor
 final class WidgetCenterReloader: WidgetTimelineReloading {
     func reloadTimelines(ofKind kind: String) {
         WidgetCenter.shared.reloadTimelines(ofKind: kind)
+        if kind == WidgetSnapshot.continueListeningKind {
+            ControlCenter.shared.reloadControls(ofKind: WidgetSnapshot.playPauseControlKind)
+        }
     }
 }
 

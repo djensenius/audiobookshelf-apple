@@ -1,4 +1,5 @@
 import ABSCore
+import ABSTestSupport
 import Foundation
 import Testing
 
@@ -111,11 +112,15 @@ final class FakeShakeDetector: ShakeDetecting {
 }
 
 /// Yields until `condition` holds; the timer's tasks need a few turns of the executors to run. Never sleeps. Bounded
-/// by wall-clock time, not yields: a loaded machine can starve the pool threads that resume ``ManualClock`` sleepers.
+/// by time, not yields: a loaded machine can starve the pool threads that resume ``ManualClock`` sleepers. The time is
+/// a ``WaitBudget`` (its source is `now`), so a stall of the process doesn't spend it (#485).
 @MainActor
-func until(_ condition: () -> Bool, sourceLocation: SourceLocation = #_sourceLocation) async {
-    let deadline = ContinuousClock.now + .seconds(10)
-    while !condition(), ContinuousClock.now < deadline { await Task.yield() }
+func until(
+    now: @escaping WaitBudget.Now = { ContinuousClock.now }, sourceLocation: SourceLocation = #_sourceLocation,
+    _ condition: () -> Bool
+) async {
+    var budget = WaitBudget(.seconds(10), now: now)
+    while !condition(), budget.hasTimeLeft() { await Task.yield() }
     if !condition() { Issue.record("Condition never held", sourceLocation: sourceLocation) }
 }
 
