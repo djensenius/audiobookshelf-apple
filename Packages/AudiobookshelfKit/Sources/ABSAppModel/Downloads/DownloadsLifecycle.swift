@@ -15,6 +15,10 @@ public protocol DownloadsLifecycleEngine: Sendable {
     func quiesce(connectionID: UUID, pausing: @Sendable () async -> Void) async -> Bool
     /// See ``DownloadEngine/quiesceGeneration()``.
     func quiesceGeneration() async -> Int
+    /// See ``DownloadEngine/handleBackgroundEvents()``.
+    func handleBackgroundEvents() async
+    /// See ``DownloadEngine/abandonBackgroundEvents()``.
+    func abandonBackgroundEvents() async
 }
 
 extension DownloadEngine: DownloadsLifecycleEngine {}
@@ -39,11 +43,16 @@ extension DownloadManager: DownloadsLifecycleManager {}
 ///   ``DownloadManager/start()`` asks), which prepares the download folders. It neither
 ///   activates the engine nor starts the controller (whose network policy can restart
 ///   transfers), so a launch without a window (CarPlay, a background wake) starts no transfer.
+/// - ``handleBackgroundEvents()`` attaches the engine for a background wake only once
+///   ``launch()`` has prepared the folders, so a finished transfer never lands in a folder
+///   without its backup exclusion; otherwise the wake is given up.
 /// - ``handle(scenePhase:)`` runs the phases one after another, in call order. Each
 ///   ``SessionScenePhase/active`` launches if needed, prepares the folders again if that failed,
 ///   and only once they are prepared starts the controller (once) and activates the engine.
-///   If that succeeded, it then retries unfinished cleanups and sweeps what downloads left
-///   behind (``DownloadJanitor``), outside the chain, so neither holds up the next phase.
+///   If that succeeded, it then retries unfinished cleanups, starts the controller again if an
+///   earlier activation had (which retries a cellular-policy restart that failed), and sweeps
+///   what downloads left behind (``DownloadJanitor``), outside the chain, so none of them holds
+///   up the next phase.
 ///   ``SessionScenePhase/background`` deactivates the engine, after any activation called
 ///   before it, so the app never stays activated in the background.
 /// - As a ``SessionParticipant``, a sign-out or expiry of the session's connection pauses that
@@ -85,6 +94,9 @@ public final class DownloadsLifecycle: SessionParticipant {
     /// transfers) isn't started. The next active phase tries again.
     private var isPrepared = false
     private var controllerStarted = false
+    /// Whether an activation after the one that started the controller succeeded, so the next
+    /// retries starting it.
+    private var restartsController = false
     /// The last phase handled; the next one waits for it. Its value is whether it activated.
     private var lastPhase: Task<Bool, Never>?
     /// The connection of the running session.
@@ -149,6 +161,10 @@ public final class DownloadsLifecycle: SessionParticipant {
             // doesn't hold up theirs; the sweep waits for them all.
             let retries = self.unfinishedCleanups.map { self.startCleanup(of: $0) }
             for retry in retries { await Self.wait(for: retry) }
+            if self.restartsController {
+                self.restartsController = false
+                await self.startController()
+            }
             await sweep()
             await self.resumeOwedRefetches()
         }
@@ -159,11 +175,13 @@ public final class DownloadsLifecycle: SessionParticipant {
         case .active:
             await launch().value
             guard await prepare() else { return false }
-            if !controllerStarted {
+            let startsController = !controllerStarted
+            if startsController {
                 controllerStarted = true
                 await startController()
             }
             isActive = await engine.activate()
+            if isActive, !startsController { restartsController = true }
             return isActive
         case .background:
             isActive = false
@@ -172,6 +190,19 @@ public final class DownloadsLifecycle: SessionParticipant {
         case .inactive:
             return false
         }
+    }
+
+    /// Call from the `.backgroundTask(.urlSession(...))` handler: once ``launch()`` has prepared
+    /// the folders, ``DownloadEngine/handleBackgroundEvents()``; otherwise the wake is given up
+    /// (``DownloadEngine/abandonBackgroundEvents()``), and its events wait for a later session.
+    public func handleBackgroundEvents() async {
+        await launch().value
+        guard isPrepared else {
+            Log.downloads.error("The download folders aren't prepared; not handling background events")
+            await engine.abandonBackgroundEvents()
+            return
+        }
+        await engine.handleBackgroundEvents()
     }
 
     /// Starts the manager until it has prepared the folders.

@@ -261,6 +261,9 @@ public actor DownloadEngine {
     private var undiscardedSignOuts: Set<UUID> = []
     /// The identifiers of the tasks this engine created, so they aren't taken for survivors.
     private var createdTasks: Set<Int> = []
+    /// The parts this engine marked a transfer start for, so a file a survivor moved isn't
+    /// taken for theirs (see ``performActivation()``).
+    private var markedTransfers: Set<UUID> = []
     /// Surviving transfers whose adoption ``reattach(_:partID:)`` is deciding, and the results
     /// they finished with meanwhile: those are handled only once the transfer is adopted.
     private var adopting: Set<Int> = []
@@ -428,12 +431,15 @@ public actor DownloadEngine {
         await start(partIDs: partIDs, resumingRecordID: nil, resettingBudgetOf: nil)
     }
 
-    /// - Parameter resettingBudgetOf: the parts whose retry budget starts over, if they aren't
-    ///   settling; `nil` for every part in `partIDs`. The replay of a failure that overlapped a
-    ///   start passes the failing part only: its siblings were reset when the start began.
+    /// - Parameters:
+    ///   - resettingBudgetOf: the parts whose retry budget starts over, if they aren't
+    ///     settling; `nil` for every part in `partIDs`. The replay of a failure that overlapped a
+    ///     start passes the failing part only: its siblings were reset when the start began.
+    ///   - onlyWhileActive: launches nothing after a ``deactivate()`` until the next
+    ///     ``activate()``, which starts the parts left queued, as ``restartQueuedParts()`` does.
     private func start(
         partIDs: [UUID], resumingRecordID: UUID?, resettingBudgetOf: Set<UUID>? = nil,
-        activationOwnsSession: Bool = false
+        activationOwnsSession: Bool = false, onlyWhileActive: Bool = false
     ) async {
         // A replay from a failure held during reattachment runs inside performActivation's task.
         // Waiting for ensureSession here would make that task wait for itself.
@@ -471,7 +477,8 @@ public actor DownloadEngine {
                 await persist { _ = try await $0.updatePart(partID: partID, retryCount: 0) }
             }
         }
-        for partID in partIDs where tasks[partID] == nil && !settlingParts.contains(partID) {
+        for partID in partIDs
+        where tasks[partID] == nil && !settlingParts.contains(partID) && (!onlyWhileActive || restartsQueuedParts) {
             await launch(partID, activationOwnsSession: activationOwnsSession)
         }
     }
@@ -563,7 +570,9 @@ public actor DownloadEngine {
     /// (``DownloadManager/restartActiveTransfers()``): a quiesce of the record's server that is
     /// under way or began since `generation` (a ``quiesceGeneration()``) may have passed over
     /// the record while it was paused, so the resume pauses it instead and starts nothing: its
-    /// transfers would run with the old credentials.
+    /// transfers would run with the old credentials. Not one the user asked for, so between a
+    /// ``deactivate()`` and the next ``activate()`` it only queues the record, whose parts that
+    /// activation starts: background starts aren't reliable.
     ///
     /// - Returns: `false` when the record doesn't exist, or such a quiesce kept it paused.
     @discardableResult
@@ -596,7 +605,9 @@ public actor DownloadEngine {
             _ = try await store.setState(.paused, forRecord: recordID, expecting: [.queued])
             return false
         }
-        await start(partIDs: record.parts.filter { $0.state != .completed }.map(\.id), resumingRecordID: recordID)
+        await start(
+            partIDs: record.parts.filter { $0.state != .completed }.map(\.id), resumingRecordID: recordID,
+            onlyWhileActive: generation != nil)
         return true
     }
 
@@ -803,6 +814,13 @@ public actor DownloadEngine {
         await withCheckedContinuation { backgroundWaiters.append($0) }
     }
 
+    /// Gives up a background wake without creating the session, as ``handleBackgroundEvents()``
+    /// does when it can't read the downloads: the wake's events wait for a later session, and
+    /// their events-finished call doesn't release a later wake early.
+    public func abandonBackgroundEvents() {
+        registry.abandonWake()
+    }
+
     /// ``handleBackgroundEvents()`` on the process's engine, waiting up to 10 seconds for the
     /// app to create it. Without one it returns, and the events wait for the next session.
     public static func handleBackgroundEvents() async {
@@ -891,14 +909,17 @@ public actor DownloadEngine {
         // ended the process before the completion was saved, or the app ended before the system
         // kept the transfer. The first completes, but only while the store still has the part
         // running in a download that isn't stopped: a file moved by a survivor whose adoption
-        // was refused isn't used. The second is queued again, so a restart can begin it, but
-        // only while the store still has it running: a part that failed for good while the
-        // tasks were listed keeps its state.
+        // was refused isn't used, nor one a survivor to stop moved (its pause failed, so its
+        // download isn't stopped): only this engine's transfers of such a server count. The
+        // second is queued again, so a restart can begin it, but only while the store still has
+        // it running: a part that failed for good while the tasks were listed keeps its state.
         for part in records.flatMap(\.parts)
         where part.state == .running && tasks[part.id] == nil && launching[part.id] == nil
             && !settling.contains(part.id)
         {
-            if let context = contexts[part.id], let bytes = movedFileSize(part.id, context),
+            if let context = contexts[part.id],
+                !survivorsToStop.contains(context.connectionID) || markedTransfers.contains(part.id),
+                let bytes = movedFileSize(part.id, context),
                 await isStillRunning(part.id)
             {
                 Log.downloads.info("A download's file is already in place; completing it without a request")
@@ -1173,6 +1194,7 @@ public actor DownloadEngine {
         }
         do {
             try locations.markTransferStart(partID: partID)
+            markedTransfers.insert(partID)
         } catch {
             logError("Couldn't mark a download's start; a file it moves is only kept once recorded", error)
         }

@@ -2747,6 +2747,49 @@ import Testing
         #expect(harness.requests.count == (isKept ? 0 : 1))
     }
 
+    /// A file a survivor to stop moved (its download wasn't stopped: the sign-out's pause
+    /// failed) doesn't complete the part: it carries the old credentials' result, so the part
+    /// downloads again.
+    @Test func fileASurvivorToStopMovedDoesNotCompleteThePart() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        try await harness.addRecord(parts: [partID], state: .downloading, partState: .running)
+        let file = harness.fileURL("li_1/1.mp3")
+        try FileManager.default.createDirectory(at: harness.fileURL("li_1"), withIntermediateDirectories: true)
+        try Data("audio-bytes".utf8).write(to: file)
+        try harness.locations.markTransferStart(partID: partID)
+        try FileManager.default.setAttributes(
+            [.modificationDate: Date.now.addingTimeInterval(60)], ofItemAtPath: file.path(percentEncoded: false))
+        try harness.locations.markSurvivorsToStop(connectionID: harness.connectionID)
+        let engine = harness.makeEngine()
+
+        #expect(await engine.activate())
+
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 1)
+    }
+
+    /// An automatic resume (a cellular-policy restart's) after a deactivate only queues the
+    /// record: background starts aren't reliable, so the next activation starts it.
+    @Test func guardedResumeInTheBackgroundWaitsForTheNextActivation() async throws {
+        let harness = try await DownloadHarness { _ in .status(200) }
+        let partID = UUID()
+        let record = try await harness.addRecord(parts: [partID], state: .paused, partState: .queued)
+        let engine = harness.makeEngine()
+        #expect(await engine.activate())
+        await engine.waitForRestart()
+        await engine.deactivate()
+
+        let generation = await engine.quiesceGeneration()
+        #expect(try await engine.resume(recordID: record.id, unlessQuiescedSince: generation))
+        #expect(try await harness.store.record(id: record.id)?.state == .queued)
+        #expect(try await harness.store.part(id: partID)?.state == .queued)
+
+        #expect(await engine.activate())
+        #expect(await engine.nextRecordComplete() != nil)
+        #expect(harness.requests.count == 1)
+    }
+
     @Test func pauseStopsAndResumeContinues() async throws {
         let gate = StubGate()
         let harness = try await DownloadHarness { $0.stubCount == 1 ? .status(200, gate: gate) : .status(200) }

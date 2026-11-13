@@ -81,6 +81,14 @@ private actor FakeEngine: DownloadsLifecycleEngine {
     }
 
     func quiesceGeneration() -> Int { 7 }
+
+    func handleBackgroundEvents() {
+        calls.append("handle background events")
+    }
+
+    func abandonBackgroundEvents() {
+        calls.append("abandon background events")
+    }
 }
 
 /// A manager that records its calls.
@@ -88,6 +96,8 @@ private actor FakeManager: DownloadsLifecycleManager {
     let calls: Calls
     /// How many of the next starts throw.
     private var failingStarts = 0
+    /// Holds the next start until it opens.
+    private var startGate: StubGate?
     /// Holds the next pause until it opens.
     private var pauseGate: StubGate?
     private var isHoldingAPause = false
@@ -104,6 +114,10 @@ private actor FakeManager: DownloadsLifecycleManager {
         failingStarts = count
     }
 
+    func holdStart(_ gate: StubGate) {
+        startGate = gate
+    }
+
     func hold(_ gate: StubGate) {
         pauseGate = gate
     }
@@ -116,8 +130,12 @@ private actor FakeManager: DownloadsLifecycleManager {
         failingPauses = count
     }
 
-    func start() throws {
+    func start() async throws {
         calls.append("start manager")
+        if let gate = startGate {
+            startGate = nil
+            await gate.pass()
+        }
         if failingStarts > 0 {
             failingStarts -= 1
             throw CocoaError(.fileWriteNoPermission)
@@ -246,8 +264,50 @@ struct DownloadsLifecycleTests {
         #expect(
             calls.all == [
                 "start manager", "start controller", "activate", "activated", "sweep", "activate", "activated",
-                "activate", "activated", "sweep",
+                "activate", "activated", "start controller", "sweep",
             ])
+    }
+
+    /// A later successful activation starts the controller again, which retries a cellular-policy
+    /// restart that failed (``DownloadsController/start()``), outside the phase chain.
+    @Test func laterActivationsStartTheControllerAgain() async {
+        let lifecycle = makeLifecycle()
+
+        await lifecycle.handle(scenePhase: .active).value
+        await lifecycle.handle(scenePhase: .background).value
+        await lifecycle.handle(scenePhase: .active).value
+
+        #expect(
+            calls.all == [
+                "start manager", "start controller", "activate", "activated", "sweep", "deactivate", "activate",
+                "activated", "start controller", "sweep",
+            ])
+    }
+
+    /// A background wake attaches the engine only once the folders are prepared.
+    @Test func backgroundEventsWaitForFolderPreparation() async {
+        let gate = StubGate()
+        await manager.holdStart(gate)
+        let lifecycle = makeLifecycle()
+
+        let wake = Task { await lifecycle.handleBackgroundEvents() }
+        await gate.arrived()
+        for _ in 0..<10 { await Task.yield() }
+        #expect(calls.all == ["start manager"])
+        gate.open()
+        await wake.value
+
+        #expect(calls.all == ["start manager", "handle background events"])
+    }
+
+    /// A wake whose folders couldn't be prepared is given up: its events wait for a later session.
+    @Test func backgroundEventsWithoutPreparedFoldersAreGivenUp() async {
+        await manager.failStarts(1)
+        let lifecycle = makeLifecycle()
+
+        await lifecycle.handleBackgroundEvents()
+
+        #expect(calls.all == ["start manager", "abandon background events"])
     }
 
     @Test func backgroundDeactivates() async {
@@ -297,7 +357,7 @@ struct DownloadsLifecycleTests {
         #expect(
             calls.all == [
                 "start manager", "start manager", "start manager", "start controller", "activate", "activated",
-                "sweep", "activate", "activated", "sweep",
+                "sweep", "activate", "activated", "start controller", "sweep",
             ])
     }
 
@@ -467,7 +527,7 @@ struct DownloadsLifecycleTests {
         let cleanup = pauses(recordsA) + ["quiesce \(connectionA)"]
         #expect(
             calls.all == ["start manager"] + cleanup + ["start controller", "activate", "activated"] + cleanup
-                + ["sweep", "activate", "activated", "sweep"])
+                + ["sweep", "activate", "activated", "start controller", "sweep"])
     }
 
     /// A pause that wasn't saved leaves a record the next activation would restart, so the
@@ -485,7 +545,7 @@ struct DownloadsLifecycleTests {
         let cleanup = pauses(recordsA) + ["quiesce \(connectionA)"]
         #expect(
             calls.all == ["start manager"] + cleanup + ["start controller", "activate", "activated"] + cleanup
-                + ["sweep", "activate", "activated", "sweep"])
+                + ["sweep", "activate", "activated", "start controller", "sweep"])
     }
 
     /// A cleanup's pauses run at once: one that hangs doesn't keep the others' transfers running
