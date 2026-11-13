@@ -29,6 +29,9 @@ public actor ImagePipeline {
     private var sessionServers: Set<UUID> = []
     private var fetches: [FetchKey: Flight<FetchedFile>] = [:]
     private var decodes: [MemoryKey: Flight<DecodedBitmap>] = [:]
+    /// ``ensureCoverFile(for:)`` calls in progress per server, which a sweep removes like
+    /// tracked loads: one may be about to store its server's first cover.
+    private var ensuring: [UUID: Int] = [:]
     /// Network requests started, for tests.
     private(set) var networkFetchCount = 0
     /// Decodes that took the large-decode slot, for tests.
@@ -144,6 +147,11 @@ public actor ImagePipeline {
     /// Offline, or when the fetch or the write fails, it throws and stores nothing.
     public func ensureCoverFile(for key: ImageKey) async throws -> URL {
         guard !removedServers.contains(key.serverID) else { throw ImagePipelineError.noRequest }
+        ensuring[key.serverID, default: 0] += 1
+        defer {
+            ensuring[key.serverID, default: 1] -= 1
+            if ensuring[key.serverID] == 0 { ensuring[key.serverID] = nil }
+        }
         if let stored = await fileStore.lookup(key) { return stored.url }
         if let cover = await downloadedCovers?.downloadedCover(for: key), Self.isFresh(cover, for: key) {
             let generation = await fileStore.generation(for: key.serverID)
@@ -202,12 +210,14 @@ public actor ImagePipeline {
 
     /// A sweep's first step: forgets the memory entries and loads of every server not in `saved`
     /// and not given a builder in this process, and returns those servers and the ones with
-    /// cached files not in `saved`, for ``removeServerUnlessInSession(_:)``. A forgotten load may
-    /// be past its cancellation check and about to store its server's first cover, so its server
-    /// is removed even without a folder: the removal refuses that write.
+    /// cached files not in `saved`, for ``removeServerUnlessInSession(_:)``. A forgotten load (or
+    /// an ``ensureCoverFile(for:)`` in progress) may be past its checks and about to store its
+    /// server's first cover, so its server is removed even without a folder: the removal refuses
+    /// that write.
     public func serversToSweep(keepingOnly saved: Set<UUID>) async -> Set<UUID> {
         let kept = saved.union(sessionServers)
         var unkept = Set(fetches.keys.map(\.key.serverID)).union(decodes.keys.map(\.key.serverID))
+            .union(ensuring.keys)
         memory.removeAll { entry in
             guard !kept.contains(entry.key.serverID) else { return false }
             unkept.insert(entry.key.serverID)

@@ -92,6 +92,31 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: folder.path))
     }
 
+    @Test func aSweepRemovesAServerWhoseEnsureIsStoringItsFirstCover() async throws {
+        let reached = Gate()
+        let proceed = Gate()
+        let images = harness.directory.url.appending(path: "Images")
+        let store = CoverFileStore(
+            directory: images, limit: 1 << 30, now: Date.init, listingHook: nil,
+            insertHook: {
+                reached.open()
+                await Task { await proceed.wait() }.value
+            })
+        let covers = FakeDownloadedCovers(covers: try downloaded(updatedAt: 2))
+        let pipeline = ImagePipeline(limits: .iPhone, fileStore: store, downloadedCovers: covers)
+        let ensure = Task { [key = key()] in try await pipeline.ensureCoverFile(for: key) }
+
+        // The downloaded cover is downsampled and its insert is waiting: no folder, memory entry or
+        // tracked load names the server yet.
+        await reached.wait()
+        await pipeline.removeServers(keepingOnly: [])
+        proceed.open()
+
+        await #expect(throws: CancellationError.self) { try await ensure.value }
+        #expect(!FileManager.default.fileExists(atPath: images.appending(path: harness.serverID.uuidString).path))
+        #expect(await store.size == 0)
+    }
+
     @Test func aStoredFileIsReturnedWithoutFetchingAgain() async throws {
         let host = PipelineHarness.pngRoute(width: 300, height: 480)
         let (pipeline, store) = await harness.make(host: host)
