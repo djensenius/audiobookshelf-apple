@@ -13,9 +13,14 @@ enum HomeScreenState: Equatable {
     case librariesFailed
     /// The first load failed, or a reload failed with nothing to show; Retry reloads the shelves.
     case failed
-    /// The libraries loaded but none is selected, or the library has no shelves.
+    /// The libraries loaded but none is selected, or the library has no shelves, and nothing is
+    /// downloaded.
     case empty
+    /// The network or the server is unavailable and nothing is downloaded: why, with Retry while
+    /// the server is unreachable (legacy `pages/bookshelf/index.vue`).
+    case disconnected(ConnectionBannerStatus)
     /// The sections; `refreshFailed` when the last reload failed and older shelves are shown.
+    /// Disconnected, only the downloaded shelves (ADR 0004).
     case shelves(refreshFailed: Bool)
 
     /// What ``resolve(_:)`` decides from.
@@ -36,18 +41,33 @@ enum HomeScreenState: Equatable {
         var hasError = false
         /// The model has no sections.
         var isEmpty = true
+        /// Why the server can't be used (the connection banner's status), or `nil` online.
+        var connection: ConnectionBannerStatus?
+        /// Home has downloaded shelves to show.
+        var hasDownloads = false
+        /// The downloaded items have been read, so ``hasDownloads`` can be trusted.
+        var downloadsLoaded = true
     }
 
     static func resolve(_ inputs: Inputs) -> HomeScreenState {
         guard inputs.isSignedIn else { return .signedOut }
+        // Without the server, Home shows only what's downloaded, or why there's nothing.
+        if let connection = inputs.connection { return downloadsOr(.disconnected(connection), inputs) }
         guard inputs.libraryID != nil else {
             // The shell selects a library once the libraries have loaded.
             if inputs.librariesFailed, !inputs.librariesLoading { return .librariesFailed }
-            return inputs.librariesLoaded ? .empty : .loading
+            return inputs.librariesLoaded ? downloadsOr(.empty, inputs) : .loading
         }
         guard inputs.hasLoaded else { return inputs.hasError && !inputs.isLoading ? .failed : .loading }
-        if inputs.isEmpty { return inputs.hasError ? .failed : .empty }
+        if inputs.isEmpty { return inputs.hasError ? .failed : downloadsOr(.empty, inputs) }
         return .shelves(refreshFailed: inputs.hasError)
+    }
+
+    /// The downloaded shelves when there are some, otherwise `state`; loading until the downloads
+    /// have been read, so `state` doesn't flash first.
+    private static func downloadsOr(_ state: HomeScreenState, _ inputs: Inputs) -> HomeScreenState {
+        guard inputs.downloadsLoaded else { return .loading }
+        return inputs.hasDownloads ? .shelves(refreshFailed: false) : state
     }
 
     /// The state for `store` and `model` while the router shows `libraryID`.
@@ -55,10 +75,16 @@ enum HomeScreenState: Equatable {
     /// Until `model` adopts a new `libraryID` (in the view's task), its shelves, loaded flag and
     /// error belong to the previous library, so they count as not loaded yet.
     ///
-    /// - Parameter sections: `model.sections`, read once by the caller.
+    /// - Parameters:
+    ///   - sections: `model.sections`, read once by the caller.
+    ///   - connection: Why the server can't be used, or `nil` online.
+    ///   - downloads: The downloaded shelves Home would show
+    ///     (``HomePresentation/downloadedSections(of:libraryKind:isConnected:)``).
+    ///   - downloadsLoaded: The downloaded items have been read; `true` without a download stack.
     @MainActor
     static func resolve(
-        store: LibraryStore?, model: HomeModel?, libraryID: String?, sections: [HomeSection]
+        store: LibraryStore?, model: HomeModel?, libraryID: String?, sections: [HomeSection],
+        connection: ConnectionBannerStatus? = nil, downloads: [HomeSection] = [], downloadsLoaded: Bool = true
     ) -> HomeScreenState {
         guard let store, let model else { return .signedOut }
         let isCurrent = model.libraryID == libraryID
@@ -67,7 +93,8 @@ enum HomeScreenState: Equatable {
                 isSignedIn: store.connectionKey != nil, librariesLoaded: store.hasLoaded,
                 librariesLoading: store.isLoading, librariesFailed: store.error != nil, libraryID: libraryID,
                 hasLoaded: isCurrent && model.hasLoaded, isLoading: isCurrent && model.isLoading,
-                hasError: isCurrent && model.error != nil, isEmpty: !isCurrent || sections.isEmpty))
+                hasError: isCurrent && model.error != nil, isEmpty: !isCurrent || sections.isEmpty,
+                connection: connection, hasDownloads: !downloads.isEmpty, downloadsLoaded: downloadsLoaded))
     }
 }
 
@@ -155,5 +182,28 @@ enum HomePresentation {
         case .series: 180
         case .authors: 120
         }
+    }
+
+    /// The downloaded shelves Home shows (legacy `pages/bookshelf/index.vue`): online, only the
+    /// shelf of the current library's kind; disconnected, Local Books and Local Podcasts.
+    @MainActor
+    static func downloadedSections(
+        of shelf: DownloadedShelfModel?, libraryKind: LibraryKind?, isConnected: Bool
+    ) -> [HomeSection] {
+        shelf?.sections(for: isConnected ? libraryKind : nil) ?? []
+    }
+
+    /// The sections Home shows: online, the server's and then the downloaded ones; disconnected,
+    /// only the downloaded ones, as legacy and ADR 0004 do.
+    static func sections(server: [HomeSection], downloaded: [HomeSection], isConnected: Bool) -> [HomeSection] {
+        isConnected ? server + downloaded : downloaded
+    }
+
+    /// The disconnected state's Retry: only while the server is unreachable. Without a network
+    /// there's nothing to retry, and while checking a check is already running.
+    static func connectionRetry(
+        for status: ConnectionBannerStatus, retry: @escaping () -> Void
+    ) -> (() -> Void)? {
+        status.offersRetry ? retry : nil
     }
 }

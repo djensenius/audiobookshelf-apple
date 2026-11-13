@@ -4,7 +4,8 @@ import ABSUI
 import SwiftUI
 
 /// The Home tab (legacy `pages/bookshelf/index.vue`): the personalized shelves of the router's
-/// current library.
+/// current library, then the downloaded shelf of its kind; without the server, only the
+/// downloaded shelves, or why there's nothing to show.
 ///
 /// Signed out (no `libraryStore` in the environment) it shows the signed-out state. Signed in it
 /// hosts one ``HomeModel`` per store and account connection (ADR 0004): the scene's subtree is
@@ -12,11 +13,12 @@ import SwiftUI
 /// signing out and back in to the same account never shows the previous model's shelves.
 struct HomeView: View {
     @Environment(\.libraryStore) private var store
+    @Environment(\.downloads) private var downloads
 
     var body: some View {
         Group {
             if let store {
-                HomeScreen(store: store)
+                HomeScreen(store: store, downloadUpdates: downloads?.localItemUpdates)
                     .id(HomeModelIdentity(store: ObjectIdentifier(store), connection: store.connectionKey))
             } else {
                 HomeContent(
@@ -42,13 +44,18 @@ private struct HomeLoadTrigger: Hashable {
     let libraryID: String?
     let connection: LibraryConnectionKey?
     let onlineRevision: Int
+    /// The server answers, so a load that failed while it didn't runs again.
+    let isConnected: Bool
 }
 
-/// Home while signed in: owns the ``HomeModel``, loads the router's library, reloads shelves
-/// that have gone stale, and performs the card actions through the environment.
+/// Home while signed in: owns the ``HomeModel`` and the ``DownloadedShelfModel``, loads the
+/// router's library, reloads shelves that have gone stale, and performs the card actions through
+/// the environment.
 private struct HomeScreen: View {
     let store: LibraryStore
     @State private var model: HomeModel
+    /// `nil` without a download stack.
+    @State private var downloaded: DownloadedShelfModel?
     @State private var schedule = HomeRefreshSchedule()
     /// The key of the message for the last failed action, kept while the alert is dismissed.
     @State private var failureKey: String?
@@ -57,31 +64,49 @@ private struct HomeScreen: View {
     @Environment(\.itemActions) private var itemActions
     @Environment(\.playItem) private var playItem
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.connectionBanner) private var connectionBanner
 
-    init(store: LibraryStore) {
+    /// - Parameter downloadUpdates: The account's downloaded items as they change, or `nil`
+    ///   without a download stack.
+    init(store: LibraryStore, downloadUpdates: DownloadedShelfModel.Updates?) {
         self.store = store
         _model = State(initialValue: HomeModel(store: store))
+        _downloaded = State(initialValue: downloadUpdates.map { DownloadedShelfModel(updates: $0) })
     }
 
     var body: some View {
         let libraryID = router?.libraryID
         // `sections` is rebuilt on every read: read it once.
-        let sections = model.sections
-        let state = HomeScreenState.resolve(store: store, model: model, libraryID: libraryID, sections: sections)
+        let serverSections = model.sections
+        let connection = connectionStatus
+        let downloads = HomePresentation.downloadedSections(
+            of: downloaded, libraryKind: router?.libraryKind, isConnected: connection == nil)
+        let state = HomeScreenState.resolve(
+            store: store, model: model, libraryID: libraryID, sections: serverSections, connection: connection,
+            downloads: downloads, downloadsLoaded: downloaded?.isLoaded ?? true)
         HomeContent(
-            state: state, sections: sections, context: ItemCardActions.actionContext(canPlay: playItem != nil),
-            open: { navigate(to: $0) }, perform: { perform($0, on: $1) }, retry: { Task { await refresh() } }
+            state: state,
+            sections: HomePresentation.sections(
+                server: serverSections, downloaded: downloads, isConnected: connection == nil),
+            context: ItemCardActions.actionContext(canPlay: playItem != nil), open: { navigate(to: $0) },
+            perform: { perform($0, on: $1) }, retry: { Task { await refresh() } },
+            retryConnection: { connectionBanner?.model.retry() }
         )
         .refreshable { await refresh() }
-        // With the client and the online revision too: a reconnect, whether it attaches a client
-        // after an offline start without one or keeps the offline session's, loads again even
-        // when the library is unchanged.
+        // With the client, the online revision and the connection too: a reconnect, whether it
+        // attaches a client after an offline start without one or keeps the offline session's,
+        // or the server answering again, loads again even when the library is unchanged.
         .task(
             id: HomeLoadTrigger(
-                libraryID: libraryID, connection: store.connectedKey, onlineRevision: store.onlineRevision)
+                libraryID: libraryID, connection: store.connectedKey, onlineRevision: store.onlineRevision,
+                isConnected: connection == nil)
         ) {
             model.libraryID = libraryID
             await update()
+        }
+        // The downloads follow the store live, online and offline.
+        .task(id: store.connectionKey?.connectionID) {
+            await downloaded?.observe(connectionID: store.connectionKey?.connectionID)
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { Task { await update() } }
@@ -114,13 +139,21 @@ private struct HomeScreen: View {
     }
 
     /// Pull to refresh, the Refresh command and Retry: the libraries while none is selected,
-    /// otherwise the shelves.
+    /// otherwise the shelves. Without the server, it checks the server again instead.
     private func refresh() async {
-        if model.libraryID == nil {
+        if let connectionBanner, connectionStatus != nil {
+            connectionBanner.model.retry()
+        } else if model.libraryID == nil {
             await store.refresh()
         } else {
             await update(force: true)
         }
+    }
+
+    /// Why the server can't be used, as the shell's connection banner shows it; `nil` online, or
+    /// without a banner (previews).
+    private var connectionStatus: ConnectionBannerStatus? {
+        connectionBanner.flatMap { ConnectionBannerPresentation.status(for: $0.model.state) }
     }
 
     /// Pushes `route` on the Home tab's stack, the stack this screen is the root of, unless it is
@@ -150,6 +183,8 @@ struct HomeContent: View {
     let open: (Route) -> Void
     let perform: (ItemActionKind, ItemSummary) -> Void
     let retry: () -> Void
+    /// Checks the server again (the connection banner's Retry).
+    var retryConnection: () -> Void = {}
 
     var body: some View {
         switch state {
@@ -167,6 +202,14 @@ struct HomeContent: View {
         case .empty:
             HomeMessageView(
                 title: L10n.string("MessageBookshelfEmpty"), systemImage: "books.vertical", refreshable: true)
+        case .disconnected(let status):
+            // Legacy's empty bookshelf with the connection's message.
+            HomeScrollableState {
+                ErrorStateView(
+                    title: L10n.string("MessageBookshelfEmpty"), message: status.message,
+                    systemImage: status.systemImage,
+                    retry: HomePresentation.connectionRetry(for: status, retry: retryConnection))
+            }
         case .shelves(let refreshFailed):
             HomeShelvesView(
                 sections: sections, refreshFailed: refreshFailed, context: context, open: open, perform: perform,
@@ -250,6 +293,17 @@ private struct HomeMessageView: View {
         HomeContent(
             state: .failed, sections: [], context: ItemCardActions.actionContext(canPlay: true), open: { _ in },
             perform: { _, _ in }, retry: {}
+        )
+        .navigationTitle(Text(verbatim: L10n.string("ButtonHome")))
+    }
+    .absBackground()
+}
+
+#Preview("Server unreachable, nothing downloaded") {
+    NavigationStack {
+        HomeContent(
+            state: .disconnected(.serverUnreachable(retryAt: .now.addingTimeInterval(30))), sections: [],
+            context: ItemCardActions.actionContext(canPlay: true), open: { _ in }, perform: { _, _ in }, retry: {}
         )
         .navigationTitle(Text(verbatim: L10n.string("ButtonHome")))
     }
