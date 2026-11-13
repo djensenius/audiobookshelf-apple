@@ -246,7 +246,8 @@ public final class PlaybackCoordinator {
     @ObservationIgnored private var recoveryAttempt: Int?
     @ObservationIgnored private var recoveryAttemptError: PlaybackCoordinatorError?
     /// The item the user agreed to stream on a metered network, so its recovery rebuilds don't ask
-    /// again; another item, or a play without that consent, clears it.
+    /// again; starting another item (also by an auto-advance), or a play without that consent,
+    /// clears it.
     @ObservationIgnored private var meteredConsent: MediaKey?
     /// The access token in the loaded stream's URLs: the one a 401 rejected.
     @ObservationIgnored private var streamAccessToken: String?
@@ -415,6 +416,9 @@ public final class PlaybackCoordinator {
     /// Everything after a play passed the streaming policy. A `prepared` start (an auto-advance)
     /// reuses its server progress instead of fetching it.
     private func start(key: MediaKey, startTime: Double?, prepared: PreparedNextItem?, playing: Bool = true) async {
+        // Consent is for one item: an auto-advance (or anything else) starting another drops it,
+        // so coming back to the item later asks again; its own rebuilds keep it.
+        if meteredConsent != key { meteredConsent = nil }
         let itemID = key.libraryItemId
         let episodeID = key.episodeId
         generation += 1
