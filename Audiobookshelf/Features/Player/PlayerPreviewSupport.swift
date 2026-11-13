@@ -24,6 +24,7 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
     var isBuffering = false
     var isPlaybackRequested = false
     var isWaitingForNetwork = false
+    var isRecovering = false
     var timeline: PlaybackTimeline?
 
     var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }

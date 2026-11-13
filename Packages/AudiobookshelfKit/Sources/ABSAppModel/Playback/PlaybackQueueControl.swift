@@ -72,11 +72,13 @@ public final class PlaybackQueueControl: PlaybackQueueReading, PlayAllQueueing {
 
     /// Replaces the queue with `items`, in order, once the start of `started` has succeeded (play-all, #354): it is
     /// the loaded media, without an error. A start still pending (`.starting`, as when another screen began it and
-    /// the player's `play` returned at once) is waited for, checking every ``startPollInterval`` for up to
-    /// ``startTimeout``. Only the start the play-all's own play joined or began counts, held from here on: the one
-    /// under way at ``beginPlayAll()`` (the same ``PlayerPlaybackControlling/startGeneration``), or the one its play
-    /// began (``PlayerPlaybackControlling/startPlayRequest`` is the play request after the request's). Not one
-    /// another play began, even of the same media, nor one begun after a stop.
+    /// the player's `play` returned at once), or recovering (``PlayerPlaybackControlling/isRecovering``, as before a
+    /// direct play's HLS fallback), is waited for, checking every ``startPollInterval`` for up to ``startTimeout``.
+    /// Only the play the play-all's own play joined or began counts, held from here on: the start under way at
+    /// ``beginPlayAll()`` (the same ``PlayerPlaybackControlling/startGeneration``), or the one its play began
+    /// (``PlayerPlaybackControlling/startPlayRequest`` is the play request after the request's). Recovery's rebuilds
+    /// keep that play's request, so they count; a start another play began, even of the same media, or one begun
+    /// after a stop, doesn't.
     /// The current media isn't queued (``isCurrent(_:)``).
     ///
     /// - Returns: `false`, leaving the queue as it was, when a newer ``beginPlayAll()`` has begun, `started` is
@@ -90,18 +92,23 @@ public final class PlaybackQueueControl: PlaybackQueueReading, PlayAllQueueing {
             current.startGeneration == request.startGeneration
                 || current.startPlayRequest == request.playRequest + 1
         else { return false }
+        // The play: by its request, which recovery's rebuilds keep; by its start when no play began it.
+        let play = current.startPlayRequest
         let generation = current.startGeneration
+        func isSamePlay(_ playback: any PlayerPlaybackControlling) -> Bool {
+            if let play { playback.startPlayRequest == play } else { playback.startGeneration == generation }
+        }
         let deadline = ContinuousClock.now + startTimeout
-        while request.id == playAllRequests, let playback = scope?.playback, playback.startGeneration == generation,
-            playback.mediaKey == started, playback.error == nil, playback.phase == .starting
+        while request.id == playAllRequests, let playback = scope?.playback, isSamePlay(playback),
+            playback.mediaKey == started, playback.error == nil,
+            playback.phase == .starting || (playback.phase == .unloaded && playback.isRecovering)
         {
             guard ContinuousClock.now < deadline, (try? await Task.sleep(for: startPollInterval)) != nil else {
                 return false
             }
         }
         guard !Task.isCancelled, request.id == playAllRequests, let playback = scope?.playback,
-            playback.startGeneration == generation, playback.mediaKey == started, playback.error == nil,
-            playback.phase == .loaded
+            isSamePlay(playback), playback.mediaKey == started, playback.error == nil, playback.phase == .loaded
         else { return false }
         return edit { $0.replace(with: items.filter { !isCurrent($0) }) }
     }

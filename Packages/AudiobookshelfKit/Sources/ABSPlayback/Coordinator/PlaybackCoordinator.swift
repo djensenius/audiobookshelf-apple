@@ -80,8 +80,9 @@ public final class PlaybackCoordinator {
     public var startGeneration: Int { generation }
     /// Counts plays, and what cancels a play awaiting its streaming check; each play takes the next count, at once.
     public var playRequestCount: Int { policyCheck }
-    /// The ``playRequestCount`` of the play that began the current start; `nil` when no play did (an auto-advance or
-    /// a rebuild began it), or after a stop or a restore.
+    /// The ``playRequestCount`` of the play that began the current start; `nil` when no play did (an auto-advance
+    /// began it), or after a stop or a restore. Recovery's rebuilds (the HLS fallback among them) and a gone
+    /// session's replacement keep it: they carry on the same play.
     @ObservationIgnored public private(set) var startPlayRequest: Int?
     /// The play that ``error``'s `.streamingNeedsConfirmation` blocked, which
     /// ``confirmMeteredStreaming()`` replays; `forceTranscode` for a blocked recovery rebuild's HLS
@@ -935,6 +936,10 @@ public final class PlaybackCoordinator {
     /// "Waiting for network"), spending none of its budget; it gives up after five minutes.
     public var isWaitingForNetwork: Bool { recovery.isWaitingForNetwork(at: generation) }
 
+    /// Whether recovery is running for the current item: between a failure (such as a direct play's decode error,
+    /// before its HLS fallback) and the rebuild that recovers it, or its terminal failure.
+    public var isRecovering: Bool { recovery.isRecovering(at: generation) }
+
     /// Sets and saves the playback rate. Rates the settings reject are ignored.
     public func setRate(_ rate: Double) {
         settings.playbackRate = rate
@@ -957,7 +962,7 @@ public final class PlaybackCoordinator {
         if heldPlay?.generation == generation { heldPlay?.generation = generation + 1 }
         await start(
             key: key, startTime: currentTime, prepared: nil, playing: isPlaybackRequested,
-            forceTranscode: transcodeForced)
+            forceTranscode: transcodeForced, playRequest: startPlayRequest)
     }
 
     /// Ordinary user stop remains reusable and clears LastPlayed. Account end permanently
@@ -1451,7 +1456,7 @@ public final class PlaybackCoordinator {
         }
         await start(
             key: key, startTime: target, prepared: nil, playing: playing,
-            forceTranscode: forceTranscode || transcodeForced)
+            forceTranscode: forceTranscode || transcodeForced, playRequest: startPlayRequest)
         guard generation == attempt else { return .superseded }
         if phase == .loaded { return .recovered(generation: attempt) }
         guard let error = recoveryAttemptError else { return .superseded }

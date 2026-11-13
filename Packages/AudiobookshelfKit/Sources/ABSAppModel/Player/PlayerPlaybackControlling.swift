@@ -31,6 +31,8 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     var isPlaybackRequested: Bool { get }
     /// Whether recovery is waiting for the network before its next attempt.
     var isWaitingForNetwork: Bool { get }
+    /// ``PlaybackCoordinator/isRecovering``.
+    var isRecovering: Bool { get }
     /// The loaded timeline; `nil` unless media is loaded.
     var timeline: PlaybackTimeline? { get }
     var chapterIndex: Int? { get }

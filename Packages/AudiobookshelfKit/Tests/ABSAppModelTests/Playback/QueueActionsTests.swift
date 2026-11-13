@@ -361,6 +361,47 @@ struct QueueActionsTests {
         #expect(queue.items.map(\.id) == ["x|"])
     }
 
+    /// The play-all's play hit a direct-play decode error at load, so its `play` returned while recovery runs its HLS
+    /// fallback: the queue waits for the fallback's outcome, and a user stop during it ends the wait.
+    enum Fallback: CaseIterable {
+        case succeeds, fails, isStopped, isStoppedAndPlayedAgain
+    }
+
+    @Test(arguments: Fallback.allCases)
+    func aPlayRecoveringThroughItsFallback(_ fallback: Fallback) async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        stop(scope.control)
+        let request = queue.beginPlayAll()
+        play(started, on: scope.control)
+        scope.control.phase = .unloaded
+        scope.control.isRecovering = true
+
+        let replacing = Task { await queue.replace(with: [item("b")], afterStarting: started, request: request) }
+        try await letItWait()
+        #expect(queue.items.map(\.id) == ["x|"])
+        switch fallback {
+        case .succeeds, .fails:
+            // The rebuild: a new start of the same play.
+            scope.control.startGeneration += 1
+            scope.control.phase = .starting
+            scope.control.isRecovering = false
+            try await letItWait()
+            if fallback == .succeeds { scope.control.phase = .loaded } else { scope.control.error = .recoveryExhausted }
+        case .isStopped:
+            scope.control.isRecovering = false
+            stop(scope.control)
+        case .isStoppedAndPlayedAgain:
+            scope.control.isRecovering = false
+            stop(scope.control)
+            play(started, on: scope.control)
+            try await letItWait()
+            scope.control.phase = .loaded
+        }
+
+        #expect(await replacing.value == (fallback == .succeeds))
+        #expect(queue.items.map(\.id) == (fallback == .succeeds ? ["b|"] : ["x|"]))
+    }
+
     @Test func aPendingStartThatNeverLoadsTimesOut() async throws {
         let (scope, queue, started) = try startedScope("a", items: [item("x")])
         scope.control.phase = .starting

@@ -34,6 +34,7 @@ final class ScopePlayback: PlayerPlaybackControlling {
     var isBuffering: Bool { coordinator.isBuffering }
     var isPlaybackRequested: Bool { coordinator.isPlaybackRequested }
     var isWaitingForNetwork: Bool { coordinator.isWaitingForNetwork }
+    var isRecovering: Bool { coordinator.isRecovering }
     var timeline: PlaybackTimeline? { coordinator.timeline }
     var chapterIndex: Int? { coordinator.chapterIndex }
     var chapter: Chapter? { coordinator.chapter }

@@ -38,6 +38,7 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     var isBuffering = false
     var isPlaybackRequested = false
     var isWaitingForNetwork = false
+    var isRecovering = false
     var timeline: PlaybackTimeline?
     /// Whether seeks land; one that doesn't returns `nil` and leaves playback where it was.
     var seeksLand = true

@@ -363,6 +363,37 @@ struct PlaybackStallFallbackTests {
         #expect(coordinator.phase == .unloaded)
     }
 
+    /// A play whose direct play fails to load returns recovering, and its HLS fallback carries on the same play: it
+    /// keeps the play's request. A stop during the fallback ends it.
+    @Test(arguments: [false, true])
+    func theFallbackOfAFailedLoadKeepsItsPlay(stopped: Bool) async {
+        h.recoverySleep.isManual = true
+        engine.loadError = .itemFailed(trackIndex: 0, Self.failure(.decode))
+        await coordinator.play(itemID: "A", startTime: 600)
+        let request = coordinator.playRequestCount
+        let generation = coordinator.startGeneration
+
+        #expect(coordinator.phase == .unloaded)
+        #expect(coordinator.isRecovering)
+        #expect(coordinator.error == nil)
+        #expect(coordinator.startPlayRequest == request)
+        engine.loadError = nil
+        await settle { h.recoverySleep.waitingCount == 1 }
+        if stopped {
+            coordinator.stop()
+            #expect(!coordinator.isRecovering)
+            #expect(coordinator.startPlayRequest == nil)
+            return
+        }
+        h.recoverySleep.fireOldest()
+        await settle { coordinator.isPlaying }
+
+        #expect(service.forcedTranscodes == [false, true])
+        #expect(coordinator.startGeneration != generation)
+        #expect(coordinator.startPlayRequest == request)
+        #expect(!coordinator.isRecovering)
+    }
+
     @Test func aServerIgnoringTheForcedTranscodeGetsNoSecondFallback() async {
         h.recoverySleep.elapsesImmediately = true
         service.state.withLock { $0.ignoresForceTranscode = true }
