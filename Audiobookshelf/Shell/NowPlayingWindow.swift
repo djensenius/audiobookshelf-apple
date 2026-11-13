@@ -19,6 +19,9 @@
 
         var body: some View {
             NowPlayingView(model: player)
+                // A failed Playback menu command shows here while this window is focused; inside
+                // the session's subtree, so a switch drops the last session's alert.
+                .playbackCommandAlert()
                 .id(Self.sessionKey(bookmarks))
                 .onChange(of: player.hasSession, initial: true) { _, hasSession in
                     if !hasSession { dismissWindow(id: Self.id) }
