@@ -233,6 +233,76 @@ public final class AccountManager {
         try await finishSignIn(result, to: server, method: .openid, attempt: attempt)
     }
 
+    /// Checks a username and password with `server` without saving or changing anything: the
+    /// state, the active connection and the Keychain stay as they were, and no running call is
+    /// superseded, so a wrong password leaves the active session untouched. Pass the result to
+    /// ``activate(_:)``, or to ``discard(_:)`` if it won't be activated.
+    ///
+    /// It throws the sign-in's error, or `CancellationError` if its task was cancelled, which also
+    /// ends a session the server opened.
+    public func authenticate(local server: ValidatedServer, username: String, password: String) async throws
+        -> AuthenticatedSignIn
+    {
+        try await authenticated(server, method: .local) {
+            try await validator.login(to: server, username: username, password: password)
+        }
+    }
+
+    /// Checks a sign-in through `server`'s OpenID provider without saving or changing anything,
+    /// as ``authenticate(local:username:password:)`` does. A cancelled browser sign-in throws.
+    public func authenticate(oidc server: ValidatedServer, authenticator: any WebAuthenticator) async throws
+        -> AuthenticatedSignIn
+    {
+        try await authenticated(server, method: .openid) {
+            try await openID.login(to: server, using: authenticator)
+        }
+    }
+
+    /// Saves an authenticated sign-in's session and makes its connection active, as
+    /// ``connect(local:username:password:)`` does once the server accepted it, and fails and is
+    /// cancelled as that does from then on. It's a new call: starting it supersedes the calls
+    /// still running, whichever started first. A ``logout()`` since the authentication started
+    /// cancels it and ends its server session, as does a ``remove(_:)`` of the server user's
+    /// connection, so neither is undone by a sign-in that was checked before it.
+    public func activate(_ signIn: AuthenticatedSignIn) async throws {
+        guard latestLogout == signIn.latestLogout else {
+            await discard(signIn)
+            throw CancellationError()
+        }
+        let attempt = beginSignIn()
+        try await finishSignIn(
+            signIn.result, to: signIn.server, method: signIn.method,
+            attempt: SignInAttempt(
+                operation: attempt.operation, latestLogout: attempt.latestLogout, removals: signIn.removals))
+    }
+
+    /// Ends the server session of a sign-in that won't be activated, best effort. Nothing saved
+    /// or active changes.
+    public func discard(_ signIn: AuthenticatedSignIn) async {
+        let session = StoredSession(tokens: signIn.result.tokens, openIDSession: signIn.result.openIDSession)
+        _ = await serverLogout(session, client: makeClient(signIn.server, credentials: nil))
+    }
+
+    /// Runs `login`, capturing the logouts and removals before it starts.
+    private func authenticated(
+        _ server: ValidatedServer, method: ServerAuthMethod, login: () async throws -> LoginResult
+    ) async throws -> AuthenticatedSignIn {
+        let (latestLogout, removals) = (self.latestLogout, self.removals)
+        let result: LoginResult
+        do {
+            result = try await login()
+        } catch {
+            throw Task.isCancelled ? CancellationError() : error
+        }
+        let signIn = AuthenticatedSignIn(
+            server: server, method: method, result: result, latestLogout: latestLogout, removals: removals)
+        if Task.isCancelled {
+            await discard(signIn)
+            throw CancellationError()
+        }
+        return signIn
+    }
+
     /// Saves the session, then marks the connection used, which also clears a sign-out saved with
     /// it, and activates it. A sign-in superseded by another call keeps its saved session for
     /// switching to later, unless the newer call was ``logout()``, which this sign-in then also
@@ -1113,6 +1183,20 @@ private struct LocalState {
 /// What a sign-in captured when it was called.
 private struct SignInAttempt {
     let operation: Int
+    let latestLogout: Int
+    let removals: Int
+}
+
+/// A sign-in the server accepted, from ``AccountManager/authenticate(local:username:password:)``
+/// or ``AccountManager/authenticate(oidc:authenticator:)``, that isn't saved or active yet. Pass
+/// it to ``AccountManager/activate(_:)``, or to ``AccountManager/discard(_:)`` to end its server
+/// session. Dropping it saves nothing, but leaves that session open until the server expires it.
+public struct AuthenticatedSignIn: Sendable {
+    let server: ValidatedServer
+    let method: ServerAuthMethod
+    let result: LoginResult
+    /// The manager's latest ``AccountManager/logout()`` and count of removals when the
+    /// authentication started.
     let latestLogout: Int
     let removals: Int
 }

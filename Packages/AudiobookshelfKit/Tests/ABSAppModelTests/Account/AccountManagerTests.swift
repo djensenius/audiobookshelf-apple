@@ -2343,3 +2343,132 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(relaunched.state == .signedOut && relaunched.connections.first?.signedOutAt != nil)
     }
 }
+
+/// A browser sign-in the user cancelled.
+private struct CancelledAuthenticator: WebAuthenticator {
+    func authenticate(_ url: URL, callbackScheme: String) async throws -> URL {
+        throw CancellationError()
+    }
+}
+
+/// ``AccountManager/authenticate(local:username:password:)`` and its OpenID twin change nothing;
+/// ``AccountManager/activate(_:)`` saves and activates, as `connect` does.
+@MainActor @Suite(.timeLimit(.minutes(1))) struct AccountManagerAuthenticateTests {
+    @Test(arguments: [false, true])
+    func authenticatingSavesNothingUntilActivated(oidc: Bool) async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let validated = try await validate(server)
+
+        let signIn =
+            oidc
+            ? try await manager.authenticate(oidc: validated, authenticator: FakeAuthenticator())
+            : try await manager.authenticate(local: validated, username: "david", password: "pw")
+        #expect(manager.state == .signedOut && manager.activeConnection == nil && manager.client == nil)
+        #expect(manager.connections.isEmpty && harness.keychain.isEmpty)
+        #expect(manager.credentialsRevision == 0)
+        #expect(try await harness.store.connectionToRestore() == nil)
+
+        try await manager.activate(signIn)
+        let id = try #require(manager.activeConnection?.id)
+        #expect(manager.state.user?.authMethod == (oidc ? .openid : .local))
+        #expect(try harness.session(id)?.tokens == AuthTokens(accessToken: "access-1", refreshToken: "refresh-1"))
+        #expect(try harness.customHeaders(id) == ["X-Proxy": "proxy-secret"])
+        #expect(server.loggedOutRefreshTokens.isEmpty)
+    }
+
+    /// Activating another account keeps the active one's saved session, as `connect` does.
+    @Test func activatingKeepsTheOtherAccountsSession() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let firstID = try await signIn(manager, to: FakeServer())
+        let validated = try await validate(FakeServer(userId: "usr-2"))
+
+        let signIn = try await manager.authenticate(local: validated, username: "david", password: "pw")
+        #expect(manager.activeConnection?.id == firstID && manager.connections.map(\.id) == [firstID])
+
+        try await manager.activate(signIn)
+        let secondID = try #require(manager.activeConnection?.id)
+        #expect(secondID != firstID && manager.connections.map(\.id) == [secondID, firstID])
+        #expect(try harness.session(firstID) != nil)
+        #expect(try harness.session(secondID) != nil)
+    }
+
+    /// A rejected password or a cancelled browser leaves the active account, its saved session,
+    /// and the connections as they were.
+    @Test(arguments: [false, true])
+    func failedAuthenticationChangesNothing(oidc: Bool) async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let firstID = try await signIn(manager, to: FakeServer())
+        let state = manager.state
+        let session = try harness.session(firstID)
+        let revision = manager.credentialsRevision
+        let server = FakeServer(userId: "usr-2")
+        let validated = try await validate(server)
+
+        if oidc {
+            await #expect(throws: OIDCLoginError.cancelled) {
+                try await manager.authenticate(oidc: validated, authenticator: CancelledAuthenticator())
+            }
+        } else {
+            server.update { $0.isOffline = true }
+            await #expect(throws: (any Error).self) {
+                try await manager.authenticate(local: validated, username: "david", password: "wrong")
+            }
+        }
+        #expect(manager.state == state && manager.activeConnection?.id == firstID && manager.lastError == nil)
+        #expect(manager.connections.map(\.id) == [firstID])
+        #expect(try harness.session(firstID) == session && manager.credentialsRevision == revision)
+        #expect(server.requests("/logout").isEmpty)
+    }
+
+    /// Authenticating doesn't supersede a restore that's running.
+    @Test func authenticatingLeavesARunningRestore() async throws {
+        let harness = try Harness()
+        let first = FakeServer()
+        let firstID = try await signIn(harness.makeManager(), to: first)
+        let manager = harness.makeManager()
+        let authorize = first.hold("/api/authorize")
+        let restore = Task { await manager.restoreSession() }
+        await authorize.arrived()
+
+        _ = try await manager.authenticate(
+            local: try await validate(FakeServer(userId: "usr-2")), username: "david", password: "pw")
+        #expect(manager.state == .restoring)
+        authorize.open()
+        await restore.value
+        #expect(manager.state.user?.connectionID == firstID && manager.lastError == nil)
+    }
+
+    @Test func discardingEndsTheServerSessionOnly() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+
+        let signIn = try await manager.authenticate(
+            local: try await validate(server), username: "david", password: "pw")
+        await manager.discard(signIn)
+        #expect(server.loggedOutRefreshTokens == ["refresh-1"])
+        #expect(manager.state == .signedOut && manager.connections.isEmpty && harness.keychain.isEmpty)
+    }
+
+    /// A logout or removal since the sign-in was checked isn't undone by activating it.
+    @Test(arguments: [false, true])
+    func activatingAfterALogoutOrRemovalIsCancelled(removing: Bool) async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        let server = FakeServer()
+        let id = try await signIn(manager, to: server)
+        let signIn = try await manager.authenticate(
+            local: try await validate(server), username: "david", password: "pw")
+
+        if removing { try await manager.remove(id) } else { await manager.logout() }
+        await #expect(throws: CancellationError.self) { try await manager.activate(signIn) }
+        #expect(manager.state == .signedOut && manager.activeConnection == nil)
+        #expect(manager.connections.map(\.id) == (removing ? [] : [id]))
+        #expect(try harness.session(id) == nil)
+        #expect(server.loggedOutRefreshTokens == ["refresh-1", "refresh-2"])
+    }
+}
