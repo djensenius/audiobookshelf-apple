@@ -54,6 +54,8 @@ public protocol DownloadRedirectPreflighting: Sendable {
 /// some methods or ranges redirects it too. A redirect that appears only after the check, or
 /// only for a resumed transfer's `Range`, is still followed by the background session; its
 /// response is then discarded (``DownloadFailureCode/offOrigin``), but its headers have been sent.
+/// So connections with custom headers download in the engine's foreground session instead
+/// (#467), whose delegate refuses such a hop before it is sent.
 ///
 /// The check's status is ignored, and of its body only what arrives with the headers is read:
 /// the background task reports the status. Cookies, caches and credentials storage aren't used.

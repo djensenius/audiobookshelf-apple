@@ -40,10 +40,10 @@ public enum DownloadFailureCode: String, Sendable, Equatable {
     /// The background session kept disconnecting; downloads wait for the next
     /// ``DownloadEngine/activate()``.
     case sessionLost
-    /// The connection sends custom headers. A background session follows a redirect of the
-    /// transfer itself, or of a resumed transfer's `Range` request, without asking its delegate,
-    /// so the redirect check can't keep them on the server. Refused until such downloads run in
-    /// the foreground (follow-up #467).
+    /// The connection sends custom headers, and the engine has no foreground session for them.
+    /// A background session follows a redirect of the transfer itself, or of a resumed
+    /// transfer's `Range` request, without asking its delegate, so the redirect check can't keep
+    /// them on the server. With a foreground session (#467), the app's, they download there.
     case customHeadersUnsupported
 }
 
@@ -79,6 +79,9 @@ public struct DownloadProgress: Sendable, Equatable {
 /// Downloads the parts of ``DownloadStore`` records with one background `URLSession` task
 /// per part (#72).
 ///
+/// - A connection with custom headers uses a foreground session instead (#467), whose
+///   delegate refuses every redirect off the server; its tasks' `taskDescription` has the
+///   `foreground:` prefix, and they are paused on ``deactivate()``.
 /// - Each task's `taskDescription` is its part ID, which is how tasks are matched to parts
 ///   after a relaunch; the store's `taskIdentifier` is only a cache.
 /// - A task is only created once ``DownloadStore/beginRunning(partID:expecting:now:)`` has
@@ -161,6 +164,7 @@ public actor DownloadEngine {
     private let now: @Sendable () -> Date
     private let random: @Sendable () -> Double
     private let makeSession: DownloadSessionFactory
+    private let makeForegroundSession: DownloadSessionFactory?
     private let preflight: any DownloadRedirectPreflighting
     private let registry: DownloadEngineRegistry
     private let readRecords: @Sendable (DownloadStore) async throws -> [DownloadRecordDTO]
@@ -184,6 +188,8 @@ public actor DownloadEngine {
 
     private var activation: Task<Bool, Never>?
     private var session: (any DownloadSession)?
+    /// The session of connections with custom headers, created at their first transfer (#467).
+    private var foregroundSession: (any DownloadSession)?
     private var isEventLoopRunning = false
     private var isInvalidatingSession = false
     /// Set by ``activate()`` and cleared by ``deactivate()``: a part the user's force quit
@@ -311,6 +317,10 @@ public actor DownloadEngine {
     ///   - networkAccess: the request flags for the current download cellular policy, read
     ///     when each task is created.
     ///   - makeSession: ``backgroundSession()`` in the app.
+    ///   - makeForegroundSession: ``foregroundSession()`` in the app: the session for
+    ///     connections with custom headers, whose delegate refuses every redirect off the
+    ///     server. Without it their downloads fail with
+    ///     ``DownloadFailureCode/customHeadersUnsupported``.
     ///   - preflight: checks each request's redirects before its background task is made.
     ///   - sweepsOrphanedResumeData: whether activation deletes resume data no record
     ///     references; pass `true` only when `store` is the App Group store.
@@ -327,13 +337,15 @@ public actor DownloadEngine {
         now: @escaping @Sendable () -> Date = { .now },
         random: @escaping @Sendable () -> Double = { Double.random(in: 0...1) },
         makeSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession(),
+        makeForegroundSession: DownloadSessionFactory? = DownloadEngine.foregroundSession(),
         preflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight()
     ) {
         self.init(
             store: store, localItems: localItems, credentials: credentials, vault: vault,
             sweepsOrphanedResumeData: sweepsOrphanedResumeData, locations: locations,
             retryPolicy: retryPolicy, networkAccess: networkAccess, clock: clock, now: now, random: random,
-            makeSession: makeSession, registry: .shared, readRecords: { try await $0.allRecords() },
+            makeSession: makeSession, makeForegroundSession: makeForegroundSession, registry: .shared,
+            readRecords: { try await $0.allRecords() },
             readRecord: { try await $0.record(id: $1) },
             cancelKeepingResumeData: { await $0.cancelByProducingResumeData() }, preflight: preflight)
     }
@@ -351,6 +363,7 @@ public actor DownloadEngine {
         now: @escaping @Sendable () -> Date,
         random: @escaping @Sendable () -> Double,
         makeSession: @escaping DownloadSessionFactory,
+        makeForegroundSession: DownloadSessionFactory? = nil,
         registry: DownloadEngineRegistry,
         readRecords: @escaping @Sendable (DownloadStore) async throws -> [DownloadRecordDTO],
         readRecord: @escaping @Sendable (DownloadStore, UUID) async throws -> DownloadRecordDTO?,
@@ -379,6 +392,7 @@ public actor DownloadEngine {
         self.now = now
         self.random = random
         self.makeSession = makeSession
+        self.makeForegroundSession = makeForegroundSession
         self.preflight = preflight
         self.registry = registry
         self.readRecords = readRecords
@@ -433,9 +447,13 @@ public actor DownloadEngine {
     /// Call when the app goes to the background: until the next ``activate()``, parts the
     /// system cancels are queued, not restarted, because a background wake can't start
     /// transfers reliably, and a retry's transfer is created at once, to begin after its delay.
-    public func deactivate() {
+    /// The foreground session's transfers (#467) stop, keeping their resume data, and their
+    /// parts stay queued in their records, so the next ``activate()`` continues them; until
+    /// then none of their parts gets a transfer.
+    public func deactivate() async {
         restartsQueuedParts = false
         isInBackground = true
+        await stop(partIDs: tasks.filter { $0.value.isForeground }.map(\.key), keepingResumeData: true)
     }
 
     /// ``deactivate()`` on the process's engine, if it has one.
@@ -530,7 +548,7 @@ public actor DownloadEngine {
             authRetried.remove(partID)
             throttle.reset(partID)
             let task = tasks.removeValue(forKey: partID)
-            if let task { ignoredTasks.insert(task.taskIdentifier) }
+            if let task { ignoredTasks.insert(task.key) }
             // Until the cancellation returns, the store still has the part running: stops of a
             // part run in order, and its launches wait for them.
             let previous = stopping[partID]
@@ -835,7 +853,7 @@ public actor DownloadEngine {
             preflights.removeValue(forKey: partID)?.cancel()
             let task = tasks.removeValue(forKey: partID)
             if let task {
-                ignoredTasks.insert(task.taskIdentifier)
+                ignoredTasks.insert(task.key)
                 task.cancel()
             }
             if retry != nil || launch != nil || task != nil { cancelled.insert(partID) }
@@ -939,21 +957,21 @@ public actor DownloadEngine {
         let session = makeSession(delegate)
         self.session = session
         isInvalidatingSession = false
-        ignoredTasks.removeAll()
+        ignoredTasks = ignoredTasks.filter { $0 < 0 }
         startEventLoop()
         // A task that finished on the way is left to its completion, which adopts it first.
         for task in await session.allTasks where task.state != .completed {
             if let partID = task.partID, tasks[partID] === task { continue }
             if isSurvivorToStop(task) {
                 // Its part stays running, so it is queued below.
-                ignoredTasks.insert(task.taskIdentifier)
+                ignoredTasks.insert(task.key)
                 task.cancel()
                 continue
             }
             guard let partID = task.partID, contexts[partID] != nil, tasks[partID] == nil,
                 let download = task as? URLSessionDownloadTask
             else {
-                ignoredTasks.insert(task.taskIdentifier)
+                ignoredTasks.insert(task.key)
                 task.cancel()
                 continue
             }
@@ -1040,11 +1058,11 @@ public actor DownloadEngine {
     /// the next transfer starts a new generation, so the file isn't reused (see
     /// ``movedFileSize(_:_:)``).
     private func reattach(_ task: URLSessionDownloadTask, partID: UUID, activationOwnsSession: Bool = false) async {
-        adopting.insert(task.taskIdentifier)
+        adopting.insert(task.key)
         if let adoptionStarted { await adoptionStarted(partID) }
         await decideAdoption(of: task, partID: partID)
-        adopting.remove(task.taskIdentifier)
-        if let result = heldResults.removeValue(forKey: task.taskIdentifier) {
+        adopting.remove(task.key)
+        if let result = heldResults.removeValue(forKey: task.key) {
             await handleCompletion(task, result, activationOwnsSession: activationOwnsSession)
         }
     }
@@ -1055,7 +1073,7 @@ public actor DownloadEngine {
         if case .failed(let failure) = result, let data = failure.resumeData {
             contexts[partID]?.hasResumeData = seal(data, partID: partID, task: task)
         }
-        heldResults[task.taskIdentifier] = result
+        heldResults[task.key] = result
     }
 
     private func decideAdoption(of task: URLSessionDownloadTask, partID: UUID) async {
@@ -1079,7 +1097,7 @@ public actor DownloadEngine {
             guard tasks[partID] === task else { return }
             if isGone {
                 tasks[partID] = nil
-                ignoredTasks.insert(task.taskIdentifier)
+                ignoredTasks.insert(task.key)
                 task.cancel()
                 vault.delete(partID: partID)
                 locations.clearTransferMarker(partID: partID)
@@ -1089,7 +1107,10 @@ public actor DownloadEngine {
             }
             return
         }
-        await persist { try await $0.setPartState(.running, partID: partID, taskIdentifier: task.taskIdentifier) }
+        await persist {
+            try await $0.setPartState(
+                .running, partID: partID, taskIdentifier: task.isForeground ? nil : task.taskIdentifier)
+        }
         if task.state == .suspended, tasks[partID] === task { task.resume() }
     }
 
@@ -1097,7 +1118,7 @@ public actor DownloadEngine {
     /// credentials of before the sign-out (ADR 0003).
     private func isSurvivorToStop(_ task: URLSessionTask) -> Bool {
         guard let partID = task.partID, let context = contexts[partID] else { return false }
-        return survivorsToStop.contains(context.connectionID) && !createdTasks.contains(task.taskIdentifier)
+        return survivorsToStop.contains(context.connectionID) && !createdTasks.contains(task.key)
     }
 
     /// Lets the session's tasks finish, then creates it again (on ``sessionInvalidated()``).
@@ -1111,8 +1132,9 @@ public actor DownloadEngine {
         session = nil
         activation = nil
         isInvalidatingSession = false
-        tasks.removeAll()
-        ignoredTasks.removeAll()
+        // The foreground session's transfers go on.
+        tasks = tasks.filter { $0.value.isForeground }
+        ignoredTasks = ignoredTasks.filter { $0 < 0 }
         if !isSessionInUse { await recreateSession() }
         while backgroundFinishesAwaitingRecreation > 0 {
             backgroundFinishesAwaitingRecreation -= 1
@@ -1290,11 +1312,15 @@ public actor DownloadEngine {
         }
         let request: URLRequest
         var unchecked: URLRequest?
+        var isForeground = false
         do {
             let credentials = try await credentials.credentials(
                 for: context.connectionID, replacing: rejectedAccessToken)
-            // Before any request is made, so the headers never reach the preflight or a transfer.
-            guard credentials.configuration.customHeaders.isEmpty else { throw CustomHeadersRefused() }
+            // Custom headers only go to the foreground session, whose delegate refuses a redirect
+            // off the server. Without one they are refused before any request is made, so the
+            // headers never reach the preflight or a background transfer.
+            isForeground = !credentials.configuration.customHeaders.isEmpty
+            guard !isForeground || makeForegroundSession != nil else { throw CustomHeadersRefused() }
             var fresh = try DownloadRequests.request(
                 path: context.serverPath, configuration: credentials.configuration,
                 accessToken: credentials.accessToken)
@@ -1350,14 +1376,18 @@ public actor DownloadEngine {
         }
         guard launching[partID] == token, tasks[partID] == nil, contexts[partID] != nil, !settling.contains(partID)
         else { return }
-        guard let session, !isInvalidatingSession else {
+        guard self.session != nil, !isInvalidatingSession,
+            let session = isForeground ? foregroundSessionCreatingIt() : self.session
+        else {
             // The session went away meanwhile: start again once it is back.
             deferredLaunches.insert(partID)
             await persistIdle(partID) { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
             return
         }
-        // Deactivated while the credentials or the preflight were awaited.
-        if contexts[partID]?.onlyWhileActive == true, !restartsQueuedParts {
+        // A foreground transfer can't run while the app is suspended, and a launch that may only
+        // start while active was deactivated while the credentials or the preflight were awaited:
+        // the part waits, queued, for the next activation.
+        if (isForeground && isInBackground) || (contexts[partID]?.onlyWhileActive == true && !restartsQueuedParts) {
             await persistIdle(partID) { try await $0.setPartState(.queued, partID: partID, taskIdentifier: nil) }
             return
         }
@@ -1374,8 +1404,9 @@ public actor DownloadEngine {
             }
         }
         let task = resumeData.map(session.downloadTask(withResumeData:)) ?? session.downloadTask(with: request)
-        createdTasks.insert(task.taskIdentifier)
-        task.taskDescription = partID.uuidString
+        // Before its key is read: the prefix tells the sessions' identifiers apart.
+        task.taskDescription = (isForeground ? URLSessionTask.foregroundPrefix : "") + partID.uuidString
+        createdTasks.insert(task.key)
         if let notBefore { task.earliestBeginDate = notBefore }
         tasks[partID] = task
         delegate.setTarget(
@@ -1385,7 +1416,8 @@ public actor DownloadEngine {
         let recorded: Bool
         do {
             recorded = try await store.setPartState(
-                .running, partID: partID, taskIdentifier: task.taskIdentifier, hasResumeData: keepsResumeData,
+                .running, partID: partID, taskIdentifier: isForeground ? nil : task.taskIdentifier,
+                hasResumeData: keepsResumeData,
                 now: now())
         } catch {
             logError("Couldn't update a download", error)
@@ -1394,7 +1426,7 @@ public actor DownloadEngine {
         guard recorded, tasks[partID] === task else {
             // The part was deleted or stopped meanwhile; the task never ran.
             if tasks[partID] === task { tasks[partID] = nil }
-            ignoredTasks.insert(task.taskIdentifier)
+            ignoredTasks.insert(task.key)
             task.cancel()
             if !recorded { forget(partID) }
             return
@@ -1412,7 +1444,7 @@ public actor DownloadEngine {
         // it took is sealed again for the next activation's launch.
         if contexts[partID]?.onlyWhileActive == true, !restartsQueuedParts {
             tasks[partID] = nil
-            ignoredTasks.insert(task.taskIdentifier)
+            ignoredTasks.insert(task.key)
             task.cancel()
             var hasResumeData = keepsResumeData
             if let resumeData {
@@ -1507,12 +1539,12 @@ public actor DownloadEngine {
     private func handleProgress(_ task: URLSessionTask, bytesWritten: Int64, expectedBytes: Int64) async {
         // An error body (a 401 page, say) also reports progress.
         guard let partID = task.partID, let context = contexts[partID],
-            tasks[partID]?.taskIdentifier == task.taskIdentifier
+            tasks[partID]?.key == task.key
         else { return }
         // Before the check below: an error body over the limit (a large 404 page, say) is
         // stopped too, rather than written in full to temporary storage.
         if let limit = context.maxBytes, bytesWritten > limit || expectedBytes > limit {
-            ignoredTasks.insert(task.taskIdentifier)
+            ignoredTasks.insert(task.key)
             task.cancel()
             await failPermanently(partID, code: .tooLarge, message: Self.tooLargeMessage(limit))
             return
@@ -1539,7 +1571,7 @@ public actor DownloadEngine {
     private func handleCompletion(
         _ task: URLSessionTask, _ result: DownloadTaskResult, activationOwnsSession: Bool = false
     ) async {
-        if ignoredTasks.remove(task.taskIdentifier) != nil { return }
+        if ignoredTasks.remove(task.key) != nil { return }
         guard let partID = task.partID, contexts[partID] != nil else { return }
         let current = tasks[partID]
         // Finished before or while the session was created: neither its result nor its resume
@@ -1552,7 +1584,7 @@ public actor DownloadEngine {
         }
         // A surviving transfer's result waits for its adoption, so it can't complete or fail a
         // stopped record's part. One that finished before it was adopted is adopted first.
-        if adopting.contains(task.taskIdentifier) {
+        if adopting.contains(task.key) {
             hold(result, of: task, partID: partID)
             return
         }
@@ -1563,8 +1595,8 @@ public actor DownloadEngine {
         }
         if case .moved(let bytes) = result {
             // A finished file wins even from a stale task; drop any newer transfer.
-            if let current, current.taskIdentifier != task.taskIdentifier {
-                ignoredTasks.insert(current.taskIdentifier)
+            if let current, current.key != task.key {
+                ignoredTasks.insert(current.key)
                 current.cancel()
             }
             sessionRecreations = 0
@@ -1572,7 +1604,7 @@ public actor DownloadEngine {
             return
         }
         // A stale task's failure doesn't affect the transfer that replaced it.
-        guard current == nil || current?.taskIdentifier == task.taskIdentifier else { return }
+        guard current == nil || current?.key == task.key else { return }
         tasks[partID] = nil
         throttle.reset(partID)
         if let status = (task.response as? HTTPURLResponse)?.statusCode, status == 200 || status == 206 {
@@ -2134,5 +2166,21 @@ extension DownloadEngine {
         { delegate in
             URLSession(configuration: .absDownloads(), delegate: delegate, delegateQueue: nil)
         }
+    }
+
+    /// The app's foreground session factory, for connections with custom headers (#467).
+    public static func foregroundSession() -> DownloadSessionFactory {
+        { delegate in
+            URLSession(configuration: .absForegroundDownloads(), delegate: delegate, delegateQueue: nil)
+        }
+    }
+
+    /// The foreground session, created on first use. It shares the engine's delegate, which
+    /// asks before each redirect in a session that isn't a background one.
+    private func foregroundSessionCreatingIt() -> (any DownloadSession)? {
+        if let foregroundSession { return foregroundSession }
+        let session = makeForegroundSession?(delegate)
+        foregroundSession = session
+        return session
     }
 }

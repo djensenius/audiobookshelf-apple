@@ -40,10 +40,14 @@ enum StubReply: Sendable {
     case failure(
         code: Int = NSURLErrorNetworkConnectionLost, resumeData: Data? = nil, cancelReason: Int? = nil,
         partialBody: Data? = nil, gate: StubGate? = nil)
+    /// Responds `302` to `url`. Like `URLSession`, the proposed request keeps the original's
+    /// headers, `Authorization` aside, whatever its origin.
+    case redirect(to: URL)
 
     var gate: StubGate? {
         switch self {
         case .status(_, _, _, _, _, let gate), .failure(_, _, _, _, let gate): gate
+        case .redirect: nil
         }
     }
 }
@@ -117,6 +121,14 @@ final class StubDownloadProtocol: URLProtocol {
             info[NSURLSessionDownloadTaskResumeData] = resumeData
             info[NSURLErrorBackgroundTaskCancelledReasonKey] = cancelReason
             client.urlProtocol(self, didFailWithError: NSError(domain: NSURLErrorDomain, code: code, userInfo: info))
+        case .redirect(let target):
+            let response = HTTPURLResponse(
+                url: url, statusCode: 302, httpVersion: "HTTP/1.1", headerFields: ["Location": target.absoluteString])!
+            var proposed = URLRequest(url: target)
+            for (name, value) in request.allHTTPHeaderFields ?? [:] where name != "Authorization" {
+                proposed.setValue(value, forHTTPHeaderField: name)
+            }
+            client.urlProtocol(self, wasRedirectedTo: proposed, redirectResponse: response)
         }
     }
 }

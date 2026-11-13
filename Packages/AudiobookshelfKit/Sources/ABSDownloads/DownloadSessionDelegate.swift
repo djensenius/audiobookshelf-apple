@@ -72,13 +72,29 @@ enum DownloadSessionEvent: Sendable {
 }
 
 extension URLSessionTask {
-    /// The part ID the engine stores in `taskDescription`.
+    /// The `taskDescription` prefix of a task in the engine's foreground session (#467).
+    static let foregroundPrefix = "foreground:"
+
+    /// The part ID the engine stores in `taskDescription`, after ``foregroundPrefix`` for a
+    /// foreground task.
     var partID: UUID? {
-        taskDescription.flatMap(UUID.init(uuidString:))
+        guard let description = taskDescription else { return nil }
+        return UUID(uuidString: isForeground ? String(description.dropFirst(Self.foregroundPrefix.count)) : description)
+    }
+
+    /// Whether the task belongs to the engine's foreground session.
+    var isForeground: Bool {
+        taskDescription?.hasPrefix(Self.foregroundPrefix) == true
+    }
+
+    /// The task's identifier among both of the engine's sessions: each session numbers its
+    /// tasks from 1, so a foreground task's is made negative.
+    var key: Int {
+        isForeground ? ~taskIdentifier : taskIdentifier
     }
 }
 
-/// The background session's delegate. It handles each finished file synchronously (the
+/// The delegate of the engine's sessions, background and foreground. It handles each finished file synchronously (the
 /// system deletes it when the callback returns) and forwards everything else, in order, to
 /// the engine through ``events``. It outlives sessions: a recreated session gets the same one.
 final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Sendable {
@@ -93,6 +109,8 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
     private let continuation: AsyncStream<DownloadSessionEvent>.Continuation
     private let targets = Mutex<[UUID: Target]>([:])
     private let finished = Mutex<[Int: DownloadTaskResult]>([:])
+    /// The tasks whose redirect off their origin was refused, by ``URLSessionTask/key``.
+    private let refusedRedirects = Mutex<Set<Int>>([])
 
     override init() {
         (events, continuation) = AsyncStream.makeStream()
@@ -183,7 +201,7 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
         _ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL
     ) {
         let result = finish(downloadTask, location: location)
-        finished.withLock { $0[downloadTask.taskIdentifier] = result }
+        finished.withLock { $0[downloadTask.key] = result }
     }
 
     func urlSession(
@@ -202,7 +220,12 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
     /// what ``finish(_:location:)`` decided. A task that ended with neither (an empty error
     /// response, or a body the system dropped) is classified by its response like a body.
     func completion(of task: URLSessionTask, response: URLResponse?, error: (any Error)?) -> DownloadTaskResult {
-        let result = finished.withLock { $0.removeValue(forKey: task.taskIdentifier) }
+        // Cancelled by the refusal, so the error is the cancellation's.
+        if refusedRedirects.withLock({ $0.remove(task.key) }) != nil {
+            finished.withLock { _ = $0.removeValue(forKey: task.key) }
+            return .offOrigin
+        }
+        let result = finished.withLock { $0.removeValue(forKey: task.key) }
         if let result, case .moved = result { return result }
         if let error { return .failed(DownloadTransferFailure(error)) }
         if let result { return result }
@@ -210,13 +233,23 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
             ?? .failed(DownloadTransferFailure(URLError(.zeroByteResource)))
     }
 
-    /// Only called for non-background sessions: a background session follows redirects
-    /// itself, so ``finish(_:location:)`` also rejects responses from another origin.
+    /// Only called for non-background sessions, such as the foreground session of servers with
+    /// custom headers (#467): a background session follows redirects itself, so
+    /// ``finish(_:location:)`` also rejects responses from another origin. A hop off the
+    /// origin of the task's original request (the fresh request, or the one in its resume data
+    /// for a `Range` resume) is refused before anything is sent there, and the task is
+    /// cancelled, so it ends with ``DownloadTaskResult/offOrigin`` rather than the redirect's
+    /// body.
     func urlSession(
         _ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
         newRequest request: URLRequest
     ) async -> URLRequest? {
-        DownloadRequests.redirect(following: response, to: request, original: task.originalRequest)
+        if let hop = DownloadRequests.redirect(following: response, to: request, original: task.originalRequest) {
+            return hop
+        }
+        refusedRedirects.withLock { _ = $0.insert(task.key) }
+        task.cancel()
+        return nil
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
@@ -224,7 +257,10 @@ final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, Senda
     }
 
     func urlSession(_ session: URLSession, didBecomeInvalidWithError error: (any Error)?) {
-        finished.withLock { $0.removeAll() }
+        // Only the background session is invalidated; the foreground one lives as long as the
+        // engine.
+        finished.withLock { $0 = $0.filter { $0.key < 0 } }
+        refusedRedirects.withLock { $0 = $0.filter { $0 < 0 } }
         continuation.yield(.sessionInvalidated)
     }
 }

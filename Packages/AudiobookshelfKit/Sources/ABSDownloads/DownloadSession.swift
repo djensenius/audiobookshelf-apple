@@ -45,6 +45,23 @@ extension URLSessionConfiguration {
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         return configuration
     }
+
+    /// The foreground configuration for connections with custom headers (#467). Unlike a
+    /// background session, its delegate is asked before every redirect, so the headers never
+    /// leave the server; its transfers stop when the app is suspended, so the engine pauses
+    /// them on ``DownloadEngine/deactivate()``. Cookies, the URL cache and credential storage
+    /// are off, as in ``absDownloads(identifier:)``.
+    public static func absForegroundDownloads() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpMaximumConnectionsPerHost = 3
+        configuration.httpCookieAcceptPolicy = .never
+        configuration.httpShouldSetCookies = false
+        configuration.httpCookieStorage = nil
+        configuration.urlCache = nil
+        configuration.urlCredentialStorage = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return configuration
+    }
 }
 
 /// What a download request for one server connection needs: the server and its custom
