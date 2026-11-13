@@ -13,6 +13,13 @@ private final class NoQueueStore: PlaybackQueueStoring {
     func removeQueue(serverConnectionID: UUID) {}
 }
 
+/// The queue rows played, and the outcome each play ends with.
+@MainActor
+private final class QueuedPlays {
+    var rows: [QueueRow] = []
+    var outcome = CarPlayPlayOutcome.started
+}
+
 /// A model over a fake playback, a sleep timer on it and an empty queue, with settings in a fresh suite.
 @MainActor
 private final class Harness {
@@ -22,7 +29,7 @@ private final class Harness {
     let timer: SleepTimer
     let queue = PlaybackQueue(serverConnectionID: FakePlaybackControl.serverID, store: NoQueueStore())
     let model: CarPlayNowPlayingModel
-    var plays: [(itemID: String, episodeID: String?)] = []
+    let queuedPlays = QueuedPlays()
 
     init(chapterLimit: Int = 12) throws {
         defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -30,11 +37,15 @@ private final class Harness {
         self.timer = timer
         let queue = queue
         let player = PlayerViewModel(playback: playback, settings: AppSettings(defaults: defaults))
-        var playItem: PlayItemAction?
+        let queuedPlays = queuedPlays
         model = CarPlayNowPlayingModel(
-            player: player, sleepTimer: { timer }, queue: { queue }, playItem: { playItem },
+            player: player, sleepTimer: { timer }, queue: { queue },
+            playQueued: { row in
+                queuedPlays.rows.append(row)
+                let outcome = queuedPlays.outcome
+                return Task { outcome }
+            },
             chapterLimit: chapterLimit)
-        playItem = PlayItemAction { [weak self] itemID, episodeID, _ in self?.plays.append((itemID, episodeID)) }
     }
 
     isolated deinit {
@@ -185,12 +196,51 @@ private func chapterRows(_ count: Int) -> [PlayerChapterRow] {
         #expect(harness.model.queueRows.map(\.title) == ["Next"])
     }
 
-    @Test func aQueueRowPlaysThroughThePlayAction() async throws {
+    @Test func aQueueRowPlaysThroughTheInjectedPlayAndReportsItsOutcome() async throws {
         let harness = try Harness()
         harness.queue.addToEnd(QueueItem(libraryItemID: "podcast", episodeID: "ep", title: "Episode"))
         let row = try #require(harness.model.queueRows.first)
-        #expect(await harness.model.play(row))
-        #expect(harness.plays.map(\.itemID) == ["podcast"])
-        #expect(harness.plays.map(\.episodeID) == ["ep"])
+        harness.queuedPlays.outcome = .blocked
+        #expect(await harness.model.play(row)?.value == .blocked)
+        #expect(harness.queuedPlays.rows.map(\.libraryItemID) == ["podcast"])
+        #expect(harness.queuedPlays.rows.map(\.episodeID) == ["ep"])
+    }
+
+    /// Review of #564: a queued play returns to Now Playing only once it started; a block or a
+    /// failure stays for the root model's alert.
+    @Test func onlyAStartedPlayReturnsToNowPlaying() {
+        #expect(CarPlayNowPlayingControls.returnsToNowPlaying(after: .started))
+        #expect(CarPlayNowPlayingControls.returnsToNowPlaying(after: .blocked) == false)
+        #expect(CarPlayNowPlayingControls.returnsToNowPlaying(after: .failed) == false)
+        #expect(CarPlayNowPlayingControls.returnsToNowPlaying(after: .discarded) == false)
+    }
+
+    // MARK: List observation
+
+    /// Review of #564: reopening Chapters ends the first list's loop, so loops don't pile up.
+    @Test func aNewerListEndsTheEarlierListsObservation() {
+        let observation = CarPlayListObservation<NSObject>()
+        let first = NSObject()
+        let second = NSObject()
+        observation.begin(first)
+        #expect(observation.continues(first, isShown: true))
+
+        observation.begin(second)
+        #expect(observation.continues(first, isShown: true) == false, "Replaced, even while shown")
+        #expect(observation.continues(second, isShown: true))
+        #expect(observation.list === second)
+    }
+
+    @Test func aListNoLongerShownEndsItsObservation() {
+        let observation = CarPlayListObservation<NSObject>()
+        let list = NSObject()
+        observation.begin(list)
+        #expect(observation.continues(list, isShown: false) == false)
+        #expect(observation.list == nil)
+        #expect(observation.continues(list, isShown: true) == false, "Ended for good")
+
+        observation.begin(list)
+        observation.end()
+        #expect(observation.continues(list, isShown: true) == false)
     }
 }

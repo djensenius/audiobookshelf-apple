@@ -1,4 +1,3 @@
-import ABSCore
 import ABSPlayback
 import Foundation
 
@@ -92,6 +91,12 @@ public enum CarPlayNowPlayingControls {
         return hasChapters ? .chapters : nil
     }
 
+    /// Whether a play from a list over Now Playing returns to Now Playing: only once it started.
+    /// A blocked or failed play stays, so the root model's alert shows over the list.
+    public static func returnsToNowPlaying(after outcome: CarPlayPlayOutcome) -> Bool {
+        outcome == .started
+    }
+
     /// The chapter list's rows, at most `limit`: all of them when they fit, otherwise a window
     /// that starts one before the current chapter, so it and the next ones show.
     public static func chapterRows(_ chapters: [PlayerChapterRow], currentIndex: Int?, limit: Int)
@@ -117,23 +122,24 @@ public final class CarPlayNowPlayingModel {
     private let player: PlayerViewModel
     private let sleepTimer: @MainActor () -> SleepTimer?
     private let queue: @MainActor () -> (any PlaybackQueueReading)?
-    private let playItem: @MainActor () -> PlayItemAction?
+    private let playQueued: @MainActor (QueueRow) -> Task<CarPlayPlayOutcome, Never>?
     private let chapterLimit: Int
 
     /// - Parameters:
     ///   - sleepTimer: The current account session's timer, if any.
     ///   - queue: The current account session's queue, if any.
-    ///   - playItem: The current account session's play action, for a queue row.
+    ///   - playQueued: Plays a queue row through CarPlay's root model, whose outcome and alert it
+    ///     shares (``CarPlayRootModel/playQueued(_:)``).
     ///   - chapterLimit: The most rows the chapter list shows (the car's list limit).
     public init(
         player: PlayerViewModel, sleepTimer: @escaping @MainActor () -> SleepTimer?,
         queue: @escaping @MainActor () -> (any PlaybackQueueReading)?,
-        playItem: @escaping @MainActor () -> PlayItemAction?, chapterLimit: Int
+        playQueued: @escaping @MainActor (QueueRow) -> Task<CarPlayPlayOutcome, Never>?, chapterLimit: Int
     ) {
         self.player = player
         self.sleepTimer = sleepTimer
         self.queue = queue
-        self.playItem = playItem
+        self.playQueued = playQueued
         self.chapterLimit = chapterLimit
     }
 
@@ -180,16 +186,41 @@ public final class CarPlayNowPlayingModel {
         return Array(QueueRow.rows(of: queue).prefix(chapterLimit))
     }
 
-    /// Plays `row` from its saved progress; `false` when nothing can play it.
+    /// Plays `row` from its saved progress; `nil` when nothing can play it.
     @discardableResult
-    public func play(_ row: QueueRow) async -> Bool {
-        guard let playItem = playItem() else { return false }
-        do {
-            try await row.play(with: playItem)
-            return true
-        } catch {
-            Log.playback.error("CarPlay: couldn't play the queued item: \(error, privacy: .public)")
+    public func play(_ row: QueueRow) -> Task<CarPlayPlayOutcome, Never>? {
+        playQueued(row)
+    }
+}
+
+/// The one observation loop of a list pushed over Now Playing (#81). A loop re-registers on every
+/// change, so each pushed list must end its predecessor's: a loop goes on only while its list is
+/// the latest one and still shown.
+@MainActor
+public final class CarPlayListObservation<List: AnyObject> {
+    /// The latest list, while its loop runs.
+    public private(set) weak var list: List?
+
+    public init() {}
+
+    /// Makes `list` the observed one; the earlier list's loop stops at its next change.
+    public func begin(_ list: List) {
+        self.list = list
+    }
+
+    /// Stops observing.
+    public func end() {
+        list = nil
+    }
+
+    /// Whether the loop observing `list` observes again: only for the latest list while
+    /// `isShown`. A latest list no longer shown ends the observation.
+    public func continues(_ list: List, isShown: Bool) -> Bool {
+        guard self.list === list else { return false }
+        guard isShown else {
+            end()
             return false
         }
+        return true
     }
 }

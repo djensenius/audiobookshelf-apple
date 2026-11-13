@@ -479,6 +479,42 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
         }
     }
 
+    /// Review of #564: a queued row played from Now Playing goes through the same outcome and
+    /// alerts as a tapped row: a block asks (and Stream plays it), a failure says why, and only a
+    /// play that started reports `.started`.
+    @Test func aQueuedPlaySharesTheOutcomeAndAlerts() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            let model = harness.model()
+            await model.update()
+            let row = QueueRow(
+                item: QueueItem(libraryItemID: SampleLibrary.sherlock.id, title: "Sherlock"),
+                serverConnectionID: carAccountA.connectionID)
+
+            harness.playError = Self.needsConfirmation
+            #expect(await model.playQueued(row)?.value == .blocked)
+            #expect(model.alert == .streamingNeedsConfirmation)
+            #expect(harness.plays.value == ["A:\(SampleLibrary.sherlock.id)"])
+            harness.playError = nil
+            #expect(await model.confirmStreaming()?.value == .started)
+            #expect(harness.playback.calls == [.confirmMeteredStreaming])
+
+            harness.playError = .sessionStartFailed(.timedOut)
+            #expect(await model.playQueued(row)?.value == .failed)
+            #expect(model.alert == .sessionStartFailed)
+
+            harness.playError = nil
+            harness.playback.error = nil
+            #expect(await model.playQueued(row)?.value == .started)
+            #expect(model.alert == nil)
+
+            harness.canPlay = false
+            #expect(model.playQueued(row) == nil)
+        }
+    }
+
     /// #544: a play still running when the account signs out (its playback unbound, so it ends
     /// with no error) or signs in again (another session, with its own error) is discarded: no
     /// Now Playing and no alert.

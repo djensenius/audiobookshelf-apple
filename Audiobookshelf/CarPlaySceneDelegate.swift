@@ -70,7 +70,7 @@
                     player: environment.playback.player,
                     sleepTimer: { environment.playback.participant?.sleepTimer },
                     queue: { environment.playback.participant?.queue },
-                    playItem: { environment.playback.participant?.playItem },
+                    playQueued: { [weak model] in model?.playQueued($0) },
                     chapterLimit: CPListTemplate.maximumItemCount))
 
             let list = CPListTemplate(title: Self.labels.continueListening, sections: [])

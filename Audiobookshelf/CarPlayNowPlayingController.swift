@@ -28,7 +28,8 @@
         private let model: CarPlayNowPlayingModel
         private var isConnected = true
         private var shownButtons: CarPlayNowPlayingButtons?
-        private var chapterList: CPListTemplate?
+        /// The chapter list shown, and its one observation loop.
+        private let chapterObservation = CarPlayListObservation<CPListTemplate>()
         private var shownChapters: [CarPlayChapterRow]?
 
         init(interfaceController: CPInterfaceController, model: CarPlayNowPlayingModel) {
@@ -45,7 +46,7 @@
         func disconnect() {
             isConnected = false
             CPNowPlayingTemplate.shared.remove(self)
-            chapterList = nil
+            chapterObservation.end()
             shownChapters = nil
         }
 
@@ -104,28 +105,27 @@
         // MARK: - Chapters
 
         private func showChapters() {
-            guard isConnected, !isShown(chapterList) else { return }
+            guard isConnected, !isShown(chapterObservation.list) else { return }
             let list = CPListTemplate(title: L10n.string("LabelChapters"), sections: [])
             list.emptyViewTitleVariants = [L10n.string("MessageNoChapters")]
-            chapterList = list
+            chapterObservation.begin(list)
             shownChapters = nil
-            observeChapters()
+            observeChapters(list)
             interfaceController.pushTemplate(list, animated: true, completion: nil)
         }
 
         /// Updates the chapter list while it shows. The current chapter follows the playback time,
-        /// so this runs on every tick, but the list changes only when a row does.
-        private func observeChapters() {
-            guard isConnected, let chapterList else { return }
+        /// so this runs on every tick, but the list changes only when a row does. Each loop
+        /// belongs to its `list` and ends once a newer list replaces it or it's no longer shown.
+        private func observeChapters(_ list: CPListTemplate) {
+            guard isConnected else { return }
             let rows = withObservationTracking {
                 model.chapters
-            } onChange: { [weak self] in
+            } onChange: { [weak self, weak list] in
                 Task { @MainActor in
-                    guard let self, self.isShown(self.chapterList) else {
-                        self?.chapterList = nil
-                        return
-                    }
-                    self.observeChapters()
+                    guard let self, let list, self.chapterObservation.continues(list, isShown: self.isShown(list))
+                    else { return }
+                    self.observeChapters(list)
                 }
             }
             guard rows != shownChapters else { return }
@@ -142,7 +142,7 @@
                 }
                 return item
             }
-            chapterList.updateSections([CPListSection(items: items)])
+            list.updateSections([CPListSection(items: items)])
         }
 
         private func select(_ row: CarPlayChapterRow) {
@@ -168,9 +168,12 @@
             interfaceController.pushTemplate(list, animated: true, completion: nil)
         }
 
+        /// Plays `row` through the root model; a blocked or failed play stays on the list while
+        /// the root model's alert shows, and one that started returns to Now Playing.
         private func play(_ row: QueueRow) {
+            guard let play = model.play(row) else { return }
             Task {
-                await model.play(row)
+                guard CarPlayNowPlayingControls.returnsToNowPlaying(after: await play.value) else { return }
                 popToNowPlaying()
             }
         }
