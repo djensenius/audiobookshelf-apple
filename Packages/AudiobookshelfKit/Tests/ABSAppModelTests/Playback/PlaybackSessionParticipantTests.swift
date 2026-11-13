@@ -61,6 +61,16 @@ private final class FakeScope: PlaybackScopeHandle {
         log.record("\(name).saveLocally")
     }
 
+    var onProgress: (@MainActor (PlaybackProgressUpdate) -> Void)?
+
+    func syncWithServer(isFirstSync: Bool) {
+        log.record("\(name).sync(\(isFirstSync ? "first" : "reconnect"))")
+    }
+
+    func flush() async {
+        log.record("\(name).flush")
+    }
+
     func retire(reason: PlaybackStopReason) {
         retiredReason = reason
         control.stop(reason: reason)
@@ -91,6 +101,7 @@ private struct Harness {
     let scopes = ScopeList()
     let features: FeatureTable
     let signOuts = CallLog()
+    let progress = ProgressLog()
 
     @MainActor
     final class ScopeList {
@@ -103,6 +114,12 @@ private struct Harness {
     @MainActor
     final class FeatureTable {
         var byUser: [String: ServerFeatures] = ["a": serverFeatures, "b": serverFeatures]
+    }
+
+    /// What the participant's progress sink heard, with the session it came from.
+    @MainActor
+    final class ProgressLog {
+        var heard: [(update: PlaybackProgressUpdate, sessionID: UInt64)] = []
     }
 
     init(restoredPhase: AccountSessionPhase = .active(identityA, isOffline: false), restoredClient: APIClient? = nil)
@@ -120,10 +137,12 @@ private struct Harness {
         let scopes = scopes
         let log = log
         let signOuts = signOuts
+        let progress = progress
         participant = PlaybackSessionParticipant(
             current: current, writer: writer, deviceIdentifiers: FixedDevice(),
             features: { features.byUser[$0.userID] },
             requestSignOut: { signOuts.record("signOut(\($0.identity.userID))") },
+            progressSink: { progress.heard.append(($0, $1.sessionID)) },
             makeScope: { request in
                 log.record("\(user(of: request.connectionID)).make")
                 let scope = FakeScope(request, log: log)
@@ -205,7 +224,8 @@ private struct Harness {
         let scopeLog = harness.log.entries.filter { $0.hasPrefix("a.") || $0.hasPrefix("b.") }
         #expect(
             scopeLog == [
-                "a.saveLocally", "a.retire(accountSwitch)", "a.finish", "a.finished", "b.make", "b.restore",
+                "a.saveLocally", "a.flush", "a.retire(accountSwitch)", "a.finish", "a.finished", "b.make",
+                "b.restore",
             ])
         #expect(harness.current.current === harness.scopes.last?.control)
         #expect(harness.scopes.all[0].retiredReason == .accountSwitch)
@@ -291,18 +311,88 @@ private struct Harness {
         #expect(harness.current.current === scope.control)
     }
 
-    @Test func flushSavesLocallyOnlyWhileRunning() async throws {
+    @Test func flushSavesLocallyThenFlushesOnlyWhileRunning() async throws {
         let harness = try Harness()
         try await harness.started()
 
         await harness.participant.flush()
-        #expect(harness.log.entries == ["a.saveLocally"])
+        #expect(harness.log.entries == ["a.saveLocally", "a.flush"])
 
         await harness.lifecycle.signOut()
         #expect(await eventually { harness.log.entries.contains("a.finished") })
         harness.log.clear()
         await harness.participant.flush()
         #expect(harness.log.entries.isEmpty)
+    }
+
+    /// Sign-out flushes the scope's progress before it retires it and before the account logs
+    /// out (#184).
+    @Test func signOutFlushesBeforeRetiringAndLoggingOut() async throws {
+        let harness = try Harness()
+        try await harness.started()
+
+        await harness.lifecycle.signOut()
+        #expect(await eventually { harness.log.entries.contains("accounts.logout") })
+
+        let entries = harness.log.entries
+        let flush = try #require(entries.firstIndex(of: "a.flush"))
+        #expect(flush < (entries.firstIndex(of: "a.retire(signOut)") ?? -1))
+        #expect(flush < (entries.firstIndex(of: "accounts.logout") ?? -1))
+    }
+
+    /// An online start syncs with the server as the first sync after login; an offline one
+    /// doesn't, and its reconnect syncs, not as the first.
+    @Test(arguments: [false, true])
+    func anOnlineSessionSyncsWithTheServer(startsOffline: Bool) async throws {
+        let harness = try Harness(
+            restoredPhase: .active(identityA, isOffline: startsOffline), restoredClient: try makeClient())
+        await harness.lifecycle.start()
+        #expect(await eventually { harness.log.entries.contains("a.restore") })
+        for _ in 0..<50 { await Task.yield() }
+        let started = harness.log.entries.filter { $0.hasPrefix("a.") }
+        #expect(started == (startsOffline ? ["a.make", "a.restore"] : ["a.make", "a.restore", "a.sync(first)"]))
+
+        harness.log.clear()
+        await harness.source.reconnect(client: try makeClient())
+        #expect(await eventually { harness.log.entries.contains("a.reconnect") })
+        #expect(harness.log.entries.filter { $0.hasPrefix("a.") } == ["a.reconnect", "a.sync(reconnect)"])
+    }
+
+    /// The negative control: without a client, there's no server to sync with.
+    @Test func aSessionWithoutAClientDoesNotSync() async throws {
+        let harness = try Harness()
+        // Not `started()`, which clears the log the start wrote.
+        await harness.lifecycle.start()
+        #expect(await eventually { harness.log.entries.contains("a.restore") })
+        for _ in 0..<50 { await Task.yield() }
+
+        #expect(!harness.log.entries.contains { $0.hasPrefix("a.sync") })
+    }
+
+    /// The scope's progress reaches the sink with its session, until the scope retires.
+    @Test func progressReachesTheSinkOnlyWhileTheScopeRuns() async throws {
+        let harness = try Harness()
+        try await harness.started()
+        let scopeA = try #require(harness.scopes.last)
+        let reportA = try #require(scopeA.onProgress)
+        let update = PlaybackProgressUpdate(
+            key: MediaKey(serverConnectionID: identityA.connectionID, libraryItemId: "li"), currentTime: 30,
+            duration: 60, date: Date(timeIntervalSince1970: 1_800_000_000))
+
+        reportA(update)
+        #expect(harness.progress.heard.map(\.update) == [update])
+        let sessionA = try #require(harness.progress.heard.first?.sessionID)
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        #expect(await eventually { harness.log.entries.contains("b.restore") })
+        #expect(scopeA.onProgress == nil)
+        reportA(update)
+        #expect(harness.progress.heard.count == 1)
+
+        let reportB = try #require(harness.scopes.last?.onProgress)
+        reportB(update)
+        #expect(harness.progress.heard.count == 2)
+        #expect(harness.progress.heard.last?.sessionID != sessionA)
     }
 
     @Test func playItemPlaysInTheCurrentScope() async throws {
