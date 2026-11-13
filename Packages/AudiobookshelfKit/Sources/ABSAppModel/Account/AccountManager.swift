@@ -531,6 +531,13 @@ public final class AccountManager {
         return endSessionURL
     }
 
+    /// Replaces ``authorization``'s user with `user` from the socket's `user_updated`, when it is
+    /// the signed-in user; nothing is saved.
+    public func applyUserUpdate(_ user: User) {
+        guard authorization?.user.id == user.id else { return }
+        authorization?.user = user
+    }
+
     /// The custom headers saved for a connection, kept after sign-out, for signing in again.
     /// - Throws: The ``KeychainError`` if they can't be read.
     public func customHeaders(for id: UUID) async throws -> [String: String] {

@@ -280,6 +280,19 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(harness.keychain.accessibility(of: item) == .afterFirstUnlock)
     }
 
+    @Test func userUpdatesReplaceOnlyTheSignedInUser() async throws {
+        let harness = try Harness()
+        let manager = harness.makeManager()
+        _ = try await signIn(manager, to: FakeServer())
+
+        manager.applyUserUpdate(User(id: "usr-2", username: "someone"))
+        #expect(manager.authorization?.user.username == "david")
+
+        manager.applyUserUpdate(User(id: "usr-1", username: "renamed", type: .user))
+        #expect(manager.authorization?.user.username == "renamed" && manager.authorization?.user.type == .user)
+        #expect(manager.authorization?.userDefaultLibraryId == "lib1")
+    }
+
     @Test func firstOpenIDLoginKeepsSignOutCookies() async throws {
         let harness = try Harness()
         let manager = harness.makeManager()

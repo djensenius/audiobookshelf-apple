@@ -53,6 +53,7 @@ struct TestDownloads {
             #expect(environment.downloads != nil)
             // The library is the lifecycle's seeder, and stays cleared while signed out.
             #expect(environment.library != nil)
+            #expect(environment.realtime?.bridge.connectionState == .idle)
             #expect(environment.lifecycle.gate == .launching)
 
             await environment.lifecycle.start()
