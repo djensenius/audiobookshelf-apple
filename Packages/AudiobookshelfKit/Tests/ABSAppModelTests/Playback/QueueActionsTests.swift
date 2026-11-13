@@ -25,6 +25,7 @@ private final class QueueScope: PlaybackScopeHandle {
     let control = FakePlaybackControl()
     var isRetired = false
     var onSessionRejected: (@MainActor () -> Void)?
+    var onProgress: (@MainActor (PlaybackProgressUpdate) -> Void)?
 
     init(items: [QueueItem] = []) {
         let id = UUID()
@@ -43,6 +44,8 @@ private final class QueueScope: PlaybackScopeHandle {
     func play(itemID: String, episodeID: String?, startTime: Double?) async {}
     func reconnect(client: APIClient?, features: ServerFeatures?) {}
     func saveLocally() {}
+    func syncWithServer(isFirstSync: Bool) {}
+    func flush() async {}
     func retire(reason: PlaybackStopReason) { isRetired = true }
     func finishRetirement(timeout: Duration) async -> Result<PlaybackCloseOutcome, any Error> {
         .success(PlaybackCloseOutcome(sessions: []))
