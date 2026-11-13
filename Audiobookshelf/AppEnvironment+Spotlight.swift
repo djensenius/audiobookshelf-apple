@@ -53,8 +53,8 @@ final class NoRecentItemsIndex: RecentItemsIndexing {
 
 extension AppEnvironment {
     /// Spotlight's recently played items (#87): a ``SessionStage/connect`` participant that follows
-    /// `player`, and deletes an account's items once it's removed, a switch to it ends signed out,
-    /// or its credentials expire.
+    /// `player`, and deletes an account's items once it's removed, a switch to it or the launch's
+    /// restore of it ends signed out, or its credentials are removed or expire.
     ///
     /// Only the App Group store (`storeLocation` `.appGroup`, the real app) writes the system
     /// index; a fixture or test environment indexes nothing.
@@ -71,15 +71,8 @@ extension AppEnvironment {
         donor.followRejectedSwitches { [weak lifecycle] in
             (lifecycle?.signedOutSwitches ?? 0, lifecycle?.signedOutSwitchConnectionID)
         }
-        if let accounts {
-            donor.followRemovals { Set(accounts.connections.map(\.id)) }
-            // After whatever the environment already runs on an expiry.
-            let expired = accounts.credentialsExpired
-            accounts.credentialsExpired = { [weak donor] in
-                expired?($0)
-                donor?.connectionExpired($0)
-            }
-        }
+        // After whatever the environment already runs on a removal or an expiry.
+        if let accounts { donor.follow(accounts: accounts) }
         return donor
     }
 }

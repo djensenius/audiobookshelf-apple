@@ -14,8 +14,12 @@ import Observation
 /// - It deletes an account's domain when the user signs out, removes the account or the server
 ///   rejects the session (``SessionParticipant``), when the account is removed while another one
 ///   is active (``followRemovals(of:)``), when its credentials expire (``connectionExpired(_:)``)
-///   and when a switch to it ends signed out (``followRejectedSwitches(of:)``). A switch keeps it:
-///   a tap opens the item on its own account, asking to switch first (``DeepLink/init(spotlightIdentifier:)``).
+///   and when a switch to it, or the launch's restore of it, ends signed out
+///   (``followRejectedSwitches(of:)``, ``follow(accounts:)``). A switch keeps it: a tap opens the
+///   item on its own account, asking to switch first (``DeepLink/init(spotlightIdentifier:)``).
+/// - A deletion that fails stays pending in `defaults`, with the identifiers it was for, until it
+///   succeeds: the donor retries it when it's made (at launch) and when a session starts, so a
+///   signed-out account's items, or those past the limit, don't stay searchable.
 ///
 /// Index writes run one at a time, in order, so a deletion can't overtake the donation before it.
 @MainActor
@@ -24,6 +28,11 @@ public final class RecentItemsDonor: SessionParticipant {
     public static let limit = 20
     /// The `defaults` key of each account's indexed identifiers, most recent first.
     public static let defaultsKey = "spotlight.recentItems"
+    /// The `defaults` key of each account's pending domain deletion, with the identifiers it was
+    /// asked for: ``removeItems(of:)`` moves them here until the deletion succeeds.
+    public static let pendingDomainsKey = "spotlight.pendingDomainDeletions"
+    /// The `defaults` key of each account's identifiers past the limit that aren't deleted yet.
+    public static let pendingEvictionsKey = "spotlight.pendingEvictions"
 
     public let index: any RecentItemsIndexing
     private let defaults: UserDefaults
@@ -42,6 +51,7 @@ public final class RecentItemsDonor: SessionParticipant {
     public init(index: any RecentItemsIndexing, defaults: UserDefaults) {
         self.index = index
         self.defaults = defaults
+        retryPendingDeletions()
     }
 
     isolated deinit {
@@ -60,18 +70,37 @@ public final class RecentItemsDonor: SessionParticipant {
         var identifiers = indexedIdentifiers(of: connectionID).filter { $0 != record.id }
         identifiers.insert(record.id, at: 0)
         let dropped = Array(identifiers.dropFirst(Self.limit))
+        // Played again: it stays, though an earlier eviction (queued before this) deletes it first.
+        update(Self.pendingEvictionsKey, of: connectionID) { $0.removeAll { $0 == record.id } }
+        // Tracked as pending until deleted, so a failure can't leave them past the limit, untracked.
+        update(Self.pendingEvictionsKey, of: connectionID) { $0.append(contentsOf: dropped) }
         setIndexedIdentifiers(Array(identifiers.prefix(Self.limit)), of: connectionID)
         enqueue { index in
-            try await index.index(record)
-            if !dropped.isEmpty { try await index.delete(identifiers: dropped) }
+            // Evicts whether or not indexing succeeds.
+            await Self.attempt { try await index.index(record) }
         }
+        if !dropped.isEmpty { evict(dropped, of: connectionID) }
     }
 
-    /// Deletes `connectionID`'s items from Spotlight, and forgets them.
+    /// Deletes `connectionID`'s items from Spotlight, and forgets them once that succeeds. Until
+    /// then the deletion stays pending, with the identifiers it was asked for.
     public func removeItems(of connectionID: UUID) {
+        let identifiers = indexedIdentifiers(of: connectionID) + pending(Self.pendingEvictionsKey, of: connectionID)
+        update(Self.pendingDomainsKey, of: connectionID) { $0.append(contentsOf: identifiers) }
+        update(Self.pendingEvictionsKey, of: connectionID) { $0 = [] }
         setIndexedIdentifiers([], of: connectionID)
         if lastDonated?.key.serverConnectionID == connectionID { lastDonated = nil }
-        enqueue { try await $0.deleteDomain(of: connectionID) }
+        deleteDomain(of: connectionID, identifiers: identifiers)
+    }
+
+    /// The connections whose domain deletion hasn't succeeded yet.
+    public var pendingDomainDeletions: Set<UUID> {
+        Set(pendingEntries(Self.pendingDomainsKey).keys.compactMap(UUID.init(uuidString:)))
+    }
+
+    /// The identifiers past `connectionID`'s limit that aren't deleted yet.
+    public func pendingEvictions(of connectionID: UUID) -> [String] {
+        pending(Self.pendingEvictionsKey, of: connectionID)
     }
 
     /// The identifiers indexed for `connectionID`, most recently played first.
@@ -136,6 +165,31 @@ public final class RecentItemsDonor: SessionParticipant {
         }
     }
 
+    /// Follows `accounts`, after whatever its callbacks already run: deletes a connection's items
+    /// once it leaves ``AccountManager/connections`` (``followRemovals(of:)``), once its
+    /// credentials are removed (``AccountManager/credentialsRemoved``, even if the store then keeps
+    /// it listed) or expire (``connectionExpired(_:)``), and once the launch's restore of it ends
+    /// signed out (``AccountManager/restoreSignedOut``).
+    public func follow(accounts: AccountManager) {
+        followRemovals { Set(accounts.connections.map(\.id)) }
+        // Weakly: `accounts` outlives the donor's owner.
+        let expired = accounts.credentialsExpired
+        accounts.credentialsExpired = { [weak self] in
+            expired?($0)
+            self?.connectionExpired($0)
+        }
+        let removed = accounts.credentialsRemoved
+        accounts.credentialsRemoved = { [weak self] in
+            await removed?($0)
+            self?.removeItems(of: $0)
+        }
+        let restored = accounts.restoreSignedOut
+        accounts.restoreSignedOut = { [weak self] in
+            restored?($0)
+            self?.removeItems(of: $0)
+        }
+    }
+
     /// Deletes `connectionID`'s items when its credentials expire (`AccountManager`'s
     /// `credentialsExpired`): Spotlight mustn't offer a signed-out account's items. The running
     /// session's are deleted when it ends (``sessionWillEnd(_:)``), even as a switch.
@@ -153,6 +207,7 @@ public final class RecentItemsDonor: SessionParticipant {
         connectionID = context.identity.connectionID
         runningSessionExpired = false
         lastDonated = nil
+        retryPendingDeletions()
     }
 
     public func sessionWillEnd(_ reason: SessionEndReason) async {
@@ -176,28 +231,97 @@ public final class RecentItemsDonor: SessionParticipant {
         defaults.set(all, forKey: Self.defaultsKey)
     }
 
-    /// Runs `write` after the writes before it. Spotlight is best effort, so a failure is only
-    /// logged.
-    private func enqueue(_ write: @escaping @MainActor (any RecentItemsIndexing) async throws -> Void) {
+    private func pendingEntries(_ key: String) -> [String: [String]] {
+        defaults.dictionary(forKey: key) as? [String: [String]] ?? [:]
+    }
+
+    private func pending(_ key: String, of connectionID: UUID) -> [String] {
+        pendingEntries(key)[connectionID.uuidString] ?? []
+    }
+
+    /// Changes `connectionID`'s pending identifiers under `key`, deduplicated. A pending domain
+    /// deletion is kept even with no identifiers; an eviction is dropped once it has none.
+    private func update(_ key: String, of connectionID: UUID, _ change: (inout [String]) -> Void) {
+        var all = pendingEntries(key)
+        var identifiers = all[connectionID.uuidString] ?? []
+        change(&identifiers)
+        var seen = Set<String>()
+        identifiers = identifiers.filter { seen.insert($0).inserted }
+        all[connectionID.uuidString] = identifiers.isEmpty && key == Self.pendingEvictionsKey ? nil : identifiers
+        defaults.set(all, forKey: key)
+    }
+
+    /// Queues every pending deletion again, as at launch.
+    private func retryPendingDeletions() {
+        for (connection, identifiers) in pendingEntries(Self.pendingDomainsKey) {
+            guard let connectionID = UUID(uuidString: connection) else { continue }
+            deleteDomain(of: connectionID, identifiers: identifiers)
+        }
+        for (connection, identifiers) in pendingEntries(Self.pendingEvictionsKey) {
+            guard let connectionID = UUID(uuidString: connection), !identifiers.isEmpty else { continue }
+            evict(identifiers, of: connectionID)
+        }
+    }
+
+    /// Deletes `connectionID`'s domain, then forgets the pending deletion of `identifiers`; if it
+    /// fails, they stay pending.
+    private func deleteDomain(of connectionID: UUID, identifiers: [String]) {
+        enqueue { [weak self] index in
+            let deleted = await Self.attempt { try await index.deleteDomain(of: connectionID) }
+            guard let self else { return }
+            if deleted {
+                var all = self.pendingEntries(Self.pendingDomainsKey)
+                let left = (all[connectionID.uuidString] ?? []).filter { !identifiers.contains($0) }
+                // Another removal queued meanwhile, with other identifiers, keeps its own entry.
+                all[connectionID.uuidString] = left.isEmpty ? nil : left
+                self.defaults.set(all, forKey: Self.pendingDomainsKey)
+            } else {
+                // Kept pending, even if a removal queued before this one succeeded and cleared it.
+                self.update(Self.pendingDomainsKey, of: connectionID) { $0.append(contentsOf: identifiers) }
+            }
+        }
+    }
+
+    /// Deletes `identifiers`, past `connectionID`'s limit, then forgets their pending eviction.
+    private func evict(_ identifiers: [String], of connectionID: UUID) {
+        enqueue { [weak self] index in
+            guard await Self.attempt({ try await index.delete(identifiers: identifiers) }), let self else { return }
+            self.update(Self.pendingEvictionsKey, of: connectionID) { $0.removeAll { identifiers.contains($0) } }
+        }
+    }
+
+    /// Runs `write` after the writes before it.
+    private func enqueue(_ write: @escaping @MainActor (any RecentItemsIndexing) async -> Void) {
         let previous = work
         let index = self.index
         work = Task { @MainActor in
             await previous?.value
-            do {
-                try await write(index)
-            } catch {
-                let reason = Log.redact(String(describing: error))
-                Log.data.error("Spotlight's recent items couldn't be updated: \(reason, privacy: .public)")
-            }
+            await write(index)
+        }
+    }
+
+    /// Runs an index write, and returns whether it succeeded. Spotlight is best effort, so a
+    /// failure is only logged; a deletion's stays pending.
+    @discardableResult
+    private static func attempt(_ write: @MainActor () async throws -> Void) async -> Bool {
+        do {
+            try await write()
+            return true
+        } catch {
+            let reason = Log.redact(String(describing: error))
+            Log.data.error("Spotlight's recent items couldn't be updated: \(reason, privacy: .public)")
+            return false
         }
     }
 }
 
 extension PlayerViewModel {
-    /// The item to donate to Spotlight: the current one, once it's asked to play and its duration
-    /// is known; `nil` otherwise, so a restored item that isn't played isn't donated.
+    /// The item to donate to Spotlight: the current one, once it plays and its duration is known;
+    /// `nil` otherwise, so a restored item that isn't played isn't donated. Not just once play is
+    /// requested: a request for another item, waiting on its streaming-policy check, counts as
+    /// one while the restored item is still current.
     public var spotlightRecord: PlayableEntityRecord? {
-        guard let key = playback.mediaKey, hasSession, playback.isPlaybackRequested, playback.duration > 0,
+        guard let key = playback.mediaKey, hasSession, playback.isPlaying, playback.duration > 0,
             !title.isEmpty
         else { return nil }
         return PlayableEntityRecord(

@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSCore
 import ABSData
 import CoreSpotlight
@@ -7,7 +8,7 @@ import Testing
 
 @testable import ABSAppModel
 
-/// Records the index writes, in order.
+/// Records the index writes, in order, failing those of the kinds in ``failing``.
 @MainActor
 private final class FakeRecentItemsIndex: RecentItemsIndexing {
     enum Write: Equatable {
@@ -16,21 +17,40 @@ private final class FakeRecentItemsIndex: RecentItemsIndexing {
         case deleteDomain(UUID)
     }
 
+    enum Kind { case index, delete, deleteDomain }
+
+    struct Failure: Error {}
+
     private(set) var writes: [Write] = []
     private(set) var indexed: [PlayableEntityRecord] = []
+    /// The kinds of write that throw (each is still recorded).
+    var failing: Set<Kind> = []
 
     func index(_ record: PlayableEntityRecord) async throws {
         writes.append(.index(record.id))
+        if failing.contains(.index) { throw Failure() }
         indexed.append(record)
     }
 
     func delete(identifiers: [String]) async throws {
         writes.append(.delete(identifiers))
+        if failing.contains(.delete) { throw Failure() }
     }
 
     func deleteDomain(of connectionID: UUID) async throws {
         writes.append(.deleteDomain(connectionID))
+        if failing.contains(.deleteDomain) { throw Failure() }
     }
+
+    func clearWrites() {
+        writes = []
+    }
+}
+
+/// The connections a callback was called with.
+@MainActor
+private final class Calls {
+    var ids: [UUID] = []
 }
 
 @MainActor
@@ -278,6 +298,140 @@ private func context(_ server: UUID) -> SessionContext {
         #expect(await eventually { index.writes == [.deleteDomain(serverA)] })
     }
 
+    // MARK: Failures
+
+    @Test func aFailedDeletionStaysPendingUntilARelaunchRetriesIt() async {
+        let donor = await makeDonor()
+        donor.donate(record())
+        index.failing = [.deleteDomain]
+
+        await donor.sessionWillEnd(.signOut)
+        await donor.settle()
+
+        #expect(index.writes == [.index(record().id), .deleteDomain(serverA)])
+        #expect(donor.pendingDomainDeletions == [serverA])
+        let pending = defaults.dictionary(forKey: RecentItemsDonor.pendingDomainsKey) as? [String: [String]]
+        #expect(pending == [serverA.uuidString: [record().id]])
+
+        index.failing = []
+        index.clearWrites()
+        let relaunched = await makeDonor(running: nil)
+        await relaunched.settle()
+
+        #expect(index.writes == [.deleteDomain(serverA)])
+        #expect(relaunched.pendingDomainDeletions.isEmpty)
+    }
+
+    @Test func aStartingSessionRetriesAFailedDeletion() async {
+        let donor = await makeDonor(running: serverB)
+        index.failing = [.deleteDomain]
+        donor.connectionExpired(serverA)
+        await donor.settle()
+
+        index.failing = []
+        await donor.sessionWillEnd(.switch)
+        await donor.sessionDidStart(context(serverB))
+        await donor.settle()
+
+        #expect(index.writes == [.deleteDomain(serverA), .deleteDomain(serverA)])
+        #expect(donor.pendingDomainDeletions.isEmpty)
+    }
+
+    @Test func itemsPastTheLimitAreDeletedEvenIfIndexingFails() async {
+        let donor = await makeDonor()
+        for number in 1...RecentItemsDonor.limit { donor.donate(record("li_\(number)")) }
+        await donor.settle()
+        index.failing = [.index]
+        index.clearWrites()
+
+        donor.donate(record("li_new"))
+        await donor.settle()
+
+        #expect(index.writes == [.index(record("li_new").id), .delete([record("li_1").id])])
+        #expect(donor.pendingEvictions(of: serverA).isEmpty)
+    }
+
+    @Test func aFailedEvictionStaysPendingUntilARelaunchRetriesIt() async {
+        let donor = await makeDonor()
+        for number in 1...RecentItemsDonor.limit { donor.donate(record("li_\(number)")) }
+        index.failing = [.delete]
+        donor.donate(record("li_new"))
+        await donor.settle()
+        #expect(donor.pendingEvictions(of: serverA) == [record("li_1").id])
+
+        index.failing = []
+        index.clearWrites()
+        let relaunched = await makeDonor(running: nil)
+        await relaunched.settle()
+
+        #expect(index.writes == [.delete([record("li_1").id])])
+        #expect(relaunched.pendingEvictions(of: serverA).isEmpty)
+    }
+
+    @Test func anEvictedItemPlayedAgainIsntEvictedLater() async {
+        let donor = await makeDonor()
+        for number in 1...RecentItemsDonor.limit { donor.donate(record("li_\(number)")) }
+        index.failing = [.delete]
+        donor.donate(record("li_new"))
+        donor.donate(record("li_1"))
+        await donor.settle()
+
+        #expect(donor.pendingEvictions(of: serverA) == [record("li_2").id])
+        #expect(donor.indexedIdentifiers(of: serverA).first == record("li_1").id)
+    }
+
+    // MARK: Accounts
+
+    @Test func followingTheAccountsDeletesAnItemsOnceItsCredentialsAreRemoved() async throws {
+        let accounts = try makeAccounts()
+        let earlier = Calls()
+        accounts.credentialsRemoved = { earlier.ids.append($0) }
+        let donor = await makeDonor(running: serverB)
+        donor.follow(accounts: accounts)
+
+        await accounts.credentialsRemoved?(serverA)
+        await donor.settle()
+
+        #expect(earlier.ids == [serverA])
+        #expect(index.writes == [.deleteDomain(serverA)])
+    }
+
+    @Test func followingTheAccountsDeletesTheItemsOfARestoreThatEndedSignedOut() async throws {
+        let accounts = try makeAccounts()
+        let earlier = Calls()
+        accounts.restoreSignedOut = { earlier.ids.append($0) }
+        let donor = await makeDonor(running: nil)
+        donor.follow(accounts: accounts)
+
+        accounts.restoreSignedOut?(serverA)
+        await donor.settle()
+
+        #expect(earlier.ids == [serverA])
+        #expect(index.writes == [.deleteDomain(serverA)])
+    }
+
+    @Test func followingTheAccountsKeepsTheirExpiryCallback() async throws {
+        let accounts = try makeAccounts()
+        let earlier = Calls()
+        accounts.credentialsExpired = { earlier.ids.append($0) }
+        let donor = await makeDonor(running: serverB)
+        donor.follow(accounts: accounts)
+
+        accounts.credentialsExpired?(serverA)
+        await donor.settle()
+
+        #expect(earlier.ids == [serverA])
+        #expect(index.writes == [.deleteDomain(serverA)])
+    }
+
+    private func makeAccounts() throws -> AccountManager {
+        AccountManager(
+            store: ServerConnectionStore(modelContainer: try DataStack(location: .inMemory).container),
+            keychain: InMemoryKeychain(),
+            validator: ServerValidator(sessionConfiguration: { StubURLProtocol.sessionConfiguration() }),
+            sessionConfiguration: { StubURLProtocol.sessionConfiguration() })
+    }
+
     // MARK: Player
 
     @Test func thePlayersItemIsDonatedOnceItPlays() throws {
@@ -298,6 +452,17 @@ private func context(_ server: UUID) -> SessionContext {
         #expect(donated.title == "Dune")
         #expect(donated.subtitle == "Frank Herbert")
         #expect(donated.duration == 400)
+    }
+
+    @Test func aRequestForAnotherItemDoesntDonateTheRestoredOne() {
+        let playback = FakePlaybackControl()
+        let player = PlayerViewModel(playback: playback, settings: AppSettings(defaults: defaults))
+        playback.load(FakePlaybackControl.bookSession(), at: 150)
+
+        // Another item waits on its streaming-policy check: play is requested, but this one is paused.
+        playback.isPlaybackRequested = true
+
+        #expect(player.spotlightRecord == nil)
     }
 
     @Test func followingThePlayerDonatesWhatStartsPlaying() async {

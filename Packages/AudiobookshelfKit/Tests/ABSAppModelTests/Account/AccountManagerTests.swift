@@ -396,6 +396,32 @@ private func signIn(_ manager: AccountManager, to server: FakeServer, oidc: Bool
         #expect(relaunched.state == .signedOut && relaunched.connections.count == 1)
     }
 
+    /// Reported so the app can delete the connection's data, such as its Spotlight items; not
+    /// when there was nothing to restore, or it's offline.
+    @Test func restoreThatEndsSignedOutReportsItsConnection() async throws {
+        let harness = try Harness()
+        let reported = Mutex<[UUID]>([])
+        let empty = harness.makeManager()
+        empty.restoreSignedOut = { id in reported.withLock { $0.append(id) } }
+        await empty.restoreSession()
+        let id = try await signIn(harness.makeManager(), to: FakeServer())
+
+        harness.keychain.failReads(with: errSecInteractionNotAllowed)
+        let locked = harness.makeManager()
+        locked.restoreSignedOut = { id in reported.withLock { $0.append(id) } }
+        await locked.restoreSession()
+        #expect(locked.state == .offline(try #require(locked.state.user)))
+        #expect(reported.withLock { $0 }.isEmpty)
+
+        // Unreadable.
+        harness.keychain.failReads(with: errSecDecode)
+        let relaunched = harness.makeManager()
+        relaunched.restoreSignedOut = { id in reported.withLock { $0.append(id) } }
+        await relaunched.restoreSession()
+        #expect(relaunched.state == .signedOut)
+        #expect(reported.withLock { $0 } == [id])
+    }
+
     @Test func switchesBetweenServers() async throws {
         let harness = try Harness()
         let manager = harness.makeManager()

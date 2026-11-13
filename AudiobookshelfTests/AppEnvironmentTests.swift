@@ -132,7 +132,8 @@ struct TestDownloads {
 
             #expect(environment.accounts != nil)
             #expect(environment.downloads == nil)
-            #expect(environment.accounts?.credentialsRemoved == nil)
+            // Only Spotlight's recent items are deleted on a removal (RecentItemsDonorTests).
+            #expect(environment.accounts?.credentialsRemoved != nil)
             // A committed removal still deletes the saved play queue (PlaybackQueueWiringTests).
             #expect(environment.accounts?.connectionRemoved != nil)
 

@@ -430,6 +430,7 @@ public final class AccountManager {
             guard isCurrent(operation) else { return }
             restoreFailed(chosen, error: error)
         }
+        if let chosen, isCurrent(operation), state == .signedOut { restoreSignedOut?(chosen.id) }
     }
 
     /// Makes another saved connection active, as ``restoreSession()`` does, and marks it used
@@ -668,6 +669,11 @@ public final class AccountManager {
     /// session's end may be a switch. Also for a connection being removed, whose Keychain delete
     /// may still fail, so ``credentialsRemoved`` isn't called; the app serializes the two cleanups.
     @ObservationIgnored public var credentialsExpired: (@MainActor (UUID) -> Void)?
+
+    /// Called when ``restoreSession()`` ends signed out with the connection it chose: its saved
+    /// session is missing or unreadable, or the server rejected it or its version. Not when there
+    /// was nothing to restore, or it's offline. The app deletes the connection's Spotlight items there.
+    @ObservationIgnored public var restoreSignedOut: (@MainActor (UUID) -> Void)?
 
     /// Called when a sign-in saves a session over a connection's saved one, active or not, even if
     /// the sign-in is then superseded: the transfers under way and the resume data still carry the
