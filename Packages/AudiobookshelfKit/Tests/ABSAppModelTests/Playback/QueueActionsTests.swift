@@ -298,6 +298,41 @@ struct QueueActionsTests {
         #expect(queue.items.map(\.id) == ["c|"])
     }
 
+    /// The play-all's own play began the start: the generation advanced once since ``beginPlayAll()``.
+    @Test func thePlayAllsOwnStartReplacesTheQueue() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        scope.control.phase = .idle
+        let request = queue.beginPlayAll()
+        scope.control.startGeneration += 1
+        scope.control.phase = .loaded
+
+        #expect(await queue.replace(with: [item("b")], afterStarting: started, request: request))
+        #expect(queue.items.map(\.id) == ["b|"])
+    }
+
+    /// The player is stopped and the same media started again while the play-all's play is still returning (the
+    /// scope's Now Playing claim awaits after the start), so before the replace begins: the restart's load doesn't
+    /// replace the queue, whether the play-all joined a pending start or began its own.
+    @Test(arguments: [false, true])
+    func aStopAndRestartBeforeTheReplaceBeginsKeepsThePreviousQueue(ownStart: Bool) async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        scope.control.phase = ownStart ? .idle : .starting
+        let request = queue.beginPlayAll()
+        if ownStart {
+            scope.control.startGeneration += 1
+            scope.control.phase = .loaded
+        }
+        scope.control.phase = .idle
+        scope.control.mediaKey = nil
+        scope.control.startGeneration += 1
+        scope.control.mediaKey = started
+        scope.control.startGeneration += 1
+        scope.control.phase = .loaded
+
+        #expect(!(await queue.replace(with: [item("b")], afterStarting: started, request: request)))
+        #expect(queue.items.map(\.id) == ["x|"])
+    }
+
     @Test func aPendingStartThatNeverLoadsTimesOut() async throws {
         let (scope, queue, started) = try startedScope("a", items: [item("x")])
         scope.control.phase = .starting

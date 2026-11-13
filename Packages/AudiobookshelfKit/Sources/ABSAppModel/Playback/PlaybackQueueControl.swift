@@ -64,15 +64,16 @@ public final class PlaybackQueueControl: PlaybackQueueReading, PlayAllQueueing {
 
     public func beginPlayAll() -> PlayAllRequest {
         playAllRequests += 1
-        return PlayAllRequest(id: playAllRequests)
+        return PlayAllRequest(id: playAllRequests, startGeneration: scope?.playback.startGeneration ?? 0)
     }
 
     /// Replaces the queue with `items`, in order, once the start of `started` has succeeded (play-all, #354): it is
     /// the loaded media, without an error. A start still pending (`.starting`, as when another screen began it and
     /// the player's `play` returned at once) is waited for, checking every ``startPollInterval`` for up to
-    /// ``startTimeout``. Only the start under way when this is called counts (its
-    /// ``PlayerPlaybackControlling/startGeneration``): not one begun after a stop, even of the same media. The
-    /// current media isn't queued (``isCurrent(_:)``).
+    /// ``startTimeout``. Only the start the play-all's own play joined or began counts: the one under way at
+    /// ``beginPlayAll()``, or the next (``PlayerPlaybackControlling/startGeneration`` advanced at most once since),
+    /// held from here on. Not one begun after a stop, even of the same media, nor one begun while the play returned.
+    /// The current media isn't queued (``isCurrent(_:)``).
     ///
     /// - Returns: `false`, leaving the queue as it was, when a newer ``beginPlayAll()`` has begun, `started` is
     ///   another connection's, the start failed, was cancelled, timed out, stopped or was replaced by another start,
@@ -81,7 +82,8 @@ public final class PlaybackQueueControl: PlaybackQueueReading, PlayAllQueueing {
     public func replace(with items: [QueueItem], afterStarting started: MediaKey, request: PlayAllRequest) async
         -> Bool
     {
-        guard started.serverConnectionID == serverConnectionID, let generation = scope?.playback.startGeneration
+        guard started.serverConnectionID == serverConnectionID, let generation = scope?.playback.startGeneration,
+            (0...1).contains(generation - request.startGeneration)
         else { return false }
         let deadline = ContinuousClock.now + startTimeout
         while request.id == playAllRequests, let playback = scope?.playback, playback.startGeneration == generation,

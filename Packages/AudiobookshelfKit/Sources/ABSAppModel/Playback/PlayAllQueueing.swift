@@ -5,9 +5,12 @@ import Foundation
 /// One play-all (#354) on a session's queue. Only the newest one may replace the queue.
 public struct PlayAllRequest: Sendable, Hashable {
     public let id: Int
+    /// The player's ``PlayerPlaybackControlling/startGeneration`` when the request began, before its play.
+    public let startGeneration: Int
 
-    public init(id: Int) {
+    public init(id: Int, startGeneration: Int = 0) {
         self.id = id
+        self.startGeneration = startGeneration
     }
 }
 
