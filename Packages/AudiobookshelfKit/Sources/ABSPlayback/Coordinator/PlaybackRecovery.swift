@@ -160,7 +160,8 @@ final class PlaybackRecovery {
     func recover(from failure: PlaybackFailure, generation: Int, wasPlaying: Bool) {
         guard let host else { return }
         if isRunning, var episode, generation == attemptGeneration || episode.generation == generation {
-            // The attempt in flight failed; its run reads the cause when the attempt returns.
+            // The attempt in flight, or the backoff before it, failed: its run reads the cause before
+            // the attempt or when the attempt returns.
             episode.cause = .failure(failure)
             episode.failedDuringAttempt = true
             self.episode = episode
@@ -289,6 +290,9 @@ final class PlaybackRecovery {
                 return giveUp(.recoveryExhausted, host)
             }
             guard isCurrent(run, host) else { return }
+            // A failure during the backoff (a decode error's fallback, a 401's refresh, a final
+            // error) may call for another step: start over, with that step's budget and backoff.
+            if let latest = self.episode, self.step(for: latest, session: session) != step { continue }
             switch step {
             case .surface: return
             case .reseek:

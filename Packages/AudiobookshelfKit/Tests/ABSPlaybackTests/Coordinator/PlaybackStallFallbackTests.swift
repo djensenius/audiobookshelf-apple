@@ -121,6 +121,48 @@ struct PlaybackStallFallbackTests {
         #expect(failedEvents == 1)
     }
 
+    enum FailureDuringBackoff: CaseIterable {
+        /// A decode error on direct play: the HLS fallback.
+        case decodeOnDirectPlay
+        /// A decode error on HLS: final.
+        case decodeOnHLS
+        /// A 401: the one refresh, then a rebuild.
+        case unauthorized
+    }
+
+    /// The step a stall's backoff was for is not the one a failure during it needs.
+    @Test(arguments: FailureDuringBackoff.allCases)
+    func aFailureDuringAStallsBackoffTakesItsOwnStep(failure: FailureDuringBackoff) async {
+        h.recoverySleep.isManual = true
+        if failure == .decodeOnHLS { service.state.withLock { _ = $0.transcodeSessions.insert("A-1") } }
+        await playAt600()
+        let seeks = engine.seeks.count
+        let error = Self.failure(failure == .unauthorized ? .http(status: 401) : .decode)
+
+        stall()
+        await settle { h.recoverySleep.waitingCount == 1 }
+        engine.fail(.itemFailed(trackIndex: 0, error))
+        h.recoverySleep.fireOldest()
+
+        if failure == .decodeOnHLS {
+            await settle { coordinator.error != nil }
+            #expect(coordinator.error == .playback(error))
+            #expect(h.recoverySleep.durations == [.milliseconds(500)])
+            #expect(service.starts == ["A"])
+        } else {
+            // The new step's own backoff, then its rebuild.
+            await settle { h.recoverySleep.waitingCount == 1 }
+            h.recoverySleep.fireOldest()
+            await settle { service.starts.count == 2 && coordinator.isPlaying }
+            #expect(h.recoverySleep.durations == [.milliseconds(500), .seconds(1)])
+            #expect(service.forcedTranscodes == [false, failure == .decodeOnDirectPlay])
+            #expect(service.state.withLock { $0.refreshes } == (failure == .unauthorized ? 1 : 0))
+            #expect(coordinator.error == nil)
+        }
+        // Not the stall's re-seek.
+        #expect(engine.seeks.count == seeks)
+    }
+
     // MARK: - Direct play to HLS fallback
 
     @Test(arguments: [PlaybackFailure.Kind.decode, .unsupported])
