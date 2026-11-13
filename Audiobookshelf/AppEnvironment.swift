@@ -136,6 +136,8 @@ final class AppEnvironment {
         let widgetSnapshots = Self.makeWidgetSnapshotWriter(
             accounts: accounts, lifecycle: lifecycle, storeLocation: storeLocation)
         lifecycle.register(widgetSnapshots, stage: .connect)
+        // The app's one player, across every account's session: its item and play state.
+        widgetSnapshots.follow(playback.player)
         self.widgetSnapshots = widgetSnapshots
     }
 }
