@@ -223,6 +223,7 @@
   "MessageAuthorsListEmpty": "No authors",
   "MessageAuthorsListLoadFailed": "Couldn't load the authors.",
   "MessageAutoSleepTimerWindowEmpty": "The start and end times are the same, so the auto sleep timer never starts.",
+  "MessageCarPlaySignedOut": "Sign in to Audiobookshelf on your iPhone to listen here.",
   "MessageCellularSettingsHelp": "These settings also apply when Low Data Mode is on.",
   "MessageCellularSettingsHelpMac": "On a Mac, these settings apply to personal hotspots and other metered connections, and when Low Data Mode is on.",
   "MessageCollectionDetailLoadFailed": "Couldn't load this collection.",
