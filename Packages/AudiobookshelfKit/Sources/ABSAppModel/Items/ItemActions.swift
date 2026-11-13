@@ -96,6 +96,10 @@ extension APIClient: ProgressWriting {
 ///   was committed, `localSync` (``ItemActionLocalSync``) updates the local playback database,
 ///   still in the key's queue, so the syncer's pending values can't undo the change. It isn't
 ///   called for a failed or rolled-back action, or for hiding; its errors are logged, not thrown.
+/// - After that, an action that changed the cache reports its media to
+///   ``ProgressCache/onChange`` again (``ProgressCache/reportSettled(_:episodeID:token:)``), so
+///   what the optimistic change prompted (auto-advance's preparation, #160) runs again against
+///   the server's and the local database's new progress.
 @MainActor
 public final class ProgressItemActions: ItemActionPerforming {
     private struct Tail {
@@ -168,6 +172,7 @@ public final class ProgressItemActions: ItemActionPerforming {
         try await enqueue(target) { session in
             guard try await self.discard(target, session: session) else { return }
             await self.syncLocally { try await $0.didDiscard(target) }
+            self.cache.reportSettled(target.libraryItemID, episodeID: target.episodeID, token: session)
         }
     }
 
@@ -197,8 +202,9 @@ public final class ProgressItemActions: ItemActionPerforming {
         optimistic: @escaping @MainActor (MediaProgress?, Date) -> MediaProgress?
     ) async throws {
         try await enqueue(target) { session in
-            try await self.perform(target, update: update, optimistic: optimistic, session: session)
+            let changed = try await self.perform(target, update: update, optimistic: optimistic, session: session)
             await self.syncLocally(local)
+            if changed { self.cache.reportSettled(target.libraryItemID, episodeID: target.episodeID, token: session) }
         }
     }
 
@@ -240,10 +246,11 @@ public final class ProgressItemActions: ItemActionPerforming {
         try result.get()
     }
 
+    /// Returns whether the cache took an optimistic value.
     private func perform(
         _ target: ItemActionTarget, update: MediaProgressUpdate,
         optimistic: (MediaProgress?, Date) -> MediaProgress?, session: ProgressCache.SessionToken
-    ) async throws {
+    ) async throws -> Bool {
         guard cache.isCurrent(session) else { throw CancellationError() }
         let before = cache.progress(libraryItemID: target.libraryItemID, episodeID: target.episodeID)
         let applied = optimistic(before, now()).flatMap { cache.applyOptimistic($0, token: session) }
@@ -258,6 +265,7 @@ public final class ProgressItemActions: ItemActionPerforming {
         }
         guard cache.isCurrent(session) else { throw CancellationError() }
         if let applied { cache.commitOptimistic(applied, token: session) }
+        return applied != nil
     }
 
     /// Returns whether the server's progress is gone; `false` when there was nothing to discard.

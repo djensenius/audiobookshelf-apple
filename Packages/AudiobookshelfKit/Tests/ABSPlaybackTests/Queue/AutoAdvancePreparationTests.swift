@@ -205,6 +205,23 @@ struct AutoAdvancePreparationTests {
         #expect(progressReads == [a.key("A"), a.key("B"), a.key("B")])
     }
 
+    /// #554: e2 was finished elsewhere while this device was offline. The connection change
+    /// fetches the podcast's episodes again, so the end advances to e3 on that preparation.
+    @Test func connectionChangeFetchesTheListingAgain() async {
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e2"])
+        let listings = a.episodes.fetches
+
+        a.advancer.connectionDidChange()
+        await a.advancer.waitForPreparation()
+
+        #expect(a.episodes.fetches == listings + 1)
+        let before = a.fetches
+        #expect(await a.finish() == before)
+        #expect(a.coordinator.mediaKey == a.key("P", episode: "e3"))
+    }
+
     /// A failed listing fetch prepares nothing; the end tries once more, then stays.
     @Test func listingFailureStaysAtEnd() async {
         a.episodes.state.withLock { $0.error = .notFound }

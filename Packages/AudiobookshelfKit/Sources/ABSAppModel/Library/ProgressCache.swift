@@ -87,7 +87,8 @@ public final class ProgressCache {
 
     /// Called after an entry's progress is stored, replaced or removed, however it changed (an
     /// apply, a seed, an optimistic action or its rollback), with its item and episode; not for
-    /// ``clear()``, which ends the account's session. The app forwards it to playback's
+    /// ``clear()``, which ends the account's session. An optimistic action that succeeds reports
+    /// again once settled (``reportSettled(_:episodeID:token:)``). The app forwards it to playback's
     /// auto-advance, which prepares the next item again when it concerns it (#160).
     public var onChange: (@MainActor (_ libraryItemID: String, _ episodeID: String?) -> Void)?
     private var isClearing = false
@@ -365,6 +366,16 @@ public final class ProgressCache {
         entry.owner = self
         entries[key] = entry
         return entry
+    }
+
+    /// Reports `libraryItemID` and `episodeID` to ``onChange`` again once an action that changed
+    /// them optimistically has reached the server and the local database
+    /// (``ProgressItemActions``). The optimistic change was reported before either had it, so
+    /// what it prompted may have read the old progress, and committing changes no value. Nothing
+    /// once `token`'s session has ended.
+    func reportSettled(_ libraryItemID: String, episodeID: String?, token: SessionToken) {
+        guard isCurrent(token) else { return }
+        onChange?(libraryItemID, episodeID)
     }
 
     fileprivate func valueDidChange(_ progress: MediaProgress) {

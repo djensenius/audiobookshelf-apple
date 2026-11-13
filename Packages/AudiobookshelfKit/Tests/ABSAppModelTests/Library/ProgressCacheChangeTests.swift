@@ -1,3 +1,4 @@
+import ABSAPI
 import ABSCore
 import Foundation
 import Testing
@@ -89,6 +90,32 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
         #expect(recorder.changes == [Change(item: "book", episode: nil), Change(item: "book", episode: nil)])
     }
 
+    /// An action reports its media again once the server and the local database have it, so a
+    /// preparation the optimistic report started against the old progress runs again (#554); a
+    /// failed one only reports its rollback.
+    @Test func aSucceededActionReportsAgainOnceSettled() async throws {
+        let cache = ProgressCache()
+        cache.apply(progress("podcast", episode: "e2", currentTime: 5, lastUpdate: 10))
+        let log = Locked<[String]>([])
+        cache.onChange = { item, episode in log.value.append("change \(item) \(episode ?? "-")") }
+        let writer = LoggingWriter(log: log)
+        let actions = ProgressItemActions(cache: cache, writer: writer, localSync: LoggingSync(log: log))
+        let target = ItemActionTarget(libraryItemID: "podcast", episodeID: "e2", duration: 60)
+
+        try await actions.markFinished(target)
+        #expect(log.value == ["change podcast e2", "write", "local finished", "change podcast e2"])
+
+        log.value = []
+        try await actions.discardProgress(target)
+        #expect(log.value == ["change podcast e2", "delete", "local discard", "change podcast e2"])
+
+        log.value = []
+        cache.apply(progress("podcast", episode: "e2", currentTime: 5, lastUpdate: 20))
+        writer.fails.value = true
+        await #expect(throws: LoggingWriter.Failure.self) { try await actions.markFinished(target) }
+        #expect(log.value == ["change podcast e2", "change podcast e2", "write", "change podcast e2"])
+    }
+
     /// Clearing ends the account's session; it reports nothing.
     @Test func clearingReportsNothing() {
         let cache = ProgressCache()
@@ -100,4 +127,30 @@ private func progress(_ itemID: String, episode: String? = nil, currentTime: Dou
         #expect(cache.progress(libraryItemID: "book") == nil)
         #expect(recorder.changes.isEmpty)
     }
+}
+
+/// Logs each server request into the shared log; fails them while `fails` is set.
+private struct LoggingWriter: ProgressWriting {
+    struct Failure: Error {}
+
+    let log: Locked<[String]>
+    let fails = Locked(false)
+
+    func writeProgress(itemID: String, episodeID: String?, update: MediaProgressUpdate) async throws {
+        log.value.append("write")
+        if fails.value { throw Failure() }
+    }
+
+    func progressID(itemID: String, episodeID: String?) async throws -> String? { "mp-\(itemID)" }
+
+    func deleteProgress(id: String) async throws { log.value.append("delete") }
+}
+
+/// Logs each local database update into the shared log.
+private struct LoggingSync: ItemActionLocalSync {
+    let log: Locked<[String]>
+
+    func didMarkFinished(_ target: ItemActionTarget) async throws { log.value.append("local finished") }
+    func didMarkNotFinished(_ target: ItemActionTarget) async throws { log.value.append("local not finished") }
+    func didDiscard(_ target: ItemActionTarget) async throws { log.value.append("local discard") }
 }

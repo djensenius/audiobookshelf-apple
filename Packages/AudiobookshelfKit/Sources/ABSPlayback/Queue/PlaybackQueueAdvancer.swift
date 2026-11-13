@@ -112,10 +112,11 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     }
 
     /// The network path or the connection's reachability changed: checks the streaming policy
-    /// and fetches the next item's progress again.
+    /// and fetches the podcast's episodes and the next item's progress again, since either may
+    /// have changed elsewhere while this device was offline.
     public func connectionDidChange() {
         guard current != nil else { return }
-        recompute()
+        recompute(refetchListing: true)
     }
 
     // MARK: NextItemProvider
