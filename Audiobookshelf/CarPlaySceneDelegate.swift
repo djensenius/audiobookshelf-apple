@@ -177,11 +177,13 @@
 
         /// Pushes Now Playing once `play` has started; a failed or blocked play shows its alert
         /// instead, and a discarded one nothing. A play from a connection that has since
-        /// disconnected pushes nothing, even onto a newer connection.
+        /// disconnected pushes nothing, even onto a newer connection: the waiter checks the
+        /// connection when the play ends, and the push checks it's still the controller the tap
+        /// came from when it runs, which can be after a disconnect and reconnect.
         private func showNowPlaying(after play: Task<CarPlayPlayOutcome, Never>) {
-            guard let wait = nowPlayingWaiter.wait(for: play) else { return }
+            guard let interfaceController, let wait = nowPlayingWaiter.wait(for: play) else { return }
             Task { [weak self] in
-                guard await wait.value, let interfaceController = self?.interfaceController else { return }
+                guard await wait.value, let self, self.interfaceController === interfaceController else { return }
                 let nowPlaying = CPNowPlayingTemplate.shared
                 guard !interfaceController.templates.contains(where: { $0 === nowPlaying }) else { return }
                 interfaceController.pushTemplate(nowPlaying, animated: true, completion: nil)

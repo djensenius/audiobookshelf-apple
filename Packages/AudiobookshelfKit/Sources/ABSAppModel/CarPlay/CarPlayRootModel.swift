@@ -247,7 +247,8 @@ public final class CarPlayRootModel {
             // Once it ends, discarded or not, a tap starts afresh.
             defer { if pendingPlay?.origin.operation == origin.operation { pendingPlay = nil } }
             guard origin.operation == operation, isCurrent(origin), isCurrent(blocked.origin),
-                playback.error == blocked.error
+                playback.error == blocked.error, let key = Self.blockedKey(blocked.error),
+                Self.isItem(key, of: blocked.origin)
             else { return CarPlayPlayOutcome.discarded }
             await playback.confirmMeteredStreaming()
             return finish(origin, threw: false)
@@ -308,10 +309,13 @@ public final class CarPlayRootModel {
     /// The outcome of an operation that has returned, by the player's error; a failure or block
     /// is kept for ``alert``. Discarded once a later operation started or the account's session
     /// changed: the playback may then be unbound (no error, which isn't a start) or another
-    /// account's.
+    /// account's. Also discarded when the error is a streaming block for another item, as when
+    /// the phone played something else meanwhile: that block is the phone's to answer, and Stream
+    /// here would authorize an item the driver didn't tap.
     private func finish(_ origin: Origin, threw: Bool) -> CarPlayPlayOutcome {
         guard origin.operation == operation, isCurrent(origin) else { return .discarded }
         let error = playback?.error
+        if let key = Self.blockedKey(error), !Self.isItem(key, of: origin) { return .discarded }
         guard error != nil || threw else { return .started }
         let message = error.map(PlayerErrorMessage.init) ?? .playbackFailed
         failedPlay = FailedPlay(origin: origin, error: error, message: message)
@@ -319,5 +323,19 @@ public final class CarPlayRootModel {
         case .streamingNeedsConfirmation, .streamingNotAllowed: return .blocked
         default: return .failed
         }
+    }
+
+    /// The item a streaming block is for; `nil` for other errors, which carry no item.
+    private static func blockedKey(_ error: PlaybackCoordinatorError?) -> MediaKey? {
+        switch error {
+        case .streamingNeedsConfirmation(_, let key), .streamingNotAllowed(_, let key): key
+        default: nil
+        }
+    }
+
+    /// Whether `key` is the item `origin` played, on its account's server.
+    private static func isItem(_ key: MediaKey, of origin: Origin) -> Bool {
+        origin.action == .play(itemID: key.libraryItemId, episodeID: key.episodeId)
+            && key.serverConnectionID == origin.identity.connectionID
     }
 }

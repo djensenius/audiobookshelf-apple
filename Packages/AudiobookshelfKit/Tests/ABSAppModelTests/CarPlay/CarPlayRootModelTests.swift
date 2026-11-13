@@ -362,6 +362,37 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
         }
     }
 
+    /// #544: a streaming block for another item (another book, or the same one on another server)
+    /// that the player ends on while CarPlay's play is pending, as when the phone played it
+    /// meanwhile, isn't this play's: it's discarded, with no prompt and nothing to confirm, so
+    /// Stream can't authorize an item the driver didn't tap. The play's own block is still its
+    /// outcome.
+    @Test(arguments: [true, false], [CarPlayRootModelTests.frankensteinKey, CarPlayRootModelTests.sherlockOnServerB])
+    func aBlockOnAnotherItemIsntThePlaysOwn(asks: Bool, otherKey: MediaKey) async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            let model = harness.model()
+            await model.update()
+            let row = try #require(tabRows(model.content).first)
+
+            func block(_ key: MediaKey) -> PlaybackCoordinatorError {
+                asks ? .streamingNeedsConfirmation(.cellular, key: key) : .streamingNotAllowed(.cellular, key: key)
+            }
+            harness.playError = block(otherKey)
+            #expect(await model.play(row)?.value == .discarded)
+            #expect(model.alert == nil)
+            #expect(model.confirmStreaming() == nil)
+            #expect(harness.playback.calls.isEmpty)
+
+            // Negative control: the play's own block is its outcome.
+            harness.playError = block(Self.sherlockKey)
+            #expect(await model.play(row)?.value == .blocked)
+            #expect(model.alert == (asks ? .streamingNeedsConfirmation : .streamingNotAllowed))
+        }
+    }
+
     /// #544: Cancel declines the block, which clears the player's error and the prompt.
     @Test func aBlockedPlayDeclinedClearsThePrompt() async throws {
         try await withLibrarySettings { settings in
@@ -597,7 +628,9 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
 
     private static let sherlockKey = MediaKey(
         serverConnectionID: carAccountA.connectionID, libraryItemId: SampleLibrary.sherlock.id)
-    private static let frankensteinKey = MediaKey(
+    nonisolated private static let sherlockOnServerB = MediaKey(
+        serverConnectionID: carAccountB.connectionID, libraryItemId: SampleLibrary.sherlock.id)
+    nonisolated private static let frankensteinKey = MediaKey(
         serverConnectionID: carAccountA.connectionID, libraryItemId: SampleLibrary.frankenstein.id)
     private static let needsConfirmation = PlaybackCoordinatorError.streamingNeedsConfirmation(
         .cellular, key: sherlockKey)
