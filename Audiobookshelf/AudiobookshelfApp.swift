@@ -37,6 +37,7 @@ struct AudiobookshelfApp: App {
             .environment(\.windowRoute, $windowRoute)
             .environment(\.downloadedEbookFile, downloadedEbookFile)
             .environment(\.downloadAccess, environment.downloads?.access)
+            .environment(\.currentPlayback, environment.playback.current)
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {
