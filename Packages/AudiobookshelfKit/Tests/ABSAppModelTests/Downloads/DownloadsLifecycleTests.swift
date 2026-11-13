@@ -596,6 +596,34 @@ struct DownloadsLifecycleTests {
         #expect(calls.all == pauses(recordsA) + ["quiesce \(connectionA)"])
     }
 
+    /// New credentials over a saved session: the records are paused and the transfers and resume
+    /// data with the old ones are gone (the quiesce) before the paused records resume. Another
+    /// connection's downloads are left alone.
+    @Test func replacedCredentialsPauseQuiesceThenResume() async {
+        let lifecycle = makeLifecycle()
+
+        lifecycle.credentialsReplaced(connectionA)
+        // Waits for the cleanup.
+        await lifecycle.sessionDidStart(context(connectionA))
+
+        let stopped = pauses(recordsA) + ["quiesce \(connectionA)"]
+        let all = calls.all
+        #expect(Array(all.prefix(stopped.count)) == stopped)
+        let resumed = recordsA.filter { [.queued, .downloading].contains($0.state) }.map { "resume \($0.id) since 7" }
+        #expect(all.dropFirst(stopped.count).sorted() == resumed.sorted())
+    }
+
+    /// A cleanup that didn't finish leaves the records paused: its retry doesn't resume them.
+    @Test func replacedCredentialsResumeNothingIfTheQuiesceFails() async {
+        let lifecycle = makeLifecycle()
+        await engine.failQuiesces(1)
+
+        lifecycle.credentialsReplaced(connectionA)
+        await lifecycle.sessionDidStart(context(connectionA))
+
+        #expect(calls.all == pauses(recordsA) + ["quiesce \(connectionA)"])
+    }
+
     /// Once a session of the connection starts, its downloads are that session's.
     @Test func unfinishedCleanupIsDroppedOnceTheConnectionSignsInAgain() async {
         let lifecycle = makeLifecycle()

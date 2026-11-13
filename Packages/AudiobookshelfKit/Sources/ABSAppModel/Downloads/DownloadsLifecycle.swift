@@ -59,7 +59,9 @@ extension DownloadManager: DownloadsLifecycleManager {}
 ///   keeps them running: the other connection's credentials stay saved. A removal does the same
 ///   as a sign-out, but in ``connectionRemoved(_:)``, once the credentials are deleted. An
 ///   expiry does the same in ``connectionExpired(_:)``, whatever the session's end says (a
-///   switch can be under way, or there may be no session of it, during a restore).
+///   switch can be under way, or there may be no session of it, during a restore). A sign-in
+///   that replaces a connection's saved session does the same in ``credentialsReplaced(_:)``,
+///   then resumes the records it paused, with the new credentials.
 /// - A cleanup runs in its own task, so it outlives the session teardown's time budget; a new
 ///   session of the same connection waits for it in ``sessionDidStart(_:)``, so it can't pause
 ///   or discard what that session starts. A cleanup that couldn't stop the transfers (the engine
@@ -209,6 +211,15 @@ public final class DownloadsLifecycle: SessionParticipant {
         _ = startCleanup(of: connectionID)
     }
 
+    /// Stops a connection's downloads as ``connectionExpired(_:)`` does, then resumes the records
+    /// it paused, so they start again with the new credentials. Call it once a sign-in has saved
+    /// them over the connection's saved session (``AccountManager/credentialsReplaced``). None is
+    /// resumed if the cleanup didn't finish (its retry keeps them paused, for the user to resume)
+    /// or a quiesce of the connection began since.
+    public func credentialsReplaced(_ connectionID: UUID) {
+        _ = startCleanup(of: connectionID, resuming: true)
+    }
+
     public func sessionDidStart(_ context: SessionContext) async {
         let id = context.identity.connectionID
         connectionID = id
@@ -264,7 +275,7 @@ public final class DownloadsLifecycle: SessionParticipant {
 
     /// Starts the cleanup of `connectionID` after its previous one, registered before this
     /// returns, so a session of it that starts later waits for it.
-    private func startCleanup(of connectionID: UUID) -> Task<Void, Never> {
+    private func startCleanup(of connectionID: UUID, resuming: Bool = false) -> Task<Void, Never> {
         let records = records
         let manager = manager
         let engine = engine
@@ -278,6 +289,7 @@ public final class DownloadsLifecycle: SessionParticipant {
             // policy restart has paused for now is skipped, but its resume is refused once this began.
             // The pauses run at once, so a slow one doesn't keep the others' transfers running.
             let paused = Mutex(true)
+            let pausedIDs = Mutex<[UUID]>([])
             let quiesced = await engine.quiesce(connectionID: connectionID) {
                 do {
                     let stopping = try await records(connectionID).filter {
@@ -287,7 +299,9 @@ public final class DownloadsLifecycle: SessionParticipant {
                         for record in stopping {
                             group.addTask {
                                 do {
-                                    _ = try await manager.pause(recordID: record.id)
+                                    if try await manager.pause(recordID: record.id) {
+                                        pausedIDs.withLock { $0.append(record.id) }
+                                    }
                                 } catch {
                                     paused.withLock { $0 = false }
                                     Log.downloads.error(
@@ -306,6 +320,7 @@ public final class DownloadsLifecycle: SessionParticipant {
             }
             if quiesced, paused.withLock({ $0 }) {
                 self.unfinishedCleanups.remove(connectionID)
+                if resuming { await Self.resume(pausedIDs.withLock { $0 }, engine: engine, manager: manager) }
             } else {
                 Log.downloads.error("Couldn't stop a signed-out server's downloads; will retry")
                 self.unfinishedCleanups.insert(connectionID)
@@ -317,6 +332,22 @@ public final class DownloadsLifecycle: SessionParticipant {
             if self.cleanups[connectionID] == cleanup { self.cleanups[connectionID] = nil }
         }
         return cleanup
+    }
+
+    /// Resumes `recordIDs` unless a quiesce of their connection began since this cleanup's ended.
+    private static func resume(
+        _ recordIDs: [UUID], engine: any DownloadsLifecycleEngine, manager: any DownloadsLifecycleManager
+    ) async {
+        let generation = await engine.quiesceGeneration()
+        for id in recordIDs {
+            do {
+                _ = try await manager.resume(recordID: id, unlessQuiescedSince: generation)
+            } catch {
+                Log.downloads.error(
+                    "Couldn't resume a download after a new sign-in: \(Log.redact(String(describing: error)), privacy: .public)"
+                )
+            }
+        }
     }
 
     /// How long a wait for a cleanup lasts before it's logged.
