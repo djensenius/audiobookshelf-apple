@@ -1,5 +1,8 @@
 import ABSAPI
+import ABSAppModel
 import ABSCore
+import ABSPlayback
+import AVFoundation
 import Foundation
 import Testing
 
@@ -129,6 +132,73 @@ struct FixtureServerTests {
         #expect(
             URLSessionConfiguration.absConnection().protocolClasses?.contains { $0 == FixtureURLProtocol.self } != true)
     }
+
+    /// Pride and Prejudice plays (#46): each `/play` opens a new session, which a lookup, `/sync`
+    /// and `/close` accept, and its direct-play track resolves to the bundled silent audio.
+    @Test func playsTheSampleBookFromTheBundledAudio() async throws {
+        let services = AccountPlaybackServices(
+            serverConnectionID: UUID(), client: client, features: ServerFeatures(version: ServerVersion(2, 26, 0)),
+            deviceIdentifiers: FixtureDevice(), trackURLOverride: { FixtureServer.trackURL($0) })
+
+        let session = try await services.startSession(itemID: SampleLibrary.prideAndPrejudice.id, episodeID: nil)
+        let next = try await services.startSession(itemID: SampleLibrary.prideAndPrejudice.id, episodeID: nil)
+        #expect(session.id != FixtureServer.sessionPlaceholder)
+        #expect(next.id != session.id)
+        #expect(session.playMethod == .directPlay)
+        #expect(session.displayTitle == "Pride and Prejudice")
+        #expect(session.chapters.last?.end == session.duration)
+        #expect(try await client.send(SessionEndpoints.openSession(id: session.id)).id == session.id)
+        #expect(await services.sessionStatus(id: session.id) == .alive)
+        let report = try #require(PlaybackSyncReport(currentTime: 5, timeListened: 5, duration: 60))
+        try await services.syncSession(id: session.id, report: report)
+        try await services.closeSession(id: session.id, report: nil)
+
+        let stream = try await services.resolveStream(for: session)
+        let audio = try #require(Bundle.main.url(forResource: "fixture-silence", withExtension: "m4a"))
+        #expect(stream.plan.kind == .directPlay)
+        #expect(stream.urls == [audio])
+        let size = try #require(try audio.resourceValues(forKeys: [.fileSizeKey]).fileSize)
+        #expect(size < 50_000)
+        let asset = AVURLAsset(url: audio)
+        #expect(try await asset.load(.isPlayable))
+        let duration = try await asset.load(.duration).seconds
+        #expect(abs(duration - session.duration) < 0.5)
+    }
+
+    /// Only a fixture session's direct-play track plays the bundled audio: another server's track,
+    /// an HLS playlist and other fixture paths are left alone, and only a fixture launch's scopes
+    /// get the override.
+    @Test func redirectsOnlyFixtureDirectPlayTracks() throws {
+        let fixtureTrack = try #require(URL(string: "\(FixtureServer.address)/public/session/s1/track/1"))
+        let others = [
+            "https://abs.example.com/public/session/s1/track/1", "\(FixtureServer.address)/hls/s1/output.m3u8",
+            "\(FixtureServer.address)/api/items/li_pride/file/11",
+        ].compactMap { URL(string: $0) }
+        #expect(others.count == 3)
+        #expect(others.map { FixtureServer.trackURL($0) } == others)
+        #expect(FixtureServer.trackURL(fixtureTrack).isFileURL)
+
+        let override = try #require(AppPlayback.fixtureTrackURL(arguments: [FixtureServer.launchArgument]))
+        #expect(override(fixtureTrack) == FixtureServer.trackURL(fixtureTrack))
+        let hasOverrideWithoutTheArgument = AppPlayback.fixtureTrackURL(arguments: []) != nil
+        #expect(!hasOverrideWithoutTheArgument)
+        // The test host isn't a fixture launch, so its scopes play the server's URLs.
+        let environment = FixtureServer.environment()
+        let request = PlaybackScopeRequest(
+            connectionID: UUID(), client: nil, features: nil, deviceIdentifiers: environment.deviceIdentifiers,
+            writer: try #require(environment.localProgress))
+        let configuration = AppPlayback.configuration(
+            for: request, settings: environment.settings,
+            policy: NetworkPolicy(monitor: NetworkMonitor(), settings: environment.settings),
+            engine: AudioEngine(audioSession: nil))
+        let hasOverride = configuration.trackURLOverride != nil
+        #expect(!hasOverride)
+    }
+}
+
+/// A fixed device identifier for fixture sessions.
+private struct FixtureDevice: DeviceIdentifying {
+    func deviceIdentifier() async -> String { "fixture-device" }
 }
 
 /// The fixture server accepts any token.
