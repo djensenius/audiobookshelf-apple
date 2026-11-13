@@ -37,6 +37,49 @@ private actor RotatedTokenProvider: TokenProvider {
     func expireSession(ifCurrent rejected: AuthTokens) -> Bool { false }
 }
 
+/// Shares each pair's refresh between the clients using it, as `ConnectionCredentials` does.
+private actor SharedRefreshTokenProvider: TokenProvider {
+    private var stored: AuthTokens? = AuthTokens(accessToken: "access-1", refreshToken: "refresh-1")
+    private var refreshes: [AuthTokens: Task<Bool, any Error>] = [:]
+    private let joins = Checkpoint()
+
+    /// Returns once a refresh has joined another client's.
+    nonisolated func joined() async {
+        await joins.reached()
+    }
+
+    func tokens() -> AuthTokens? { stored }
+
+    func replaceTokens(expected: AuthTokens, with new: AuthTokens) -> Bool {
+        guard stored == expected else { return false }
+        stored = new
+        return true
+    }
+
+    func expireSession(ifCurrent rejected: AuthTokens) -> Bool {
+        guard stored == rejected else { return false }
+        stored = nil
+        return true
+    }
+
+    func refreshTokens(_ tokens: AuthTokens, using refresh: @escaping @Sendable () async throws -> Void) async throws
+        -> Bool
+    {
+        if let running = refreshes[tokens] {
+            joins.pass()
+            return try await running.value
+        }
+        let task = Task {
+            defer { refreshes[tokens] = nil }
+            guard stored == tokens else { return false }
+            try await refresh()
+            return true
+        }
+        refreshes[tokens] = task
+        return try await task.value
+    }
+}
+
 /// Wraps an ``InMemoryTokenProvider`` and holds the `heldCall`th `tokens()` call until
 /// ``release()``, after taking its snapshot (or before, with `readsAfterRelease`). ``held()``
 /// returns once that call is holding. `heldCall: 0` never holds.
@@ -204,6 +247,28 @@ private func makeClient(_ server: StubServer, tokens: any TokenProvider) throws 
         #expect(other.didRefresh)
         #expect(try result.result.get() == OK(ok: true))
         #expect(!result.didRefresh)
+        #expect(server.requests(path: refreshPath).count == 1)
+    }
+
+    /// A refresh another client of a shared provider ran, which this request's refresh joined, is
+    /// this request's too, though this client's own lineage doesn't record it.
+    @Test func aRefreshJoinedFromAnotherClientIsTracked() async throws {
+        let refreshGate = StubGate()
+        let server = tokenServer(refresh: .json(refreshedJSON, gate: refreshGate))
+        let tokens = SharedRefreshTokenProvider()
+        let other = try makeClient(server, tokens: tokens)
+        let client = try makeClient(server, tokens: tokens)
+
+        let otherRequest = Task { await other.sendTrackingRefresh(Endpoint<OK>(.get, "/api/other")) }
+        await refreshGate.arrived()
+        let tracked = Task { await client.sendTrackingRefresh(Endpoint<OK>(.get, "/api/me")) }
+        await tokens.joined()
+        refreshGate.open()
+        let result = await tracked.value
+
+        #expect(await otherRequest.value.didRefresh)
+        #expect(try result.result.get() == OK(ok: true))
+        #expect(result.didRefresh)
         #expect(server.requests(path: refreshPath).count == 1)
     }
 

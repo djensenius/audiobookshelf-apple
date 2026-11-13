@@ -112,6 +112,9 @@ final class PlaybackRecovery {
     }
 
     private struct Episode {
+        /// Kept across seek takeovers and rebuilds; a new episode, after another item's failure or
+        /// after one ended, gets a new one.
+        let id: Int
         var generation: Int
         var cause: Cause
         var wantsPlay: Bool
@@ -130,6 +133,7 @@ final class PlaybackRecovery {
     private var episode: Episode?
     private var isRunning = false
     @ObservationIgnored private var token = 0
+    @ObservationIgnored private var lastEpisodeID = 0
     /// The generation of the rebuild in flight: failures at it are its new item's.
     @ObservationIgnored private var attemptGeneration: Int?
 
@@ -156,7 +160,9 @@ final class PlaybackRecovery {
             episode.playingSince = nil
             self.episode = episode
         } else {
-            episode = Episode(generation: generation, cause: .failure(failure), wantsPlay: wasPlaying)
+            lastEpisodeID += 1
+            episode = Episode(
+                id: lastEpisodeID, generation: generation, cause: .failure(failure), wantsPlay: wasPlaying)
         }
         // A run for an older generation (if any) is superseded.
         token += 1
@@ -235,7 +241,7 @@ final class PlaybackRecovery {
             cameBack = false
             var session = PlaybackSessionStatus.unknown
             if returned || needsSessionCheck(current) {
-                session = await checkSession(run, host)
+                session = await checkSession(host)
                 guard isCurrent(run, host) else { return }
             }
             guard let episode = self.episode else { return }
@@ -371,7 +377,7 @@ final class PlaybackRecovery {
                 giveUp(.recoveryExhausted, host)
                 return false
             case .returned:
-                let session = await checkSession(run, host)
+                let session = await checkSession(host)
                 guard isCurrent(run, host) else { return false }
                 if session == .unauthorized {
                     giveUp(.streamRejected, host)
@@ -413,11 +419,12 @@ final class PlaybackRecovery {
         }
     }
 
-    /// Looks up the session, charging a refresh its request made to the run's episode's one
-    /// refresh.
-    private func checkSession(_ run: Int, _ host: PlaybackRecoveryHost) async -> PlaybackSessionStatus {
+    /// Looks up the session, charging a refresh its request made to the episode's one refresh,
+    /// even if a user seek took the run over meanwhile; not to an episode that replaced it.
+    private func checkSession(_ host: PlaybackRecoveryHost) async -> PlaybackSessionStatus {
+        let episodeID = episode?.id
         let check = await host.checkSession()
-        if check.refreshedToken, isCurrent(run, host) { episode?.refreshed = true }
+        if check.refreshedToken, let episodeID, episode?.id == episodeID { episode?.refreshed = true }
         return check.status
     }
 

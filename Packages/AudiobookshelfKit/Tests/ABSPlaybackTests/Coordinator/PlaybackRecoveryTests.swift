@@ -252,6 +252,40 @@ struct PlaybackRecoveryTests {
         }
     }
 
+    /// A user seek that takes the run over while the lookup is held doesn't lose the lookup's
+    /// refresh: the episode stays, and so does the charge.
+    @Test(arguments: [true, false])
+    func aLookupRefreshHeldAcrossASeekIsCharged(lookupRefreshed: Bool) async {
+        h.recoverySleep.elapsesImmediately = true
+        await playAt600()
+        let gate = Gate()
+        service.state.withLock {
+            $0.sessionStatus = .alive
+            $0.sessionRefreshesToken = lookupRefreshed
+            $0.sessionGate = gate
+        }
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 503))))
+        await settle { service.state.withLock { $0.sessionLookups.count } == 1 }
+
+        #expect(await coordinator.seek(to: 1200) == 1200)
+        gate.open()
+        for _ in 0..<200 { await Task.yield() }
+        #expect(coordinator.error == nil)
+
+        engine.fail(.itemFailed(trackIndex: 0, Self.failure(.http(status: 401))))
+
+        if lookupRefreshed {
+            #expect(coordinator.error == .streamRejected)
+            for _ in 0..<200 { await Task.yield() }
+            #expect(service.state.withLock { $0.refreshes } == 0)
+            #expect(service.starts == ["A"])
+        } else {
+            await settle { service.starts.count == 2 }
+            #expect(service.state.withLock { $0.refreshes } == 1)
+            #expect(coordinator.error == nil)
+        }
+    }
+
     @Test func aFailedRefreshStopsWithoutARebuild() async {
         h.recoverySleep.elapsesImmediately = true
         await playAt600()
