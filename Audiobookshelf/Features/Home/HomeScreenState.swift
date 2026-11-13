@@ -127,6 +127,14 @@ struct HomeRefreshSchedule {
         return now.timeIntervalSince(loaded.date) >= Self.maxAge ? .refresh : nil
     }
 
+    /// Whether Home's load trigger forces its request: when the server can be used and the last
+    /// load or refresh failed, so a reconnect retries it at once rather than leaving its error up
+    /// until the shelves are older than ``maxAge``. Fresh shelves without an error aren't fetched
+    /// again, and nothing is retried without the server.
+    static func forcesReload(isConnected: Bool, hasError: Bool) -> Bool {
+        isConnected && hasError
+    }
+
     /// The model's state when a request it made finished.
     struct ModelState {
         var libraryID: String?

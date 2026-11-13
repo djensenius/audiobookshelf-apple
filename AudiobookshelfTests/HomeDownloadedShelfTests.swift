@@ -137,6 +137,30 @@ private struct EmptyLibraryService: LibraryService {
         #expect(retried == 1)
     }
 
+    /// Shelves loaded, then a refresh failed as the connection went, within ``HomeRefreshSchedule/maxAge``:
+    /// when the server answers again, the load trigger retries it at once instead of leaving its
+    /// error up; fresh shelves without an error aren't fetched again.
+    @Test func reconnectingRetriesAFailedRefreshAtOnce() {
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        var schedule = HomeRefreshSchedule()
+        schedule.markLoaded(libraryID: "lib", at: start)
+        let failed = HomeRefreshSchedule.ModelState(libraryID: "lib", hasLoaded: true, isLoading: false, hasError: true)
+        let recorded = schedule.recordCompletion(of: "lib", model: failed, isCancelled: false, at: start + 60)
+        #expect(!recorded)
+        let reconnected = start.addingTimeInterval(120)
+        #expect(reconnected.timeIntervalSince(start) < HomeRefreshSchedule.maxAge)
+
+        func request(isConnected: Bool, hasError: Bool) -> HomeRefreshSchedule.Request? {
+            schedule.request(
+                libraryID: "lib", hasLoaded: true, now: reconnected,
+                force: HomeRefreshSchedule.forcesReload(isConnected: isConnected, hasError: hasError))
+        }
+        #expect(request(isConnected: true, hasError: true) == .refresh)
+        #expect(request(isConnected: true, hasError: false) == nil)
+        #expect(request(isConnected: false, hasError: true) == nil)
+        #expect(request(isConnected: false, hasError: false) == nil)
+    }
+
     @Test func homeWaitsForTheDownloadsBeforeSayingThereAreNone() {
         #expect(HomeScreenState.resolve(Inputs(connection: .offline, downloadsLoaded: false)) == .loading)
         #expect(HomeScreenState.resolve(Inputs(hasLoaded: true, downloadsLoaded: false)) == .loading)

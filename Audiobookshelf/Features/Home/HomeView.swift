@@ -95,14 +95,16 @@ private struct HomeScreen: View {
         .refreshable { await refresh() }
         // With the client, the online revision and the connection too: a reconnect, whether it
         // attaches a client after an offline start without one or keeps the offline session's,
-        // or the server answering again, loads again even when the library is unchanged.
+        // or the server answering again, loads again even when the library is unchanged, and
+        // retries a failed load or refresh even while the shelves are fresh.
         .task(
             id: HomeLoadTrigger(
                 libraryID: libraryID, connection: store.connectedKey, onlineRevision: store.onlineRevision,
                 isConnected: connection == nil)
         ) {
             model.libraryID = libraryID
-            await update()
+            await update(
+                force: HomeRefreshSchedule.forcesReload(isConnected: connection == nil, hasError: model.error != nil))
         }
         // The downloads follow the store live, online and offline.
         .task(id: store.connectionKey?.connectionID) {
