@@ -1,11 +1,12 @@
 import ABSAppModel
 import ABSCore
 import ABSUI
+import CoreSpotlight
 import SwiftUI
 
 /// The root of every window scene: shows what the session lifecycle's gate says (ADR 0004).
 ///
-/// Links reach the scene here, from `onOpenURL` and Handoff. A link waits in ``links``,
+/// Links reach the scene here, from `onOpenURL`, Handoff and Spotlight. A link waits in ``links``,
 /// tagged with ``SessionLifecycle/linkEpoch``, until a signed-in host can open it, so a cold launch
 /// from a link, or a link that arrives while the session restores, isn't lost. Only a ready
 /// session's shell gets the binding: during an account switch the outgoing shell has none, so the
@@ -68,6 +69,14 @@ struct RootView: View {
             }
             .onContinueUserActivity(DeepLink.handoffActivityType) { activity in
                 if let handoff = HandoffActivity(userInfo: activity.userInfo) { receive(handoff) }
+            }
+            // A tapped Spotlight result: a recently played item (#87), on the account it was played on.
+            .onContinueUserActivity(CSSearchableItemActionType) { activity in
+                if let identifier = activity.userInfo?[CSSearchableItemActivityIdentifier] as? String,
+                    let link = DeepLink(spotlightIdentifier: identifier)
+                {
+                    receive(link)
+                }
             }
             .alert(
                 Text(verbatim: L10n.string("MessageHandoffAccountNotSignedIn")),

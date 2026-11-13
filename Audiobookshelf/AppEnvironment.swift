@@ -61,6 +61,8 @@ final class AppEnvironment {
     let images: ImageServices
     /// Writes the Continue Listening widget's snapshot (#89).
     let widgetSnapshots: WidgetSnapshotWriter
+    /// Donates recently played items to Spotlight (#87).
+    let recentItems: RecentItemsDonor
 
     /// - Parameters:
     ///   - settings: The settings every scene shares.
@@ -171,6 +173,11 @@ final class AppEnvironment {
         // The app's one player, across every account's session: its item and play state.
         widgetSnapshots.follow(playback.player)
         self.widgetSnapshots = widgetSnapshots
+
+        // Spotlight (#87).
+        recentItems = Self.makeRecentItemsDonor(
+            accounts: accounts, lifecycle: lifecycle, player: playback.player, settings: settings,
+            storeLocation: storeLocation)
     }
 
     /// Deletes the history events past ``PlaybackHistoryStore/retention`` (ADR 0003), off the main

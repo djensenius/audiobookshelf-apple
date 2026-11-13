@@ -305,7 +305,7 @@ The legacy app registers the `audiobookshelf` URL scheme (`ios/App/App/Info.plis
 - `RootView.onContinueUserActivity` reads the activity with `HandoffActivity(userInfo:)` and resolves its account (below) before the link joins the links from `onOpenURL`.
 - The activity type is listed in `NSUserActivityTypes` in `Audiobookshelf/Info.plist`, which the system requires before it delivers the activity. `AppEnvironmentTests` checks it.
 - The intents and entities side of Handoff is in P5-10 #87.
-- App Intents and Spotlight, added later, also produce a `DeepLink`.
+- App Intents, added later, also produce a `DeepLink`.
 
 | `userInfo` key | Type | Meaning |
 | --- | --- | --- |
@@ -336,6 +336,12 @@ IDs follow the URL rules. A present but invalid `item` or `episode` rejects the 
   - It is the newest link even if it turns out to open nothing, so on arrival it drops the waiting link and a confirmed switch's link, and the host drops the server switch its dialog or router asks about (`handoffArrivals`, `ServerSwitchPrompt.supersede(in:)`).
   - Its result is stale, and does nothing, if another link arrived while it resolved (the newer link wins) or the session changed (the epoch moved on). That holds for both results: a stale link isn't kept, not even for a confirmed switch's next account, and a stale `accountNotSignedIn` shows no alert.
 - Publishing from the player is a follow-up (#219).
+
+**Spotlight**
+
+- `RecentItemsDonor` (#87) indexes each account's 20 most recently played items, associated with their `BookEntity` or `PodcastEpisodeEntity`. Each item's domain is its account's connection ID. Its identifier is its `MediaKey`, so playing it again updates it.
+- An account's items are deleted when it signs out, is removed, or its credentials expire, and when a switch to it ends signed out. A switch to another account keeps them.
+- A tapped result reaches `RootView.onContinueUserActivity(CSSearchableItemActionType)`. `DeepLink(spotlightIdentifier:)` turns it into an item or episode link with `server=` set to the item's own connection, so a result from another signed-in account asks before switching. The connection ID is local, but so is the Spotlight index.
 
 ### State restoration
 
