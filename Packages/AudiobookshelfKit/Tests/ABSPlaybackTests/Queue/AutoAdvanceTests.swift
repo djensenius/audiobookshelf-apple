@@ -268,6 +268,24 @@ struct AutoAdvanceTests {
         #expect(a.activity.active == 0)
     }
 
+    /// #376: "Stream anyway" after a blocked advance starts the queue's next item.
+    @Test func confirmingABlockedAdvanceStartsTheNextItem() async {
+        a.enqueue("B")
+        await a.play("A")
+        a.h.policy.decision = .askUser(.cellular)
+        a.h.policy.currentDecision = .askUser(.cellular)
+        await a.finish()
+        #expect(coordinator.error == .streamingNeedsConfirmation(.cellular, key: a.key("B")))
+
+        await coordinator.confirmMeteredStreaming()
+
+        #expect(a.service.starts == ["A", "B"])
+        #expect(coordinator.mediaKey == a.key("B"))
+        #expect(coordinator.isPlaying)
+        #expect(coordinator.error == nil)
+        #expect(a.queue.items.isEmpty)
+    }
+
     /// The prepared decision is stale: prepared on cellular ("ask"), allowed now (Wi-Fi joined).
     @Test func preparedAskUserAdvancesWhenNowAllowed() async {
         a.enqueue("B")
