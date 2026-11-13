@@ -74,6 +74,43 @@ import Testing
         #expect(model.isEmpty && !model.isLoaded && model.connectionID == nil)
     }
 
+    /// The first read fails: the shelf says so and waits; Retry reads the same connection's items
+    /// again and follows them from then on.
+    @Test func aFailedReadIsReadAgainOnRetryAndThenFollowed() async throws {
+        struct ReadFailed: Error {}
+        @MainActor final class Reads {
+            var connections: [UUID] = []
+        }
+        let reads = Reads()
+        let (stream, continuation) = AsyncStream.makeStream(of: [LocalLibraryItemDTO].self)
+        let model = DownloadedShelfModel { @MainActor connectionID in
+            reads.connections.append(connectionID)
+            if reads.connections.count == 1 { throw ReadFailed() }
+            return stream
+        }
+        let task = Task { await model.observe(connectionID: connectionID) }
+        defer { task.cancel() }
+        while model.loadError == nil, !Task.isCancelled { await Task.yield() }
+        #expect(model.loadError is ReadFailed)
+        #expect(model.isLoaded && model.isEmpty)
+
+        let book = item("Book")
+        continuation.yield([book])
+        model.retry()
+        while model.books.isEmpty, !Task.isCancelled { await Task.yield() }
+        #expect(model.books == [book] && model.isLoaded && model.loadError == nil)
+        #expect(reads.connections == [connectionID, connectionID])
+
+        let podcast = item("Show", .podcast, addedAt: 5)
+        continuation.yield([podcast, book])
+        while model.podcasts.isEmpty, !Task.isCancelled { await Task.yield() }
+        #expect(model.podcasts == [podcast])
+        // Retry while following does nothing.
+        model.retry()
+        for _ in 0..<50 { await Task.yield() }
+        #expect(reads.connections.count == 2)
+    }
+
     /// Through a real store: a finished download appears, a deleted one disappears.
     @Test func storeDownloadsAndDeletionsShowLive() async throws {
         let container = try DataStack(location: .inMemory).container
