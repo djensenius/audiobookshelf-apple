@@ -11,17 +11,21 @@ public struct DownloadsServices {
     public let control: any DownloadControlling
     /// A connection's downloaded items, as `LocalItemStore.items(serverConnectionID:)` reads them.
     public let localItems: @Sendable (UUID) async throws -> [LocalLibraryItemDTO]
+    /// One downloaded item, as `LocalItemStore.item(id:)` reads it; `nil` once it's deleted.
+    public let localItem: @Sendable (UUID) async throws -> LocalLibraryItemDTO?
     /// The bytes still available for downloads, as ``StorageCapacityProviding`` reports them.
     public let availableCapacity: @Sendable () async throws -> Int64
 
     public init(
         controller: DownloadsController, control: any DownloadControlling,
         localItems: @escaping @Sendable (UUID) async throws -> [LocalLibraryItemDTO],
+        localItem: @escaping @Sendable (UUID) async throws -> LocalLibraryItemDTO? = { _ in nil },
         availableCapacity: @escaping @Sendable () async throws -> Int64
     ) {
         self.controller = controller
         self.control = control
         self.localItems = localItems
+        self.localItem = localItem
         self.availableCapacity = availableCapacity
     }
 }

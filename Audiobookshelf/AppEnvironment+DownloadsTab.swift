@@ -17,6 +17,7 @@ extension AppEnvironment {
         return DownloadsServices(
             controller: downloads.controller, control: downloads.manager,
             localItems: { try await LocalItemStore(modelContainer: container).items(serverConnectionID: $0) },
+            localItem: { try await LocalItemStore(modelContainer: container).item(id: $0) },
             availableCapacity: { try capacity.availableCapacity() })
     }
 }
