@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSPlayback
 import Foundation
 
 /// Connects the shared ``LibraryStore`` to the session (S7a): the lifecycle's seeder
@@ -21,6 +22,8 @@ import Foundation
 ///   failed offline retry even when the offline session kept its client.
 /// - End cancels the refresh and clears the store synchronously, so the clear always runs,
 ///   even once the teardown's deadline passed.
+/// - Local playback's progress reaches the cache through
+///   ``applyPlaybackProgress(_:sessionID:)`` (#184), for the running session only.
 ///
 /// A partial pipeline is fine: start without a boundary or seed leaves the cache unseeded, and
 /// end without a start does nothing but clear.
@@ -140,6 +143,29 @@ public final class LibraryParticipant: SessionSeeding {
                 return
             }
         }
+    }
+
+    // MARK: Playback progress
+
+    /// Puts where local playback has reached into the progress cache (#184), so the library's
+    /// progress follows the player between seeds; the playback participant's progress sink. Only
+    /// for the running session: nothing after its end, which cleared the cache, or for an older
+    /// session's playback. Keeps the cached row's other fields, `isFinished` among them; a cached
+    /// row newer than `update` wins (``ProgressCache/apply(_:)``). Returns whether it was stored.
+    @discardableResult
+    public func applyPlaybackProgress(_ update: PlaybackProgressUpdate, sessionID: UInt64) -> Bool {
+        guard self.sessionID == sessionID else { return false }
+        let key = update.key
+        var progress =
+            store.progress.progress(libraryItemID: key.libraryItemId, episodeID: key.episodeId)
+            ?? MediaProgress(
+                id: MediaProgress.key(libraryItemID: key.libraryItemId, episodeID: key.episodeId),
+                libraryItemId: key.libraryItemId, episodeId: key.episodeId)
+        progress.currentTime = update.currentTime
+        if update.duration > 0 { progress.duration = update.duration }
+        if progress.duration > 0 { progress.progress = min(max(progress.currentTime / progress.duration, 0), 1) }
+        progress.lastUpdate = Int((update.date.timeIntervalSince1970 * 1000).rounded())
+        return store.progress.apply(progress)
     }
 
     // MARK: Private

@@ -20,6 +20,7 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
         case stop(PlaybackStopReason)
         case confirmMeteredStreaming
         case declineMeteredStreaming
+        case streamReset(sessionID: String)
     }
 
     var phase: PlaybackCoordinator.Phase = .idle
@@ -33,6 +34,7 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     var isPlaying = false
     var isBuffering = false
     var isPlaybackRequested = false
+    var isWaitingForNetwork = false
     var timeline: PlaybackTimeline?
     /// Whether seeks land; one that doesn't returns `nil` and leaves playback where it was.
     var seeksLand = true
@@ -116,6 +118,10 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
 
     func declineMeteredStreaming() {
         calls.append(.declineMeteredStreaming)
+    }
+
+    func handleStreamReset(sessionID: String) {
+        calls.append(.streamReset(sessionID: sessionID))
     }
 
     // MARK: Fixtures

@@ -21,6 +21,8 @@ struct AppPlayback {
     let writer: LocalProgressStore?
     /// Registered with the lifecycle at ``SessionStage/progressSource``; `nil` without a store.
     let participant: PlaybackSessionParticipant?
+    /// Records every scope's playback history; `nil` without a store.
+    let history: (any PlaybackHistoryRecording)?
 
     /// The engine's time-update interval and the progress syncer's tick.
     static let tickInterval: TimeInterval = 0.5
@@ -30,14 +32,18 @@ struct AppPlayback {
     ///     too (ADR 0003); without it (or without `accounts`) there is no participant, and the
     ///     player stays idle.
     ///   - deviceIdentifiers: The process-wide device ID for playback sessions (ADR 0007).
+    ///   - library: Hears each session's playback progress, for its progress cache (#184).
+    ///   - history: Records every scope's playback history, over the data environment's one
+    ///     history store (#184).
     static func make(
         writer: LocalProgressStore?, accounts: AccountManager?, lifecycle: SessionLifecycle, settings: AppSettings,
-        deviceIdentifiers: any DeviceIdentifying
+        deviceIdentifiers: any DeviceIdentifying, library: LibraryParticipant? = nil,
+        history: (any PlaybackHistoryRecording)? = nil
     ) -> AppPlayback {
         let current = CurrentPlayback()
         let player = PlayerViewModel(playback: current, settings: settings)
         guard let writer, let accounts else {
-            return AppPlayback(current: current, player: player, writer: nil, participant: nil)
+            return AppPlayback(current: current, player: player, writer: nil, participant: nil, history: nil)
         }
         let monitor = NetworkMonitor()
         monitor.start()
@@ -57,9 +63,13 @@ struct AppPlayback {
                     return isOffline
                 })
             },
-            makeScope: { Self.makeScope(for: $0, settings: settings, policy: policy) })
+            progressSink: { [weak library] update, context in
+                library?.applyPlaybackProgress(update, sessionID: context.sessionID)
+            },
+            makeScope: { Self.makeScope(for: $0, settings: settings, policy: policy, history: history) })
         lifecycle.register(participant, stage: .progressSource)
-        return AppPlayback(current: current, player: player, writer: writer, participant: participant)
+        removesQueues(of: accounts, from: queueStore(settings: settings))
+        return AppPlayback(current: current, player: player, writer: writer, participant: participant, history: history)
     }
 
     /// Hands the playback intents (widgets, controls, Shortcuts, Siri) to ``current``, so they
@@ -74,8 +84,9 @@ struct AppPlayback {
 
     /// One account session's scope, over an engine of its own. The connection's last-played record
     /// and queue are kept in the settings' defaults, under keys of their own.
-    private static func makeScope(
-        for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy
+    static func makeScope(
+        for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
+        history: (any PlaybackHistoryRecording)?
     ) -> PlaybackScope {
         #if os(iOS)
             let engine = AudioEngine(timeObserverInterval: tickInterval)
@@ -87,7 +98,9 @@ struct AppPlayback {
             let engine = AudioEngine(audioSession: nil, timeObserverInterval: tickInterval)
             let interruptions: AudioInterruptionHandler? = nil
         #endif
-        return makeScope(for: request, settings: settings, policy: policy, engine: engine, interruptions: interruptions)
+        return makeScope(
+            for: request, settings: settings, policy: policy, engine: engine, interruptions: interruptions,
+            history: history)
     }
 
     /// The scope over `engine`. An interruption also cancels a play the coordinator holds outside
@@ -96,10 +109,12 @@ struct AppPlayback {
     /// the scope owns it.
     static func makeScope(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
-        engine: any AudioEngineProtocol, interruptions: AudioInterruptionHandler?
+        engine: any AudioEngineProtocol, interruptions: AudioInterruptionHandler?,
+        history: (any PlaybackHistoryRecording)? = nil
     ) -> PlaybackScope {
-        let scope = PlaybackScope.make(configuration(for: request, settings: settings, policy: policy, engine: engine))
-        {
+        let scopeConfiguration = Self.configuration(
+            for: request, settings: settings, policy: policy, engine: engine, history: history)
+        let scope = PlaybackScope.make(scopeConfiguration) {
             coordinator in
             // No artwork or App Intents entities yet.
             NowPlayingBridge(
@@ -111,23 +126,25 @@ struct AppPlayback {
     }
 
     /// The scope's configuration. Recovery waits on the system's network path; without one it
-    /// would treat the device as always online.
+    /// would treat the device as always online. The syncer records `history`.
     static func configuration(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
-        engine: any AudioEngineProtocol
+        engine: any AudioEngineProtocol, history: (any PlaybackHistoryRecording)? = nil
     ) -> PlaybackScope.Configuration {
         var configuration = PlaybackScope.Configuration(
             connectionID: request.connectionID, client: request.client, features: request.features,
             deviceIdentifiers: request.deviceIdentifiers, writer: request.writer, settings: settings,
             policy: policy, engine: engine, tickInterval: tickInterval,
             lastPlayed: { PlaybackScope.lastPlayedStore(for: $0, defaults: settings.defaults) },
-            queueStore: UserDefaultsPlaybackQueueStore(defaults: settings.defaults))
+            queueStore: queueStore(settings: settings))
         configuration.networkPaths = SystemNetworkPathSource()
+        configuration.history = history
+        configuration.trackURLOverride = fixtureTrackURL
         return configuration
     }
 }
 
-/// Sets `\.playItem`, `\.bookmarkStore` and `\.sleepTimer` from the running account session's
+/// Sets `\.playItem`, `\.bookmarkStore`, `\.sleepTimer` and `\.playbackQueue` from the running account session's
 /// playback, each `nil` between sessions; the sleep timer is `nil` until the scope has one (#185).
 /// A view modifier, so it follows the participant as each session starts and ends. The signed-in
 /// shell passes the participant only while it serves the shell's account
@@ -140,5 +157,6 @@ struct PlaybackEnvironment: ViewModifier {
             .environment(\.playItem, participant?.playItem)
             .environment(\.bookmarkStore, participant?.bookmarks)
             .environment(\.sleepTimer, participant?.sleepTimer)
+            .environment(\.playbackQueue, participant?.queue)
     }
 }

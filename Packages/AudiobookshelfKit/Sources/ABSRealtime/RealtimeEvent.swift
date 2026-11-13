@@ -79,6 +79,21 @@ public enum RssFeedChange: Sendable, Hashable {
     }
 }
 
+/// The `stream_reset` payload, `{startTime, streamId}`: the server restarted an HLS transcode
+/// (`HlsRouter`). It goes to every socket, so it applies only where `streamId` is the playing
+/// session's ID, which is a capability (ADR 0007): never log it.
+public struct StreamReset: Sendable, Hashable, Decodable {
+    /// The server stream's ID, which is its playback session's.
+    public var streamId: String
+    /// Where the transcode restarted, in seconds. Only a signal: recovery seeks to its own target.
+    public var startTime: Double?
+
+    public init(streamId: String, startTime: Double? = nil) {
+        self.streamId = streamId
+        self.startTime = startTime
+    }
+}
+
 public enum RealtimeEvent: Sendable, Equatable {
     /// The Socket.IO namespace connection was accepted. Not yet authenticated.
     case connected
@@ -98,6 +113,8 @@ public enum RealtimeEvent: Sendable, Equatable {
     case authorChanged(LibraryEntityChange<Author>)
     /// `rss_feed_open` or `rss_feed_closed`.
     case rssFeedChanged(RssFeedChange)
+    /// `stream_reset`, for any user's stream.
+    case streamReset(StreamReset)
 }
 
 extension RealtimeEvent {
@@ -151,6 +168,8 @@ extension RealtimeEvent {
             return .rssFeedChanged(.opened(try argument(RssFeed.self, from: arguments)))
         case "rss_feed_closed":
             return .rssFeedChanged(.closed(try argument(RssFeed.self, from: arguments)))
+        case "stream_reset":
+            return .streamReset(try argument(StreamReset.self, from: arguments))
         default:
             return nil
         }

@@ -22,6 +22,9 @@ extension View {
 /// without one (previews); Add to playlist opens ``AddToPlaylistSheet`` for the book, so it needs the account's
 /// playlist writes (`playlists`).
 ///
+/// Play Next and Add to Queue (``QueueActionButtons``) follow the actions while the book can be
+/// played and isn't gone.
+///
 /// RSS Feed (``RssFeedEntryButton``) follows for admins once the book has loaded with something to
 /// publish or a feed open (``RssFeedItemEntry``), showing whether the feed is open; podcasts, which
 /// have no More menu, keep it in the toolbar.
@@ -74,6 +77,7 @@ private struct ItemDetailMoreMenu: ViewModifier {
                 } entry: { action in
                     entry(action)
                 } extra: { isGone in
+                    QueueActionButtons(item: isGone ? nil : model.item)
                     if let ebookActions {
                         ebookEntries(ebookActions, isGone: isGone)
                     }

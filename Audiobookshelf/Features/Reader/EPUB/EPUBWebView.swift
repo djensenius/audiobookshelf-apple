@@ -10,6 +10,8 @@ final class EPUBReaderController {
     enum CommandError: Error, Equatable {
         /// The command isn't a JSON object.
         case notAnObject
+        /// The reader was closed (``close()``).
+        case closed
     }
 
     let webView: WKWebView
@@ -21,6 +23,9 @@ final class EPUBReaderController {
 
     private let messages = EPUBMessageHandler()
     private let navigation = ReaderNavigationPolicy()
+    private(set) var isClosed = false
+    /// The commands the page is still running, failed by ``close()``.
+    private var pending: [UUID: CheckedContinuation<Void, any Error>] = [:]
 
     /// - Parameter loadBook: Fetches a book's bytes for `absreader://book/<id>.epub`.
     init(
@@ -51,12 +56,42 @@ final class EPUBReaderController {
     /// `window.absReader.handle`, returning once the page has finished it. Throws when the page
     /// rejects it, for example a command sent before the `ready` event.
     func send(_ commandJSON: Data) async throws {
+        guard !isClosed else { throw CommandError.closed }
         guard let command = try JSONSerialization.jsonObject(with: commandJSON) as? [String: Any] else {
             throw CommandError.notAnObject
         }
-        _ = try await webView.callAsyncJavaScript(
-            "return await window.absReader.handle(command)", arguments: ["command": command], in: nil,
-            contentWorld: .page)
+        let id = UUID()
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            pending[id] = continuation
+            // The callback doesn't capture the web view: a command the page never finishes leaves
+            // nothing of the reader's alive once ``close()`` has failed it.
+            webView.callAsyncJavaScript(
+                "return await window.absReader.handle(command)", arguments: ["command": command], in: nil,
+                in: .page
+            ) { [weak self] result in
+                MainActor.assumeIsolated {
+                    guard let continuation = self?.pending.removeValue(forKey: id) else { return }
+                    continuation.resume(with: result.map { _ in })
+                }
+            }
+        }
+    }
+
+    /// Ends the reader page, for a reader that's gone: the commands it was still running fail with
+    /// ``CommandError/closed``, it stops posting events, and a blank page replaces it, which stops
+    /// epub.js. Off screen, the page gets no animation frames, so an `open` sent before the reader
+    /// went away would otherwise never finish (WebKit doesn't fail it when the page goes), and the
+    /// task awaiting it would keep the web view alive.
+    func close() {
+        guard !isClosed else { return }
+        isClosed = true
+        let stranded = pending.values
+        pending = [:]
+        for continuation in stranded { continuation.resume(throwing: CommandError.closed) }
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: EPUBMessageHandler.name)
+        webView.stopLoading()
+        navigation.isClosed = true
+        webView.loadHTMLString("", baseURL: nil)
     }
 
     /// Whether the web view may load `url`: the main frame only the reader page; frames (epub.js's
@@ -72,10 +107,17 @@ final class EPUBReaderController {
 /// book's sections load; links out of the book don't navigate the reader away.
 @MainActor
 private final class ReaderNavigationPolicy: NSObject, WKNavigationDelegate {
+    /// Once the reader is closed, only the blank page that replaces it loads.
+    var isClosed = false
+
     func webView(
         _ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction
     ) async -> WKNavigationActionPolicy {
-        EPUBReaderController.allowsNavigation(
+        if isClosed {
+            return navigationAction.targetFrame?.isMainFrame == true
+                && navigationAction.request.url?.absoluteString == "about:blank" ? .allow : .cancel
+        }
+        return EPUBReaderController.allowsNavigation(
             to: navigationAction.request.url, isMainFrame: navigationAction.targetFrame?.isMainFrame ?? false)
             ? .allow : .cancel
     }

@@ -24,7 +24,7 @@ public enum DownloadManagerEvent: Sendable, Equatable {
 }
 
 /// Why a ``DownloadManager`` call, such as
-/// ``DownloadManager/enqueue(item:episodeID:connectionID:replacingExisting:)``, failed.
+/// ``DownloadManager/enqueue(item:episodeID:connectionID:replacingExisting:unlessQuiescedSince:)``, failed.
 public enum DownloadManagerError: Error, Equatable, Sendable {
     /// An episode was asked for, but the item isn't a podcast.
     case notPodcast
@@ -45,6 +45,9 @@ public enum DownloadManagerError: Error, Equatable, Sendable {
     case connectionNotFound(UUID)
     /// The downloads couldn't be read or saved.
     case storeFailure
+    /// A sign-out, expiry or removal stopped the server's downloads after the request began, so
+    /// nothing was queued (see ``DownloadManager/enqueue(item:episodeID:connectionID:replacingExisting:unlessQuiescedSince:)``).
+    case downloadsStopped(UUID)
 
     init(_ error: DownloadPlanError) {
         switch error {

@@ -1,5 +1,6 @@
 import ABSAppModel
 import ABSCore
+import ABSData
 import ABSDownloads
 import ABSUI
 import SwiftUI
@@ -12,6 +13,11 @@ struct AudiobookshelfApp: App {
     /// The Downloads tab's services, built once.
     private let downloads = AppEnvironment.shared.makeDownloadsServices()
     @Environment(\.scenePhase) private var scenePhase
+    /// Readers open an ebook's downloaded copy when there is one.
+    private let downloadedEbookFile = AppEnvironment.shared.dataStack.map {
+        EbookFileLoader.downloadedFileLookup(
+            items: LocalItemStore(modelContainer: $0.container), locations: DownloadLocations())
+    }
 
     init() {
         // Here rather than in `AppEnvironment`, so the environments tests build don't replace it.
@@ -29,7 +35,9 @@ struct AudiobookshelfApp: App {
             .environment(\.downloads, downloads)
             .environment(settings)
             .environment(\.windowRoute, $windowRoute)
+            .environment(\.downloadedEbookFile, downloadedEbookFile)
             .environment(\.downloadAccess, environment.downloads?.access)
+            .environment(\.currentPlayback, environment.playback.current)
             .modifier(AppThemeModifier(settings: settings))
         }
         .commands {
@@ -37,6 +45,8 @@ struct AudiobookshelfApp: App {
             RefreshCommands()
             PlaybackCommands(player: environment.player, participant: environment.playback.participant)
             GoCommands()
+            // View > Show/Hide Inspector toggles the scene's queue inspector (ADR 0004).
+            InspectorCommands()
         }
         // The system relaunches the app for finished background downloads; this waits until
         // the download engine has processed every event before the system suspends it again.
@@ -60,6 +70,16 @@ struct AudiobookshelfApp: App {
         }
 
         #if os(macOS)
+            // Each ebook opened with Read; reopening one brings its window forward.
+            WindowGroup(id: ReaderWindow.id, for: ReaderPresentation.self) { $presentation in
+                ReaderWindow(presentation: presentation, store: environment.library?.store)
+                    // macOS can restore a reader window alone, without the window that starts it.
+                    .task { await environment.lifecycle.start() }
+                    .environment(settings)
+                    .environment(\.downloadedEbookFile, downloadedEbookFile)
+                    .modifier(AppThemeModifier(settings: settings))
+            }
+
             Settings {
                 SettingsView(settings: settings)
                     .modifier(AppThemeModifier(settings: settings))
