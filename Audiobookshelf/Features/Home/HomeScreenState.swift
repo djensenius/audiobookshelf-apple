@@ -292,18 +292,19 @@ struct HomeRefreshSchedule {
     /// Nothing once the trigger's task is cancelled: the trigger changed and runs again.
     ///
     /// - Parameter isConnected: Whether the server can be used now (no connection banner).
+    /// - Returns: Whether it reloaded the list, or waited for the request in flight to retry it.
     @MainActor
+    @discardableResult
     static func updateLibrariesAfterShelves(
         of store: LibraryStore, shelvesError: (any Error)?, for trigger: Trigger, isConnected: () -> Bool,
         pollInterval: Duration = .milliseconds(100)
-    ) async {
-        guard !Task.isCancelled else { return }
-        await reload(
-            store,
-            as: librariesRequestAfterShelves(
-                for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
-                shelvesRefused: refusesLibrary(shelvesError), isConnected: isConnected()),
-            isConnected: isConnected, pollInterval: pollInterval)
+    ) async -> Bool {
+        guard !Task.isCancelled else { return false }
+        let request = librariesRequestAfterShelves(
+            for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
+            shelvesRefused: refusesLibrary(shelvesError), isConnected: isConnected())
+        await reload(store, as: request, isConnected: isConnected, pollInterval: pollInterval)
+        return request != nil
     }
 
     /// Makes `request` of `store`: behind a libraries request in flight, waits for it and reloads
@@ -362,7 +363,7 @@ struct HomeRefreshSchedule {
         /// Retry the failed shelves now, as the load trigger does after an error.
         case shelves
         /// Wait for the shelves load or refresh in flight, and retry it once if it fails; then
-        /// the libraries list as ``libraries`` does, unless that retry's completion checked it.
+        /// the libraries list as ``libraries`` does, unless that retry's completion handled it.
         case shelvesAfterInFlight
         /// Reload the failed libraries list, or wait for the request in flight and reload it once
         /// if it fails (``librariesRequest(for:librariesFailed:librariesLoading:isConnected:)``).
@@ -399,11 +400,12 @@ struct HomeRefreshSchedule {
     ///   - isConnected: Whether the server can be used now (no connection banner).
     ///   - retry: Retries the failed shelves (Home's update for the load trigger).
     ///   - refreshed: Called after the shelves were retried behind a request in flight, so Home
-    ///     records the completion and checks the libraries list as after its own requests.
+    ///     records the completion and checks the libraries list as after its own requests;
+    ///     returns whether it handled the list (``updateLibrariesAfterShelves(of:shelvesError:for:isConnected:pollInterval:)``).
     @MainActor
     static func updateAfterVerification(
         of model: HomeModel, store: LibraryStore, isConnected: () -> Bool,
-        pollInterval: Duration = .milliseconds(100), retry: () async -> Void, refreshed: () async -> Void
+        pollInterval: Duration = .milliseconds(100), retry: () async -> Void, refreshed: () async -> Bool
     ) async {
         let request = verificationRequest(
             libraryID: model.libraryID, isLoading: model.isLoading, hasError: model.error != nil,
@@ -414,13 +416,15 @@ struct HomeRefreshSchedule {
         case .shelves:
             await retry()
         case .shelvesAfterInFlight:
+            // Home's completion after a shelves retry may check the libraries list itself.
+            var listHandled = false
             if await updateShelvesAfterInFlight(
                 of: model, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
             {
-                // Home's completion checks the libraries list as after its own requests.
-                await refreshed()
-            } else if !Task.isCancelled {
-                // The list may have failed meanwhile, or still be in flight.
+                listHandled = await refreshed()
+            }
+            // Otherwise the list may have failed meanwhile, or still be in flight.
+            if !listHandled, !Task.isCancelled {
                 await updateLibraries(
                     of: store, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
             }

@@ -119,7 +119,8 @@ private struct HomeScreen: View {
                 of: model, store: store, isConnected: { connectionStatus == nil },
                 retry: { await update(.loadTrigger) },
                 refreshed: {
-                    if let libraryID = model.libraryID { await finishShelves(of: libraryID, for: .loadTrigger) }
+                    guard let libraryID = model.libraryID else { return false }
+                    return await finishShelves(of: libraryID, for: .loadTrigger)
                 })
             verifications.finish(revision, isCancelled: Task.isCancelled)
         }
@@ -155,9 +156,12 @@ private struct HomeScreen: View {
 
     /// After `trigger` requested `libraryID`'s shelves, or didn't (`recording` is `false`):
     /// records a completed request, then reloads the libraries list if it may be out of date.
+    ///
+    /// - Returns: Whether it reloaded the list, or waited for the request in flight to retry it.
+    @discardableResult
     private func finishShelves(
         of libraryID: String, for trigger: HomeRefreshSchedule.Trigger, recording: Bool = true
-    ) async {
+    ) async -> Bool {
         if recording {
             schedule.recordCompletion(
                 of: libraryID,
@@ -166,7 +170,7 @@ private struct HomeScreen: View {
                     hasError: model.error != nil),
                 isCancelled: Task.isCancelled, at: .now)
         }
-        await HomeRefreshSchedule.updateLibrariesAfterShelves(
+        return await HomeRefreshSchedule.updateLibrariesAfterShelves(
             of: store, shelvesError: model.error, for: trigger, isConnected: { connectionStatus == nil })
     }
 
