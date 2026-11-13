@@ -89,6 +89,48 @@ private let connectionB = UUID(uuidString: "0A1B2C3D-4E5F-4A6B-8C7D-9E0F1A2B3C4D
     }
 }
 
+/// The activity an item or episode screen publishes, read back by the receiver.
+@Suite struct HandoffPublishingTests {
+    @Test func anItemRoundTrips() throws {
+        let account = try account(address, "usr_1")
+        let userInfo = try #require(DeepLink.handoffUserInfo(itemID: "li_1", account: account))
+        #expect(userInfo == ["item": "li_1", "serverAddress": address, "userID": "usr_1"])
+        let activity = try #require(HandoffActivity(userInfo: userInfo))
+        #expect(activity.link == DeepLink(.item(id: "li_1", episodeID: nil)))
+        #expect(activity.account == account)
+    }
+
+    @Test func anEpisodeRoundTrips() throws {
+        let account = try account(otherAddress, "usr_2")
+        let userInfo = try #require(DeepLink.handoffUserInfo(itemID: "li_1", episodeID: "ep_1", account: account))
+        let activity = try #require(HandoffActivity(userInfo: userInfo))
+        #expect(activity.link == DeepLink(.item(id: "li_1", episodeID: "ep_1")))
+        #expect(activity.account == account)
+    }
+
+    @Test func anEmptyEpisodeIsLeftOut() throws {
+        let userInfo = DeepLink.handoffUserInfo(itemID: "li_1", episodeID: "", account: try account(address, "usr_1"))
+        #expect(userInfo?["episode"] == nil)
+        #expect(userInfo?["item"] == "li_1")
+    }
+
+    @Test func invalidIDsPublishNothing() throws {
+        let account = try account(address, "usr_1")
+        #expect(DeepLink.handoffUserInfo(itemID: "", account: account) == nil)
+        #expect(DeepLink.handoffUserInfo(itemID: "a\nb", account: account) == nil)
+        #expect(DeepLink.handoffUserInfo(itemID: "li_1", episodeID: " ", account: account) == nil)
+    }
+
+    @Test func aConnectionNamesItsAccountButNotItsID() throws {
+        let saved = connection(connectionA, address: address, userID: "usr_1")
+        let account = try #require(HandoffAccount(connection: saved))
+        #expect(account == HandoffAccount(serverAddress: address, userID: "usr_1"))
+        let userInfo = try #require(DeepLink.handoffUserInfo(itemID: "li_1", account: account))
+        #expect(!userInfo.values.contains(connectionA.uuidString))
+        #expect(HandoffAccount(connection: connection(connectionA, address: "not a url", userID: "usr_1")) == nil)
+    }
+}
+
 /// Matching the account to a saved connection, and what the router does with the result.
 @MainActor
 @Suite struct HandoffAccountResolutionTests {

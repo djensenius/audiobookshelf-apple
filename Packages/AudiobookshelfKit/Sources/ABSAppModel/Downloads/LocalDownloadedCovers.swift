@@ -21,7 +21,12 @@ public struct LocalDownloadedCovers: DownloadedCoverLookup {
             let path = item.coverRelativePath, let url = try? locations.fileURL(forRelativePath: path),
             FileManager.default.fileExists(atPath: url.path(percentEncoded: false))
         else { return nil }
-        let updatedAt = item.coverUpdatedAt.flatMap { Int(exactly: ($0.timeIntervalSince1970 * 1000).rounded()) }
-        return DownloadedCover(fileURL: url, updatedAt: updatedAt)
+        return DownloadedCover(fileURL: url, updatedAt: Self.version(of: item.coverUpdatedAt))
+    }
+
+    /// The `updatedAt` a downloaded item's cover is keyed by (``CoverRef/updatedAt``): its
+    /// `coverUpdatedAt` in milliseconds since 1970, or `nil` when unknown or out of `Int`'s range.
+    public static func version(of coverUpdatedAt: Date?) -> Int? {
+        coverUpdatedAt.flatMap { Int(exactly: ($0.timeIntervalSince1970 * 1000).rounded()) }
     }
 }
