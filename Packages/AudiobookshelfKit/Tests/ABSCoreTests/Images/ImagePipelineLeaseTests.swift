@@ -41,18 +41,20 @@ import Testing
         let box = box
         let held = [try await pipeline.image(for: harness.key("a"), pixelBox: box)]
         let blocker = Task { [key = harness.key("b")] in _ = try await pipeline.image(for: key, pixelBox: box) }
-        while await pipeline.memoryWaiterCount == 0 { await Task.yield() }
+        try await yieldUntil { await pipeline.memoryWaiterCount > 0 }
         let key = harness.key("c")
         let queued = Task { try await pipeline.image(for: key, pixelBox: box).pixelWidth }
-        while await pipeline.queuedDecodeCount == 0 { await Task.yield() }
+        try await yieldUntil { await pipeline.queuedDecodeCount > 0 }
         let file = store.directory.appending(path: "\(key.serverID.uuidString)/\(key.fileStem).png")
         return Queued(
             pipeline: pipeline, store: store, host: host, held: held, blocker: blocker, queued: queued, file: file)
     }
 
-    /// Returns once nothing leases `file`.
-    private func waitUntilUnleased(_ file: URL, in store: CoverFileStore) async {
-        while await store.isLeased(file) { await Task.yield() }
+    /// Returns once nothing leases `file`; throws if a lease is never released.
+    private func waitUntilUnleased(
+        _ file: URL, in store: CoverFileStore, sourceLocation: SourceLocation = #_sourceLocation
+    ) async throws {
+        try await yieldUntil(sourceLocation: sourceLocation) { await !store.isLeased(file) }
     }
 
     @Test(arguments: [false, true])
@@ -74,7 +76,7 @@ import Testing
         if !cancels { #expect(try await queued.queued.value == 512) }
 
         // Released once the decode finished or was cancelled, so the next eviction deletes it.
-        await waitUntilUnleased(queued.file, in: queued.store)
+        try await waitUntilUnleased(queued.file, in: queued.store)
         await queued.store.fullPass()
         #expect(!FileManager.default.fileExists(atPath: queued.file.path))
         #expect(ImageStubProtocol.route(queued.host)?.requests.count == 1)
