@@ -45,8 +45,8 @@ final class AccountShellValuesCache {
     }
 }
 
-/// The signed-in shell around `content`: injects its account's store, progress reader and item
-/// actions, or the signed-out defaults while the store doesn't serve the account. The accounts
+/// The signed-in shell around `content`: injects its account's store, progress reader, downloaded
+/// items (``DownloadedItemsEnvironment``) and item actions, or the signed-out defaults while the store doesn't serve the account. The accounts
 /// and session lifecycle in its environment let its banner restore the session on reconnect.
 struct AccountShell<Content: View>: View {
     /// The store while it serves the shell's account, `nil` otherwise.
@@ -57,8 +57,10 @@ struct AccountShell<Content: View>: View {
     @State private var cache = AccountShellValuesCache()
 
     var body: some View {
-        content.modifier(
-            AccountShellEnvironment(values: cache.values(for: store, accounts: accounts, lifecycle: lifecycle)))
+        content
+            .modifier(DownloadedItemsEnvironment(connectionID: store?.connectionKey?.connectionID))
+            .modifier(
+                AccountShellEnvironment(values: cache.values(for: store, accounts: accounts, lifecycle: lifecycle)))
     }
 }
 

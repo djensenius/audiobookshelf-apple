@@ -2,7 +2,7 @@ import ABSCore
 import SwiftUI
 
 /// One item as a list row: a small cover, title, subtitle, series and duration, and a progress
-/// badge. Use it in a `List` (port of the legacy list-style item card). At accessibility text
+/// badge, and a mark when the item is downloaded (``ItemDownloadReader``). Use it in a `List` (port of the legacy list-style item card). At accessibility text
 /// sizes the cover sits above the text (``AdaptiveStack``) so the text keeps the full width.
 public struct ItemRow: View {
     private let item: ItemSummary
@@ -13,6 +13,7 @@ public struct ItemRow: View {
     private let perform: (ItemActionKind) -> Void
     @ScaledMetric(relativeTo: .body) private var coverWidth: CGFloat = 56
     @Environment(\.itemProgressReader) private var progressReader
+    @Environment(\.itemDownloadReader) private var downloadReader
     @Environment(\.locale) private var locale
 
     /// - Parameter librarySettings: The item's library's settings, for the cover shape
@@ -31,6 +32,7 @@ public struct ItemRow: View {
 
     public var body: some View {
         let progress = ItemPresentation.progress(for: item, explicit: progress, reader: progressReader)
+        let isDownloaded = ItemPresentation.isDownloaded(item, reader: downloadReader)
         Button {
             perform(.openDetails)
         } label: {
@@ -46,6 +48,7 @@ public struct ItemRow: View {
                         .lineLimit(2)
                         .foregroundStyle(ABSColor.foreground)
                     HStack(spacing: ABSSpacing.xxSmall) {
+                        if isDownloaded { DownloadedIndicator() }
                         if item.isExplicit { ExplicitBadge() }
                         if item.isAbridged { AbridgedBadge() }
                         if let subtitle = ItemPresentation.subtitle(item) {
@@ -73,7 +76,9 @@ public struct ItemRow: View {
         .accessibilityLabel(Text(verbatim: ItemPresentation.rowAccessibilityLabel(item, locale: locale)))
         .cardInputLabels(title: item.title, label: ItemPresentation.rowAccessibilityLabel(item, locale: locale))
         .accessibilityValue(
-            Text(verbatim: ItemPresentation.accessibilityValue(item, progress: progress, locale: locale))
+            Text(
+                verbatim: ItemPresentation.accessibilityValue(
+                    item, progress: progress, isDownloaded: isDownloaded, locale: locale))
         )
         .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
         .accessibilityAddTraits(.isButton)
@@ -89,10 +94,11 @@ public struct ItemRow: View {
     }
 }
 
-#Preview("Item rows, dark, largest text") {
+#Preview("Item rows, dark, largest text, downloaded") {
     List {
         ItemRow(item: ItemSummary(item: SampleLibrary.warlordOfMars), serverID: nil) { _ in }
     }
+    .environment(\.itemDownloadReader, ItemDownloadReader { _, _ in true })
     .environment(\.dynamicTypeSize, .accessibility5)
     .preferredColorScheme(.dark)
 }

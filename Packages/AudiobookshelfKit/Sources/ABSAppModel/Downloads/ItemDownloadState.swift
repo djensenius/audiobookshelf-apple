@@ -57,6 +57,20 @@ public enum ItemDownloadState: Sendable, Equatable {
         self = downloaded.map { .downloaded(localItemID: $0.id) } ?? .none
     }
 
+    /// Whether the book, or podcast episode, is downloaded on this device for `connectionID`, from
+    /// the stored local items alone: the downloaded mark on cards and rows. Only completed
+    /// downloads count (a local item exists once one completed); downloads under way don't, nor do
+    /// other connections' items. For a podcast (`episodeID` `nil`), any downloaded episode counts,
+    /// as legacy `LazyBookCard.vue`'s `showHasLocalDownload` does.
+    public static func isDownloaded(
+        libraryItemID: String, episodeID: String?, connectionID: UUID, localItems: [LocalLibraryItemDTO]
+    ) -> Bool {
+        ItemDownloadState(
+            libraryItemID: libraryItemID, episodeID: episodeID, connectionID: connectionID, records: [],
+            progress: [:], localItems: localItems
+        ).localItemID != nil
+    }
+
     /// The download record under way, which Cancel removes; `nil` when there's none.
     public var recordID: UUID? {
         switch self {

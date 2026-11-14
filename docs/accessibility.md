@@ -11,8 +11,9 @@ it for free; app-side views follow the same rules.
   the app's `GroupCard` use `accessibilityElement(children: .ignore)` with:
   - a label: the title, then the author or narrator, then the series
     (`ItemPresentation.accessibilityLabel`); a row adds the spoken duration;
-  - a value: the progress ("Progress, 45%" or "Finished"), then the Explicit, Abridged and
-    Missing badges (`ItemPresentation.accessibilityValue`);
+  - a value: the progress ("Progress, 45%" or "Finished"), "Downloaded" when the item is
+    downloaded on this device (`itemDownloadReader`), then the Explicit, Abridged and Missing
+    badges (`ItemPresentation.accessibilityValue`);
   - the Open Details hint and the `.isButton` trait;
   - Voice Control names (`cardInputLabels(title:label:)`): the visible title first, then the
     full label, so "Tap Dune" works without speaking the series.
@@ -35,7 +36,9 @@ it for free; app-side views follow the same rules.
   `ExpandableText.toggleAnimation(reduceMotion:)` and `ConnectionStatus.pulses(reduceMotion:)`.
   The cover fade-in is a short cross-fade, which Reduce Motion allows.
 - **Differentiate Without Color.** When colour is the only cue, add a shape. A finished
-  card adds a check next to its title (`ItemPresentation.showsFinishedCheck`).
+  card adds a check next to its title (`ItemPresentation.showsFinishedCheck`). The downloaded
+  mark is a down-arrow symbol, not a colour: a black arrow on the green success circle
+  (7.56:1, above the 3:1 non-text minimum).
 - **Strings.** New labels, values and hints go through `Localization/native/en-us.json` and
   `mise run strings` ([localization](localization.md)). Never build a spoken string by hand
   from numbers; use `DurationStyle.accessibilityString` and the percent format.
@@ -48,8 +51,8 @@ default text size and at AX5. Record failures as issues that reference #106.
 ### Home
 
 - [ ] Each shelf title is a heading, and the rotor's Headings jump between shelves.
-- [ ] Each card reads its title, author, series, then progress, as one element with Open
-  Details as its hint.
+- [ ] Each card reads its title, author, series, then progress and Downloaded, as one element
+  with Open Details as its hint.
 - [ ] The Actions rotor offers the card's context-menu actions.
 - [ ] "Show All" names its shelf.
 - [ ] Voice Control: "Tap" plus a card's title opens it.
@@ -90,7 +93,8 @@ default text size and at AX5. Record failures as issues that reference #106.
 
 - [ ] Each download reads its title, state and progress.
 - [ ] Delete and Cancel are actions on the row as well as buttons.
-- [ ] Downloaded state reaches cards and rows once the downloads model lands (#385).
+- [ ] A downloaded item's card and row show the mark and read "Downloaded" in their value; it
+  appears when the download completes and goes when it's deleted.
 
 ## Dynamic Type up to AX5
 
@@ -141,8 +145,8 @@ and the Voice Control names and Reduce Motion helpers in `AccessibilityTests`.
 
 ## Known gaps
 
-- Cards and rows don't say whether an item is downloaded: `ItemSummary` doesn't carry it yet.
-  The downloads work (#385) adds it.
+- Cards and rows mark completed downloads only; a download under way shows nothing until it
+  completes.
 - Series and author cards have no context menu, so they have no custom actions to mirror.
 - The connection indicator tells a metered connection from an unmetered one by colour alone;
   its message, which is its value and tooltip, says which.

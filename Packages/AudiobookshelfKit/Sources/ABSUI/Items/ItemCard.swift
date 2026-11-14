@@ -5,8 +5,10 @@ import SwiftUI
 /// legacy `LazyBookCard.vue`). The width comes from the parent.
 ///
 /// The card is one VoiceOver element: the label speaks title, subtitle and series, the value
-/// the progress and the badges, and the actions mirror the context menu. A tap performs
-/// ``ItemActionKind/openDetails``. With Differentiate Without Color, a finished card adds a check.
+/// the progress, the downloaded state and the badges, and the actions mirror the context menu. A
+/// tap performs ``ItemActionKind/openDetails``. With Differentiate Without Color, a finished card
+/// adds a check. A downloaded item (``ItemDownloadReader``) shows a mark at the cover's top
+/// trailing corner, as legacy does.
 public struct ItemCard: View {
     private let item: ItemSummary
     private let serverID: UUID?
@@ -15,6 +17,7 @@ public struct ItemCard: View {
     private let context: ItemActionContext
     private let perform: (ItemActionKind) -> Void
     @Environment(\.itemProgressReader) private var progressReader
+    @Environment(\.itemDownloadReader) private var downloadReader
     @Environment(\.locale) private var locale
     @Environment(\.accessibilityDifferentiateWithoutColor) private var differentiateWithoutColor
 
@@ -37,6 +40,7 @@ public struct ItemCard: View {
 
     public var body: some View {
         let progress = ItemPresentation.progress(for: item, explicit: progress, reader: progressReader)
+        let isDownloaded = ItemPresentation.isDownloaded(item, reader: downloadReader)
         Button {
             perform(.openDetails)
         } label: {
@@ -44,7 +48,18 @@ public struct ItemCard: View {
                 CoverView(
                     key: serverID.flatMap { item.coverKey(serverID: $0) }, title: item.title, author: item.subtitle,
                     shape: shape, progress: progress?.isInProgress == true ? progress?.fraction : nil,
-                    isFinished: progress?.isFinished ?? false, accessibility: .hidden)
+                    isFinished: progress?.isFinished ?? false, accessibility: .hidden
+                )
+                .overlay(alignment: .topTrailing) {
+                    if isDownloaded {
+                        DownloadedIndicator()
+                            .font(.title3)
+                            // Grows with the text, but not past covering the cover.
+                            .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+                            .shadow(radius: 1)
+                            .padding(ABSSpacing.xSmall)
+                    }
+                }
                 Text(verbatim: item.title)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(2, reservesSpace: true)
@@ -78,7 +93,9 @@ public struct ItemCard: View {
         .accessibilityLabel(Text(verbatim: ItemPresentation.accessibilityLabel(item)))
         .cardInputLabels(title: item.title, label: ItemPresentation.accessibilityLabel(item))
         .accessibilityValue(
-            Text(verbatim: ItemPresentation.accessibilityValue(item, progress: progress, locale: locale))
+            Text(
+                verbatim: ItemPresentation.accessibilityValue(
+                    item, progress: progress, isDownloaded: isDownloaded, locale: locale))
         )
         .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
         .accessibilityAddTraits(.isButton)
@@ -103,11 +120,12 @@ public struct ItemCard: View {
     .absBackground()
 }
 
-#Preview("Item cards, dark, largest text") {
+#Preview("Item cards, dark, largest text, downloaded") {
     ItemCard(item: ItemSummary(item: SampleLibrary.warlordOfMars), serverID: nil) { _ in }
         .frame(width: 200)
         .padding()
         .absBackground()
+        .environment(\.itemDownloadReader, ItemDownloadReader { _, _ in true })
         .environment(\.dynamicTypeSize, .accessibility5)
         .preferredColorScheme(.dark)
 }
