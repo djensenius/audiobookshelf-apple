@@ -221,10 +221,8 @@ public struct CarPlayContentBuilder: Sendable {
                     action: .play(itemID: item.libraryItemId, episodeID: nil))
             ]
         }
-        let episodes = item.media.episodes.filter {
-            LocalPlaybackSessionBuilder.hasDownload(of: item, episodeID: $0.id)
-        }
-        return episodes.sorted(by: Self.newestFirst).map { episode in
+        // The snapshot lists only downloaded episodes, so each is one `hasDownload` holds for.
+        return item.media.episodes.sorted(by: Self.newestFirst).map { episode in
             CarPlayRow(
                 id: "\(item.libraryItemId)-\(episode.id)", text: episode.title, detail: item.title, image: image,
                 action: .play(itemID: item.libraryItemId, episodeID: episode.id))
