@@ -191,8 +191,14 @@ layout for them; these rules cover what it can't decide (Human Interface Guideli
     maps to time the same way in every language.
   - `gobackward`, `goforward`, `backward.end.fill` and `forward.end.fill` don't mirror,
     so the Control Center jump-back control matches the player.
-  - On the Mac, the left arrow jumps back and the right arrow jumps forward.
+  - The left arrow jumps back and the right arrow jumps forward (⌘← and ⌘→, with ⌥ for
+    chapters).
   - Text inside those views is still localized. Only the layout direction is fixed.
+- **Arrow keys.** By default SwiftUI swaps a `.keyboardShortcut`'s left and right arrows
+  in right-to-left languages. Arrow-key shortcuts use `localization: .withoutMirroring`,
+  and the handler maps the physical key: the player's seek keys, and the EPUB reader's
+  page turns by the book's direction. `onKeyPress` and AppKit's `keyDown` report the
+  physical key already (the comic and PDF readers).
 - **Readers follow the book, the chrome follows the language.**
   - EPUB: epub.js lays pages out by the book's `page-progression-direction`. Each
     `relocated` event says whether that is right to left (`rightToLeft`). Then a tap

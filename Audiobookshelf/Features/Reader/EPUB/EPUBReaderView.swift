@@ -30,20 +30,22 @@ struct EPUBReaderView: View {
                         session.turn(.next)
                     }
                     .background {
-                        // Hidden buttons, so the arrow keys turn pages wherever focus is.
+                        // Hidden buttons, so the arrow keys turn pages wherever focus is. Not mirrored
+                        // in right-to-left languages: the handler maps the physical key by the book's
+                        // direction.
                         Group {
                             Button {
                                 session.turn(toward: .left)
                             } label: {
                                 EmptyView()
                             }
-                            .keyboardShortcut(.leftArrow, modifiers: [])
+                            .keyboardShortcut(.leftArrow, modifiers: [], localization: .withoutMirroring)
                             Button {
                                 session.turn(toward: .right)
                             } label: {
                                 EmptyView()
                             }
-                            .keyboardShortcut(.rightArrow, modifiers: [])
+                            .keyboardShortcut(.rightArrow, modifiers: [], localization: .withoutMirroring)
                         }
                         .opacity(0)
                         .accessibilityHidden(true)
