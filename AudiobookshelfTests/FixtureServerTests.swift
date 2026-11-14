@@ -89,6 +89,11 @@ struct FixtureServerTests {
         #expect(model.detail?.books.map(\.id) == books.map(\.id))
         #expect(model.detail?.books.map(\.sequence) == ["1", "2", "3"])
 
+        // The Library's "no series" filter is a series filter too, but not a series: it gets the whole page.
+        let noSeries = try await client.filteredBooksPage(
+            libraryID: SampleLibrary.libraryID, query: LibraryQuery(filter: .noSeries))
+        #expect(noSeries.results.map(\.id) == SampleLibrary.books.map(\.id))
+
         await #expect(throws: APIError.notFound) { try await client.seriesDetail(id: "ser_unknown") }
         let unknown = LibraryQuery(filter: .series(id: "ser_unknown"))
         await #expect(throws: APIError.notFound) {

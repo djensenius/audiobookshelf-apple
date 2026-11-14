@@ -116,10 +116,13 @@
             case ("GET", library): return ("fixture-library", "json")
             case ("GET", library + "/personalized"): return ("fixture-personalized", "json")
             // A series' books (`SeriesDetailModel.booksQuery`) are the series' own page; an unknown series has none.
+            // The Library's "no series" filter (`LibraryFilter.noSeries`) isn't a series, so it gets every item.
             case ("GET", library + "/items"):
                 guard let filter = query.first(where: { $0.name == "filter" })?.value, filter.hasPrefix("series.")
                 else { return ("fixture-items", "json") }
-                return seriesID(filter: filter).map { ("fixture-items-series-\($0)", "json") }
+                let id = seriesID(filter: filter)
+                if id == LibraryFilter.noSeries.value { return ("fixture-items", "json") }
+                return id.map { ("fixture-items-series-\($0)", "json") }
             case ("GET", library + "/series"): return ("fixture-series", "json")
             // A series' metadata and progress (`SeriesEndpoints.detail(id:)`).
             case ("GET", _) where parts.count == 3 && parts[0...1] == ["api", "series"]:
@@ -156,7 +159,7 @@
         }
 
         /// The reply to `method` and `path` with `query` from `bundle`. A request without a fixture is a 404,
-        /// logged with its path so a missing fixture is obvious.
+        /// logged with its path and query so a missing fixture is obvious.
         static func reply(method: String, path: String, query: [URLQueryItem] = [], bundle: Bundle = .main) -> Reply {
             // `/logout` returns no end-session URL for a local sign-in, and a session's `/sync` and
             // `/close` return nothing the app reads.
@@ -167,7 +170,10 @@
                 let url = bundle.url(forResource: resource.name, withExtension: resource.ext),
                 var body = try? Data(contentsOf: url)
             else {
-                Log.api.error("Fixture server: no fixture for \(method, privacy: .public) \(path, privacy: .public)")
+                var components = URLComponents()
+                components.queryItems = query.isEmpty ? nil : query
+                let target = components.percentEncodedQuery.map { "\(path)?\($0)" } ?? path
+                Log.api.error("Fixture server: no fixture for \(method, privacy: .public) \(target, privacy: .public)")
                 return .notFound
             }
             if let sessionID = sessionID(method: method, path: path) {
