@@ -45,6 +45,14 @@ struct PlayLinkScreen: Equatable {
         return !goneState.isGone(gone)
     }
 
+    /// Whether a prompt already asked on this screen still stands: the media is still shown
+    /// and playable. A refresh that answers 404, drops the episode or removes the audio
+    /// withdraws it, as it disables Play.
+    func keepsPrompt(given goneState: ItemDetailGoneState) -> Bool {
+        guard let title, !title.isEmpty else { return false }
+        return isPlayable(given: goneState)
+    }
+
     /// The item screen: a book with audio that isn't missing. A podcast's own screen has nothing
     /// to play: its links name an episode, which opens on top.
     @MainActor
@@ -153,26 +161,29 @@ enum PlayLinkConfirmationPresentation {
         }
     }
 
-    /// Whether `prompt` still stands: no navigation since it was taken. A newer link (even
-    /// `item/` for the same screen, which the router doesn't push again) or a change to the
-    /// Library path supersedes it, so its position never plays.
+    /// Whether `prompt` still stands: its screen still has the media to play
+    /// (``PlayLinkScreen/keepsPrompt(given:)``, passed as `screenIsPlayable`), and no navigation
+    /// came since it was taken. A newer link (even `item/` for the same screen, which the router
+    /// doesn't push again) or a change to the Library path supersedes it, so its position never
+    /// plays.
     @MainActor
-    static func isCurrent(_ prompt: PlayLinkPrompt, in router: Router?) -> Bool {
-        guard let router else { return false }
+    static func isCurrent(_ prompt: PlayLinkPrompt, in router: Router?, screenIsPlayable: Bool) -> Bool {
+        guard screenIsPlayable, let router else { return false }
         return router.navigationGeneration == prompt.generation
     }
 
     /// Plays the confirmed link through `play`, the screens' own play path, so its streaming and
     /// cellular checks apply: from the link's start time, or with `atCurrentPosition` (a paused
     /// item) where it is. The same media, already loaded, resumes in its session from there
-    /// rather than restarting. A prompt newer navigation superseded (``isCurrent(_:in:)``)
-    /// plays nothing. Returns what the alert shows when that fails, or `nil` once it starts, is
-    /// cancelled or is superseded.
+    /// rather than restarting. A prompt that no longer stands (``isCurrent(_:in:screenIsPlayable:)``:
+    /// newer navigation, or a screen that lost its media) plays nothing. Returns what the alert
+    /// shows when that fails, or `nil` once it starts, is cancelled or no longer stands.
     @MainActor
     static func confirm(
-        _ prompt: PlayLinkPrompt, atCurrentPosition: Bool = false, in router: Router?, with play: PlayItemAction
+        _ prompt: PlayLinkPrompt, atCurrentPosition: Bool = false, in router: Router?, screenIsPlayable: Bool,
+        with play: PlayItemAction
     ) async -> ItemDetailPlayFailure? {
-        guard isCurrent(prompt, in: router) else { return nil }
+        guard isCurrent(prompt, in: router, screenIsPlayable: screenIsPlayable) else { return nil }
         let link = prompt.link
         do {
             try await play(
@@ -232,9 +243,10 @@ struct PlayLinkConfirmation: ViewModifier {
             .onChange(of: resolution, initial: true) { _, resolution in
                 if let next = PlayLinkConfirmationPresentation.take(resolution, from: router) { prompt = next }
             }
-            // Newer navigation withdraws the question; Confirm checks again before playing.
-            .onChange(of: router?.navigationGeneration) {
-                if let prompt, !PlayLinkConfirmationPresentation.isCurrent(prompt, in: router) { self.prompt = nil }
+            // Newer navigation, or a refresh that takes the media away, withdraws the question;
+            // Confirm checks again before playing.
+            .onChange(of: PromptCheck(generation: router?.navigationGeneration, isPlayable: keepsPrompt)) {
+                withdrawPromptIfSuperseded()
             }
             .alert(
                 Text(verbatim: prompt?.message ?? ""),
@@ -290,11 +302,28 @@ struct PlayLinkConfirmation: ViewModifier {
             isPlaying: playback?.isPlaybackRequested ?? false, locale: locale)
     }
 
+    /// Whether the screen still has the media a shown prompt would play.
+    private var keepsPrompt: Bool { screen.keepsPrompt(given: goneState) }
+
+    /// What a shown prompt depends on, besides itself.
+    private struct PromptCheck: Equatable {
+        let generation: Int?
+        let isPlayable: Bool
+    }
+
+    private func withdrawPromptIfSuperseded() {
+        guard let prompt,
+            !PlayLinkConfirmationPresentation.isCurrent(prompt, in: router, screenIsPlayable: keepsPrompt)
+        else { return }
+        self.prompt = nil
+    }
+
     private func confirm(_ prompt: PlayLinkPrompt, atCurrentPosition: Bool) {
         guard let playItem else { return }
         Task {
             playFailure = await PlayLinkConfirmationPresentation.confirm(
-                prompt, atCurrentPosition: atCurrentPosition, in: router, with: playItem)
+                prompt, atCurrentPosition: atCurrentPosition, in: router, screenIsPlayable: keepsPrompt,
+                with: playItem)
         }
     }
 }

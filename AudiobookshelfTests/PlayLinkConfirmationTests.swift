@@ -59,7 +59,9 @@ import Testing
         #expect(prompt.confirmKey == "ButtonPlay")
         #expect(!prompt.offersCurrentPosition)
         let plays = Plays()
-        #expect(await PlayLinkConfirmationPresentation.confirm(prompt, in: router, with: plays.action) == nil)
+        #expect(
+            await PlayLinkConfirmationPresentation.confirm(
+                prompt, in: router, screenIsPlayable: true, with: plays.action) == nil)
         #expect(plays.started.count == 1)
         #expect(plays.started.first?.itemID == "li_1")
         #expect(plays.started.first?.episodeID == nil)
@@ -75,7 +77,8 @@ import Testing
                 resolve(.episode(itemID: "li_2", episodeID: "ep_1"), on: router), from: router))
 
         let plays = Plays()
-        _ = await PlayLinkConfirmationPresentation.confirm(prompt, in: router, with: plays.action)
+        _ = await PlayLinkConfirmationPresentation.confirm(
+            prompt, in: router, screenIsPlayable: true, with: plays.action)
         #expect(plays.started.first?.episodeID == "ep_1")
         #expect(plays.started.first?.startTime == 90)
     }
@@ -138,9 +141,10 @@ import Testing
         #expect(prompt.confirmKey == "ButtonItemDetailResume")
         #expect(prompt.offersCurrentPosition)
         let plays = Plays()
-        _ = await PlayLinkConfirmationPresentation.confirm(prompt, in: router, with: plays.action)
         _ = await PlayLinkConfirmationPresentation.confirm(
-            prompt, atCurrentPosition: true, in: router, with: plays.action)
+            prompt, in: router, screenIsPlayable: true, with: plays.action)
+        _ = await PlayLinkConfirmationPresentation.confirm(
+            prompt, atCurrentPosition: true, in: router, screenIsPlayable: true, with: plays.action)
         #expect(plays.started.map(\.startTime) == [5_025, nil])
     }
 
@@ -259,9 +263,10 @@ import Testing
         }
     }
 
-    /// Serves `item`, or fails with the error the test sets.
+    /// Serves `item` (or the one ``serve(_:)`` replaces it with), or fails with the error the
+    /// test sets.
     private actor ScriptedItemService: ItemDetailService {
-        let item: ABSCore.LibraryItem
+        private var item: ABSCore.LibraryItem
         private var error: (any Error)?
 
         init(item: ABSCore.LibraryItem) {
@@ -270,6 +275,11 @@ import Testing
 
         func fail(with error: (any Error)?) {
             self.error = error
+        }
+
+        func serve(_ item: ABSCore.LibraryItem) {
+            self.item = item
+            error = nil
         }
 
         func item(id: String) async throws -> ABSCore.LibraryItem {
@@ -345,14 +355,16 @@ import Testing
         let router = router(opening: Self.book)
         let prompt = try #require(
             PlayLinkConfirmationPresentation.take(resolve(.item(id: "li_1"), on: router), from: router))
-        #expect(PlayLinkConfirmationPresentation.isCurrent(prompt, in: router))
+        #expect(PlayLinkConfirmationPresentation.isCurrent(prompt, in: router, screenIsPlayable: true))
 
         // `item/li_1` keeps the same screen on top, but the question it was asked under is gone.
         router.open(DeepLink(.item(id: "li_1", episodeID: nil)))
         #expect(router[path: .library] == [.item(id: "li_1")])
-        #expect(!PlayLinkConfirmationPresentation.isCurrent(prompt, in: router))
+        #expect(!PlayLinkConfirmationPresentation.isCurrent(prompt, in: router, screenIsPlayable: true))
         let plays = Plays()
-        #expect(await PlayLinkConfirmationPresentation.confirm(prompt, in: router, with: plays.action) == nil)
+        #expect(
+            await PlayLinkConfirmationPresentation.confirm(
+                prompt, in: router, screenIsPlayable: true, with: plays.action) == nil)
         #expect(plays.started.isEmpty)
 
         // So does a change to the Library path, such as pushing a screen and popping back.
@@ -362,8 +374,108 @@ import Testing
             PlayLinkConfirmationPresentation.take(resolve(.item(id: "li_1"), on: router), from: router))
         router[path: .library] += [.series(id: "se_1")]
         router[path: .library].removeLast()
-        _ = await PlayLinkConfirmationPresentation.confirm(current, in: router, with: plays.action)
+        _ = await PlayLinkConfirmationPresentation.confirm(
+            current, in: router, screenIsPlayable: true, with: plays.action)
         #expect(plays.started.isEmpty)
+    }
+
+    // MARK: A refresh after the prompt is asked
+
+    /// The preview book without its audio tracks, as a refresh might find it.
+    private static let bookWithoutAudio: ABSCore.LibraryItem = {
+        let book = ItemDetailPreviewData.book
+        return ABSCore.LibraryItem(
+            id: book.id, libraryId: book.libraryId, updatedAt: 15, mediaType: .book,
+            media: .book(
+                Book(
+                    id: "book_li_barsoom_1", metadata: BookMetadata(title: "A Princess of Mars"), tracks: [],
+                    numTracks: 0)))
+    }()
+
+    /// The preview podcast without episode `pe_2`, as a refresh might find it.
+    private static let podcastWithoutEpisode: ABSCore.LibraryItem = {
+        let item = PodcastDetailPreviewData.podcast
+        guard case .podcast(let podcast) = item.media else { return item }
+        return ABSCore.LibraryItem(
+            id: item.id, libraryId: item.libraryId, updatedAt: 21, mediaType: .podcast,
+            media: .podcast(
+                Podcast(
+                    id: podcast.id, libraryItemId: podcast.libraryItemId, metadata: podcast.metadata,
+                    episodes: podcast.episodes?.filter { $0.id != "pe_2" })))
+    }()
+
+    /// Asks `screen()`'s link, lets `refresh` run, then confirms as the alert would: with the
+    /// screen's playability then. Returns the plays started.
+    private func confirmAfterRefresh(
+        _ link: PlayLink, route: Route, screen: () -> PlayLinkScreen, refresh: () async -> Void
+    ) async throws -> Int {
+        let router = router(opening: link)
+        let follower = GoneFollower()
+        let asked = screen()
+        #expect(follower.isPlayable(asked))
+        let prompt = try #require(
+            PlayLinkConfirmationPresentation.take(
+                resolve(route, on: router, isPlayable: follower.isPlayable(asked)), from: router))
+
+        await refresh()
+
+        let now = screen()
+        let stands = now.keepsPrompt(given: follower.state)
+        #expect(
+            PlayLinkConfirmationPresentation.isCurrent(prompt, in: router, screenIsPlayable: stands) == stands)
+        let plays = Plays()
+        _ = await PlayLinkConfirmationPresentation.confirm(
+            prompt, in: router, screenIsPlayable: stands, with: plays.action)
+        return plays.started.count
+    }
+
+    @Test func aRefreshThatTakesTheBookAwayWithdrawsTheAskedPrompt() async throws {
+        let book = ItemDetailPreviewData.book
+        let link = PlayLink(itemID: book.id, startTime: 90)
+        let route = Route.item(id: book.id)
+        for change in [
+            { (service: ScriptedItemService) in await service.fail(with: APIError.notFound) },
+            { (service: ScriptedItemService) in await service.serve(Self.bookWithoutAudio) },
+        ] {
+            let service = ScriptedItemService(item: book)
+            let model = ItemDetailModel(itemID: book.id, service: service, cache: ProgressCache())
+            await model.load()
+            let started = try await confirmAfterRefresh(link, route: route, screen: { .item(model) }) {
+                await change(service)
+                await model.load()
+            }
+            #expect(started == 0)
+        }
+
+        // Control: a refresh that changes nothing still plays.
+        let service = ScriptedItemService(item: book)
+        let model = ItemDetailModel(itemID: book.id, service: service, cache: ProgressCache())
+        await model.load()
+        let started = try await confirmAfterRefresh(link, route: route, screen: { .item(model) }) {
+            await model.load()
+        }
+        #expect(started == 1)
+    }
+
+    @Test func aRefreshThatTakesTheEpisodeAwayWithdrawsTheAskedPrompt() async throws {
+        let podcast = PodcastDetailPreviewData.podcast
+        let link = PlayLink(itemID: podcast.id, episodeID: "pe_2", startTime: 90)
+        let route = Route.episode(itemID: podcast.id, episodeID: "pe_2")
+        for (change, expected) in [
+            ({ (service: ScriptedItemService) in await service.fail(with: APIError.notFound) }, 0),
+            ({ (service: ScriptedItemService) in await service.serve(Self.podcastWithoutEpisode) }, 0),
+            ({ (_: ScriptedItemService) in }, 1),
+        ] {
+            let service = ScriptedItemService(item: podcast)
+            let detail = ItemDetailModel(itemID: podcast.id, service: service, cache: ProgressCache())
+            let model = EpisodeDetailModel(detail: detail, episodeID: "pe_2", cache: ProgressCache())
+            await detail.load()
+            let started = try await confirmAfterRefresh(link, route: route, screen: { .episode(model) }) {
+                await change(service)
+                await detail.load()
+            }
+            #expect(started == expected)
+        }
     }
 
     @Test func handoffPlayerActivityAsksLikeAPlayURL() throws {
