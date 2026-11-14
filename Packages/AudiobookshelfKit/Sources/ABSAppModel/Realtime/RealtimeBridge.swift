@@ -60,7 +60,7 @@ public struct RealtimePlaybackSnapshot: Sendable, Hashable {
 ///   its progress list isn't known to be complete.
 /// - `author_added`, `author_updated` and `author_removed` go to ``onLibraryChange`` with the
 ///   session's account.
-/// - `rss_feed_open` and `rss_feed_closed` go to ``onRssFeedChange``.
+/// - `rss_feed_open` and `rss_feed_closed` go to ``onRssFeedChange`` with the session's account.
 /// - `stream_reset` goes to ``onStreamReset``, whichever user's stream it names.
 ///
 /// Every progress update other than such an echo is also merged into ``localProgress`` with
@@ -85,9 +85,10 @@ public final class RealtimeBridge: SessionParticipant {
     /// for ``LibraryStore/applyLibraryChange(_:connectionKey:)``. Nothing arrives after the
     /// session ends.
     @ObservationIgnored public var onLibraryChange: (@MainActor (LibraryChange, LibraryConnectionKey) -> Void)?
-    /// An RSS feed was opened or closed on the session's server, for ``RssFeedModel/apply(_:)``.
-    /// Nothing arrives after the session ends.
-    @ObservationIgnored public var onRssFeedChange: (@MainActor (RssFeedChange) -> Void)?
+    /// An RSS feed was opened or closed on the session's server; with the account of the session it
+    /// came from, for ``LibraryStore/applyRssFeedChange(_:connectionKey:)``. Nothing arrives after
+    /// the session ends.
+    @ObservationIgnored public var onRssFeedChange: (@MainActor (RssFeedChange, LibraryConnectionKey) -> Void)?
     /// The server restarted a stream's transcode. The server sends it to every socket, so the
     /// receiver matches `streamId` against its own session. Nothing arrives after the session ends.
     @ObservationIgnored public var onStreamReset: (@MainActor (StreamReset) -> Void)?
@@ -344,7 +345,7 @@ public final class RealtimeBridge: SessionParticipant {
         case .authorChanged(let change):
             deliver(.author(change))
         case .rssFeedChanged(let change):
-            onRssFeedChange?(change)
+            if let key = connectionKey { onRssFeedChange?(change, key) }
         case .streamReset(let reset):
             onStreamReset?(reset)
         }
@@ -352,8 +353,13 @@ public final class RealtimeBridge: SessionParticipant {
     }
 
     private func deliver(_ change: LibraryChange) {
-        guard let identity else { return }
-        onLibraryChange?(change, LibraryConnectionKey(connectionID: identity.connectionID, userID: identity.userID))
+        guard let connectionKey else { return }
+        onLibraryChange?(change, connectionKey)
+    }
+
+    /// The running session's account, or `nil` between sessions.
+    private var connectionKey: LibraryConnectionKey? {
+        identity.map { LibraryConnectionKey(connectionID: $0.connectionID, userID: $0.userID) }
     }
 
     private func apply(_ update: UserItemProgressUpdate) {

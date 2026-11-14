@@ -2,6 +2,7 @@ import ABSAPI
 import ABSCore
 import ABSData
 import ABSPlayback
+import ABSRealtime
 import Foundation
 import Observation
 
@@ -83,6 +84,8 @@ public final class LibraryStore {
     @ObservationIgnored private var viewPreferencesObservers: [ViewPreferencesObserver] = []
     /// Told of each socket change (``observeLibraryChanges(connectionKey:owner:_:)``).
     @ObservationIgnored private var libraryChangeObservers: [LibraryChangeObserver] = []
+    /// Told of each live RSS feed change (``observeRssFeedChanges(connectionKey:owner:_:)``).
+    @ObservationIgnored private var rssFeedChangeObservers: [RssFeedChangeObserver] = []
 
     /// - Parameters:
     ///   - itemActionLocalSync: The ``ItemActionLocalSync`` an account's shared
@@ -543,6 +546,26 @@ public final class LibraryStore {
         libraryChangeObservers.removeAll { $0.owner == nil }
         libraryChangeObservers.append(LibraryChangeObserver(owner: owner, connectionKey: connectionKey, apply: apply))
     }
+
+    /// Hands a live RSS feed open or close from `connectionKey`'s session to that account's
+    /// observers, dropped unless the store serves that account, as
+    /// ``applyLibraryChange(_:connectionKey:)`` does. Wire it as ``RealtimeBridge/onRssFeedChange``.
+    public func applyRssFeedChange(_ change: RssFeedChange, connectionKey: LibraryConnectionKey) {
+        guard connectionKey == self.connectionKey else { return }
+        rssFeedChangeObservers.removeAll { $0.owner == nil }
+        for observer in rssFeedChangeObservers where observer.connectionKey == connectionKey {
+            observer.apply(change)
+        }
+    }
+
+    /// Calls `apply` with each live RSS feed change for `connectionKey`'s account, of any entity, for
+    /// as long as `owner` lives. ``RssFeedModel/apply(_:)`` keeps only its own entity's.
+    public func observeRssFeedChanges(
+        connectionKey: LibraryConnectionKey, owner: AnyObject, _ apply: @escaping @MainActor (RssFeedChange) -> Void
+    ) {
+        rssFeedChangeObservers.removeAll { $0.owner == nil }
+        rssFeedChangeObservers.append(RssFeedChangeObserver(owner: owner, connectionKey: connectionKey, apply: apply))
+    }
 }
 
 /// An observer of ``LibraryStore``'s saved view preferences, kept while its owner lives.
@@ -557,6 +580,13 @@ private struct LibraryChangeObserver {
     weak var owner: AnyObject?
     let connectionKey: LibraryConnectionKey
     let apply: @MainActor (LibraryChange) -> Void
+}
+
+/// An observer of ``LibraryStore``'s live RSS feed changes, kept while its owner lives.
+private struct RssFeedChangeObserver {
+    weak var owner: AnyObject?
+    let connectionKey: LibraryConnectionKey
+    let apply: @MainActor (RssFeedChange) -> Void
 }
 
 /// Thrown by ``LibraryStoreServices`` when the store's current client doesn't implement the

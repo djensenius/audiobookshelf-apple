@@ -88,7 +88,7 @@ Now Playing runtime check on devices is still open under #44.
 | `latest.vue` | `LatestView` | #70 | Done | |
 | `PodcastEpisodesFeedModal` | `PodcastEpisodesFeedSheet` | #95 | Done | |
 | `ItemDetailsModal` | `ItemDetailInfoSheet` | #342 | Done | |
-| `modals/rssfeeds/*` | `RssFeedSheet` | #96, PRs #419, #463, #503 | In progress (#96) | The sheet and its entry points are in the app. Live socket updates aren't wired yet (#601), and the manual admin check is still open. |
+| `modals/rssfeeds/*` | `RssFeedSheet` | #96, PRs #419, #463, #503, #605 | In progress (#96) | The sheet and its entry points are in the app. Live opens and closes reach an open sheet (#601, PR #605); the manual admin check is still open. |
 
 ### Offline
 

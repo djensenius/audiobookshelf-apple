@@ -499,17 +499,24 @@ struct RealtimeBridgeTests {
             ])
     }
 
-    @Test func rssFeedChangesReachTheHook() async throws {
+    @Test func rssFeedChangesReachTheHookWithTheSessionAccount() async throws {
         let harness = BridgeHarness()
         let socket = try await harness.start()
         let changes = Recorder<RssFeedChange>()
-        harness.bridge.onRssFeedChange = { changes.append($0) }
+        let keys = Recorder<LibraryConnectionKey>()
+        harness.bridge.onRssFeedChange = {
+            changes.append($0)
+            keys.append($1)
+        }
         let feed = RssFeed(id: "feed-1", entityType: "libraryItem", entityId: "li-1", feedUrl: "/feed/li-1")
 
         await harness.send(.rssFeedChanged(.opened(feed)), on: socket)
         await harness.send(.rssFeedChanged(.closed(feed)), on: socket)
 
         #expect(changes.values == [.opened(feed), .closed(feed)])
+        #expect(
+            keys.values
+                == Array(repeating: LibraryConnectionKey(connectionID: identityA.connectionID, userID: "a"), count: 2))
     }
 
     @Test func authorChangesOfAStaleSessionNeverReachTheHook() async throws {
