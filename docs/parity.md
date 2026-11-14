@@ -143,7 +143,7 @@ open or the app doesn't wire it in yet.
 | Media-control seeking | `NowPlayingController` | #183 | Done | |
 | Lock Screen, remote commands, Now Playing | `NowPlayingController`, `NowPlayingBridge` | #54, #183 | Done | #54 and #183 are closed. The runtime check on devices is part of #44. |
 | Queue, next episode | `PlaybackQueue` | #60, #156 | In progress (#60) | The auto-advance core and queue composition (PR #445) are merged, and so are the queue sheet, the queue inspector and "Play next" / "Add to queue" (#156, still open). Background-safe auto-advance is wired (#160, PR #554; #587, PR #590). The iPhone Duo player's Up Next pane shows the queue (#84). |
-| Haptics | ABSUI `Haptics` | #147 | Done | The player's transport controls and the sleep timer's reset feedback use the haptics setting. |
+| Haptics | ABSUI `Haptics` | #147 | Done | The player's transport controls use the Haptic feedback setting. The sleep timer's reset vibration has its own toggle, "Disable vibrate on reset" (`disableSleepTimerResetFeedback`). |
 | Cast and routes | ABSUI `RoutePicker` (AirPlay) | #183 | Done | Cast was never confirmed in legacy; AirPlay only. |
 | Close player | `MiniPlayerView`, `PlayerSlot` | #183 | Done | |
 | Total track, scale elapsed time by speed, lock player | `PlayerOptionsMenu` | #505, PR #526 | Done | Listed under Gaps found in the first draft. |
