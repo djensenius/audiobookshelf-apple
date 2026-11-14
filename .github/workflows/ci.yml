@@ -16,9 +16,11 @@ jobs:
   build-and-test:
     name: Lint, build, and test
     runs-on: xcode-27
-    # Successful runs take 18 to 23 minutes, and the shared runner is slower under load, so 30
-    # minutes cancelled runs whose tests were still passing.
-    timeout-minutes: 45
+    # Successful runs take 18 to 23 minutes. Under load, the iOS package's cold
+    # build-for-testing alone can take up to BUILD_TIMEOUT (2400 s) in scripts/test-kit-ios.py,
+    # so the job allows for that plus the other steps. The script's per-phase limits still
+    # bound a hung build or test run.
+    timeout-minutes: 75
     env:
       # The image defaults to Xcode 27.1; the project needs 27.2.
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
