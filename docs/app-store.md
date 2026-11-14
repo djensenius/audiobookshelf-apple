@@ -169,6 +169,7 @@ These need the maintainer's Apple account or a signed build:
       age rating, App Privacy answers and review information above.
 - [ ] Generate the privacy report from a signed archive (Xcode Organizer › the archive
       › Generate Privacy Report), and check it matches [App privacy](#app-privacy-nutrition-label).
-- [ ] Take screenshots for each required device size.
+- [ ] Take screenshots for each required device size (`mise run screenshots`) and upload
+      them ([testing/screenshots.md](testing/screenshots.md#uploading)).
 - [ ] Publish the privacy policy and support pages, and fill in their URLs.
 - [ ] Set up the demo server and the review account.

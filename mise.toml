@@ -172,6 +172,11 @@ case "${ABS_UI_PLATFORM:-macos}" in
 esac
 """
 
+[tasks.screenshots]
+description = "App Store screenshots into build/screenshots/ (--device <id>, --locale <tag>; docs/testing/screenshots.md)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "scripts/screenshots.sh"
+
 [tasks."test:tools"]
 description = "Run repository tool tests (Tools/StringsImport, and the release scripts in test:release)"
 depends = ["test:release"]
