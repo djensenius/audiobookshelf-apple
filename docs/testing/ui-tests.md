@@ -46,8 +46,10 @@ A Debug build launched with `-ABSFixtures` (`Audiobookshelf/Fixtures/FixtureServ
   fixture launch, instead of the app's cover cache, and loads them without waiting for the
   network monitor, so fixture covers neither evict real ones nor fail offline;
 - keeps downloads in `AudiobookshelfFixtures/Downloads` in the temporary directory, emptied on
-  every fixture launch, with a foreground session that answers from the fixtures too, so the
-  Downloads tab starts empty (`downloads.empty`) and never sees a real download.
+  every fixture launch, and sends every part of a transfer (the redirect check, the download
+  session and the custom-header session) through `FixtureURLProtocol`, so the Downloads tab
+  starts empty (`downloads.empty`), never sees a real download and never reaches the network.
+  The fixtures don't serve audio files for download yet, so a fixture download fails (404).
 
 Type the fixture address on the connect screen and sign in with any username and password.
 
