@@ -2,9 +2,9 @@
 
 This is a draft. It maps every row of the
 [legacy feature inventory](research/legacy-feature-inventory.md) to its native
-replacement, the issue or PR that tracks it, or a decision to drop it. Issue
-[#111](https://github.com/djensenius/audiobookshelf-apple/issues/111) tracks
-sign-off.
+replacement, the issue or PR that tracks it, or a decision to drop it. It was
+written for [#111](https://github.com/djensenius/audiobookshelf-apple/issues/111)
+(PR #506) and is updated as issues close.
 
 The statuses were taken from GitHub and the code at main `37f3b53d`
 (2026-11-14). They will go stale. Update a row when its issue closes.
