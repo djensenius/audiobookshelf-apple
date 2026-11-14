@@ -324,6 +324,7 @@
   "MessageLanguageSettingsHelp": "Audiobookshelf uses the language you choose for it in the Settings app. That option appears once you add more than one preferred language in General > Language & Region.",
   "MessageLanguageSettingsHelpMac": "To choose the language Audiobookshelf uses, open System Settings > General > Language & Region and add it under Applications.",
   "MessageLatestEpisodesLoadFailed": "Couldn't load the latest episodes.",
+  "MessageLegacyAppInstalled": "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app.",
   "MessageLibraryFilterLoadFailed": "Couldn't load this library's filters.",
   "MessageLibraryFilterNoValues": "Nothing to filter by in this group.",
   "MessageLibraryItemsLoadFailed": "Couldn't load this library's items.",
