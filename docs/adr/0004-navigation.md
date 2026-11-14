@@ -164,7 +164,7 @@ The sidebar-only section tabs need a fallback. If the size class becomes compact
 2. It moves the section's path into Library: `paths[.library] = paths[.series]`. This **replaces** any existing Library path. That older Library path was not visible, and keeping it would put an unrelated screen on top.
 3. It clears `paths[.series]` and selects `.library`.
 
-The visible destination (for example an item pushed from Series) is therefore unchanged, and Back returns to the Series list in the Library root. If the size class becomes regular again, nothing moves back: the user stays in Library with that section selected, and the Series tab starts at its root. Router tests cover the transfer and the replacement.
+The visible destination (for example an item pushed from Series) is therefore unchanged, and Back returns to the Series list in the Library root. If the size class becomes regular again, nothing moves back: the user stays in Library with that section selected, and the Series tab starts at its root. The Library root keeps its section menu while a section is selected, in any width, so it can return to the grid; once the grid is shown in regular width, the menu goes and the sidebar lists the sections. Router tests cover the transfer and the replacement.
 
 #### Unauthenticated and offline states
 

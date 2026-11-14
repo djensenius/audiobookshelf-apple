@@ -85,8 +85,13 @@ struct MainTabView<Root: View>: View {
                         if horizontalSizeClass == .compact, tab.isLibraryScoped, tab != .search {
                             LibraryPickerToolbar()
                         }
-                        // The sidebar lists the sections in regular width.
-                        if horizontalSizeClass == .compact, tab == .library, !router.visibleSections.isEmpty {
+                        // The sidebar lists the sections in regular width, but a section chosen in
+                        // compact width stays in the Library root when the width becomes regular
+                        // (`normalize(isCompact:)` moves nothing back), so the menu stays until the
+                        // grid is shown again.
+                        if tab == .library, horizontalSizeClass == .compact || router.librarySection != nil,
+                            !router.visibleSections.isEmpty
+                        {
                             LibrarySectionToolbar(router: router)
                         }
                         ConnectionIndicatorToolbar()

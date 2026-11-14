@@ -3,7 +3,8 @@ import ABSUI
 import SwiftUI
 
 /// The Library root's section menu in a compact tab's toolbar, where the sidebar's Browse
-/// section isn't shown (ADR 0004): the grid, then ``Router/visibleSections`` in sidebar order,
+/// section isn't shown (ADR 0004), and in regular width while the root shows a section, so it
+/// can return to the grid: the grid, then ``Router/visibleSections`` in sidebar order,
 /// as legacy `BookshelfNavBar.vue` lists them. Choosing one sets ``Router/librarySection``,
 /// which the Library root (``TabRoot``) shows. It's on the root only, where the Library path is
 /// empty, so nothing else changes.
