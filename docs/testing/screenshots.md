@@ -74,10 +74,11 @@ skipped without launching the app. To run it by hand:
 TEST_RUNNER_ABS_SCREENSHOTS=1 ABS_UI_PLATFORM=ios mise run test:ui -- -only-testing:AudiobookshelfUITests/ScreenshotTests
 ```
 
-The fixture library is public-domain LibriVox material. Every item has the same cover,
-`Audiobookshelf/Fixtures/Resources/fixture-cover.png`: an 8 × 8 single-colour placeholder made for
-this repository, not artwork from anywhere else, so the screenshots contain nothing under someone
-else's copyright.
+The fixture library is public-domain LibriVox material. Each item's cover,
+`Audiobookshelf/Fixtures/Resources/fixture-cover-<itemId>.png`, is an original typographic design
+generated for this repository by `scripts/fixture-covers.swift` (`mise run fixtures:covers`;
+[ui-tests.md](ui-tests.md#fixture-covers)), not artwork from anywhere else, so the screenshots
+contain nothing under someone else's copyright.
 
 ## iPhone Duo
 
