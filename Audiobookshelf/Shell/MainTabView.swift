@@ -79,6 +79,7 @@ struct MainTabView<Root: View>: View {
                         if horizontalSizeClass == .compact, tab.isLibraryScoped, tab != .search {
                             LibraryPickerToolbar()
                         }
+                        ConnectionIndicatorToolbar()
                     }
             }
             // Screens and their pushed routes know which tab's stack they're on, so a hidden tab's copy of the same
