@@ -572,6 +572,117 @@ import Testing
         #expect(resume.message == "Resume playback?")
     }
 
+    // MARK: The alert's lifecycle
+
+    /// Opens `link` on `router` and takes its prompt for the item screen, as the modifier does.
+    private func takePrompt(_ link: PlayLink, on router: Router) throws -> PlayLinkPrompt {
+        router.open(DeepLink(.play(link)))
+        return try #require(
+            PlayLinkConfirmationPresentation.take(resolve(.item(id: link.itemID), on: router), from: router))
+    }
+
+    @Test(arguments: [false, true])
+    func aSecondTimestampWhileTheFirstIsShownPresentsNextAndPlaysIt(withdrawsFirst: Bool) async throws {
+        let first = PlayLink(itemID: "li_1", startTime: 90)
+        let second = PlayLink(itemID: "li_1", startTime: 180)
+        let router = router(opening: first)
+        var state = PlayLinkPromptState()
+        state.receive(
+            try #require(
+                PlayLinkConfirmationPresentation.take(resolve(.item(id: "li_1"), on: router), from: router)))
+        let shown = try #require(state.presented)
+        #expect(shown.link == first)
+
+        // The second link moves the generation; the screen's handlers then withdraw and take its
+        // prompt in either order, and the new prompt, taken after the move, stands.
+        router.open(DeepLink(.play(second)))
+        if withdrawsFirst {
+            state.withdraw(generation: router.navigationGeneration, screenIsPlayable: true)
+        }
+        state.receive(
+            try #require(
+                PlayLinkConfirmationPresentation.take(resolve(.item(id: "li_1"), on: router), from: router)))
+        state.withdraw(generation: router.navigationGeneration, screenIsPlayable: true)
+
+        // The open alert closes before the next presents: SwiftUI keeps an open alert's data.
+        #expect(state.presented == nil)
+        let closing = try #require(state.closingID)
+        #expect(closing == shown.id)
+        state.didClose(closing)
+        let replacement = try #require(state.presented)
+        #expect(replacement.link == second)
+
+        // The first alert's late callbacks change nothing, and its Confirm plays nothing.
+        state.dismissed(shown.id)
+        state.didClose(shown.id)
+        #expect(state.presented == replacement)
+        let firstPlays = state.confirm(shown.id)
+        #expect(!firstPlays)
+        let plays = Plays()
+        #expect(
+            await PlayLinkConfirmationPresentation.confirm(
+                shown, in: router, screenIsPlayable: true, with: plays.action) == nil)
+        #expect(plays.started.isEmpty)
+
+        // The second plays from its time, once.
+        let secondPlays = state.confirm(replacement.id)
+        #expect(secondPlays)
+        let secondPlaysAgain = state.confirm(replacement.id)
+        #expect(!secondPlaysAgain)
+        _ = await PlayLinkConfirmationPresentation.confirm(
+            replacement, in: router, screenIsPlayable: true, with: plays.action)
+        #expect(plays.started.map(\.startTime) == [180])
+        state.dismissed(replacement.id)
+        #expect(state.presented == nil)
+    }
+
+    @Test func onlyTheNewestWaitingPromptPresents() throws {
+        let router = router(opening: Self.book)
+        var state = PlayLinkPromptState()
+        state.receive(
+            try #require(
+                PlayLinkConfirmationPresentation.take(resolve(.item(id: "li_1"), on: router), from: router)))
+        let shown = try #require(state.presented)
+        let middle = try takePrompt(PlayLink(itemID: "li_1", startTime: 120), on: router)
+        state.receive(middle)
+        state.receive(try takePrompt(PlayLink(itemID: "li_1", startTime: 240), on: router))
+        state.withdraw(generation: router.navigationGeneration, screenIsPlayable: true)
+        #expect(state.next?.link.startTime == 240)
+
+        // Closing by its own callback (the user dismissed it as it closed) presents the newest too.
+        state.dismissed(shown.id)
+        #expect(state.presented?.link.startTime == 240)
+        #expect(state.closingID == nil)
+    }
+
+    @Test func aWithdrawnPromptClosesAndNeverPlays() throws {
+        let router = router(opening: Self.book)
+        var state = PlayLinkPromptState()
+        state.receive(
+            try #require(
+                PlayLinkConfirmationPresentation.take(resolve(.item(id: "li_1"), on: router), from: router)))
+        let shown = try #require(state.presented)
+
+        // Unchanged: it stays.
+        state.withdraw(generation: router.navigationGeneration, screenIsPlayable: true)
+        #expect(state.presented == shown)
+
+        // A refresh takes the media away.
+        state.withdraw(generation: router.navigationGeneration, screenIsPlayable: false)
+        #expect(state.presented == nil)
+        let withdrawnPlays = state.confirm(shown.id)
+        #expect(!withdrawnPlays)
+        state.didClose(try #require(state.closingID))
+        #expect(state.current == nil)
+
+        // Cancel closes a prompt that still stands, leaving nothing.
+        state.receive(try takePrompt(Self.book, on: router))
+        let next = try #require(state.presented)
+        state.dismissed(next.id)
+        #expect(state.current == nil)
+        #expect(state.closingID == nil)
+    }
+
     @Test func handoffPlayerActivityAsksLikeAPlayURL() throws {
         // A continued player activity becomes a `play/` link with the position (#219).
         let link = try #require(

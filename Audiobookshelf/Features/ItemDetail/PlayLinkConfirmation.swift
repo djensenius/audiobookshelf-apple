@@ -17,11 +17,99 @@ struct PlayLinkPrompt: Equatable {
     /// The router's ``Router/navigationGeneration`` when the prompt was taken: newer navigation
     /// (another link, or a change to the Library path) supersedes it, so it no longer plays.
     var generation = 0
+    /// Tells this prompt's alert from the ones before and after it on the screen;
+    /// ``PlayLinkPromptState/receive(_:)`` assigns it.
+    var id = 0
 
     /// The confirming button's `L10n` key.
     var confirmKey: String { isResume ? "ButtonItemDetailResume" : "ButtonPlay" }
     /// A paused item with a start time also offers to resume where it is.
     var offersCurrentPosition: Bool { isResume && link.startTime != nil }
+}
+
+/// The play-link alert's lifecycle on one screen (#577), kept apart from the view so its rules
+/// can be tested; ``PlayLinkConfirmation`` only feeds it events.
+///
+/// A newer prompt while the alert is open never replaces it in place, since SwiftUI keeps an
+/// open alert's data: the open alert closes first (``closingID``), then the newer prompt
+/// presents (``didClose(_:)``). Only the newest one waits; a later one replaces it. Callbacks
+/// from an older alert carry its ``PlayLinkPrompt/id`` and change nothing, and only the newest
+/// prompt still standing may play, once.
+struct PlayLinkPromptState {
+    /// The prompt the alert presents, or is closing.
+    private(set) var current: PlayLinkPrompt?
+    /// The newest prompt waiting for ``current`` to close.
+    private(set) var next: PlayLinkPrompt?
+    /// ``current`` is closing: a newer prompt replaced it, or it was withdrawn.
+    private(set) var isClosing = false
+    /// The prompt Confirm may play: the newest received, until it is withdrawn or confirmed.
+    private(set) var playableID: Int?
+    private var lastID = 0
+
+    /// What the alert presents: nothing while ``current`` closes.
+    var presented: PlayLinkPrompt? { isClosing ? nil : current }
+    /// The alert that must be gone before ``next`` presents.
+    var closingID: Int? { isClosing ? current?.id : nil }
+
+    /// A prompt taken from the router: presents now, or once the open alert has closed.
+    mutating func receive(_ prompt: PlayLinkPrompt) {
+        var prompt = prompt
+        lastID += 1
+        prompt.id = lastID
+        playableID = prompt.id
+        if current == nil {
+            current = prompt
+        } else {
+            next = prompt
+            isClosing = true
+        }
+    }
+
+    /// Withdraws the prompts that no longer stand
+    /// (``PlayLinkConfirmationPresentation/isCurrent(_:generation:screenIsPlayable:)``): newer
+    /// navigation, or a screen that lost its media. A prompt taken after the navigation that
+    /// moved `generation` carries the new one, so it stands.
+    mutating func withdraw(generation: Int?, screenIsPlayable: Bool) {
+        func stands(_ prompt: PlayLinkPrompt) -> Bool {
+            PlayLinkConfirmationPresentation.isCurrent(
+                prompt, generation: generation, screenIsPlayable: screenIsPlayable)
+        }
+        if let next, !stands(next) {
+            self.next = nil
+            if playableID == next.id { playableID = nil }
+        }
+        if let current, !stands(current) {
+            isClosing = true
+            if playableID == current.id { playableID = nil }
+        }
+    }
+
+    /// The closing alert `id` is gone: the waiting prompt, if any, presents.
+    mutating func didClose(_ id: Int) {
+        guard closingID == id else { return }
+        current = next
+        next = nil
+        isClosing = false
+    }
+
+    /// The alert for `id` closed: a button, or swiped away. An older alert's late callback
+    /// changes nothing.
+    mutating func dismissed(_ id: Int) {
+        guard current?.id == id else { return }
+        if isClosing {
+            didClose(id)
+        } else {
+            current = nil
+        }
+    }
+
+    /// Confirm on prompt `id`: whether it may play. Only the newest prompt still standing plays,
+    /// and only once.
+    mutating func confirm(_ id: Int) -> Bool {
+        guard playableID == id else { return false }
+        playableID = nil
+        return true
+    }
 }
 
 /// What an item or episode screen tells its play-link confirmation (#577): its title, and
@@ -169,8 +257,13 @@ enum PlayLinkConfirmationPresentation {
     /// plays.
     @MainActor
     static func isCurrent(_ prompt: PlayLinkPrompt, in router: Router?, screenIsPlayable: Bool) -> Bool {
-        guard screenIsPlayable, let router else { return false }
-        return router.navigationGeneration == prompt.generation
+        isCurrent(prompt, generation: router?.navigationGeneration, screenIsPlayable: screenIsPlayable)
+    }
+
+    /// ``isCurrent(_:in:screenIsPlayable:)`` for the router's `generation`, `nil` without one.
+    static func isCurrent(_ prompt: PlayLinkPrompt, generation: Int?, screenIsPlayable: Bool) -> Bool {
+        guard screenIsPlayable, let generation else { return false }
+        return generation == prompt.generation
     }
 
     /// Plays the confirmed link through `play`, the screens' own play path, so its streaming and
@@ -240,32 +333,42 @@ struct PlayLinkConfirmation: ViewModifier {
     @State private var isVisible = false
     /// Remembers a 404 through a failed retry, as the screen's Play does.
     @State private var goneState = ItemDetailGoneState()
-    @State private var prompt: PlayLinkPrompt?
+    @State private var prompts = PlayLinkPromptState()
     @State private var playFailure: ItemDetailPlayFailure?
 
     func body(content: Content) -> some View {
-        content
+        // The prompt this update presents; the alert's binding and buttons carry its id, so
+        // callbacks from an alert already replaced change nothing.
+        let presented = prompts.presented
+        return
+            content
             .onAppear { isVisible = true }
             .onDisappear { isVisible = false }
             .onChange(of: screen.gone, initial: true) { _, snapshot in
                 if let snapshot { goneState.update(snapshot) }
             }
             .onChange(of: resolution, initial: true) { _, resolution in
-                if let next = PlayLinkConfirmationPresentation.take(resolution, from: router) { prompt = next }
+                if let next = PlayLinkConfirmationPresentation.take(resolution, from: router) { prompts.receive(next) }
             }
             // Newer navigation, or a refresh that takes the media away, withdraws the question;
-            // Confirm checks again before playing.
+            // Confirm checks again before playing. Either order with the handler above works:
+            // a prompt taken after the navigation carries its generation.
             .onChange(of: PromptCheck(generation: router?.navigationGeneration, isPlayable: keepsPrompt)) {
-                withdrawPromptIfSuperseded()
+                prompts.withdraw(generation: router?.navigationGeneration, screenIsPlayable: keepsPrompt)
+            }
+            // Once this update has closed the open alert, the waiting prompt presents.
+            .onChange(of: prompts.closingID) { _, closingID in
+                guard let closingID else { return }
+                Task { @MainActor in prompts.didClose(closingID) }
             }
             .alert(
-                Text(verbatim: prompt?.message ?? ""),
+                Text(verbatim: presented?.message ?? ""),
                 isPresented: Binding {
-                    prompt != nil
+                    presented.map { prompts.presented?.id == $0.id } ?? false
                 } set: {
-                    if !$0 { prompt = nil }
+                    if !$0, let presented { prompts.dismissed(presented.id) }
                 },
-                presenting: prompt
+                presenting: presented
             ) { prompt in
                 Button {
                     confirm(prompt, atCurrentPosition: false)
@@ -321,15 +424,8 @@ struct PlayLinkConfirmation: ViewModifier {
         let isPlayable: Bool
     }
 
-    private func withdrawPromptIfSuperseded() {
-        guard let prompt,
-            !PlayLinkConfirmationPresentation.isCurrent(prompt, in: router, screenIsPlayable: keepsPrompt)
-        else { return }
-        self.prompt = nil
-    }
-
     private func confirm(_ prompt: PlayLinkPrompt, atCurrentPosition: Bool) {
-        guard let playItem else { return }
+        guard let playItem, prompts.confirm(prompt.id) else { return }
         Task {
             playFailure = await PlayLinkConfirmationPresentation.confirm(
                 prompt, atCurrentPosition: atCurrentPosition, in: router, screenIsPlayable: keepsPrompt,
