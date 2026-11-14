@@ -21,10 +21,18 @@ public protocol DownloadRequesting: Sendable {
 public struct DownloadAccess: Sendable {
     public let requester: any DownloadRequesting
     public let status: any DownloadStatusReading
+    /// Whether a connection's downloads continue only while the app is open: it has custom
+    /// headers, so the engine transfers them in its foreground session (#467). The app passes the
+    /// engine's credentials' `DownloadCredentialProviding/usesForegroundSession(for:)`.
+    public let onlyWhileOpen: @Sendable (UUID) async -> Bool
 
-    public init(requester: any DownloadRequesting, status: any DownloadStatusReading) {
+    public init(
+        requester: any DownloadRequesting, status: any DownloadStatusReading,
+        onlyWhileOpen: @escaping @Sendable (UUID) async -> Bool = { _ in false }
+    ) {
         self.requester = requester
         self.status = status
+        self.onlyWhileOpen = onlyWhileOpen
     }
 }
 
@@ -131,6 +139,10 @@ public final class SeriesDownloadModel {
     public private(set) var isWorking = false
     /// Set the view's alert from it; the view clears it when the alert closes.
     public var prompt: Prompt?
+    /// Whether the connection's downloads continue only while the app is open
+    /// (``DownloadAccess/onlyWhileOpen``), as read by the last ``start(libraryID:)``; the view
+    /// notes it in the confirmation.
+    public private(set) var onlyWhileOpen = false
 
     @ObservationIgnored private let service: any SeriesAuthorsService & ItemDetailService
     @ObservationIgnored private let access: DownloadAccess
@@ -166,6 +178,7 @@ public final class SeriesDownloadModel {
             let skipping = try await access.status.downloadedOrQueuedItemIDs(connectionID: connectionID)
             let plan = SeriesDownloadPlan(books: books, skipping: skipping)
             pending = plan.itemIDs
+            onlyWhileOpen = await access.onlyWhileOpen(connectionID)
             prompt = plan.itemIDs.isEmpty ? .alreadyDownloaded : .confirm(plan)
         } catch is CancellationError {
         } catch  where Task.isCancelled {

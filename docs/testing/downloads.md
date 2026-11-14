@@ -333,4 +333,7 @@ iOS.
   activation continues them. Check with a header-gated proxy (for example Cloudflare
   Access): a download completes in the foreground, pauses when the app is sent to the
   background, and continues when it comes back; a redirect to another host fails the
-  download without a request reaching that host.
+  download without a request reaching that host. For such a connection, the
+  Downloading section of Downloads has a footer, and the Download Series
+  confirmation a line, saying downloads continue only while the app is open; neither
+  shows for a connection without custom headers.

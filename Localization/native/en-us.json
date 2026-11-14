@@ -291,6 +291,7 @@
   "MessageDownloadStartFailed": "Couldn't start the download.",
   "MessageDownloadsLoadFailed": "Couldn't load your downloads.",
   "MessageDownloadsUnavailable": "Downloads aren't available on this device.",
+  "MessageDownloadsWhileAppOpen": "Downloads from this server continue only while the app is open.",
   "MessageEpisodeDetailLoadFailed": "Couldn't load this episode.",
   "MessageEpisodeDetailNotFound": "This episode isn't on the server anymore.",
   "MessageEpisodeDetailUnavailable": "Connect to a server to see this episode.",

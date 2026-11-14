@@ -31,7 +31,9 @@ struct SeriesDownloadButton: View {
         .alert(
             Text(verbatim: model.prompt.map { SeriesDownloadAlert($0, locale: locale).title } ?? ""),
             isPresented: Binding(get: { model.prompt != nil }, set: { if !$0 { model.prompt = nil } }),
-            presenting: model.prompt.map { SeriesDownloadAlert($0, locale: locale) }
+            presenting: model.prompt.map {
+                SeriesDownloadAlert($0, locale: locale, onlyWhileOpen: model.onlyWhileOpen)
+            }
         ) { alert in
             if alert.asks {
                 Button(role: .cancel) {
@@ -64,7 +66,9 @@ struct SeriesDownloadAlert {
     /// Whether it asks the user to go ahead (Cancel and OK), rather than telling them (OK).
     let asks: Bool
 
-    init(_ prompt: SeriesDownloadModel.Prompt, locale: Locale) {
+    /// - Parameter onlyWhileOpen: whether the connection's downloads continue only while the app is
+    ///   open (``SeriesDownloadModel/onlyWhileOpen``); the confirmation then says so.
+    init(_ prompt: SeriesDownloadModel.Prompt, locale: Locale, onlyWhileOpen: Bool = false) {
         self.prompt = prompt
         switch prompt {
         case .alreadyDownloaded:
@@ -74,7 +78,8 @@ struct SeriesDownloadAlert {
                 "MessageSeriesDownloadConfirmIos", plan.itemIDs.count.formatted(.number.locale(locale)),
                 plan.fileCount.formatted(.number.locale(locale)),
                 ByteCountFormatting.string(fromBytes: plan.size, locale: locale))
-            (title, self.message, asks) = (L10n.string("HeaderConfirm"), message, true)
+            let note = onlyWhileOpen ? "\n\n" + DownloadsWhileAppOpenNotice.message : ""
+            (title, self.message, asks) = (L10n.string("HeaderConfirm"), message + note, true)
         case .meteredConfirmation:
             (title, message, asks) = (
                 L10n.string("HeaderConfirm"), L10n.string("MessageConfirmDownloadUsingCellular"), true
