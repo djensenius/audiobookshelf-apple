@@ -172,6 +172,39 @@ struct HomeLibraryRecoveryTests {
         }
     }
 
+    /// A confirming ping retries the selected library's shelves while a libraries request that
+    /// predates the library's deletion succeeds: the refusal still reloads the list once, and the
+    /// scene falls back to the initial library (#570). That request doesn't count as recovery.
+    @Test func aListRequestBeforeTheRefusalDoesntStopAVerificationsReload() async throws {
+        let server = LibrariesServer(
+            [.list([books, other]), .list([books, other]), .list([other])], existing: ["books", "other"])
+        try await withScene(server) { store, router in
+            await store.refresh()
+            SceneLibrarySelection.reconcile(router, store: store)
+            SceneLibrarySelection.select("books", router: router, store: store)
+            let model = HomeModel(store: store, libraryID: router.libraryID)
+            await server.remove("books")
+            await model.load()
+            #expect(model.error != nil)
+
+            await HomeRefreshSchedule.updateAfterVerification(
+                of: model, store: store, isConnected: { true }, pollInterval: .milliseconds(5),
+                retry: { listSince in
+                    // A list request from before the deletion succeeds during the retry.
+                    await store.refresh()
+                    await model.refresh()
+                    return await HomeRefreshSchedule.updateLibrariesAfterShelves(
+                        of: store, shelvesError: model.error, for: .loadTrigger, isConnected: { true },
+                        pollInterval: .milliseconds(5), since: listSince)
+                },
+                refreshed: { _ in false })
+            #expect(await server.requests == 3)
+
+            SceneLibrarySelection.reconcile(router, store: store)
+            #expect(router.libraryID == "other")
+        }
+    }
+
     /// The launch's libraries request failed, so the saved library was restored unchecked, and
     /// it is gone: once the server answers again, Home's load trigger reloads the list once and
     /// the guess falls back to the initial library.

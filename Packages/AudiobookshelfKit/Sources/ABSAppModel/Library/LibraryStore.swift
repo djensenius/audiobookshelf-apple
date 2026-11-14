@@ -175,6 +175,10 @@ public final class LibraryStore {
         }
     }
 
+    /// Bumped each time a libraries ``refresh()`` starts, never reset: a caller that waited for
+    /// a request can tell whether another one, such as another waiter's retry, has started since.
+    public var refreshCount: Int { refreshSequence }
+
     /// ``connectionKey`` while the store has a client for it, `nil` otherwise. Key a load on it
     /// rather than on ``connectionKey``, so a reconnect that attaches a client to an account
     /// started offline without one retries the load.

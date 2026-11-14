@@ -713,4 +713,23 @@ private func service(_ libraries: [Library]) -> FakeLibraryService {
             #expect(Array(store.details.keys) == ["two"])
         }
     }
+
+    /// Each refresh that starts counts, failed or not, and a clear doesn't reset the count.
+    @Test func refreshCountCountsStartedRefreshes() async throws {
+        try await withLibrarySettings { settings in
+            let response = Locked<Result<[Library], TestError>>(.success([makeLibrary("one")]))
+            var fake = service([])
+            fake.librariesHandler = { try response.value.get() }
+            let store = LibraryStore(settings: settings)
+            #expect(store.refreshCount == 0)
+            await store.connect(client: fake, connectionKey: serverA)
+            #expect(store.refreshCount == 1)
+            response.value = .failure(.offline)
+            await store.refresh()
+            #expect(store.refreshCount == 2)
+            store.clear()
+            await store.refresh()
+            #expect(store.refreshCount == 2)
+        }
+    }
 }

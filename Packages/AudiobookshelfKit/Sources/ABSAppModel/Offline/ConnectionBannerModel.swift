@@ -54,19 +54,26 @@ public final class ConnectionBannerModel {
     /// What the banner shows.
     public var state: ConnectionBannerState { reachability.state }
 
+    /// Bumped when a ping confirms the server answers after a network change or a failure
+    /// (``ConnectionReachability/verifiedRevision``): a screen whose load failed while
+    /// ``state`` was assumed online retries on it.
+    public var verifiedRevision: UInt64 { reachability.verifiedRevision }
+
     /// Checks the server, then follows the network path until the calling task is cancelled.
     /// Any change of online path (another interface, or an `onlineEpoch` showing an offline path
     /// the stream coalesced away) checks the server again: the new route may not reach it.
+    /// Each run starts as a route change does: the path may have changed while nothing followed
+    /// it, so the run's first confirming ping bumps ``verifiedRevision`` (#570).
     public func run() async {
         runGeneration &+= 1
         let generation = runGeneration
-        send(.retry)
+        send(.routeChanged)
         var previous: NetworkPath?
         for await path in paths() {
             guard !Task.isCancelled, generation == runGeneration else { break }
             let wasOffline = state == .offline(.noNetwork)
             send(.pathChanged(isOnline: path.isOnline))
-            if path.isOnline, !wasOffline, let previous, previous != path { send(.retry) }
+            if path.isOnline, !wasOffline, let previous, previous != path { send(.routeChanged) }
             previous = path
         }
         if generation == runGeneration { perform(.cancelPing) }
