@@ -14,6 +14,9 @@ import SwiftUI
 ///   failed one.
 /// - Downloaded: a tap asks before deleting the downloaded files.
 /// - A long press (a secondary click on the Mac) shows the same actions in a context menu.
+/// - For a connection whose downloads continue only while the app is open (#467), the cellular
+///   question, the actions of a download under way and its VoiceOver hint say so
+///   (``DownloadsWhileAppOpenNotice``).
 ///
 /// It builds one ``ItemDownloadModel`` per server item, episode and connection, observing the
 /// downloaded items while it is on screen; or, in a list (a podcast's episode rows, `feed`), reading
@@ -86,6 +89,7 @@ private struct ItemDownloadControl: View {
         let state = model.state
         let presentation = ItemDownloadPresentation(state: state, locale: locale)
         let deletion = ItemDownloadDeletion(episodeTitle: episodeTitle)
+        let notesOnlyWhileOpen = model.notesOnlyWhileOpen
         Button {
             if state.canStart {
                 start()
@@ -111,6 +115,7 @@ private struct ItemDownloadControl: View {
         .disabled(model.isWorking || (state.canStart && item == nil))
         .help(Text(verbatim: presentation.title))
         .accessibilityValue(Text(verbatim: presentation.value ?? ""))
+        .accessibilityHint(Text(verbatim: notesOnlyWhileOpen ? DownloadsWhileAppOpenNotice.message : ""))
         .contextMenu {
             if !state.canStart { actions(state, deletion: deletion, confirmingDelete: false) }
         }
@@ -120,13 +125,15 @@ private struct ItemDownloadControl: View {
         ) {
             actions(model.state, deletion: deletion, confirmingDelete: true)
             Button(L10n.string("ButtonCancel"), role: .cancel) {}
+        } message: {
+            if notesOnlyWhileOpen { Text(verbatim: DownloadsWhileAppOpenNotice.message) }
         }
         // A finished or removed download leaves nothing to act on.
         .onChange(of: state.recordID) { showsActions = false }
         .alert(
             Text(verbatim: model.prompt.map { ItemDownloadAlert($0).title } ?? ""),
             isPresented: Binding(get: { model.prompt != nil }, set: { if !$0 { model.prompt = nil } }),
-            presenting: model.prompt.map(ItemDownloadAlert.init)
+            presenting: model.prompt.map { ItemDownloadAlert($0, onlyWhileOpen: model.onlyWhileOpen) }
         ) { alert in
             if alert.asks {
                 Button(role: .cancel) {
@@ -276,12 +283,15 @@ struct ItemDownloadAlert: Equatable {
     /// Whether it asks the user to go ahead (Cancel and OK), rather than telling them (OK).
     let asks: Bool
 
-    init(_ prompt: ItemDownloadModel.Prompt) {
+    /// - Parameter onlyWhileOpen: whether the connection's downloads continue only while the app is
+    ///   open (``ItemDownloadModel/onlyWhileOpen``); the cellular question then says so.
+    init(_ prompt: ItemDownloadModel.Prompt, onlyWhileOpen: Bool = false) {
         self.prompt = prompt
         switch prompt {
         case .meteredConfirmation:
+            let note = onlyWhileOpen ? "\n\n" + DownloadsWhileAppOpenNotice.message : ""
             (title, message, asks) = (
-                L10n.string("HeaderConfirm"), L10n.string("MessageConfirmDownloadUsingCellular"), true
+                L10n.string("HeaderConfirm"), L10n.string("MessageConfirmDownloadUsingCellular") + note, true
             )
         case .meteredDenied: (title, message, asks) = (L10n.string("ToastDownloadNotAllowedOnCellular"), nil, false)
         case .notEnoughSpace: (title, message, asks) = (L10n.string("MessageDownloadNotEnoughSpace"), nil, false)
