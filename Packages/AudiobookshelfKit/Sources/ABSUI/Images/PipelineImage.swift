@@ -202,10 +202,12 @@ struct PipelineImage<Placeholder: View, Failure: View>: View {
         let imageRatio = Double(image.pixelHeight) / Double(max(image.pixelWidth, 1))
         let frameRatio = size.width > 0 ? size.height / size.width : imageRatio
         if abs(imageRatio - frameRatio) > 0.15 {
-            ZStack {
-                picture.resizable().scaledToFill().blur(radius: 16, opaque: true)
-                picture.resizable().scaledToFit()
-            }
+            // Overlays, each proposed the frame, not a ZStack: a ZStack takes the size of the
+            // aspect-filled blur, larger than the frame, and lays the aspect-fit image out in it
+            // too, so that fills the frame and is cropped like the blur (#626).
+            Color.clear
+                .overlay { picture.resizable().scaledToFill().blur(radius: 16, opaque: true) }
+                .overlay { picture.resizable().scaledToFit() }
         } else {
             picture.resizable().scaledToFill()
         }
