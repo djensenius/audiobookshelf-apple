@@ -151,6 +151,19 @@ tab, so Downloads and Account are in its More tab, and it minimizes as the conte
 see docs/accessibility.md, "Automated audits". The default size takes about 80 seconds on the
 simulator and AX5 about 100.
 
+What the audits find depends on the screen's size, so they're verified on two simulators: the
+iPhone Duo, which CI runs, and an iPhone 17 (iOS 27.2), a normal-width iPhone, which CI
+doesn't, to keep the job's time down. Run them on an iPhone 17 too when changing a filter, the
+tab bar or a screen they open. To run them on another device, create a simulator, boot it and
+pass its ID:
+
+```sh
+xcrun simctl create abs-audits com.apple.CoreSimulator.SimDeviceType.iPhone-17  # prints <udid>
+xcrun simctl boot <udid> && xcrun simctl bootstatus <udid> -b
+ABS_UI_PLATFORM=ios IOS_SIMULATOR_ID=<udid> mise run test:ui -- -only-testing:AudiobookshelfUITests/AccessibilityAuditTests -jobs 2
+xcrun simctl delete <udid>
+```
+
 ## Localized runs and screenshots
 
 `LocalizedSmokeTests` runs the same journey with launch arguments for another language:

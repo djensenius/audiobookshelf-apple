@@ -166,7 +166,29 @@ struct KnownAuditIssue {
                 KnownAuditIssue(
                     screen: .library, type: .dynamicType, description: "partially unsupported",
                     element: isCardText),
+                // "Contrast failed" on the chapter's remaining time ("-0:26") on a 6.3-inch iPhone,
+                // every run, though its pixels measure 5.7:1 on the backdrop (4.5:1 needed), as do
+                // the elapsed time's beside it (5.6:1), which pass in the same font and colour.
+                // Like the whole-book remaining time's at `.caption2` (#614). Only the Player's
+                // remaining times. #623
+                KnownAuditIssue(screen: .player, type: .contrast, element: isRemainingTime),
             ]
+            // Contrast on text that has scrolled under the bottom bar: the tab bar, which floats over
+            // the content, and the mini player above it (`tabViewBottomAccessory`). The audit
+            // measures the text through the bar's glass, as on a 6.3-inch iPhone with Item detail's
+            // "Size" (y 818 to 836 of 874, under a tab bar from y 791) and Settings' last rows. It's
+            // the system's bar over a scroll view at rest, not the text's own colours, which pass
+            // above the bar. Only text whose frame overlaps the bar, and not the bar's own, on the
+            // screens with the bar: the full player covers it. #623
+            all += [FixtureScreen.home, .library, .item, .settings, .downloads].map {
+                KnownAuditIssue(screen: $0, type: .contrast, element: isUnderBottomBar)
+            }
+            // The same for a label of Item detail's metadata under the bar. The labels are hidden
+            // from VoiceOver (each value speaks its label, as in #613), so the audit reports one
+            // with no element ("Contrast failed for SwiftUI.AccessibilityNode"), as it did once in
+            // four runs for "Duration" at AX5 on a 6.3-inch iPhone. Only with no element, and only
+            // while an element of the metadata (`item.metadata`) overlaps the bar. #623
+            all.append(KnownAuditIssue(screen: .item, type: .contrast, element: isUnnamedWithMetadataUnderBottomBar))
         #endif
         return all
     }()
@@ -191,5 +213,42 @@ struct KnownAuditIssue {
         guard let element, element.elementType == .staticText, !element.label.isEmpty else { return false }
         let container = NSPredicate(format: "(\(predicate)) AND label CONTAINS %@", element.label)
         return app.descendants(matching: .any).matching(container).firstMatch.exists
+    }
+
+    /// Whether `element` is text in the content under the bottom bar: its frame overlaps the tab
+    /// bar's or the mini player's (`player.mini`), and it isn't text of either.
+    @MainActor
+    private static func isUnderBottomBar(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
+        guard let element, element.elementType == .staticText, !element.label.isEmpty else { return false }
+        let bars = bottomBars(in: app)
+        let ownText = NSPredicate(format: "label CONTAINS %@", element.label)
+        return bars.contains { $0.frame.intersects(element.frame) }
+            && !bars.contains {
+                $0.label.contains(element.label) || $0.descendants(matching: .any).matching(ownText).firstMatch.exists
+            }
+    }
+
+    /// Whether there's no `element` while an element of the item screen's metadata
+    /// (`item.metadata`) overlaps the bottom bar.
+    @MainActor
+    private static func isUnnamedWithMetadataUnderBottomBar(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
+        guard element == nil else { return false }
+        let bars = bottomBars(in: app)
+        let rows = app.descendants(matching: .any)["item.metadata"].firstMatch.descendants(matching: .any)
+        return rows.allElementsBoundByIndex.contains { row in bars.contains { $0.frame.intersects(row.frame) } }
+    }
+
+    /// The tab bar and the mini player, where they exist.
+    @MainActor
+    private static func bottomBars(in app: XCUIApplication) -> [XCUIElement] {
+        [app.tabBars.firstMatch, app.buttons["player.mini"].firstMatch].filter(\.exists)
+    }
+
+    /// Whether `element` is one of the player's remaining times: text that's a minus and a
+    /// timestamp, such as "-0:26" or "-1:02:03".
+    @MainActor
+    private static func isRemainingTime(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
+        guard let element, element.elementType == .staticText else { return false }
+        return NSPredicate(format: "SELF MATCHES %@", "-[0-9]+(:[0-9]{2})+").evaluate(with: element.label)
     }
 }

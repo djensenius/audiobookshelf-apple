@@ -120,6 +120,10 @@ default text size and at AX5. Record failures as issues that reference #106.
   in place of the Up Next context menu; Up Next stays in the full player and in VoiceOver's
   actions. `MiniPlayerTests` (UI tests) checks the narrow layout and which of the two the long
   press gets; XCUITest can't see the viewer's HUD, which closes when the press ends.
+- The full player's column (the artwork at 45% of the screen's height, then the titles,
+  scrubber and controls) scrolls when it's taller than the screen, as at AX5 on an iPhone 17,
+  and opens scrolled to its end (`defaultScrollAnchor(.bottom, for: .initialOffset)`), so the
+  controls show and the artwork's top scrolls away. Where it fits, nothing moves (#623).
 - Previews at `.accessibility5` exist for `ItemCard` and `ItemRow`; add one for any new
   view whose layout changes with the text size.
 
@@ -193,12 +197,32 @@ element, each with the reason and its issue:
   filtered: only "partially unsupported", only on Library and only for text in an `item.<id>`
   card. Home audits the same card unfiltered, and its shelf has no columns to change, so a card
   font that really doesn't scale still fails there.
+- Contrast on text that has scrolled under the bottom bar, on every screen but the Player
+  (#623). On iOS the tab bar floats over the content, with the mini player above it, so a
+  screen at rest has rows under the bar's glass, and the audit measures them through it. On an
+  iPhone 17 (6.3-inch, iOS 27.2) that's Item detail's "Size" (y 818–836 of 874, under a tab
+  bar from y 791), "Duration" at AX5 and Settings' last two rows; the same rows pass above the
+  bar. Only text whose frame overlaps the tab bar or the mini player (`player.mini`), and not
+  the bar's own text, is filtered. The full player covers the bar, so the Player isn't. Item
+  detail's metadata labels are hidden from VoiceOver (each value speaks its label), so the
+  audit can report one under the bar with no element ("Contrast failed for
+  SwiftUI.AccessibilityNode"), as it did once in four runs for "Duration" at AX5. On Item
+  detail only, a contrast issue with no element is filtered while an element of the metadata
+  (`item.metadata`) overlaps the bar.
+- The Player's remaining times, "Contrast failed" on the chapter's ("-0:26") on an iPhone 17
+  every run (#623). Its pixels measure 5.7:1 on the backdrop, and the elapsed time's beside
+  it, which passes in the same font and colour, 5.6:1. This is the false positive the
+  whole-book remaining time had at `.caption2` (#614), so only text on the Player that's a
+  minus and a timestamp is filtered.
 
 Two findings that used to be filtered are fixed instead. The Player's whole-book remaining time
 failed contrast at `.caption2` (11 points), though its pixels measure as the elapsed time's do,
 about 5.4:1 on the backdrop; it now uses `.caption`, like the chapter's times, and passes
 (#614). The mini player's title, cut to a letter on the iPhone Duo, keeps a readable width
 (#616; see "Dynamic Type up to AX5").
+
+On an iPhone 17 at AX5 the Player's play/pause button was below the fold; the player now
+opens scrolled to its controls (#623; see "Dynamic Type up to AX5").
 
 Add a filter only for an issue that isn't the app's to fix or that has its own issue; fix the
 rest. Package tests cover the pure helpers: the labels and values in `ItemViewsTests`, and the

@@ -147,6 +147,7 @@ extension XCTestCase {
     private func openTab(_ tab: FixtureTab, in app: XCUIApplication) {
         // Any type: sidebar tabs aren't buttons on macOS.
         let home = app.descendants(matching: .any)["tab.home"].firstMatch
+        expandTabBar(in: app, showing: home)
         XCTAssertTrue(home.waitForExistence(timeout: Self.fixtureTimeout), "The tab bar didn't appear")
         let button = app.descendants(matching: .any)["tab.\(tab.rawValue)"].firstMatch
         let more = app.buttons.containing(.image, identifier: "ellipsis").firstMatch
@@ -202,6 +203,16 @@ extension XCTestCase {
         XCTAssertTrue(screen.waitForExistence(timeout: Self.fixtureTimeout), "The \(name) screen didn't appear")
         let card = screen.descendants(matching: .any)[identifier].firstMatch
         XCTAssertTrue(card.waitForExistence(timeout: Self.fixtureTimeout), failure)
+    }
+
+    /// Expands the tab bar (iOS) if it has minimized as the content scrolled so far that only the
+    /// selected tab's button is left, without `home`: on a 6.3-inch iPhone at AX5, scrolling
+    /// Account to its Settings row does this. Selecting that tab again expands the bar.
+    @MainActor
+    private func expandTabBar(in app: XCUIApplication, showing home: XCUIElement) {
+        guard !home.exists else { return }
+        let selected = app.tabBars.buttons.matching(NSPredicate(format: "selected == true")).firstMatch
+        if selected.exists && selected.isHittable { selected.press() }
     }
 
     /// Pauses with the full player's play/pause button, the hittable one: the mini player's is
