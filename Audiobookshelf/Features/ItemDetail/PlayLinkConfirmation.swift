@@ -14,6 +14,9 @@ struct PlayLinkPrompt: Equatable {
     let isResume: Bool
     /// "Play "Dune" from 1:23:45?", or without the time when the link has none.
     let message: String
+    /// The router's ``Router/navigationGeneration`` when the prompt was taken: newer navigation
+    /// (another link, or a change to the Library path) supersedes it, so it no longer plays.
+    var generation = 0
 
     /// The confirming button's `L10n` key.
     var confirmKey: String { isResume ? "ButtonItemDetailResume" : "ButtonPlay" }
@@ -27,31 +30,47 @@ struct PlayLinkScreen: Equatable {
     /// The book or episode's title; `nil` while the screen is loading, and `""` once loading ended
     /// without it (not found, a failed load, or a podcast without the linked episode).
     let title: String?
+    /// Whether the loaded media has something to play, before ``gone`` is applied.
     let isPlayable: Bool
+    /// The item's loads, for ``ItemDetailGoneState``: a reload that answered 404 keeps the
+    /// retained book or episode on screen with Play disabled until a reload succeeds, and the
+    /// link plays nothing then either. `nil` when the screen doesn't follow it.
+    var gone: ItemDetailGoneState.Snapshot?
+
+    /// Whether there is something to play, given the confirmation's remembered `goneState`
+    /// (which records ``gone``): not while the item is gone from the server, as Play shows.
+    func isPlayable(given goneState: ItemDetailGoneState) -> Bool {
+        guard isPlayable else { return false }
+        guard let gone else { return true }
+        return !goneState.isGone(gone)
+    }
 
     /// The item screen: a book with audio that isn't missing. A podcast's own screen has nothing
     /// to play: its links name an episode, which opens on top.
     @MainActor
     static func item(_ model: ItemDetailModel) -> PlayLinkScreen {
+        let gone = ItemDetailGoneState.Snapshot(model: model)
         if model.hasLoaded {
             return PlayLinkScreen(
                 title: model.details?.title ?? "",
-                isPlayable: model.mediaType != .podcast && model.playButton != .unavailable)
+                isPlayable: model.mediaType != .podcast && model.playButton != .unavailable, gone: gone)
         }
         // As ``ItemDetailScreen`` shows a failed or not-found load.
-        return PlayLinkScreen(title: model.error != nil && !model.isLoading ? "" : nil, isPlayable: false)
+        return PlayLinkScreen(title: model.error != nil && !model.isLoading ? "" : nil, isPlayable: false, gone: gone)
     }
 
     /// The episode screen, by the state it shows (``EpisodeDetailPresentation/screen(for:)``).
     @MainActor
     static func episode(_ model: EpisodeDetailModel) -> PlayLinkScreen {
-        switch EpisodeDetailPresentation.screen(for: model) {
+        let gone = ItemDetailGoneState.Snapshot(model: model.detail)
+        return switch EpisodeDetailPresentation.screen(for: model) {
         case .episode:
-            PlayLinkScreen(title: model.episode?.title ?? "", isPlayable: model.playButton != .unavailable)
+            PlayLinkScreen(
+                title: model.episode?.title ?? "", isPlayable: model.playButton != .unavailable, gone: gone)
         case .notFound, .failed:
-            PlayLinkScreen(title: "", isPlayable: false)
+            PlayLinkScreen(title: "", isPlayable: false, gone: gone)
         case .loading:
-            PlayLinkScreen(title: nil, isPlayable: false)
+            PlayLinkScreen(title: nil, isPlayable: false, gone: gone)
         }
     }
 }
@@ -116,8 +135,9 @@ enum PlayLinkConfirmationPresentation {
     }
 
     /// Acts on `resolution`: an open-only link or a question drops the router's pending link, so
-    /// it is asked once; returns the question to show, if any. Cancelling the question then
-    /// plays nothing and leaves nothing pending.
+    /// it is asked once; returns the question to show, if any, stamped with the router's
+    /// ``Router/navigationGeneration``. Cancelling the question then plays nothing and leaves
+    /// nothing pending.
     @MainActor
     static func take(_ resolution: PlayLinkResolution, from router: Router?) -> PlayLinkPrompt? {
         switch resolution {
@@ -126,21 +146,33 @@ enum PlayLinkConfirmationPresentation {
         case .dismiss:
             router?.clearPendingPlayLink()
             return nil
-        case .ask(let prompt):
+        case .ask(var prompt):
             router?.clearPendingPlayLink()
+            prompt.generation = router?.navigationGeneration ?? 0
             return prompt
         }
+    }
+
+    /// Whether `prompt` still stands: no navigation since it was taken. A newer link (even
+    /// `item/` for the same screen, which the router doesn't push again) or a change to the
+    /// Library path supersedes it, so its position never plays.
+    @MainActor
+    static func isCurrent(_ prompt: PlayLinkPrompt, in router: Router?) -> Bool {
+        guard let router else { return false }
+        return router.navigationGeneration == prompt.generation
     }
 
     /// Plays the confirmed link through `play`, the screens' own play path, so its streaming and
     /// cellular checks apply: from the link's start time, or with `atCurrentPosition` (a paused
     /// item) where it is. The same media, already loaded, resumes in its session from there
-    /// rather than restarting. Returns what the alert shows when that fails, or `nil` once it
-    /// starts or is cancelled.
+    /// rather than restarting. A prompt newer navigation superseded (``isCurrent(_:in:)``)
+    /// plays nothing. Returns what the alert shows when that fails, or `nil` once it starts, is
+    /// cancelled or is superseded.
     @MainActor
-    static func confirm(_ prompt: PlayLinkPrompt, atCurrentPosition: Bool = false, with play: PlayItemAction) async
-        -> ItemDetailPlayFailure?
-    {
+    static func confirm(
+        _ prompt: PlayLinkPrompt, atCurrentPosition: Bool = false, in router: Router?, with play: PlayItemAction
+    ) async -> ItemDetailPlayFailure? {
+        guard isCurrent(prompt, in: router) else { return nil }
         let link = prompt.link
         do {
             try await play(
@@ -185,6 +217,8 @@ struct PlayLinkConfirmation: ViewModifier {
     @Environment(\.locale) private var locale
     /// Between `onAppear` and `onDisappear`: a covered screen in the stack never takes the link.
     @State private var isVisible = false
+    /// Remembers a 404 through a failed retry, as the screen's Play does.
+    @State private var goneState = ItemDetailGoneState()
     @State private var prompt: PlayLinkPrompt?
     @State private var playFailure: ItemDetailPlayFailure?
 
@@ -192,8 +226,15 @@ struct PlayLinkConfirmation: ViewModifier {
         content
             .onAppear { isVisible = true }
             .onDisappear { isVisible = false }
+            .onChange(of: screen.gone, initial: true) { _, snapshot in
+                if let snapshot { goneState.update(snapshot) }
+            }
             .onChange(of: resolution, initial: true) { _, resolution in
                 if let next = PlayLinkConfirmationPresentation.take(resolution, from: router) { prompt = next }
+            }
+            // Newer navigation withdraws the question; Confirm checks again before playing.
+            .onChange(of: router?.navigationGeneration) {
+                if let prompt, !PlayLinkConfirmationPresentation.isCurrent(prompt, in: router) { self.prompt = nil }
             }
             .alert(
                 Text(verbatim: prompt?.message ?? ""),
@@ -244,7 +285,7 @@ struct PlayLinkConfirmation: ViewModifier {
             return .wait
         }
         return PlayLinkConfirmationPresentation.resolve(
-            link: link, title: screen.title, isPlayable: screen.isPlayable, canPlay: playItem != nil,
+            link: link, title: screen.title, isPlayable: screen.isPlayable(given: goneState), canPlay: playItem != nil,
             routerServerID: router?.serverID, activeServerID: serverID, nowPlaying: playback?.mediaKey,
             isPlaying: playback?.isPlaybackRequested ?? false, locale: locale)
     }
@@ -253,7 +294,7 @@ struct PlayLinkConfirmation: ViewModifier {
         guard let playItem else { return }
         Task {
             playFailure = await PlayLinkConfirmationPresentation.confirm(
-                prompt, atCurrentPosition: atCurrentPosition, with: playItem)
+                prompt, atCurrentPosition: atCurrentPosition, in: router, with: playItem)
         }
     }
 }

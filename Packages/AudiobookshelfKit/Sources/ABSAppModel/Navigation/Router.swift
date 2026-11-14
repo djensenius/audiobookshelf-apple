@@ -52,6 +52,11 @@ public final class Router {
     /// The Library path up to and including the screen ``pendingPlayLink`` opened. The link
     /// stays pending only while the Library path starts with exactly this.
     private(set) var pendingPlayLinkPath: [Route] = []
+    /// Counts navigation that supersedes a play-link confirmation already asked (#577): every
+    /// ``open(_:)``, any change to the Library path, and every reset of the paths (a snapshot
+    /// restore or an identity change). The confirmation keeps the count it asked at and plays
+    /// only while it still matches. Taking the link (``clearPendingPlayLink()``) doesn't count.
+    public internal(set) var navigationGeneration = 0
     /// A `search?q=` query opened in this scene, until the Search tab shows it and clears it.
     /// Cleared like ``pendingPlayLink``, except that a library switch keeps it.
     public var pendingSearchQuery: String?
@@ -84,7 +89,9 @@ public final class Router {
     public subscript(path tab: AppTab) -> [Route] {
         get { paths[tab] ?? [] }
         set {
+            let changesLibrary = tab == .library && newValue != self[path: tab]
             paths[tab] = newValue.isEmpty ? nil : newValue
+            if changesLibrary { navigationGeneration += 1 }
             if tab == .library { dropPendingPlayLinkIfOffPath() }
         }
     }
@@ -200,6 +207,7 @@ public final class Router {
     /// play link and search query, which belonged to the old paths. Snapshot restore uses it
     /// too, so a link opened before the restore leaves nothing stale behind.
     func resetNavigation() {
+        navigationGeneration += 1
         clearPendingPlayLink()
         pendingSearchQuery = nil
         isSearchFocusRequested = false
