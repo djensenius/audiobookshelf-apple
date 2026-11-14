@@ -64,6 +64,9 @@ struct ItemDetailMetadataRow: Identifiable, Equatable {
 
 /// The metadata rows: labels beside their values, or above them at accessibility text sizes.
 /// Shows a book's details, or rows built elsewhere, such as a podcast's.
+///
+/// Each link, and each plain value, is at least 44 points tall, the minimum hit target (#612); in
+/// the grid the labels are padded the same way, so each row's text lines up.
 struct ItemDetailMetadata: View {
     private enum Source {
         case details(ItemDetailModel.Details)
@@ -95,18 +98,19 @@ struct ItemDetailMetadata: View {
                 VStack(alignment: .leading, spacing: ABSSpacing.medium) {
                     ForEach(rows) { row in
                         VStack(alignment: .leading, spacing: ABSSpacing.xxSmall) {
-                            label(row)
-                            values(row)
+                            label(row, padded: false)
+                            values(row, padded: false)
                         }
                     }
                 }
             } else {
-                Grid(alignment: .topLeading, horizontalSpacing: ABSSpacing.large, verticalSpacing: ABSSpacing.small) {
+                // No spacing: the cells' padding spaces the rows.
+                Grid(alignment: .topLeading, horizontalSpacing: ABSSpacing.large, verticalSpacing: 0) {
                     ForEach(rows) { row in
                         // Modifiers go on the cells: on a `GridRow` they'd make it one cell.
                         GridRow {
-                            label(row)
-                            values(row)
+                            label(row, padded: true)
+                            values(row, padded: true)
                         }
                     }
                 }
@@ -119,14 +123,16 @@ struct ItemDetailMetadata: View {
 
     /// Hidden from VoiceOver: ``values(_:)`` speaks it with each value, since VoiceOver often
     /// skips a container's label.
-    private func label(_ row: ItemDetailMetadataRow) -> some View {
+    private func label(_ row: ItemDetailMetadataRow, padded: Bool) -> some View {
         Text(verbatim: L10n.string(row.labelKey))
             .font(.subheadline)
             .foregroundStyle(ABSColor.mutedForeground)
+            .modifier(HitTargetHeight(padded: padded))
             .accessibilityHidden(true)
     }
 
-    @ViewBuilder private func values(_ row: ItemDetailMetadataRow) -> some View {
+    /// - Parameter padded: Pads each value as ``HitTargetHeight`` does, as the grid's labels are.
+    @ViewBuilder private func values(_ row: ItemDetailMetadataRow, padded: Bool) -> some View {
         let label = Text(verbatim: L10n.string(row.labelKey))
         let layout = ItemDetailFlowLayout(spacing: ABSSpacing.small) {
             // By position: a book can list the same name twice.
@@ -134,10 +140,14 @@ struct ItemDetailMetadata: View {
                 switch value {
                 case .text(let text, let spoken):
                     Text(verbatim: text)
+                        .modifier(HitTargetHeight(padded: padded))
                         .accessibilityLabel(Text(verbatim: spoken ?? text))
                 case .link(let name, let route):
                     NavigationLink(value: route) {
                         Text(verbatim: name)
+                            .modifier(HitTargetHeight(padded: padded))
+                            .frame(minWidth: HitTargetHeight.minimum, alignment: .leading)
+                            .contentShape(.rect)
                     }
                     .buttonStyle(.borderless)
                     // "Grover Gardner, Narrators, link".
@@ -150,12 +160,28 @@ struct ItemDetailMetadata: View {
         if let spoken = row.spokenText {
             // One element: "Duration, 9 hours 6 minutes".
             layout
+                .contentShape(.accessibility, .rect)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(label)
                 .accessibilityValue(Text(verbatim: spoken))
         } else {
             layout
         }
+    }
+}
+
+/// Makes a metadata cell at least 44 points tall, the minimum hit target. Padded, a line of text at
+/// the default size is just that tall, and cells beside each other line up whatever their heights.
+private struct HitTargetHeight: ViewModifier {
+    static let minimum: CGFloat = 44
+    /// Centers a line of `.subheadline` text, about 20 points tall at the default size, in 44.
+    static let inset: CGFloat = 12
+    var padded: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.vertical, padded ? Self.inset : 0)
+            .frame(minHeight: Self.minimum)
     }
 }
 

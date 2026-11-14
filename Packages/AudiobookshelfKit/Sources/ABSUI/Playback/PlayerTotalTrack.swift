@@ -30,7 +30,9 @@ public struct PlayerTotalTrack: View {
                 Spacer(minLength: 8)
                 Text(verbatim: PlayerScrubber.remainingText(remaining, locale: locale))
             }
-            .font(.caption2)
+            // `.caption`, like the chapter's times: at `.caption2` the audit fails the remaining
+            // time's contrast, though it measures as the elapsed time does, about 5:1 (#614).
+            .font(.caption)
             .monospacedDigit()
             .foregroundStyle(ABSColor.mutedForeground)
             GeometryReader { proxy in
