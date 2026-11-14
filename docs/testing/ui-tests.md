@@ -96,9 +96,11 @@ language. The connect flow has `connect.address`, `connect.submit`, `connect.use
 `connect.password` and `connect.signIn`; Home is `home.screen`. Add an identifier where a test
 needs one; don't change visible strings for a test.
 
-`FixtureSmokeTests` signs in (`testConnectsAndSignsIn`), then opens the Library tab
+`FixtureSmokeTests` signs in and waits for Home's shelves to load (the *Continue Listening*
+card `item.li_frankenstein`, as `home.screen` is there while they load or after they fail;
+`testConnectsAndSignsIn`), then opens the Library tab
 (`tab.library`; every tab is `tab.<AppTab raw value>`), checks `library.screen`, opens
-*Pride and Prejudice*'s card (`item.li_pride`; library cards and rows are `item.<item ID>`) and
+*Pride and Prejudice*'s card (`item.li_pride`; Home and Library cards and rows are `item.<item ID>`) and
 checks the item screen, `item.detail`, and its loaded title, `item.title`
 (`testOpensLibraryItem`). Each test launches the app afresh, so a failure names the step. The
 journey lives in `FixtureJourney.swift` (`signIn(launchArguments:screenshotPrefix:)` and

@@ -34,6 +34,10 @@ extension XCTestCase {
 
         let home = app.descendants(matching: .any)["home.screen"]
         XCTAssertTrue(home.waitForExistence(timeout: Self.fixtureTimeout), "The signed-in shell didn't appear")
+        // `home.screen` is there while the shelves load or after they fail; a card only once they've loaded. The first
+        // card of the first shelf (Continue Listening) in `fixture-personalized.json`.
+        let card = home.descendants(matching: .any)["item.li_frankenstein"].firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: Self.fixtureTimeout), "Home's shelves didn't appear")
         attachScreenshot(of: app, prefix: screenshotPrefix, screen: "home")
         return app
     }

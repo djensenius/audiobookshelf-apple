@@ -108,6 +108,7 @@ struct HomeSectionRow: View {
                 default: perform(kind, item)
                 }
             }
+            .accessibilityIdentifier("item.\(item.id)")
         case .series(let series):
             SeriesCard(series: series, serverID: serverID) { open(HomePresentation.route(for: entry)) }
                 .openInNewWindowMenu(HomePresentation.route(for: entry))
