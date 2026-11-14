@@ -60,6 +60,8 @@ struct SeriesListContent: View {
                             BrowsePresentation.open(.series(id: series.id), in: router)
                         }
                         .openInNewWindowMenu(.series(id: series.id))
+                        // For UI tests.
+                        .accessibilityIdentifier("series.\(series.id)")
                         .task(id: refreshes) { model.itemAppeared(id: series.id) }
                     }
                     BrowsePagingFooter(

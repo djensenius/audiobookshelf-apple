@@ -41,6 +41,33 @@ final class TabBarTests: XCTestCase {
         XCTAssertTrue(series.waitForNonExistence(timeout: Self.fixtureTimeout), "The Series section didn't go")
     }
 
+    /// Library → section menu → Series → *Barsoom* (#639): the series list, the series
+    /// (`GET /api/series/ser_barsoom`) and its books (`fixture-items-series-ser_barsoom.json`), in sequence order.
+    @MainActor
+    func testSeriesSectionOpensBarsoom() throws {
+        let app = try signInCompact()
+        open(.library, in: app)
+        chooseSection(symbol: "rectangle.stack", in: app)
+        let series = app.descendants(matching: .any)["series.screen"].firstMatch
+        XCTAssertTrue(series.waitForExistence(timeout: Self.fixtureTimeout), "The Series section didn't appear")
+        let card = series.descendants(matching: .any)["series.ser_barsoom"].firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: Self.fixtureTimeout), "The Barsoom series card didn't appear")
+        card.press()
+
+        // In sequence order. A card's label starts with its title (server data, not localized).
+        let books = ["A Princess of Mars", "The Gods of Mars", "The Warlord of Mars"]
+        let ids = books.indices.map { "item.li_barsoom_\($0 + 1)" }
+        for (id, title) in zip(ids, books) {
+            let book = app.descendants(matching: .any)[id].firstMatch
+            XCTAssertTrue(book.waitForExistence(timeout: Self.fixtureTimeout), "Barsoom has no \(title) (\(id))")
+            XCTAssertTrue(book.label.hasPrefix(title), "\(id) is \(book.label), not \(title)")
+        }
+        // The grid's cards are in the hierarchy in reading order.
+        let shown = app.descendants(matching: .any).matching(NSPredicate(format: "identifier IN %@", ids))
+            .allElementsBoundByIndex.map(\.identifier)
+        XCTAssertEqual(shown, ids, "Barsoom's books aren't in sequence order")
+    }
+
     /// Signs in, and skips unless the window is compact width, where there's a tab bar.
     @MainActor
     private func signInCompact() throws -> XCUIApplication {
