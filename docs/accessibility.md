@@ -62,6 +62,9 @@ default text size and at AX5. Record failures as issues that reference #106.
 
 - [ ] Grid and list cells read as cards and rows (above).
 - [ ] The toolbar's filter, sort and layout buttons have names.
+- [ ] In compact width, the root's section menu reads "Browse" with the section shown as its
+  value, and its entries read their titles, the shown one selected. At accessibility text
+  sizes, long-pressing it shows the Large Content Viewer.
 - [ ] Collapsed series read their name and book count.
 - [ ] Collections and playlists read their name and item count.
 
@@ -221,3 +224,7 @@ Voice Control names and Reduce Motion helpers in `AccessibilityTests`.
   reports for cards are filtered (above).
 - The connection indicator tells a metered connection from an unmetered one by colour alone;
   its message, which is its value and tooltip, says which.
+- In a vertical bar (the iPhone Duo's outer display), the Library section menu shows its
+  symbol only and reads "Browse" without the section shown: the bar drops a `Label`'s
+  accessibility value, as it does for View Options. Its overflow menu entry is titled with the
+  section.

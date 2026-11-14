@@ -21,6 +21,9 @@ struct SeriesView: View {
                 BrowsePlaceholder(libraryID: libraryID, messages: SeriesPresentation.listMessages)
             }
         }
+        // For UI tests.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("series.screen")
         .navigationTitle(Text(verbatim: L10n.string(AppTab.series.titleKey)))
         .task(id: key) {
             host = .updated(host, for: key, store: store) { key, services, _ in

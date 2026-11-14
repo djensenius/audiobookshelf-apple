@@ -127,50 +127,24 @@ extension XCTestCase {
 
         /// The identifier of the tab's root screen.
         var rootIdentifier: String { "\(rawValue).screen" }
-
-        /// The tab's SF Symbol (`AppTab.systemImage`), which names its row in the tab bar's More list.
-        var systemImage: String {
-            switch self {
-            case .home: "house"
-            case .library: "books.vertical"
-            case .downloads: "arrow.down.circle"
-            case .account: "person.crop.circle"
-            }
-        }
     }
 
-    /// Selects `tab`. A tab bar too short for every tab moves the last ones into its More tab
-    /// (its symbol is `ellipsis`, which the app doesn't use), a list whose rows have no
-    /// identifiers, so the row is found by the tab's symbol (`<symbol>` or `<symbol>.fill`), which
-    /// isn't localized.
+    /// Selects `tab`. Every tab bar has it, with no More tab, even on the iPhone Duo's outer
+    /// display (#617, `TabBarTests`).
     @MainActor
     private func openTab(_ tab: FixtureTab, in app: XCUIApplication) {
         // Any type: sidebar tabs aren't buttons on macOS.
         let home = app.descendants(matching: .any)["tab.home"].firstMatch
         XCTAssertTrue(home.waitForExistence(timeout: Self.fixtureTimeout), "The tab bar didn't appear")
         let button = app.descendants(matching: .any)["tab.\(tab.rawValue)"].firstMatch
-        let more = app.buttons.containing(.image, identifier: "ellipsis").firstMatch
+        XCTAssertTrue(button.exists, "The tab bar has no \(tab.rawValue) tab")
         defer { popToRoot(in: app) }
-        if button.exists {
-            revealTab(button, in: app, more: more)
-            button.press()
-            return
-        }
-        XCTAssertTrue(more.exists, "The \(tab.rawValue) tab isn't in the tab bar, and there's no More tab")
-        revealTab(more, in: app, more: more)
-        more.press()
-        let symbol = NSPredicate(
-            format: "elementType == %lu AND (identifier == %@ OR identifier == %@)",
-            XCUIElement.ElementType.image.rawValue, tab.systemImage, "\(tab.systemImage).fill")
-        let row = app.cells.containing(symbol).firstMatch
-        // The More tab shows the last tab opened from it; selecting it again goes back to its list.
-        if !row.waitForExistence(timeout: 3) { more.press() }
-        XCTAssertTrue(row.waitForExistence(timeout: Self.fixtureTimeout), "The More tab has no \(tab.rawValue) row")
-        row.press()
+        revealTab(button, in: app)
+        button.press()
     }
 
     /// Goes back, with the navigation bar's Back button, until a tab's root (`FixtureTab/rootIdentifier`) shows.
-    /// No-op at a root, or where there's no Back button (macOS sidebars, the More tab's list).
+    /// No-op at a root, or where there's no Back button (macOS sidebars).
     @MainActor
     private func popToRoot(in app: XCUIApplication) {
         let roots = [FixtureTab.home, .library, .downloads, .account].map(\.rootIdentifier)
@@ -185,13 +159,12 @@ extension XCTestCase {
     /// Expands the tab bar if it has minimized as the content scrolled (`tabBarMinimizeBehavior`,
     /// iOS), leaving `tab` off screen: selecting the selected tab, all that's left of it, expands it.
     @MainActor
-    private func revealTab(_ tab: XCUIElement, in app: XCUIApplication, more: XCUIElement) {
+    private func revealTab(_ tab: XCUIElement, in app: XCUIApplication) {
         guard !tab.isHittable else { return }
         let selected = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH 'tab.' AND selected == true")).firstMatch
-        let expander = selected.exists && selected.isHittable ? selected : more
-        XCTAssertTrue(expander.exists && expander.isHittable, "The tab bar is hidden")
-        expander.press()
+        XCTAssertTrue(selected.exists && selected.isHittable, "The tab bar is hidden")
+        selected.press()
         let hittable = XCTNSPredicateExpectation(predicate: NSPredicate(format: "hittable == true"), object: tab)
         XCTAssertEqual(
             XCTWaiter().wait(for: [hittable], timeout: Self.fixtureTimeout), .completed, "The tab bar didn't expand")
