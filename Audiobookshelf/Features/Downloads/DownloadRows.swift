@@ -89,16 +89,27 @@ struct DownloadQueueRow: View {
     }
 }
 
-/// A downloaded book or podcast: cover, title, author, and what was kept with its size.
+/// A downloaded book or podcast: cover, title, author, and what was kept with its size. The cover
+/// takes the shape of its library's covers, as on Home and in the Library.
 struct DownloadedItemRow: View {
     let item: DownloadsListing.Item
     let serverID: UUID?
+    private var libraries = LibraryCoverSettings()
+
+    init(item: DownloadsListing.Item, serverID: UUID?) {
+        self.item = item
+        self.serverID = serverID
+    }
 
     var body: some View {
         HStack(spacing: ABSSpacing.medium) {
             CoverView(
                 key: coverKey, title: item.title, author: item.author,
-                shape: item.mediaType == .podcast ? .square : .book, accessibility: .hidden
+                shape: CoverShape(
+                    isPodcast: item.mediaType == .podcast,
+                    librarySettings: libraries.settings(forLibrary: item.libraryId)
+                ),
+                accessibility: .hidden
             )
             .frame(width: 48)
             VStack(alignment: .leading, spacing: ABSSpacing.xxSmall) {

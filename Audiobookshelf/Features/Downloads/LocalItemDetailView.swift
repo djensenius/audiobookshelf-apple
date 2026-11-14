@@ -184,6 +184,7 @@ private struct LocalItemCover: View {
     let file: LocalItemDetailModel.CoverFile?
     @Environment(\.displayScale) private var displayScale
     @State private var image: CGImage?
+    private var libraries = LibraryCoverSettings()
 
     private static let width: CGFloat = 96
 
@@ -221,7 +222,10 @@ private struct LocalItemCover: View {
         }
     }
 
-    private var shape: CoverShape { detail.isPodcast ? .square : .book }
+    /// The shape of the library's covers, as in the Downloads list.
+    private var shape: CoverShape {
+        CoverShape(isPodcast: detail.isPodcast, librarySettings: libraries.settings(forLibrary: detail.libraryId))
+    }
 }
 
 /// The cover, title, author, sizes and link status of a downloaded item.

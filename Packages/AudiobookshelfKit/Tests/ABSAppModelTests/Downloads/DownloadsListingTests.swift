@@ -85,6 +85,17 @@ struct DownloadsListingTests {
         #expect(listing.downloadedBytes == 175)
     }
 
+    /// The row's cover takes the shape of the item's library's covers (#621).
+    @Test func keepsEachItemsLibrary() {
+        var book = Self.item("Walden")
+        book.libraryId = "lib-books"
+        let legacy = Self.item("Emma")
+        let listing = DownloadsListing(
+            items: [book, legacy], records: [], progress: [:], serverConnectionID: Self.connection)
+
+        #expect(listing.books.map(\.libraryId) == [nil, "lib-books"])
+    }
+
     @Test func ordersEpisodesNewestFirstAndKeepsFileOnlyEpisodes() {
         let old = Date(timeIntervalSince1970: 1_000)
         let new = Date(timeIntervalSince1970: 2_000)

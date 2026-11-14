@@ -14,11 +14,12 @@ struct LocalItemDetailTests {
     static func item(
         mediaType: MediaType = .book, connection: UUID = connection, address: String = address,
         userID: String = "user", media: LocalMediaSnapshot = LocalMediaSnapshot(metadata: .init(title: "Walden")),
-        files: [LocalFileDTO] = [], id: UUID = UUID()
+        files: [LocalFileDTO] = [], id: UUID = UUID(), libraryId: String? = nil
     ) -> LocalLibraryItemDTO {
         LocalLibraryItemDTO(
             id: id, serverConnectionID: connection, serverAddress: address, serverUserId: userID, libraryItemId: "li1",
-            mediaType: mediaType, title: "Walden", authorName: "Thoreau", relativeDirectory: "walden",
+            libraryId: libraryId, mediaType: mediaType, title: "Walden", authorName: "Thoreau",
+            relativeDirectory: "walden",
             addedAt: .now, updatedAt: .now, media: media, files: files)
     }
 
@@ -44,10 +45,12 @@ struct LocalItemDetailTests {
             files: [
                 Self.file("02.mp3", size: 20, trackIndex: 2), Self.file("loose.mp3", size: 5),
                 Self.file("01.mp3", size: 10, trackIndex: 1), Self.file("walden.epub", kind: .ebook, size: 7),
-            ])
+            ], libraryId: "lib-books")
 
         let detail = LocalItemDetail(item: item, account: Self.account)
 
+        // The library whose settings give the cover's shape (#621).
+        #expect(detail.libraryId == "lib-books")
         #expect(detail.tracks.map(\.title) == ["Economy", "Where I Lived", "loose.mp3"])
         #expect(detail.tracks.map(\.index) == [1, 2, nil])
         #expect(detail.tracks.map(\.duration) == [600, 300, nil])
