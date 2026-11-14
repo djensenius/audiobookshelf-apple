@@ -869,8 +869,10 @@ public enum SessionUploadResult: Sendable, Equatable {
     /// Applies the per-session results of a `local-all` upload; never the batch's HTTP status.
     ///
     /// - A success resets the session's upload bookkeeping. The session is deleted only when it
-    ///   wasn't changed while the upload was in flight (its `updatedAt` still equals the one
-    ///   sent) and isn't active (active ones too on the first sync after login).
+    ///   wasn't changed while the upload was in flight (it's still exactly the revision sent, in
+    ///   every field a save can change, #74) and isn't active (active ones too on the first sync
+    ///   after login). A changed one is sent again by the next upload: the server keeps one
+    ///   session per id, with its cumulative totals, so resending it replaces what it had.
     /// - A failure counts toward discarding the session, and ``missingResultsPerFailure``
     ///   consecutive uploads without a result count as one failure, but only when the session
     ///   wasn't changed during the upload (newer data may succeed) and no failure was counted in
@@ -878,20 +880,20 @@ public enum SessionUploadResult: Sendable, Equatable {
     ///   session is discarded and logged. The latest error is stored in `lastUploadError` even
     ///   when the failure isn't counted.
     ///
-    /// - Parameter sent: The `updatedAt` sent for each session, by id.
+    /// - Parameter sent: The revision sent of each session, by id.
     /// - Returns: The ids of the deleted sessions.
     @discardableResult
     public func settleSessionUpload(
-        sent: [String: Date],
+        sent: [String: PendingLocalSessionRevision],
         results: [String: SessionUploadResult],
         isFirstSync: Bool,
         now: Date = .now
     ) throws -> Set<String> {
         try commit {
             var deleted: Set<String> = []
-            for (id, sentUpdatedAt) in sent {
+            for (id, sentRevision) in sent {
                 guard let session = try fetchSession(id: id) else { continue }
-                let unchanged = session.updatedAt == sentUpdatedAt
+                let unchanged = PendingLocalSessionRevision(PendingLocalSessionDTO(session)) == sentRevision
                 let message: String?
                 switch results[id] {
                 case .success:

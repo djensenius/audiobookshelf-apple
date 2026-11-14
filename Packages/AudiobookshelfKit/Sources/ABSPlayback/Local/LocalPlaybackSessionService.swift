@@ -275,6 +275,8 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
         await afterRead.withLock { $0 }?(id)
         if let stored, stored.key.serverConnectionID != serverConnectionID { return }
         if isClosed {
+            // The close's position and `updatedAt` stay; an upload in flight still sees the
+            // change, since settlement compares every field it sent.
             guard var session = stored, report.timeListened > 0 else { return }
             session.timeListening += report.timeListened
             return try await progress.saveSession(session)

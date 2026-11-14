@@ -231,7 +231,8 @@ struct LocalPlaybackSessionServiceTests {
         func uploadDeletes() async throws {
             let sent = try #require(try await store.session(id: session.id))
             try await store.settleSessionUpload(
-                sent: [session.id: sent.updatedAt], results: [session.id: .success], isFirstSync: true)
+                sent: [session.id: PendingLocalSessionRevision(sent)], results: [session.id: .success],
+                isFirstSync: true)
             #expect(try await store.session(id: session.id) == nil)
         }
 

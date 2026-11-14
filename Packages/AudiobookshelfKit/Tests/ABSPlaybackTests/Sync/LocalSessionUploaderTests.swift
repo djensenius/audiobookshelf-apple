@@ -112,6 +112,47 @@ struct LocalSessionUploaderTests {
         #expect(service.currentTimes.last == [120])
     }
 
+    /// #74: an upload sends a closed session, then a save the syncer had begun as playback stopped
+    /// adds its listening time to the row, keeping the close's position and `updatedAt`. The
+    /// upload's success keeps the row, since it isn't what was sent, and the next pass sends the
+    /// added time and deletes it.
+    @Test func keepsAClosedSessionALateSaveAddedTimeToDuringTheUpload() async throws {
+        let items = LocalItems()
+        let files = LocalFiles()
+        items.add(.book(connection: connection))
+        files.addAll(for: .book(connection: connection))
+        let local = LocalPlaybackSessionService(
+            serverConnectionID: connection, items: items, progress: store,
+            fileURL: { try LocalFiles.url(for: $0) }, fileExists: { files.exists($0) }, now: { Self.start })
+        let session = try await local.startSession(itemID: "book", episodeID: nil, forceTranscode: false)
+        try await local.closeSession(
+            id: session.id, report: try #require(PlaybackSyncReport(currentTime: 50, timeListened: 10, duration: 250)))
+        let entered = Gate()
+        let release = Gate()
+        let service = StubUploadService(all: { call, batch in
+            if call == 1 {
+                entered.open()
+                await release.wait()
+            }
+            return .succeeding(batch)
+        })
+        let uploader = uploader(service)
+
+        let pass = Task { await uploader.sync() }
+        await entered.wait()
+        try await local.syncSession(
+            id: session.id, report: try #require(PlaybackSyncReport(currentTime: 40, timeListened: 30, duration: 250)))
+        release.open()
+
+        let report = await pass.value
+        #expect(report.results == [session.id: .success] && report.deleted.isEmpty)
+        let kept = try #require(try await store.session(id: session.id))
+        #expect(kept.timeListening == 40 && kept.currentTime == 50 && !kept.isActive)
+        #expect(await uploader.sync().deleted == [session.id])
+        #expect(service.timeListenings == [[10], [40]])
+        #expect(try await store.session(id: session.id) == nil)
+    }
+
     @Test(arguments: [APIError.notFound, .http(status: 405, message: nil)])
     func fallsBackToOneRequestPerSessionWithoutLocalAll(error: APIError) async throws {
         let accepted = try await save(minute: 0)
@@ -489,6 +530,7 @@ private final class StubUploadService: LocalSessionUploadService {
     /// The session ids of each `local-all` request.
     var batches: [[String]] { requests.withLock { $0.batches.map { $0.sessions.map(\.id) } } }
     var currentTimes: [[Double]] { requests.withLock { $0.batches.map { $0.sessions.map(\.currentTime) } } }
+    var timeListenings: [[Double]] { requests.withLock { $0.batches.map { $0.sessions.map(\.timeListening) } } }
     var deviceIDs: [String?] { requests.withLock { $0.batches.map(\.deviceInfo.deviceId) } }
     /// The session id of each `/local` request.
     var singles: [String] { requests.withLock { $0.singles.map(\.id) } }

@@ -56,7 +56,7 @@ public struct LocalSessionUploadReport: Sendable, Equatable {
 /// of this uploader's life. Answers are settled by
 /// `LocalProgressStore.settleSessionUpload(sent:results:isFirstSync:now:)`: it deletes
 /// acknowledged sessions but keeps active ones (except on the first sync after login) and those
-/// changed during the upload, and counts failures toward discarding a session.
+/// changed during the upload, in any field (#74), and counts failures toward discarding a session.
 ///
 /// Active sessions are sent too, as in the legacy app, so the server gets offline progress
 /// sooner. One the server acknowledged isn't sent again until it changes or closes.
@@ -97,8 +97,8 @@ public actor LocalSessionUploader {
 
     /// Cleared once the server answers `local-all` with 404 or 405.
     private var supportsLocalAll = true
-    /// The `updatedAt` of each active session the server acknowledged and the store kept.
-    private var acknowledged: [String: Date] = [:]
+    /// The revision of each active session the server acknowledged and the store kept.
+    private var acknowledged: [String: PendingLocalSessionRevision] = [:]
     private var running: Task<LocalSessionUploadReport, Never>?
     /// The pass that runs after ``running``, shared by every caller that asked meanwhile.
     private var queued: Task<LocalSessionUploadReport, Never>?
@@ -261,7 +261,7 @@ public actor LocalSessionUploader {
     /// An active session the server acknowledged that hasn't changed since. One closed since is
     /// sent again, so the store can delete it.
     private func isAcknowledged(_ session: PendingLocalSessionDTO, isFirstSync: Bool) -> Bool {
-        !isFirstSync && session.isActive && acknowledged[session.id] == session.updatedAt
+        !isFirstSync && session.isActive && acknowledged[session.id] == PendingLocalSessionRevision(session)
     }
 
     /// Sends `sessions`; one that can't be made into a valid payload is answered as a failure
@@ -273,12 +273,13 @@ public actor LocalSessionUploader {
             do {
                 let payload = try LocalPlaybackSessionPayload(
                     session: PlaybackSession(pending: session), deviceInfo: deviceInfo)
-                payloads.append(Payload(updatedAt: session.updatedAt, body: payload))
+                payloads.append(Payload(revision: PendingLocalSessionRevision(session), body: payload))
             } catch {
                 logger.error(
                     "Local session \(session.id, privacy: .public) can't be uploaded: \(String(describing: error), privacy: .public)"
                 )
-                invalid.answer(session.id, sent: session.updatedAt, .failure("Invalid session: \(error)"))
+                invalid.answer(
+                    session.id, sent: PendingLocalSessionRevision(session), .failure("Invalid session: \(error)"))
             }
         }
         guard !payloads.isEmpty else { return invalid }
@@ -304,7 +305,7 @@ public actor LocalSessionUploader {
             return attempt
         }
         // Every session sent is settled; one without a result counts as unanswered (ADR 0003).
-        for payload in payloads { attempt.sent[payload.body.id] = payload.updatedAt }
+        for payload in payloads { attempt.sent[payload.body.id] = payload.revision }
         for result in response.results where attempt.sent[result.id] != nil && attempt.results[result.id] == nil {
             attempt.results[result.id] = result.success ? .success : .failure(result.error)
         }
@@ -323,11 +324,11 @@ public actor LocalSessionUploader {
             }
             do {
                 try await service.upload(payload.body)
-                attempt.answer(payload.body.id, sent: payload.updatedAt, .success)
+                attempt.answer(payload.body.id, sent: payload.revision, .success)
             } catch {
                 switch Self.answer(to: error) {
                 case .result(let result):
-                    attempt.answer(payload.body.id, sent: payload.updatedAt, result)
+                    attempt.answer(payload.body.id, sent: payload.revision, result)
                 case .stop(let stop):
                     attempt.stop = stop
                     return attempt
@@ -384,21 +385,22 @@ public actor LocalSessionUploader {
     }
 
     private struct Payload {
-        /// The stored `updatedAt`, which settlement compares exactly; the body carries it rounded.
-        var updatedAt: Date
+        /// The stored session sent, which settlement compares exactly; the body carries its dates
+        /// rounded.
+        var revision: PendingLocalSessionRevision
         var body: LocalPlaybackSessionPayload
     }
 
     /// What one request, or one round of `/local` requests, settles.
     private struct Attempt {
-        /// The `updatedAt` sent for each session to settle. One sent to `local-all` without a
+        /// The revision sent of each session to settle. One sent to `local-all` without a
         /// result settles as unanswered.
-        var sent: [String: Date] = [:]
+        var sent: [String: PendingLocalSessionRevision] = [:]
         var results: [String: SessionUploadResult] = [:]
         var stop: Stop?
 
-        mutating func answer(_ id: String, sent updatedAt: Date, _ result: SessionUploadResult) {
-            sent[id] = updatedAt
+        mutating func answer(_ id: String, sent revision: PendingLocalSessionRevision, _ result: SessionUploadResult) {
+            sent[id] = revision
             results[id] = result
         }
     }
