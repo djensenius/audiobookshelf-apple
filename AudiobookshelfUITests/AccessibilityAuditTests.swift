@@ -44,8 +44,8 @@ final class AccessibilityAuditTests: XCTestCase {
 
     /// Audits what's on screen and fails once for every issue that isn't a ``KnownAuditIssue``,
     /// naming the screen, the text size, the audit type, the element and the issue. An issue
-    /// ``KnownAuditIssue/isUnnamedContrastUnderBottomBar(_:on:in:)`` defers is checked by a
-    /// second contrast audit with Item detail's metadata clear of the bottom bar.
+    /// ``KnownAuditIssue/isUnnamedContrastUnderBottomBar(_:on:in:)`` defers is checked by
+    /// ``auditMetadataAboveBottomBar(in:named:)``.
     @MainActor
     private func audit(
         _ screen: FixtureScreen, for types: XCUIAccessibilityAuditType, in app: XCUIApplication, textSize: String
@@ -64,17 +64,7 @@ final class AccessibilityAuditTests: XCTestCase {
                 return true
             }
             if deferred {
-                scrollMetadataClearOfBottomBar(in: app)
-                // Only an issue with no element fails here: with the metadata clear of the bar, it
-                // isn't a covered label. Named text the scroll brought on screen wasn't on screen for
-                // the audit above, so it isn't what was deferred.
-                try app.performAccessibilityAudit(for: .contrast) { issue in
-                    if issue.element == nil {
-                        failures.append(
-                            "\(screen.name) (\(textSize), metadata clear of the bottom bar): \(Self.failure(issue))")
-                    }
-                    return true
-                }
+                failures += try auditMetadataAboveBottomBar(in: app, named: "\(screen.name) (\(textSize))")
             }
         } catch {
             XCTFail("\(screen.name) (\(textSize)): the accessibility audit failed to run: \(error)")
@@ -100,16 +90,47 @@ final class AccessibilityAuditTests: XCTestCase {
         return "\(auditTypeName(issue.auditType)) on \(elementName(issue.element)): \(description)"
     }
 
-    /// Scrolls Item detail up until its metadata (`item.metadata`, whose frame includes the labels
-    /// hidden from VoiceOver) is clear of the bottom bar: above it, or off the top.
+    /// Audits contrast on Item detail's metadata (`item.metadata`) above the bottom bar, after an
+    /// issue was deferred while it was under the bar. Scrolls the content up by half the band
+    /// between the navigation bar and the bar at a time, audits each step, and stops once the
+    /// metadata ends above the bar. So every row that was under the bar (rows are shorter than half
+    /// the band) is audited fully in the band, a block taller than the band (AX5) in overlapping
+    /// segments; text scrolled off the top was audited in the band on the way. Only an issue with no
+    /// element fails: named text the scroll brings on screen wasn't on screen for the first audit,
+    /// so it isn't what was deferred.
     @MainActor
-    private func scrollMetadataClearOfBottomBar(in app: XCUIApplication) {
-        let screen = app.descendants(matching: .any)[FixtureScreen.item.identifier].firstMatch
-        for _ in 0..<8 where KnownAuditIssue.metadataOverlapsBottomBar(in: app) {
-            screen.swipeUp(velocity: .slow)
+    private func auditMetadataAboveBottomBar(in app: XCUIApplication, named name: String) throws -> [String] {
+        let metadata = app.descendants(matching: .any)["item.metadata"].firstMatch
+        let navigationBar = app.navigationBars.firstMatch
+        let margin: CGFloat = 44
+        var failures: [String] = []
+        for step in 1...10 {
+            let barTop = KnownAuditIssue.bottomBarTop(in: app)
+            if metadata.frame.maxY <= barTop { return failures }
+            let top = navigationBar.exists ? navigationBar.frame.maxY : app.frame.minY
+            let band = barTop - top
+            guard band > 2 * margin else {
+                XCTFail("\(name): no room between the navigation bar (\(top)) and the bottom bar (\(barTop))")
+                return failures
+            }
+            let start = metadata.frame.minY
+            let origin = app.coordinate(withNormalizedOffset: .zero)
+            let x = app.frame.maxX - margin / 2
+            // Held at the end, so the scroll view doesn't coast past the drag.
+            origin.withOffset(CGVector(dx: x, dy: barTop - margin / 2)).press(
+                forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(dx: x, dy: barTop - margin / 2 - band / 2)),
+                withVelocity: .slow, thenHoldForDuration: 0.3)
+            XCTAssertLessThanOrEqual(
+                start - metadata.frame.minY, band / 2 + 2, "\(name): step \(step) scrolled more than half the band")
+            try app.performAccessibilityAudit(for: .contrast) { issue in
+                if issue.element == nil {
+                    failures.append("\(name), metadata above the bottom bar, step \(step): \(Self.failure(issue))")
+                }
+                return true
+            }
         }
-        XCTAssertFalse(
-            KnownAuditIssue.metadataOverlapsBottomBar(in: app), "Item detail's metadata is still under the bottom bar")
+        XCTFail("\(name): the metadata is still under the bottom bar after 10 steps")
+        return failures
     }
 
     private static func elementName(_ element: XCUIElement?) -> String {
@@ -227,12 +248,19 @@ struct KnownAuditIssue {
     /// bottom bar. That's probably a metadata label under the bar's glass, as "Duration" was in one
     /// AX5 run in four on a 6.3-inch iPhone: the labels are hidden from VoiceOver (each value speaks
     /// its label, as in #613), so the audit can't name one. Deferred, not filtered: the test audits
-    /// contrast again with the metadata clear of the bar, where an issue with no element fails. #623
+    /// contrast again with the metadata above the bar, where an issue with no element fails. #623
     @MainActor
     static func isUnnamedContrastUnderBottomBar(
         _ issue: XCUIAccessibilityAuditIssue, on screen: FixtureScreen, in app: XCUIApplication
     ) -> Bool {
         screen == .item && issue.auditType == .contrast && issue.element == nil && metadataOverlapsBottomBar(in: app)
+    }
+
+    /// The top of the tab bar or the mini player, whichever is higher; the app's bottom without
+    /// either.
+    @MainActor
+    static func bottomBarTop(in app: XCUIApplication) -> CGFloat {
+        bottomBars(in: app).map(\.frame.minY).min() ?? app.frame.maxY
     }
 
     /// Whether Item detail's metadata (`item.metadata`) overlaps the tab bar or the mini player.
