@@ -121,8 +121,10 @@ navigation stacks, so `open` goes back (`BackButton`) to the tab's root (`home.s
 `library.screen`, `downloads.screen`, `account.screen`) before leaving it and after selecting
 a tab; an open Settings screen is reused.
 The player plays *Pride and Prejudice* (`item.play`), opens from the mini player
-(`player.mini`) and is paused (`player.playPause`); another screen minimizes it first
-(`player.minimize`). Settings is the Account tab's `account.settings` row on iOS and ⌘, on a
+(`player.mini`) and is paused; another screen minimizes it first (`player.minimize`). Its
+play/pause button is `player.pause` while playback is requested and `player.play` otherwise,
+in any language, so the helper presses it only while it's `player.pause` and never restarts
+playback that has already stopped. Settings is the Account tab's `account.settings` row on iOS and ⌘, on a
 Mac. Two things about the tab bar: on the iPhone Duo's outer display it's too short for every
 tab, so Downloads and Account are in its More tab, and it minimizes as the content scrolls
 (`tabBarMinimizeBehavior`); `open` handles both. The item's metadata is `item.metadata`.

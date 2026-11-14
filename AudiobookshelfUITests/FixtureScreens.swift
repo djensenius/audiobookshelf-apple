@@ -197,23 +197,35 @@ extension XCTestCase {
     }
 
     /// Pauses with the full player's play/pause button, the hittable one: the mini player's is
-    /// under the full player on iOS.
+    /// under the full player on iOS. Its identifier says its state in any language: `player.pause`
+    /// while playback is requested, `player.play` once it isn't. It's pressed only while it says
+    /// `player.pause`, so playback that has already stopped (the fixture audio is a minute long)
+    /// isn't started again.
     @MainActor
     private func pause(in app: XCUIApplication) {
-        let buttons = app.buttons.matching(identifier: "player.playPause")
-        let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "count > 0"), object: buttons)
-        XCTAssertEqual(
-            XCTWaiter().wait(for: [ready], timeout: Self.fixtureTimeout), .completed,
-            "The player has no play/pause button")
-        guard let button = buttons.allElementsBoundByIndex.first(where: \.isHittable) else {
+        let buttons = app.buttons.matching(NSPredicate(format: "identifier IN %@", ["player.play", "player.pause"]))
+        func hittable() -> XCUIElement? { buttons.allElementsBoundByIndex.first(where: \.isHittable) }
+        guard wait(for: { hittable() != nil }, timeout: Self.fixtureTimeout) else {
             return XCTFail("The player's play/pause button isn't on screen")
         }
-        let label = button.label
-        button.press()
-        // Its label turns from Pause to Play.
-        let paused = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label != %@", label), object: button)
-        XCTAssertEqual(
-            XCTWaiter().wait(for: [paused], timeout: Self.fixtureTimeout), .completed, "Playback didn't pause")
+        // It shows Pause as soon as playback is requested; a moment's grace in case the full
+        // player draws first.
+        _ = wait(for: { hittable()?.identifier == "player.pause" }, timeout: 3)
+        if let button = hittable(), button.identifier == "player.pause" { button.press() }
+        XCTAssertTrue(
+            wait(for: { hittable()?.identifier == "player.play" }, timeout: Self.fixtureTimeout),
+            "Playback didn't pause: the play/pause button still says \(hittable()?.identifier ?? "nothing")")
+    }
+
+    /// Polls `condition` on the main run loop until it's true or `timeout` passes.
+    @MainActor
+    private func wait(for condition: () -> Bool, timeout: TimeInterval) -> Bool {
+        let deadline = Date.now.addingTimeInterval(timeout)
+        while !condition() {
+            guard Date.now < deadline else { return false }
+            RunLoop.current.run(until: .now.addingTimeInterval(0.25))
+        }
+        return true
     }
 
     /// Minimizes the full player (iOS) or closes its window (macOS), if it's open.

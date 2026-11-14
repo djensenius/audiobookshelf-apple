@@ -87,6 +87,12 @@ public struct TransportControls: View {
         L10n.string(showsPause ? "ButtonPause" : "ButtonPlay")
     }
 
+    /// The play/pause button's identifier, for UI tests: `player.pause` while it shows Pause
+    /// (playback is requested), `player.play` while it shows Play, in any language.
+    nonisolated static func playPauseIdentifier(showsPause: Bool) -> String {
+        showsPause ? "player.pause" : "player.play"
+    }
+
     /// The play/pause button's VoiceOver value: "Loading..." while buffering, else empty.
     nonisolated static func playPauseAccessibilityValue(isBuffering: Bool) -> String {
         isBuffering ? L10n.string("MessageLoading") : ""
@@ -180,7 +186,7 @@ public struct TransportControls: View {
         .accessibilityLabel(Text(verbatim: Self.playPauseLabel(showsPause: showsPause)))
         .accessibilityValue(Text(verbatim: Self.playPauseAccessibilityValue(isBuffering: isBuffering)))
         // For UI tests.
-        .accessibilityIdentifier("player.playPause")
+        .accessibilityIdentifier(Self.playPauseIdentifier(showsPause: showsPause))
     }
 
     private func jumpButton(forward: Bool) -> some View {
