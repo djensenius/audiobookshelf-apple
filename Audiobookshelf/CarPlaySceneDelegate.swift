@@ -32,7 +32,7 @@
         private var shownContent: CarPlayRootContent?
         private var loadedTrigger: CarPlayRootModel.LoadTrigger?
         private var hasShownContinue = false
-        private var alerts = CarPlayAlertPresenter<PlayerErrorMessage>()
+        private var alerts = CarPlayAlertPresenter<CarPlayAlert>()
         /// The plays awaited to show Now Playing, by connection.
         private let nowPlayingWaiter = CarPlayNowPlayingWaiter()
         /// Now Playing's buttons and lists (#81).
@@ -167,7 +167,7 @@
         private func observeAlert() {
             guard let model else { return }
             let alert = withObservationTracking {
-                model.alert
+                model.presentedAlert
             } onChange: { [weak self] in
                 Task { @MainActor in self?.observeAlert() }
             }
@@ -250,7 +250,7 @@
 
         /// Performs the presenter's command; a dismissal reports its completion, which may present
         /// the alert wanted by then.
-        private func perform(_ command: CarPlayAlertPresenter<PlayerErrorMessage>.Command?) {
+        private func perform(_ command: CarPlayAlertPresenter<CarPlayAlert>.Command?) {
             guard let command, let interfaceController else { return }
             switch command {
             case .dismiss:
@@ -268,16 +268,31 @@
             }
         }
 
-        /// The alert for `message`, with the player's strings: Stream or Cancel for a streaming
-        /// confirmation, OK otherwise.
-        private func template(for message: PlayerErrorMessage) -> CPAlertTemplate {
+        /// The alert for `alert`, with the player's strings: Stream or Cancel for a streaming
+        /// confirmation, Stream instead or Cancel for a download missing files (#74), OK otherwise.
+        /// Each button passes `alert` back, so it does nothing once the failure changed (#74).
+        private func template(for alert: CarPlayAlert) -> CPAlertTemplate {
+            let message = alert.message
             let title = L10n.string(PlayerSlot.messageKey(for: message))
+            if message == .downloadFilesMissing {
+                return CPAlertTemplate(
+                    titleVariants: [title],
+                    actions: [
+                        CPAlertAction(title: L10n.string("ButtonStreamInstead"), style: .default) { [weak self] _ in
+                            guard let play = self?.model?.streamInstead(for: alert) else { return }
+                            self?.showNowPlaying(after: play)
+                        },
+                        CPAlertAction(title: L10n.string("ButtonCancel"), style: .cancel) { [weak self] _ in
+                            self?.model?.dismissAlert(alert)
+                        },
+                    ])
+            }
             guard message == .streamingNeedsConfirmation else {
                 return CPAlertTemplate(
                     titleVariants: [title],
                     actions: [
                         CPAlertAction(title: L10n.string("ButtonOk"), style: .cancel) { [weak self] _ in
-                            self?.model?.dismissAlert()
+                            self?.model?.dismissAlert(alert)
                         }
                     ])
             }
@@ -285,11 +300,11 @@
                 titleVariants: [title],
                 actions: [
                     CPAlertAction(title: L10n.string("ButtonStream"), style: .default) { [weak self] _ in
-                        guard let play = self?.model?.confirmStreaming() else { return }
+                        guard let play = self?.model?.confirmStreaming(for: alert) else { return }
                         self?.showNowPlaying(after: play)
                     },
                     CPAlertAction(title: L10n.string("ButtonCancel"), style: .cancel) { [weak self] _ in
-                        self?.model?.dismissAlert()
+                        self?.model?.dismissAlert(alert)
                     },
                 ])
         }

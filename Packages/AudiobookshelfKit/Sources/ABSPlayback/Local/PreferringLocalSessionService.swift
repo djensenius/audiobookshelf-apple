@@ -25,7 +25,7 @@ import Synchronization
 /// streams: only the server transcodes. The coordinator forces one only for a session it streamed
 /// (such as a "Stream instead" start), never for downloaded files, whose decode and format errors
 /// surface instead, so recovery never streams a download.
-public final class PreferringLocalSessionService: PlaybackSessionService {
+public final class PreferringLocalSessionService: PlaybackSessionService, LocalPlaybackDeciding {
     public let local: LocalPlaybackSessionService
     public let remote: any PlaybackSessionService
     /// The media whose next start streams although it is downloaded.
@@ -46,6 +46,21 @@ public final class PreferringLocalSessionService: PlaybackSessionService {
     }
 
     public var serverConnectionID: UUID { remote.serverConnectionID }
+
+    /// Whether `key`'s next unforced start goes to `local`: it has a completed download on this
+    /// connection and isn't marked ``streamInstead(_:)``. A download missing files counts: its
+    /// start then throws ``LocalPlaybackError/downloadFilesMissing(_:)`` without streaming.
+    public func playsLocally(_ key: MediaKey) async -> Bool {
+        guard key.serverConnectionID == serverConnectionID, !streamingInstead.withLock({ $0.contains(key) })
+        else { return false }
+        return await local.hasDownload(itemID: key.libraryItemId, episodeID: key.episodeId)
+    }
+
+    public func closeLocalSession(id: String, report: PlaybackSyncReport?) async throws -> Bool {
+        guard await local.owns(sessionID: id) else { return false }
+        try await local.closeSession(id: id, report: report)
+        return true
+    }
 
     public func startSession(itemID: String, episodeID: String?, forceTranscode: Bool) async throws
         -> PlaybackSession
@@ -93,4 +108,17 @@ public final class PreferringLocalSessionService: PlaybackSessionService {
         if await local.owns(sessionID: id) { return await local.sessionCheck(id: id) }
         return await remote.sessionCheck(id: id)
     }
+}
+
+/// A ``PlaybackSessionService`` that can tell before a start that media plays from this device
+/// (#74). The coordinator skips the streaming policy for it: nothing streams, so neither a
+/// metered network's "ask" nor its "never" applies (ADR 0007, decision 7). At an account end,
+/// which sends nothing, it closes such a session on this device alone.
+public protocol LocalPlaybackDeciding: Sendable {
+    /// Whether `key`'s next start, unless a forced transcode, plays from this device.
+    func playsLocally(_ key: MediaKey) async -> Bool
+    /// Closes session `id` on this device only, when it's one that plays from here, as
+    /// `closeSession(id:report:)` would; never contacts the server. For an account end, which
+    /// sends nothing but must keep the listening (#74). Returns whether `id` was such a session.
+    func closeLocalSession(id: String, report: PlaybackSyncReport?) async throws -> Bool
 }

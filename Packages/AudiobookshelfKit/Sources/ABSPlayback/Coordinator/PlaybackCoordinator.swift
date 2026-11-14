@@ -408,7 +408,12 @@ public final class PlaybackCoordinator {
 
         let checkedGeneration = generation
         pendingPlayKey = key
-        let decision = await policy.streamingDecision()
+        let decision: NetworkDecision
+        if await playsLocally(key, forceTranscode: forceTranscode) {
+            decision = .allowed
+        } else {
+            decision = await policy.streamingDecision()
+        }
         guard check == policyCheck else { return }
         pendingPlayKey = nil
         guard checkedGeneration == generation else { return }
@@ -447,6 +452,29 @@ public final class PlaybackCoordinator {
         guard case .streamingNeedsConfirmation = error else { return }
         blockedPlay = nil
         error = nil
+    }
+
+    /// The user chose "Stream instead" after ``PlaybackCoordinatorError/downloadFilesMissing(_:)``
+    /// (ADR 0007 §7, #74): the media's next start streams
+    /// (``PreferringLocalSessionService/streamInstead(_:)``), and it plays again where it stopped,
+    /// as a resume of the unloaded item does; the streaming policy is checked as for any play.
+    /// Does nothing unless that is still the error, for the item still in the player, and its
+    /// sessions can stream a download instead.
+    public func streamInsteadOfDownload() async {
+        guard case .downloadFilesMissing(let key) = error, key == mediaKey, phase == .unloaded,
+            let sessions = sessions as? PreferringLocalSessionService
+        else { return }
+        sessions.streamInstead(key)
+        await play(itemID: key.libraryItemId, episodeID: key.episodeId)
+    }
+
+    /// Whether `key`'s next start plays from a download on this device (#74), so it streams nothing
+    /// and the streaming policy doesn't apply: a downloaded item plays on a metered network set to
+    /// "ask" or "never". A forced transcode always streams. A "Stream instead" start streams, so
+    /// it's checked as any stream is.
+    private func playsLocally(_ key: MediaKey, forceTranscode: Bool = false) async -> Bool {
+        guard !forceTranscode, let sessions = sessions as? any LocalPlaybackDeciding else { return false }
+        return await sessions.playsLocally(key)
     }
 
     /// Everything after a play passed the streaming policy. A `prepared` start (an auto-advance)
@@ -1294,12 +1322,15 @@ public final class PlaybackCoordinator {
     private func advance(after key: MediaKey, provider: any NextItemProvider, _ ended: AdvanceSnapshot) async {
         var next = provider.preparedNext(after: key)
         if next == nil { next = await provider.prepareNext(after: key) }
+        // A downloaded next item streams nothing, so no policy applies to it (#74).
+        var playsLocally = false
+        if let next { playsLocally = await self.playsLocally(next.key) }
         // Anything the user did meanwhile (play, pause, seek, stop), or a detach, cancels it.
         guard let next, !Task.isCancelled, nextItemProvider === provider,
             isAdvancing(after: key, ended)
         else { return }
         // The path and setting now decide, not the prepared (possibly stale) decision; no waiting.
-        switch policy.currentStreamingDecision() {
+        switch playsLocally ? .allowed : policy.currentStreamingDecision() {
         case .allowed: break
         // Nobody can agree to a metered network at the lock screen; the item stays queued, and
         // ``confirmMeteredStreaming()`` plays it.
@@ -1495,7 +1526,13 @@ public final class PlaybackCoordinator {
         at target: Double, playing: Bool, forceTranscode: Bool
     ) async -> PlaybackRecoveryRebuild {
         guard let key = mediaKey, phase == .loaded || phase == .unloaded else { return .superseded }
-        switch policy.currentStreamingDecision() {
+        // A download rebuilt from its files streams nothing, so no policy applies to it (#74).
+        let checkedGeneration = generation
+        let playsLocally = await playsLocally(key, forceTranscode: forceTranscode || transcodeForced)
+        guard generation == checkedGeneration, mediaKey == key, phase == .loaded || phase == .unloaded else {
+            return .superseded
+        }
+        switch playsLocally ? .allowed : policy.currentStreamingDecision() {
         case .allowed: break
         case .askUser where meteredConsent == key: break
         case .askUser(let reason):
@@ -1623,8 +1660,7 @@ public final class PlaybackCoordinator {
         }
         closeOperations.append(operation)
         guard permitsCloseTransport else {
-            operation.transport.resolve(.success(false))
-            operation.dispatched.resolve(.success(()))
+            closeLocallyOnly(operation, report: handoff?.report ?? report)
             return operation
         }
         let id = UUID()
@@ -1643,6 +1679,12 @@ public final class PlaybackCoordinator {
             // The syncer's report in flight for this session returns first, within a limit (#337).
             try? await handoff?.waitForSessionSync(timeout: Self.closeWaitTimeout, sleep: sleep)
             guard !Task.isCancelled else {
+                // An account end cancelled it before it was sent: a session on this device is
+                // still closed there, without the network (#74), once the save it cut short ends.
+                if let local = sessions as? any LocalPlaybackDeciding {
+                    await Self.closeLocally(sessionID, in: local, after: handoff, report: handoff?.report ?? report)
+                        .value
+                }
                 operation.transport.resolve(.success(false))
                 return
             }
@@ -1661,6 +1703,45 @@ public final class PlaybackCoordinator {
         closeTasks[id] = task
         operation.task = task
         return operation
+    }
+
+    /// The close of a session at an account end, which sends nothing (#74): a session playing a
+    /// download is still closed on this device, with its final report, so its listening time since
+    /// the last save isn't lost and it's saved inactive, for the account's next upload. Its
+    /// transport resolves once that local write ends, so ``waitForClose(timeout:)`` joins it.
+    /// Retirement deletes no saved local session (sign-out and removal included), so the write is
+    /// never wasted; a server session has nothing to do here.
+    private func closeLocallyOnly(_ operation: PlaybackCloseOperation, report: PlaybackSyncReport?) {
+        operation.dispatched.resolve(.success(()))
+        guard let local = sessions as? any LocalPlaybackDeciding else {
+            operation.transport.resolve(.success(false))
+            return
+        }
+        let close = Self.closeLocally(operation.sessionID, in: local, after: operation.handoff, report: report)
+        Task {
+            await close.value
+            operation.transport.resolve(.success(false))
+        }
+    }
+
+    /// Closes session `sessionID` on this device (#74), in a task nothing cancels: after the
+    /// syncer's save in flight for it, however long that takes, so the close is the last write.
+    /// Only a caller's wait has a deadline (``waitForClose(timeout:)``); the write itself always
+    /// ends. The service orders the two anyway (``LocalPlaybackSessionService``): this wait keeps
+    /// the closed row whole for an upload that runs between them.
+    private static func closeLocally(
+        _ sessionID: String, in local: any LocalPlaybackDeciding, after handoff: PlaybackCloseHandoff?,
+        report: PlaybackSyncReport?
+    ) -> Task<Void, Never> {
+        Task {
+            _ = try? await handoff?.sessionSync?.wait()
+            do {
+                _ = try await local.closeLocalSession(id: sessionID, report: report)
+            } catch {
+                logger.error(
+                    "Closing a local session at account end failed: \(String(describing: error), privacy: .public)")
+            }
+        }
     }
 
     /// Joins closes captured so far, without another callback or request. The deadline bounds
@@ -1853,6 +1934,7 @@ public final class PlaybackCoordinator {
 
     private static func sessionError(_ error: any Error) -> PlaybackCoordinatorError {
         if let error = error as? APIError { return .sessionStartFailed(error) }
+        if case LocalPlaybackError.downloadFilesMissing(let key) = error { return .downloadFilesMissing(key) }
         return .unexpected(String(describing: error))
     }
 

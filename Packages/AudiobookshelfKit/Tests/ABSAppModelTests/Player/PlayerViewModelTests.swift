@@ -809,6 +809,7 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
         (.unexpected("boom"), .playbackFailed),
         (.recoveryExhausted, .streamingInterrupted),
         (.streamRejected, .streamRejected),
+        (.downloadFilesMissing(FakePlaybackControl.key()), .downloadFilesMissing),
     ])
     func errorMapsToAMessage(error: PlaybackCoordinatorError, message: PlayerErrorMessage) async throws {
         try await withPlayer { model, playback, _, _ in
@@ -824,6 +825,7 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
     @Test func onlyAnInterruptedStreamOrAConfirmationOffersActions() {
         #expect(PlayerErrorMessage.streamingInterrupted.actions == [.retry, .cancel])
         #expect(PlayerErrorMessage.streamingNeedsConfirmation.actions == [.streamAnyway, .cancel])
+        #expect(PlayerErrorMessage.downloadFilesMissing.actions == [.streamInstead, .cancel])
         let others: [PlayerErrorMessage] = [
             .streamingNotAllowed, .sessionStartFailed, .streamUnavailable, .playbackFailed, .streamRejected,
         ]
@@ -864,6 +866,28 @@ private func restoredRecord(position: Double = 120, duration: Double? = 400) -> 
             switch action {
             case .streamAnyway: #expect(playback.calls == [.confirmMeteredStreaming])
             case .cancel: #expect(playback.calls == [.declineMeteredStreaming])
+            default: #expect(playback.calls.isEmpty)
+            }
+        }
+    }
+
+    /// #74: a download missing a file streams only when the user chooses "Stream instead"
+    /// (ADR 0007 §7); Cancel stops the player.
+    @Test(arguments: [PlayerErrorAction.streamInstead, .cancel, .dismiss])
+    func theMissingDownloadsActionsDriveThePlayback(action: PlayerErrorAction) async throws {
+        try await withPlayer { model, playback, _, _ in
+            playback.load(FakePlaybackControl.bookSession(), at: 150)
+            playback.phase = .unloaded
+            playback.error = .downloadFilesMissing(FakePlaybackControl.key())
+            playback.clearCalls()
+
+            await model.respond(to: try #require(model.failure), with: action)
+
+            switch action {
+            case .streamInstead:
+                #expect(playback.calls == [.streamInsteadOfDownload])
+                #expect(playback.error == nil)
+            case .cancel: #expect(playback.calls == [.stop(.user)])
             default: #expect(playback.calls.isEmpty)
             }
         }

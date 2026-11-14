@@ -20,6 +20,7 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
         case stop(PlaybackStopReason)
         case confirmMeteredStreaming
         case declineMeteredStreaming
+        case streamInsteadOfDownload
         case streamReset(sessionID: String)
     }
 
@@ -112,6 +113,8 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
 
     func stop(reason: PlaybackStopReason) {
         calls.append(.stop(reason))
+        // Like the coordinator's, stopping clears the error.
+        error = nil
         phase = .idle
         mediaKey = nil
         session = nil
@@ -133,6 +136,14 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     func declineMeteredStreaming() {
         calls.append(.declineMeteredStreaming)
         guard case .streamingNeedsConfirmation = error else { return }
+        error = nil
+    }
+
+    /// Like the coordinator's, it only streams while the error is a missing download; the stream
+    /// starts cleanly.
+    func streamInsteadOfDownload() async {
+        calls.append(.streamInsteadOfDownload)
+        guard case .downloadFilesMissing = error else { return }
         error = nil
     }
 

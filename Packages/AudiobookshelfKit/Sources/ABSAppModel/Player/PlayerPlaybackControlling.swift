@@ -54,6 +54,8 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     func confirmMeteredStreaming() async
     /// Clears a `.streamingNeedsConfirmation` error without playing.
     func declineMeteredStreaming()
+    /// Streams the item a `.downloadFilesMissing` error stopped, as the user chose (#74).
+    func streamInsteadOfDownload() async
     /// The server restarted the transcode of session `sessionID` (`stream_reset`); see
     /// ``PlaybackCoordinator/handleStreamReset(sessionID:)``.
     func handleStreamReset(sessionID: String)

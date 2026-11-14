@@ -59,6 +59,10 @@ public enum PlaybackCoordinatorError: Error, Sendable, Equatable {
     /// The path is metered and the streaming setting is "never". No session was started for `key`.
     case streamingNotAllowed(MeteredReason, key: MediaKey)
     case sessionStartFailed(APIError)
+    /// `key` is downloaded, but a file it plays is missing (ADR 0007 §7, #74). No session was
+    /// started: a download never streams silently. The user can stream it instead
+    /// (``PlaybackCoordinator/streamInsteadOfDownload()``).
+    case downloadFilesMissing(MediaKey)
     case streamUnavailable(StreamResolutionError)
     /// The engine couldn't load the media.
     case engine(AudioEngineError)

@@ -40,11 +40,13 @@ struct AppPlayback {
     ///   - current: The player's binding, which the library's item actions (#368) also read; made
     ///     before the library, which playback's progress reaches.
     ///   - mediaLeases: Shared by every scope's coordinator and the library's item actions (#368).
+    ///   - downloads: The download stack's items and files, which every scope plays instead of
+    ///     streaming (#74); `nil` (no download stack) streams everything.
     static func make(
         writer: LocalProgressStore?, accounts: AccountManager?, lifecycle: SessionLifecycle, settings: AppSettings,
         deviceIdentifiers: any DeviceIdentifying, library: LibraryParticipant? = nil,
         history: (any PlaybackHistoryRecording)? = nil, current: CurrentPlayback = CurrentPlayback(),
-        mediaLeases: MediaLeases = MediaLeases()
+        mediaLeases: MediaLeases = MediaLeases(), downloads: LocalDownloadFiles? = nil
     ) -> AppPlayback {
         let player = PlayerViewModel(playback: current, settings: settings)
         guard let writer, let accounts else {
@@ -74,7 +76,9 @@ struct AppPlayback {
                 library?.applyPlaybackProgress(update, sessionID: context.sessionID)
             },
             makeScope: {
-                Self.makeScope(for: $0, settings: settings, policy: policy, mediaLeases: mediaLeases, history: history)
+                Self.makeScope(
+                    for: $0, settings: settings, policy: policy, mediaLeases: mediaLeases, history: history,
+                    downloads: downloads)
             })
         lifecycle.register(participant, stage: .progressSource)
         removesQueues(of: accounts, from: queueStore(settings: settings))
@@ -113,7 +117,7 @@ struct AppPlayback {
     static func makeScope(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
         mediaLeases: MediaLeases?,
-        history: (any PlaybackHistoryRecording)?
+        history: (any PlaybackHistoryRecording)?, downloads: LocalDownloadFiles? = nil
     ) -> PlaybackScope {
         #if os(iOS)
             let engine = AudioEngine(timeObserverInterval: tickInterval)
@@ -127,7 +131,7 @@ struct AppPlayback {
         #endif
         return makeScope(
             for: request, settings: settings, policy: policy, engine: engine, interruptions: interruptions,
-            mediaLeases: mediaLeases, history: history)
+            mediaLeases: mediaLeases, history: history, downloads: downloads)
     }
 
     /// The scope over `engine`. An interruption also cancels a play the coordinator holds outside
@@ -137,11 +141,11 @@ struct AppPlayback {
     static func makeScope(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
         engine: any AudioEngineProtocol, interruptions: AudioInterruptionHandler?, mediaLeases: MediaLeases?,
-        history: (any PlaybackHistoryRecording)? = nil
+        history: (any PlaybackHistoryRecording)? = nil, downloads: LocalDownloadFiles? = nil
     ) -> PlaybackScope {
         let scopeConfiguration = Self.configuration(
             for: request, settings: settings, policy: policy, engine: engine, mediaLeases: mediaLeases,
-            history: history)
+            history: history, downloads: downloads)
         let scope = PlaybackScope.make(scopeConfiguration) {
             coordinator in
             // No artwork or App Intents entities yet.
@@ -157,12 +161,14 @@ struct AppPlayback {
     /// would treat the device as always online. Its coordinator shares `mediaLeases` with the
     /// item actions (`nil` holds nothing, so every caller passes it explicitly). The same path
     /// tells the auto-advance to prepare the next item again, which it starts under
-    /// `backgroundActivity` (#160). The syncer records `history`.
+    /// `backgroundActivity` (#160). The syncer records `history`. `downloads` play from their
+    /// files instead of streaming (#74).
     static func configuration(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
         engine: any AudioEngineProtocol, mediaLeases: MediaLeases?,
         history: (any PlaybackHistoryRecording)? = nil,
-        backgroundActivity: any BackgroundActivity = makeBackgroundActivity()
+        backgroundActivity: any BackgroundActivity = makeBackgroundActivity(),
+        downloads: LocalDownloadFiles? = nil
     ) -> PlaybackScope.Configuration {
         var configuration = PlaybackScope.Configuration(
             connectionID: request.connectionID, client: request.client, features: request.features,
@@ -174,6 +180,7 @@ struct AppPlayback {
         configuration.mediaLeases = mediaLeases
         configuration.history = history
         configuration.trackURLOverride = fixtureTrackURL
+        configuration.downloads = downloads
         return configuration
     }
 }

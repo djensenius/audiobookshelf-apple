@@ -95,6 +95,10 @@ public final class CurrentPlayback: PlayerPlaybackControlling {
         current?.declineMeteredStreaming()
     }
 
+    public func streamInsteadOfDownload() async {
+        await current?.streamInsteadOfDownload()
+    }
+
     public func handleStreamReset(sessionID: String) {
         current?.handleStreamReset(sessionID: sessionID)
     }

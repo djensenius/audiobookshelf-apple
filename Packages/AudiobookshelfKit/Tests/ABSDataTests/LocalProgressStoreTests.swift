@@ -918,7 +918,8 @@ import Testing
         for item in [done, changed, active, failed] {
             try await store.saveSession(item)
         }
-        var sent = Dictionary(uniqueKeysWithValues: [done, changed, active, failed].map { ($0.id, $0.updatedAt) })
+        var sent = Dictionary(
+            uniqueKeysWithValues: [done, changed, active, failed].map { ($0.id, PendingLocalSessionRevision($0)) })
         // Changed while the upload was in flight.
         var newer = changed
         newer.updatedAt = Self.at(20)
@@ -936,7 +937,7 @@ import Testing
 
         // The first sync after login also deletes acknowledged active sessions. A second failure
         // within the hour isn't counted.
-        sent["changed"] = Self.at(20)
+        sent["changed"] = PendingLocalSessionRevision(newer)
         let firstSync = try await store.settleSessionUpload(
             sent: sent, results: results, isFirstSync: true, now: now.addingTimeInterval(60))
         #expect(firstSync == ["changed", "active"])
@@ -963,7 +964,7 @@ import Testing
         let (store, _) = try makeStore()
         let missing = session("missing", startedAt: Self.at(1), updatedAt: Self.at(1))
         try await store.saveSession(missing)
-        let sent = ["missing": missing.updatedAt]
+        let sent = ["missing": PendingLocalSessionRevision(missing)]
         for round in 1...LocalProgressStore.missingResultsPerFailure {
             try await store.settleSessionUpload(
                 sent: sent, results: [:], isFirstSync: false, now: Self.at(Double(round)))
@@ -978,7 +979,7 @@ import Testing
         let (store, _) = try makeStore()
         var item = session("s", startedAt: Self.at(1), updatedAt: Self.at(1))
         try await store.saveSession(item)
-        let sent = ["s": item.updatedAt]
+        let sent = ["s": PendingLocalSessionRevision(item)]
         item.updatedAt = Self.at(5)
         try await store.saveSession(item)
         for round in 0..<(LocalProgressStore.maxUploadFailures + 1) {
@@ -997,7 +998,7 @@ import Testing
         let (store, _) = try makeStore()
         let item = session("s", startedAt: Self.at(1), updatedAt: Self.at(1))
         try await store.saveSession(item)
-        let sent = ["s": item.updatedAt]
+        let sent = ["s": PendingLocalSessionRevision(item)]
         try await store.settleSessionUpload(
             sent: sent, results: ["s": .failure("first")], isFirstSync: false, now: Self.at(10))
         // Within the hour: not counted, but the message is newer.
@@ -1012,7 +1013,7 @@ import Testing
         let (store, _) = try makeStore()
         let active = session("active", startedAt: Self.at(1), updatedAt: Self.at(1), isActive: true)
         try await store.saveSession(active)
-        let sent = ["active": active.updatedAt]
+        let sent = ["active": PendingLocalSessionRevision(active)]
         try await store.settleSessionUpload(sent: sent, results: ["active": .failure("boom")], isFirstSync: false)
         #expect(try await store.session(id: "active")?.uploadAttempts == 1)
 
@@ -1028,7 +1029,7 @@ import Testing
         var item = session("s", startedAt: Self.at(1), updatedAt: Self.at(1))
         try await store.saveSession(item)
         try await store.settleSessionUpload(
-            sent: ["s": item.updatedAt], results: ["s": .failure("boom")], isFirstSync: false)
+            sent: ["s": PendingLocalSessionRevision(item)], results: ["s": .failure("boom")], isFirstSync: false)
 
         // The caller's copy still has the defaults; saving it must not reset the bookkeeping.
         item.currentTime = 99

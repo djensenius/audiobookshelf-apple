@@ -304,6 +304,127 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
         }
     }
 
+    /// #74: a tapped download missing a file is shown on CarPlay; Stream instead streams it, and
+    /// the alert goes (ADR 0007 §7: never silently).
+    @Test func aMissingDownloadAsksAndStreamInsteadPlaysIt() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            harness.playError = .downloadFilesMissing(Self.sherlockKey)
+            let model = harness.model()
+            await model.update()
+            let row = try #require(tabRows(model.content).first)
+            // Negative control: nothing to stream before the play.
+            #expect(model.streamInstead() == nil)
+            #expect(await model.play(row)?.value == .failed)
+            #expect(model.alert == .downloadFilesMissing)
+            harness.playError = nil
+            #expect(harness.playback.calls.isEmpty)
+
+            let stream = try #require(model.streamInstead())
+            #expect(model.alert == nil)
+            #expect(await stream.value == .started)
+            #expect(harness.playback.calls == [.streamInsteadOfDownload])
+            #expect(harness.playback.error == nil)
+            #expect(model.streamInstead() == nil)
+        }
+    }
+
+    /// #74: a download missing files that no play of CarPlay's led to, as when the queue advanced
+    /// to it, is still shown, for the signed-in account's item only; Stream instead streams it.
+    @Test func anAdvancedToMissingDownloadAsksAndStreamInsteadPlaysIt() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            let model = harness.model()
+            await model.update()
+            // Negative control: another account's missing download isn't the driver's to answer.
+            harness.playback.error = .downloadFilesMissing(Self.sherlockOnServerB)
+            #expect(model.alert == nil)
+            #expect(model.streamInstead() == nil)
+
+            harness.playback.error = .downloadFilesMissing(Self.sherlockKey)
+            #expect(model.alert == .downloadFilesMissing)
+            let stream = try #require(model.streamInstead())
+            #expect(model.alert == nil)
+            #expect(await stream.value == .started)
+            #expect(harness.playback.calls == [.streamInsteadOfDownload])
+            #expect(harness.playback.error == nil)
+        }
+    }
+
+    /// What changed while a missing download's alert was shown.
+    enum AlertChange: CaseIterable, Sendable {
+        case item, account, playback, restart
+    }
+
+    /// #74: an alert left on screen after its failure changed (another item, another account, a
+    /// replaced playback, or the same item failing again) acts on nothing: its Stream instead and
+    /// Cancel are no-ops, and the current failure gets an alert of its own, which still works.
+    @Test(arguments: AlertChange.allCases)
+    func aStaleMissingDownloadAlertDoesNothing(change: AlertChange) async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            let model = harness.model()
+            await model.update()
+            harness.playback.error = .downloadFilesMissing(Self.sherlockKey)
+            let stale = try #require(model.presentedAlert)
+
+            switch change {
+            case .item: harness.playback.error = .downloadFilesMissing(Self.frankensteinKey)
+            case .account:
+                await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountB))
+                harness.gate = .ready(carAccountB, isOffline: false)
+                harness.playback.error = .downloadFilesMissing(Self.sherlockOnServerB)
+            case .playback: harness.session = PlaybackSessionToken()
+            case .restart: harness.playback.startGeneration += 1
+            }
+            let current = try #require(model.presentedAlert)
+            #expect(current.message == .downloadFilesMissing && current != stale)
+
+            #expect(model.streamInstead(for: stale) == nil)
+            model.dismissAlert(stale)
+            #expect(harness.playback.calls.isEmpty)
+            #expect(model.presentedAlert == current)
+
+            // Negative control: the current alert's Cancel stops playback.
+            model.dismissAlert(current)
+            #expect(harness.playback.calls == [.stop(.user)])
+            #expect(model.presentedAlert == nil)
+        }
+    }
+
+    /// #74: Cancel on a missing download stops playback, as the phone's does, so the failure
+    /// clears everywhere and a later resume doesn't retry the item; tapped or advanced to.
+    @Test(arguments: [false, true])
+    func cancelOnAMissingDownloadStopsPlayback(tapped: Bool) async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            let model = harness.model()
+            await model.update()
+            if tapped {
+                harness.playError = .downloadFilesMissing(Self.sherlockKey)
+                let row = try #require(tabRows(model.content).first)
+                #expect(await model.play(row)?.value == .failed)
+                harness.playError = nil
+            } else {
+                harness.playback.error = .downloadFilesMissing(Self.sherlockKey)
+            }
+            #expect(model.alert == .downloadFilesMissing)
+
+            model.dismissAlert()
+            #expect(harness.playback.calls == [.stop(.user)])
+            #expect(harness.playback.error == nil)
+            #expect(model.alert == nil)
+        }
+    }
+
     /// #544: Stream's consent goes to the player only for the block it was asked about. If the
     /// phone blocks another item, or the playback rebinds to another session, before its task
     /// runs, nothing is forwarded.

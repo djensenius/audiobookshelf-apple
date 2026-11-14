@@ -8,6 +8,8 @@ import Foundation
 /// - A coordinator holds a ``Holder/closingSession`` lease on each session it closes until the
 ///   close's transport (`/close` with its final report) and its captured local position write
 ///   settle: until then that work can recreate discarded progress or restore the old position.
+///   An upload of saved local sessions holds one on each session's media through its request
+///   and settlement (``LocalSessionUploader``, #74), for the same reason.
 /// - A progress action waits for those to settle, then holds a ``Holder/progressAction`` lease
 ///   through its server request and local sync, and a session start of the same media waits for
 ///   it, so it never starts from the position the action replaces.

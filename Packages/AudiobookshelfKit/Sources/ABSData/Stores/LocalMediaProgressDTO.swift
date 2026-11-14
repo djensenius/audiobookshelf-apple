@@ -207,6 +207,23 @@ public struct PendingLocalSessionDTO: Sendable, Equatable, Identifiable {
     }
 }
 
+/// A pending session as an upload sent it (#74): every field a save can change, so
+/// `LocalProgressStore.settleSessionUpload` deletes a row only while it's exactly what was sent.
+/// A save during the upload (a later report, or listening time added to a closed session without
+/// a new `updatedAt`) keeps the row for the next upload, whatever field it changed. Only the
+/// upload bookkeeping (`uploadAttempts`, `lastUploadError`) is left out: settlement itself
+/// changes it.
+public struct PendingLocalSessionRevision: Sendable, Equatable {
+    private let session: PendingLocalSessionDTO
+
+    public init(_ session: PendingLocalSessionDTO) {
+        var session = session
+        session.uploadAttempts = 0
+        session.lastUploadError = nil
+        self.session = session
+    }
+}
+
 extension PendingLocalSessionDTO {
     init(_ session: PendingLocalSession) {
         self.init(

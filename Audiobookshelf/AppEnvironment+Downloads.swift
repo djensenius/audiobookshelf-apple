@@ -2,6 +2,7 @@ import ABSAppModel
 import ABSCore
 import ABSData
 import ABSDownloads
+import ABSPlayback
 import Foundation
 
 /// The download stack (#73), built once by ``AppEnvironment``.
@@ -27,6 +28,10 @@ struct AppDownloads {
     /// The downloaded items' cover files, which the image pipeline reads before the network
     /// (ADR 0005, "Offline covers").
     let covers: LocalDownloadedCovers
+    /// The downloaded items and their files, which every playback scope plays instead of
+    /// streaming (#74). Reads go through ``localItems``, the only writer, so they see every
+    /// completed download.
+    let playbackFiles: LocalDownloadFiles
 
     /// - Parameters:
     ///   - root: the directory that holds `Downloads/` and `ResumeData/` (``DownloadLocations``);
@@ -87,6 +92,8 @@ struct AppDownloads {
             access: DownloadAccess(
                 requester: controller, status: StoredDownloadStatus(localItems: localItems, records: store),
                 onlyWhileOpen: { await credentials.usesForegroundSession(for: $0) }),
-            covers: LocalDownloadedCovers(store: localItems, locations: locations))
+            covers: LocalDownloadedCovers(store: localItems, locations: locations),
+            playbackFiles: LocalDownloadFiles(
+                items: localItems, fileURL: { try locations.fileURL(forRelativePath: $0) }))
     }
 }
