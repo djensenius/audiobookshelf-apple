@@ -195,4 +195,51 @@ private final class Account {
         run.cancel()
         await run.value
     }
+
+    /// The banner model's verified revision follows the pings that confirm the network (#570).
+    @Test func theBannerBumpsItsVerifiedRevisionWhenAPingConfirmsTheNetwork() async {
+        let (paths, feed) = AsyncStream.makeStream(of: NetworkPath.self)
+        let model = ConnectionBannerModel(paths: { paths }, ping: {}, clock: ManualClock())
+        let run = Task { await model.run() }
+        #expect(await eventually { model.verifiedRevision == 1 })
+        feed.yield(.offline)
+        #expect(await eventually { model.state == .offline(.noNetwork) })
+        feed.yield(.wifi)
+        #expect(await eventually { model.verifiedRevision == 2 })
+        #expect(model.state == .online)
+        run.cancel()
+        await run.value
+    }
+
+    /// A disconnect seen only as two online snapshots with different `onlineEpoch`s still bumps
+    /// the verified revision once the server answers (#570).
+    @Test func twoOnlineSnapshotsOfDifferentEpochsBumpTheVerifiedRevision() async {
+        let (paths, feed) = AsyncStream.makeStream(of: NetworkPath.self)
+        let model = ConnectionBannerModel(paths: { paths }, ping: {}, clock: ManualClock())
+        let run = Task { await model.run() }
+        feed.yield(.wifi)
+        #expect(await eventually { model.verifiedRevision == 1 })
+        var reconnected = NetworkPath.wifi
+        reconnected.onlineEpoch = 1
+        feed.yield(reconnected)
+        #expect(await eventually { model.verifiedRevision == 2 })
+        #expect(model.state == .online)
+        run.cancel()
+        await run.value
+    }
+
+    /// A run that restarts (the shell reappears) doesn't know what the path did while nothing
+    /// followed it, so its first confirming ping bumps the verified revision again (#570).
+    @Test func aRestartedRunBumpsTheVerifiedRevisionOnceItsPingConfirms() async {
+        let model = ConnectionBannerModel(paths: { AsyncStream { _ in } }, ping: {}, clock: ManualClock())
+        let first = Task { await model.run() }
+        #expect(await eventually { model.verifiedRevision == 1 })
+        first.cancel()
+        await first.value
+        let second = Task { await model.run() }
+        #expect(await eventually { model.verifiedRevision == 2 })
+        #expect(model.state == .online)
+        second.cancel()
+        await second.value
+    }
 }

@@ -240,18 +240,22 @@ struct HomeRefreshSchedule {
     /// decides for `trigger`, while no library is selected. Behind a request in flight it waits,
     /// then reloads the list at most once (``retryAfterInFlight(isLoading:failed:isConnected:pollInterval:retry:)``).
     ///
-    /// - Parameter isConnected: Whether the server can be used now (no connection banner).
+    /// - Parameters:
+    ///   - isConnected: Whether the server can be used now (no connection banner).
+    ///   - refreshCount: The store's ``LibraryStore/refreshCount`` when the caller saw the list's
+    ///     state; it reloads nothing once a newer request has started (another waiter's retry
+    ///     owns the recovery). `nil` for now.
     @MainActor
     static func updateLibraries(
         of store: LibraryStore, for trigger: Trigger, isConnected: () -> Bool,
-        pollInterval: Duration = .milliseconds(100)
+        pollInterval: Duration = .milliseconds(100), since refreshCount: Int? = nil
     ) async {
         await reload(
             store,
             as: librariesRequest(
                 for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
                 isConnected: isConnected()),
-            isConnected: isConnected, pollInterval: pollInterval)
+            isConnected: isConnected, pollInterval: pollInterval, since: refreshCount)
     }
 
     /// Whether a shelves request's `error` says the server refused the library itself: it no
@@ -291,36 +295,52 @@ struct HomeRefreshSchedule {
     /// decides for `trigger`, after the selected library's shelves ended with `shelvesError`.
     /// Nothing once the trigger's task is cancelled: the trigger changed and runs again.
     ///
-    /// - Parameter isConnected: Whether the server can be used now (no connection banner).
+    /// - Parameters:
+    ///   - isConnected: Whether the server can be used now (no connection banner).
+    ///   - refreshCount: As for ``updateLibraries(of:for:isConnected:pollInterval:since:)``, but
+    ///     ignored when the server refused the shelves.
+    /// - Returns: Whether it reloaded the list, or waited for the request in flight to retry it.
     @MainActor
+    @discardableResult
     static func updateLibrariesAfterShelves(
         of store: LibraryStore, shelvesError: (any Error)?, for trigger: Trigger, isConnected: () -> Bool,
-        pollInterval: Duration = .milliseconds(100)
-    ) async {
-        guard !Task.isCancelled else { return }
+        pollInterval: Duration = .milliseconds(100), since refreshCount: Int? = nil
+    ) async -> Bool {
+        guard !Task.isCancelled else { return false }
+        let shelvesRefused = refusesLibrary(shelvesError)
+        let request = librariesRequestAfterShelves(
+            for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
+            shelvesRefused: shelvesRefused, isConnected: isConnected())
+        // A refusal is news about the list, not a failure to retry: a request that ended before
+        // it doesn't recover it, so `since` only guards against retrying a failed list again.
         await reload(
-            store,
-            as: librariesRequestAfterShelves(
-                for: trigger, librariesFailed: store.error != nil, librariesLoading: store.isLoading,
-                shelvesRefused: refusesLibrary(shelvesError), isConnected: isConnected()),
-            isConnected: isConnected, pollInterval: pollInterval)
+            store, as: request, isConnected: isConnected, pollInterval: pollInterval,
+            since: shelvesRefused ? nil : refreshCount)
+        return request != nil
     }
 
     /// Makes `request` of `store`: behind a libraries request in flight, waits for it and reloads
     /// the list at most once (``retryAfterInFlight(isLoading:failed:isConnected:pollInterval:retry:)``).
+    /// Nothing once a request newer than `refreshCount` (``LibraryStore/refreshCount``, now when
+    /// `nil`) has started: when Home's completion and a verification wait for the same request,
+    /// only the first to see it fail retries it, and the other leaves that retry the recovery.
     @MainActor
     private static func reload(
-        _ store: LibraryStore, as request: LibrariesRequest?, isConnected: () -> Bool, pollInterval: Duration
+        _ store: LibraryStore, as request: LibrariesRequest?, isConnected: () -> Bool, pollInterval: Duration,
+        since refreshCount: Int? = nil
     ) async {
+        let refreshCount = refreshCount ?? store.refreshCount
+        func isLatest() -> Bool { store.refreshCount == refreshCount }
         switch request {
         case nil:
             return
         case .now:
+            guard isLatest() else { return }
             await store.refresh()
         case .afterInFlight:
             await retryAfterInFlight(
-                isLoading: { store.isLoading }, failed: { store.error != nil }, isConnected: isConnected,
-                pollInterval: pollInterval
+                isLoading: { store.isLoading }, failed: { store.error != nil && isLatest() },
+                isConnected: isConnected, pollInterval: pollInterval
             ) { await store.refresh() }
         }
     }
@@ -355,6 +375,92 @@ struct HomeRefreshSchedule {
         ) { await model.refresh() }
     }
 
+    /// What Home does when the connection banner's ping confirms the server
+    /// (``ConnectionBannerModel/verifiedRevision`` bumped) after the banner assumed it online, so
+    /// a request Home made in between may have failed (#570).
+    enum VerificationRequest: Equatable {
+        /// Retry the failed shelves now, as the load trigger does after an error; then the
+        /// libraries list as ``libraries`` does, unless that retry handled it.
+        case shelves
+        /// Wait for the shelves load or refresh in flight, and retry it once if it fails; then
+        /// the libraries list as ``libraries`` does, unless that retry's completion handled it.
+        case shelvesAfterInFlight
+        /// Reload the failed libraries list, or wait for the request in flight and reload it once
+        /// if it fails (``librariesRequest(for:librariesFailed:librariesLoading:isConnected:)``).
+        case libraries
+    }
+
+    /// What a confirming ping does; `nil` for nothing: shelves that loaded, even stale ones, and
+    /// a libraries list that loaded aren't requested again, and nothing is without the server.
+    /// A request in flight is never replaced, only waited for.
+    ///
+    /// - Parameters:
+    ///   - libraryID: The model's library; without one, only the libraries list counts.
+    ///   - isLoading: The model is loading or refreshing the shelves.
+    ///   - hasError: The model's last load or refresh failed.
+    ///   - librariesFailed: The store's last libraries request failed.
+    ///   - librariesLoading: The store is loading the libraries.
+    ///   - isConnected: The server can be used (no connection banner).
+    static func verificationRequest(
+        libraryID: String?, isLoading: Bool, hasError: Bool, librariesFailed: Bool, librariesLoading: Bool,
+        isConnected: Bool
+    ) -> VerificationRequest? {
+        guard isConnected else { return nil }
+        if libraryID != nil {
+            if isLoading { return .shelvesAfterInFlight }
+            if hasError { return .shelves }
+        }
+        return librariesFailed || librariesLoading ? .libraries : nil
+    }
+
+    /// Performs ``verificationRequest(libraryID:isLoading:hasError:librariesFailed:librariesLoading:isConnected:)``
+    /// for `model` and `store`.
+    ///
+    /// - Parameters:
+    ///   - isConnected: Whether the server can be used now (no connection banner).
+    ///   - retry: Retries the failed shelves (Home's update for the load trigger); returns
+    ///     whether it handled the libraries list, as `refreshed` does.
+    ///   - refreshed: Called after the shelves were retried behind a request in flight, so Home
+    ///     records the completion and checks the libraries list as after its own requests;
+    ///     returns whether it handled the list (``updateLibrariesAfterShelves(of:shelvesError:for:isConnected:pollInterval:since:)``).
+    ///
+    /// Both take the store's ``LibraryStore/refreshCount`` when the verification decided, for
+    /// their check of the list (`since`), so a list retry Home's completion started meanwhile
+    /// isn't retried again.
+    @MainActor
+    static func updateAfterVerification(
+        of model: HomeModel, store: LibraryStore, isConnected: () -> Bool,
+        pollInterval: Duration = .milliseconds(100), retry: (Int) async -> Bool, refreshed: (Int) async -> Bool
+    ) async {
+        // The list as the verification saw it: a request started after this one is a retry it
+        // leaves the recovery to.
+        let listRefreshCount = store.refreshCount
+        let request = verificationRequest(
+            libraryID: model.libraryID, isLoading: model.isLoading, hasError: model.error != nil,
+            librariesFailed: store.error != nil, librariesLoading: store.isLoading, isConnected: isConnected())
+        // Whether Home's update or completion after a shelves retry checked the libraries list.
+        let listHandled: Bool
+        switch request {
+        case nil:
+            return
+        case .shelves:
+            listHandled = await retry(listRefreshCount)
+        case .shelvesAfterInFlight:
+            let retried = await updateShelvesAfterInFlight(
+                of: model, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval)
+            listHandled = retried ? await refreshed(listRefreshCount) : false
+        case .libraries:
+            listHandled = false
+        }
+        // Otherwise the list may have failed meanwhile, or still be in flight: every path ends
+        // here, so none skips it.
+        if !listHandled, !Task.isCancelled {
+            await updateLibraries(
+                of: store, for: .loadTrigger, isConnected: isConnected, pollInterval: pollInterval,
+                since: listRefreshCount)
+        }
+    }
+
     /// The model's state when a request it made finished.
     struct ModelState {
         var libraryID: String?
@@ -381,6 +487,30 @@ struct HomeRefreshSchedule {
     /// Records a successful load or refresh of `libraryID`.
     mutating func markLoaded(libraryID: String, at date: Date) {
         loaded = (libraryID, date)
+    }
+}
+
+/// Which of the connection banner's verified revisions Home has handled
+/// (``HomeRefreshSchedule/updateAfterVerification(of:store:isConnected:pollInterval:retry:refreshed:)``).
+/// The revision Home first sees is handled already; a later one stays pending until its recovery
+/// finishes without being cancelled (Home left), so Home handles it when it appears again. That
+/// repeats nothing that completed: the recovery only retries what still failed or is in flight.
+struct HomeVerificationTracker {
+    private(set) var handled: UInt64?
+
+    /// Whether `revision` needs recovery; the first revision seen is recorded as handled.
+    mutating func needsRecovery(_ revision: UInt64) -> Bool {
+        guard let handled else {
+            handled = revision
+            return false
+        }
+        return handled != revision
+    }
+
+    /// Records `revision`'s recovery as finished, unless it was cancelled.
+    mutating func finish(_ revision: UInt64, isCancelled: Bool) {
+        guard !isCancelled else { return }
+        handled = revision
     }
 }
 
