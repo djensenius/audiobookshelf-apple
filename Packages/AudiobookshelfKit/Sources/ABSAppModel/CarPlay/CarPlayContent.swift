@@ -36,12 +36,14 @@ public struct CarPlayLabels: Sendable, Hashable {
     public let authors: String
     /// The Latest tab: a podcast library's newest episodes.
     public let latest: String
+    /// The Downloads tab: the account's downloaded books and episodes.
+    public let downloads: String
     /// The row that shows the next rows of a list, for example "More…".
     public let more: String
 
     public init(
         continueListening: String, libraries: String, books: String, podcasts: String, series: String,
-        authors: String, latest: String, more: String
+        authors: String, latest: String, downloads: String, more: String
     ) {
         self.continueListening = continueListening
         self.libraries = libraries
@@ -50,6 +52,7 @@ public struct CarPlayLabels: Sendable, Hashable {
         self.series = series
         self.authors = authors
         self.latest = latest
+        self.downloads = downloads
         self.more = more
     }
 }
@@ -71,11 +74,13 @@ public enum CarPlayDestination: Sendable, Hashable {
     case podcastEpisodes(libraryID: String, itemID: String)
     /// The Latest tab's root: a podcast library's newest episodes (#80).
     case latestEpisodes(libraryID: String)
+    /// The Downloads tab's root: the account's downloaded books and episodes (#80).
+    case downloads
 
     /// The list's level in its tab's stack; the tab's root is 1.
     public var depth: Int {
         switch self {
-        case .continueListening, .libraries, .latestEpisodes: 1
+        case .continueListening, .libraries, .latestEpisodes, .downloads: 1
         case .library: 2
         case .items, .series, .authors: 3
         case .seriesBooks, .authorBooks, .podcastEpisodes: 4
@@ -85,7 +90,7 @@ public enum CarPlayDestination: Sendable, Hashable {
     /// The library the list belongs to, if any.
     public var libraryID: String? {
         switch self {
-        case .continueListening, .libraries: nil
+        case .continueListening, .libraries, .downloads: nil
         case .library(let id, _): id
         case .items(let id), .series(let id), .authors(let id): id
         case .seriesBooks(let id, _), .authorBooks(let id, _), .podcastEpisodes(let id, _): id
@@ -95,7 +100,8 @@ public enum CarPlayDestination: Sendable, Hashable {
 }
 
 /// One row of a CarPlay list: a text, an image and what tapping it does. Rows carry no
-/// descriptive text (author, duration, …), which CarPlay's driving guidelines discourage.
+/// descriptive text (a description, duration, …), which CarPlay's driving guidelines discourage;
+/// a Downloads row names its author or podcast in ``detail``.
 public struct CarPlayRow: Sendable, Hashable, Identifiable {
     public enum Action: Sendable, Hashable {
         /// Pushes the destination's list.
@@ -111,6 +117,9 @@ public struct CarPlayRow: Sendable, Hashable, Identifiable {
 
     public let id: String
     public let text: String
+    /// The row's second line, `CPListItem.detailText`: a download's author or podcast; `nil` for
+    /// none.
+    public let detail: String?
     /// `nil` when the row has no image.
     public let image: ImageKey?
     /// Listening progress from 0 to 1, for `CPListItem.playbackProgress`; `nil` when not shown.
@@ -120,11 +129,12 @@ public struct CarPlayRow: Sendable, Hashable, Identifiable {
     public let action: Action
 
     public init(
-        id: String, text: String, image: ImageKey? = nil, progress: Double? = nil, isEnabled: Bool = true,
-        action: Action
+        id: String, text: String, detail: String? = nil, image: ImageKey? = nil, progress: Double? = nil,
+        isEnabled: Bool = true, action: Action
     ) {
         self.id = id
         self.text = text
+        self.detail = detail
         self.image = image
         self.progress = progress
         self.isEnabled = isEnabled

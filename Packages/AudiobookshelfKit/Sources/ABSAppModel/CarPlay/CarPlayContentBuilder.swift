@@ -1,7 +1,9 @@
 import ABSCore
+import ABSData
+import ABSPlayback
 import Foundation
 
-/// Turns the app's models into CarPlay lists (#79, #80). Pure and template-agnostic: the CarPlay
+/// Turns the app's models into CarPlay lists (#79, #80), the Downloads tab's included. Pure and template-agnostic: the CarPlay
 /// delegate maps each ``CarPlayList`` to a `CPListTemplate` and each ``CarPlayRow`` to a
 /// `CPListItem`, so the rules live here and are tested without CarPlay.
 ///
@@ -186,6 +188,55 @@ public struct CarPlayContentBuilder: Sendable {
         items(
             episodes, reachedEnd: reachedEnd, in: .latestEpisodes(libraryID: libraryID), title: labels.latest,
             offset: offset)
+    }
+
+    // MARK: - Downloads tab (#80)
+
+    /// A page of the Downloads tab: one row per downloaded book, then per downloaded episode, in
+    /// the order of `items` (``DownloadedShelfModel``'s books, then its podcasts), a podcast's
+    /// episodes newest first. Each row plays, and names its author or podcast in
+    /// ``CarPlayRow/detail``; its cover is keyed as the Downloaded shelf's, so the image pipeline
+    /// serves the downloaded file offline (ADR 0005).
+    ///
+    /// Only ``serverID``'s items are listed, and of them only the media local playback plays
+    /// (``LocalPlaybackSessionBuilder/hasDownload(of:episodeID:)``): a local item exists once a
+    /// download completed, so downloads under way or failed have no row, nor has an ebook-only
+    /// book. All the rows are known, so "More…" pages them without loading.
+    public func downloads(_ items: [LocalLibraryItemDTO], offset: Int = 0) -> CarPlayList {
+        let rows = items.filter { serverID != nil && $0.serverConnectionID == serverID }.flatMap(downloadRows)
+        return page(.downloads, title: labels.downloads, rows: rows, reachedEnd: true, offset: offset)
+    }
+
+    private func downloadRows(_ item: LocalLibraryItemDTO) -> [CarPlayRow] {
+        let image = imageKey(
+            CoverRef(entityID: item.libraryItemId, updatedAt: LocalDownloadedCovers.version(of: item.coverUpdatedAt)))
+        guard item.mediaType == .podcast else {
+            guard LocalPlaybackSessionBuilder.hasDownload(of: item, episodeID: nil) else { return [] }
+            let author = [item.authorName ?? "", item.media.metadata.authors.joined(separator: ", ")].first {
+                !$0.isEmpty
+            }
+            return [
+                CarPlayRow(
+                    id: item.libraryItemId, text: item.title, detail: author, image: image,
+                    action: .play(itemID: item.libraryItemId, episodeID: nil))
+            ]
+        }
+        // The snapshot lists only downloaded episodes, so each is one `hasDownload` holds for.
+        return item.media.episodes.sorted(by: Self.newestFirst).map { episode in
+            CarPlayRow(
+                id: "\(item.libraryItemId)-\(episode.id)", text: episode.title, detail: item.title, image: image,
+                action: .play(itemID: item.libraryItemId, episodeID: episode.id))
+        }
+    }
+
+    /// Newest published first, undated last, then by title.
+    private static func newestFirst(_ lhs: LocalMediaSnapshot.Episode, _ rhs: LocalMediaSnapshot.Episode) -> Bool {
+        switch (lhs.publishedAt, rhs.publishedAt) {
+        case (let left?, let right?) where left != right: left > right
+        case (.some, nil): true
+        case (nil, .some): false
+        default: lhs.title.localizedStandardCompare(rhs.title) == .orderedAscending
+        }
     }
 
     // MARK: - Helpers

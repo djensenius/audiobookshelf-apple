@@ -231,6 +231,20 @@ public final class CarPlayRootModel {
         return start(itemID: itemID, episodeID: episodeID, identity: identity, playItem: playItem)
     }
 
+    /// ``play(_:)`` for a row of the Downloads tab (#80): `row` must be shown on the page from
+    /// `offset` of `downloads`, the signed-in account's model. It plays through the same action,
+    /// which plays a download from its files, offline too, without the metered-network prompt
+    /// (#74); the Continue tab's shelves needn't have loaded.
+    @discardableResult
+    public func play(
+        _ row: CarPlayRow, offset: Int, of downloads: CarPlayDownloadsModel
+    ) -> Task<CarPlayPlayOutcome, Never>? {
+        guard case .play(let itemID, let episodeID) = row.action, row.isEnabled, let identity,
+            downloads.identity == identity, downloads.shows(row, offset: offset), let playItem = playItem(identity)
+        else { return nil }
+        return start(itemID: itemID, episodeID: episodeID, identity: identity, playItem: playItem)
+    }
+
     /// Starts playing a row of Now Playing's queue (#81) as ``play(_:)`` plays a tapped row, with
     /// the same outcome, ``alert`` and Stream or Cancel. `nil` when the account can't play.
     @discardableResult

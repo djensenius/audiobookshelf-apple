@@ -9,7 +9,7 @@ let browseAccount = SessionIdentity(
     connectionID: UUID(uuidString: "00000000-0000-0000-0000-0000000000C1") ?? UUID(), userID: "user-1")
 let browseLabels = CarPlayLabels(
     continueListening: "Continue", libraries: "Libraries", books: "Books", podcasts: "Podcasts", series: "Series",
-    authors: "Authors", latest: "Latest", more: "More")
+    authors: "Authors", latest: "Latest", downloads: "Downloads", more: "More")
 
 /// A store client serving the browse tabs from in-memory libraries. Paged endpoints slice their
 /// lists by the request's page and limit, and every request is recorded.
