@@ -60,6 +60,8 @@ struct DownloadsList: View {
                         .accessibilityHidden(true)
                 }
             }
+            // For UI tests.
+            .accessibilityIdentifier("downloads.empty")
         } else {
             List {
                 if mode == .all {
@@ -82,6 +84,8 @@ struct DownloadsList: View {
                     ForEach(listing.podcasts) { podcastSection($0, isFirst: $0.id == listing.podcasts.first?.id) }
                 }
             }
+            // For UI tests.
+            .accessibilityIdentifier("downloads.list")
         }
     }
 

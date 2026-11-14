@@ -78,6 +78,17 @@ struct FixtureServerTests {
         #expect(model.phase == .login)
     }
 
+    /// A fixture launch has a download stack of its own, in the temporary directory, emptied on
+    /// every launch, so Downloads shows its own content and never the app's real downloads.
+    @Test func hasItsOwnEmptyDownloadStack() throws {
+        let leftover = FixtureServer.downloadsDirectory.appending(path: "leftover")
+        try FileManager.default.createDirectory(at: leftover, withIntermediateDirectories: true)
+        let environment = FixtureServer.environment()
+        #expect(environment.downloads != nil)
+        #expect(!FileManager.default.fileExists(atPath: leftover.path))
+        #expect(FixtureServer.downloadsDirectory.path.hasPrefix(URL.temporaryDirectory.path))
+    }
+
     /// Fixture covers load without the network monitor and cache only in the fixture directory.
     @Test func loadsCoversIntoTheirOwnCacheWithoutTheNetworkMonitor() async throws {
         let source = FixtureServer.coverSource()

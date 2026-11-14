@@ -146,7 +146,8 @@ launch each:
 - `testScreensAtAccessibilitySize`, at AX5 (`-UIPreferredContentSizeCategoryName
   UICTContentSizeCategoryAccessibilityXXXL`), with every audit type.
 
-The player is paused before its audit, so its times hold still. CI runs them on iOS with the
+The player is paused before its audit, so its times hold still. Downloads is audited in its
+empty state: fixture launches have their own empty download stack. CI runs them on iOS with the
 other UI tests; on macOS they build but don't run yet (#46).
 
 Known issues are filtered in `KnownAuditIssue.all`, by screen, audit type and element, each with
@@ -158,7 +159,8 @@ the reason and its issue:
   from VoiceOver because each value speaks its label (#613).
 - Player: the book's remaining time fails contrast while the elapsed time beside it, the same
   color and size, passes (#614).
-- Cards' titles and authors, which they cut short by design and speak in full (#615), and the mini
+- Cards' titles and authors on Home and Library, which they cut short by design and speak in
+  full (#615; only text inside an `item.<id>` card, not the item screen's own `item.` elements), and the mini
   player's title, which can be cut to a letter in narrow windows such as the iPhone Duo's
   (#616), count as clipped text.
 

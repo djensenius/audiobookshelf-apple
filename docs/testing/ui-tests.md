@@ -41,10 +41,13 @@ A Debug build launched with `-ABSFixtures` (`Audiobookshelf/Fixtures/FixtureServ
   is added only to the session configurations the app's `AppEnvironment` is given (API clients,
   sign-in and the cover pipeline), never registered globally;
 - keeps the store, Keychain and settings in memory, so every launch starts signed out and
-  touches nothing a normal launch saved.
+  touches nothing a normal launch saved;
 - caches covers in `AudiobookshelfFixtures/Covers` in the temporary directory, emptied on every
   fixture launch, instead of the app's cover cache, and loads them without waiting for the
-  network monitor, so fixture covers neither evict real ones nor fail offline.
+  network monitor, so fixture covers neither evict real ones nor fail offline;
+- keeps downloads in `AudiobookshelfFixtures/Downloads` in the temporary directory, emptied on
+  every fixture launch, with a foreground session that answers from the fixtures too, so the
+  Downloads tab starts empty (`downloads.empty`) and never sees a real download.
 
 Type the fixture address on the connect screen and sign in with any username and password.
 
@@ -110,7 +113,11 @@ journey lives in `FixtureJourney.swift` (`signIn(launchArguments:screenshotPrefi
 `open(_ screen: FixtureScreen, in: app)` opens Home, Library, Item detail (*Pride and
 Prejudice*), Player, Settings or Downloads from wherever the app is, waits for the screen's
 loaded content and returns its element (`FixtureScreen.identifier`): `home.screen`,
-`library.screen`, `item.detail`, `player.screen`, `settings.screen` or `downloads.screen`.
+`library.screen`, `item.detail`, `player.screen`, `settings.screen` or `downloads.screen`
+(loaded: its empty state, `downloads.empty`, or its list, `downloads.list`). Tabs keep their
+navigation stacks, so `open` goes back (`BackButton`) to the tab's root (`home.screen`,
+`library.screen`, `downloads.screen`, `account.screen`) before leaving it and after selecting
+a tab; an open Settings screen is reused.
 The player plays *Pride and Prejudice* (`item.play`), opens from the mini player
 (`player.mini`) and is paused (`player.playPause`); another screen minimizes it first
 (`player.minimize`). Settings is the Account tab's `account.settings` row on iOS and ⌘, on a

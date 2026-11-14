@@ -158,10 +158,11 @@ struct KnownAuditIssue {
         #if os(iOS)
             all += [
                 // Cards cut their title and author short at two lines and one (by design, like
-                // Apple Books); the card, one element, speaks both in full. #615
-                KnownAuditIssue(screen: nil, type: .textClipped) { element, app in
-                    isShortened(element, inElementMatching: "identifier BEGINSWITH 'item.'", in: app)
-                },
+                // Apple Books); the card, one element, speaks both in full. Only on the screens
+                // of cards, and only in a card (`item.<id>`), not the item screen's own elements,
+                // whose clipping isn't by design. #615
+                KnownAuditIssue(screen: .home, type: .textClipped, element: isShortenedInCard),
+                KnownAuditIssue(screen: .library, type: .textClipped, element: isShortenedInCard),
                 // The mini player cuts its title and author short at one line, to as little as a
                 // letter in narrow windows (iPhone Duo); its button speaks the full title.
                 // #616
@@ -176,6 +177,16 @@ struct KnownAuditIssue {
     /// Whether `element` is text whose whole label is in the label of an element matching
     /// `predicate`: text cut short in a view that speaks it in full.
     @MainActor
+    /// Whether `element` is text shortened in an item card (`item.<id>`), not one of the item
+    /// screen's `item.` elements.
+    private static func isShortenedInCard(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
+        isShortened(
+            element,
+            inElementMatching:
+                "identifier BEGINSWITH 'item.' AND NOT (identifier IN {'item.detail', 'item.title', 'item.play', 'item.metadata'})",
+            in: app)
+    }
+
     private static func isShortened(
         _ element: XCUIElement?, inElementMatching predicate: String, in app: XCUIApplication
     ) -> Bool {

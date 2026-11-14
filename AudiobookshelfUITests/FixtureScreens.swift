@@ -34,7 +34,11 @@ extension XCTestCase {
     ///   opens the full player from the mini player, and pauses, so the times hold still (a
     ///   changing label can fail an audit's contrast check). The mini player stays after it's
     ///   minimized.
-    /// - Settings is pushed from the Account tab on iOS, and is the Settings window (⌘,) on macOS.
+    /// - Settings is pushed from the Account tab on iOS, and is the Settings window (⌘,) on macOS;
+    ///   it's reused if it's already open.
+    ///
+    /// Tabs keep their navigation stacks, so before leaving a screen (other than for the player)
+    /// and after selecting a tab, the helper goes back to the tab's root.
     ///
     /// On iOS the full player covers the tabs, so it's minimized before any other screen opens; on
     /// macOS the Now Playing and Settings windows are closed instead.
@@ -42,7 +46,13 @@ extension XCTestCase {
     @discardableResult
     func open(_ screen: FixtureScreen, in app: XCUIApplication) -> XCUIElement {
         let element = app.descendants(matching: .any)[screen.identifier].firstMatch
-        if screen != .player { closePlayer(in: app) }
+        // Settings is reused if it's open; Player checks below.
+        if screen == .settings && element.exists { return element }
+        if screen != .player {
+            closePlayer(in: app)
+            // Tabs keep their stacks: leave this one at its root, so coming back to it shows the root.
+            popToRoot(in: app)
+        }
         #if os(macOS)
             if screen != .settings { closeWindow(containing: FixtureScreen.settings.identifier, in: app) }
         #endif
@@ -94,12 +104,11 @@ extension XCTestCase {
         case .downloads:
             openTab(.downloads, in: app)
             XCTAssertTrue(element.waitForExistence(timeout: Self.fixtureTimeout), "The Downloads screen didn't appear")
-            // The list, or its empty state, replaces the loading indicator once the downloads are read.
-            let expectation = XCTNSPredicateExpectation(
-                predicate: NSPredicate(format: "count == 0"), object: element.activityIndicators)
-            XCTAssertEqual(
-                XCTWaiter().wait(for: [expectation], timeout: Self.fixtureTimeout), .completed,
-                "The downloads didn't load")
+            // The fixtures' download stack starts empty (`FixtureServer.downloadsDirectory`): the empty state, or the
+            // list once a test has downloaded something, replaces the loading indicator once the downloads are read.
+            let content = element.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier IN %@", ["downloads.empty", "downloads.list"])).firstMatch
+            XCTAssertTrue(content.waitForExistence(timeout: Self.fixtureTimeout), "The downloads didn't load")
         }
         return element
     }
@@ -107,6 +116,9 @@ extension XCTestCase {
     /// The tabs `open(_:in:)` uses, by their `tab.<AppTab raw value>` identifiers.
     private enum FixtureTab: String {
         case home, library, downloads, account
+
+        /// The identifier of the tab's root screen.
+        var rootIdentifier: String { "\(rawValue).screen" }
 
         /// The tab's SF Symbol (`AppTab.systemImage`), which names its row in the tab bar's More list.
         var systemImage: String {
@@ -130,6 +142,7 @@ extension XCTestCase {
         XCTAssertTrue(home.waitForExistence(timeout: Self.fixtureTimeout), "The tab bar didn't appear")
         let button = app.descendants(matching: .any)["tab.\(tab.rawValue)"].firstMatch
         let more = app.buttons.containing(.image, identifier: "ellipsis").firstMatch
+        defer { popToRoot(in: app) }
         if button.exists {
             revealTab(button, in: app, more: more)
             button.press()
@@ -146,6 +159,19 @@ extension XCTestCase {
         if !row.waitForExistence(timeout: 3) { more.press() }
         XCTAssertTrue(row.waitForExistence(timeout: Self.fixtureTimeout), "The More tab has no \(tab.rawValue) row")
         row.press()
+    }
+
+    /// Goes back, with the navigation bar's Back button, until a tab's root (`FixtureTab/rootIdentifier`) shows.
+    /// No-op at a root, or where there's no Back button (macOS sidebars, the More tab's list).
+    @MainActor
+    private func popToRoot(in app: XCUIApplication) {
+        let roots = [FixtureTab.home, .library, .downloads, .account].map(\.rootIdentifier)
+        let root = app.descendants(matching: .any).matching(NSPredicate(format: "identifier IN %@", roots)).firstMatch
+        let back = app.buttons["BackButton"].firstMatch
+        for _ in 0..<5 where !root.exists && back.exists && back.isHittable {
+            back.press()
+            _ = root.waitForExistence(timeout: 3)
+        }
     }
 
     /// Expands the tab bar if it has minimized as the content scrolled (`tabBarMinimizeBehavior`,

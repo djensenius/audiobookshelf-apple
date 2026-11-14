@@ -89,6 +89,9 @@ struct AccountView: View {
             }
         }
         .formStyle(.grouped)
+        // For UI tests.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("account.screen")
         .navigationTitle(Text(verbatim: L10n.string(AppTab.account.titleKey)))
         .confirmationDialog(
             Text(verbatim: L10n.string("MessageConfirmLogout")), isPresented: isConfirmingSignOut,
