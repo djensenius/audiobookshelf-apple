@@ -6,7 +6,7 @@ replacement, the issue or PR that tracks it, or a decision to drop it. It was
 written for [#111](https://github.com/djensenius/audiobookshelf-apple/issues/111)
 (PR #506) and is updated as issues close.
 
-The statuses were taken from GitHub and the code at main `37f3b53d`
+The statuses were taken from GitHub and the code at main `17ca60dc`
 (2026-11-14). They will go stale. Update a row when its issue closes.
 
 ## Status legend
@@ -27,7 +27,7 @@ own `PlaybackScope`
 ([#183](https://github.com/djensenius/audiobookshelf-apple/issues/183), PR #481)
 with progress sync
 ([#184](https://github.com/djensenius/audiobookshelf-apple/issues/184), PR #534),
-and downloaded items play from their local files (PR #594, part of #74). The
+and downloaded items play from their local files (#74, PR #594). The
 Now Playing runtime check on devices is still open under #44.
 
 ## Pages and workflows
@@ -37,8 +37,8 @@ Now Playing runtime check on devices is still open under #44.
 | Legacy | Native | Tracking | Status | Notes |
 | --- | --- | --- | --- | --- |
 | Personalised shelves, continue listening | `HomeView`, `HomeShelvesView` | #62, PRs #295, #313 | Done | |
-| Local (downloaded) shelves | `DownloadedShelfModel` (ABSAppModel), `HomeView` | #76, PRs #455, #546 | In progress (#76) | Home shows the downloaded shelves; #76 is still open. |
-| Disconnected messaging | `ConnectionBannerModel`, `ServerActionAvailability` (ABSAppModel), `ConnectionBannerHost`, `ConnectionIndicatorToolbar` | #76, PRs #455, #509, #588, #595 | In progress (#76) | The banner, the toolbar indicator (#595, part of #59) and offline gating of server-only menu actions are in the app; #76 is still open. |
+| Local (downloaded) shelves | `DownloadedShelfModel` (ABSAppModel), `HomeView` | #76, PRs #455, #509, #546, #549, #588, #595 | Done | Home shows the downloaded shelves and the disconnected state. Manual checks are in #210. |
+| Disconnected messaging | `ConnectionBannerModel`, `ServerActionAvailability` (ABSAppModel), `ConnectionBannerHost`, `ConnectionIndicatorToolbar` | #76, PRs #455, #509, #588, #595 | Done | The banner, the toolbar indicator (#595, part of #59) and offline gating of server-only menu actions are in the app. Manual checks are in #210. |
 | `BookshelfNavBar`, `BookshelfToolbar` | `MainTabView`, `LibraryPickerHeader`, `LibraryToolbar` | #44 | In progress (#44) | #183 and #184 are closed; the shell issue stays open for its manual checks. |
 
 ### Library and discovery
@@ -62,7 +62,7 @@ Now Playing runtime check on devices is still open under #44.
 | Metadata, description, fullscreen cover | `ItemDetailView`, `ItemDetailContent` | #66 | In progress (#66) | Open for the manual Play check. |
 | Play | `ItemDetailContent` | #183 | Done | #183 supplies `playItem`. Play links ask before playing (#577, PR #591). |
 | Read | `ReaderContainer` | #101, PRs #474, #596 | In progress (#101) | The Read button opens the reader; unsupported formats offer Open In. |
-| Download | `ItemDownloadButton` | #75, PRs #576, #582 | In progress (#75) | Books and podcast episodes download from their detail and episode rows. |
+| Download | `ItemDownloadButton` | #75, PRs #576, #582, #602 | In progress (#75) | Books and podcast episodes download from their detail and episode rows. Cards and list rows mark downloaded items (PR #602, part of #106). |
 | `ChaptersTable`, `TracksTable`, `tables/ebook/*` | `ItemDetailTables` | #67, #341 | Done | |
 | More menu | `ItemDetailMoreMenu`, ABSUI `ItemActionMenu` | #67, #342, #397 | Done | |
 | `item/_id/_episode/index.vue` | `EpisodeDetailView` | #69 | Done | |
@@ -124,7 +124,7 @@ Now Playing runtime check on devices is still open under #44.
 
 The status rule in [Status legend](#status-legend) applies. #183 and #184 are
 closed and the app plays, so a player row is Done unless its own issue is still
-open or the app doesn't wire it in yet. The sleep timer is the exception (#600).
+open or the app doesn't wire it in yet.
 
 | Legacy | Native | Tracking | Status | Notes |
 | --- | --- | --- | --- | --- |
@@ -138,12 +138,12 @@ open or the app doesn't wire it in yet. The sleep timer is the exception (#600).
 | Speed | `PlaybackSpeedSheet` | #183 | Done | |
 | Jump forward and back | ABSUI `TransportControls` | #183 | Done | |
 | Auto-rewind | `PlaybackCoordinator` | #183 | Done | |
-| Sleep timer: duration, end of chapter | `SleepTimerSheet`, `SleepTimer` | #55, #183, #600 | In progress (#600) | The app doesn't create the timer yet (#600). |
-| Sleep timer: auto-sleep window, rewind, shake to reset and sensitivity, reset feedback, almost-done chime, fade-out | `SleepTimer` | #55, #147, #183, #600 | In progress (#600) | The app doesn't create the timer yet (#600). |
+| Sleep timer: duration, end of chapter | `SleepTimerSheet`, `SleepTimer` | #55, #183, #600, PR #604 | Done | Each account's playback scope creates a timer (#600, PR #604). The player, macOS menu, CarPlay and App Intent controls use it. Manual checks are in #210. |
+| Sleep timer: auto-sleep window, rewind, shake to reset and sensitivity, reset feedback, almost-done chime, fade-out | `SleepTimer` | #55, #147, #183, #600, PR #604 | Done | Each account's playback scope creates a timer (#600, PR #604). Manual checks are in #210. |
 | Media-control seeking | `NowPlayingController` | #183 | Done | |
 | Lock Screen, remote commands, Now Playing | `NowPlayingController`, `NowPlayingBridge` | #54, #183 | Done | #54 and #183 are closed. The runtime check on devices is part of #44. |
 | Queue, next episode | `PlaybackQueue` | #60, #156 | In progress (#60) | The auto-advance core and queue composition (PR #445) are merged, and so are the queue sheet, the queue inspector and "Play next" / "Add to queue" (#156, still open). Background-safe auto-advance is wired (#160, PR #554; #587, PR #590). The iPhone Duo player's Up Next pane shows the queue (#84). |
-| Haptics | ABSUI `Haptics` | #147 | Done | The player's transport controls use the haptics setting. The sleep timer's reset feedback waits on #600. |
+| Haptics | ABSUI `Haptics` | #147 | Done | The player's transport controls use the Haptic feedback setting. The sleep timer's reset vibration has its own toggle, "Disable vibrate on reset" (`disableSleepTimerResetFeedback`). |
 | Cast and routes | ABSUI `RoutePicker` (AirPlay) | #183 | Done | Cast was never confirmed in legacy; AirPlay only. |
 | Close player | `MiniPlayerView`, `PlayerSlot` | #183 | Done | |
 | Total track, scale elapsed time by speed, lock player | `PlayerOptionsMenu` | #505, PR #526 | Done | Listed under Gaps found in the first draft. |
@@ -151,11 +151,11 @@ open or the app doesn't wire it in yet. The sleep timer is the exception (#600).
 | `Order`, `Filter` modals | `LibrarySortMenu`, `LibraryFilterSheet` | #63 | Done | |
 | `Dialog` modal | System alerts | — | Done | |
 | `ItemMoreMenu`, `ItemDetails` modals | `ItemDetailMoreMenu`, `ItemDetailInfoSheet` | #67, #342 | Done | |
-| `SleepTimerLength`, `AutoSleepTimerRewindLength` modals | `SleepTimerLengthPicker`, `SleepTimerSettingsSection` | #55, #91, #600 | In progress (#600) | The app doesn't create the timer yet (#600). |
+| `SleepTimerLength`, `AutoSleepTimerRewindLength` modals | `SleepTimerLengthPicker`, `SleepTimerSettingsSection` | #55, #91, #600, PR #604 | Done | |
 | `Fullscreen` modal | `NowPlayingView` | #183 | Done | |
 | `FullscreenCover` modal | Cover viewer in `ItemDetailContent` | #66 | Done | |
 | Native `AudioPlayer`, `PlayerHandler`, `PlayerProgress`, rate managers | ABSPlayback `AudioEngine`, `PlaybackCoordinator`, `ProgressSyncer` | #183, #184 | Done | |
-| Native `AudioPlayerSleepTimer` | `SleepTimer` | #55, #600 | In progress (#600) | The app doesn't create the timer yet (#600). |
+| Native `AudioPlayerSleepTimer` | `SleepTimer` | #55, #600, PR #604 | Done | |
 | Native `NowPlayingInfo`, `PlayerEvents`, `AbsAudioPlayer` | `NowPlayingController`, `PlaybackScope` | #183 | Done | |
 
 ## Settings
@@ -169,9 +169,9 @@ The settings mapping is in [Settings](settings.md); this table records status.
 | Display: orientation lock | — | — | Dropped | The system controls orientation ([ADR 0004](adr/0004-navigation.md), [Settings](settings.md)). |
 | Display: language | — | — | Dropped | Replaced by the system per-app language ([Settings](settings.md)). |
 | Playback: jump amounts, auto-rewind, MP3 index seeking, media-control seeking | `SettingsView` | #91 | Done | |
-| Sleep timer settings | `SleepTimerSettingsSection` | #91, #600 | In progress (#600) | The settings save, but the app doesn't create the timer yet (#600). |
+| Sleep timer settings | `SleepTimerSettingsSection` | #91, #600, PR #604 | Done | Each account's timer uses the saved settings (#600, PR #604). |
 | Data: cellular download and stream policy | `SettingsView` | #91 | Done | |
-| Android Auto | — | #79, #80, #81 | Dropped | Replaced by a CarPlay design ([Settings](settings.md)). CarPlay is In progress (#80): the scene shows the Continue, Library and Latest tabs (PRs #544, #567) and the Now Playing buttons (PR #564). It has no Downloads tab yet: PR #567 deferred it under #80. The Now Playing sleep timer button needs #600. #79, #80 and #81 are open, and the CarPlay entitlement isn't granted yet. |
+| Android Auto | — | #79, #80, #81 | Dropped | Replaced by a CarPlay design ([Settings](settings.md)). The CarPlay scene shows the Continue, Library, Latest and Downloads tabs (PRs #544, #567, #606) and the Now Playing buttons, including the sleep timer (PRs #564, #604). #80 is closed, with manual checks in #210. #79 and #81 are open, and the CarPlay entitlement isn't granted yet. |
 
 ## Offline native references
 
@@ -183,7 +183,7 @@ The settings mapping is in [Settings](settings.md); this table records status.
 | `AbsLogger`, `Logger` | ABSCore `Log`, `LogExporter` | #27 | Done | |
 | `DownloadItem`, `DownloadItemPart` | `DownloadRecord`, `DownloadPart` | #73, PR #500 | Done | |
 | `LocalFile`, `LocalLibraryItem`, `LocalPodcastEpisode` | `LocalFile`, `LocalLibraryItem`, `LocalItemStore` | #73 | Done | |
-| `LocalMediaProgress` | `LocalMediaProgress`, `LocalProgressStore` | #74, PRs #496, #512, #594 | In progress (#74) | Downloaded items play from their local files with local sessions, which upload on reconnect; #74 is still open. |
+| `LocalMediaProgress` | `LocalMediaProgress`, `LocalProgressStore` | #74, PRs #496, #512, #594, #603 | Done | Downloaded items play from their local files with local sessions, which upload on reconnect. Downloaded ebooks keep their reading progress linked to the download (PR #603). Manual checks are in #210. |
 | `MediaProgress` | ABSCore `MediaProgress` | #25 | Done | |
 | `ApiClient` | ABSAPI `APIClient` | #29 | Done | |
 | `SecureStorage` | `KeychainStore` | #154 | Done | |
