@@ -88,7 +88,7 @@ Now Playing runtime check on devices is still open under #44.
 | `latest.vue` | `LatestView` | #70 | Done | |
 | `PodcastEpisodesFeedModal` | `PodcastEpisodesFeedSheet` | #95 | Done | |
 | `ItemDetailsModal` | `ItemDetailInfoSheet` | #342 | Done | |
-| `modals/rssfeeds/*` | `RssFeedSheet` | #96, PRs #419, #463, #503 | In progress (#96) | The code is complete; open for the manual admin check. |
+| `modals/rssfeeds/*` | `RssFeedSheet` | #96, PRs #419, #463, #503 | In progress (#96) | The sheet and its entry points are in the app. Live socket updates aren't wired yet (#601), and the manual admin check is still open. |
 
 ### Offline
 
@@ -124,7 +124,7 @@ Now Playing runtime check on devices is still open under #44.
 
 The status rule in [Status legend](#status-legend) applies. #183 and #184 are
 closed and the app plays, so a player row is Done unless its own issue is still
-open.
+open or the app doesn't wire it in yet. The sleep timer is the exception (#600).
 
 | Legacy | Native | Tracking | Status | Notes |
 | --- | --- | --- | --- | --- |
@@ -138,12 +138,12 @@ open.
 | Speed | `PlaybackSpeedSheet` | #183 | Done | |
 | Jump forward and back | ABSUI `TransportControls` | #183 | Done | |
 | Auto-rewind | `PlaybackCoordinator` | #183 | Done | |
-| Sleep timer: duration, end of chapter | `SleepTimerSheet`, `SleepTimer` | #55, #183 | Done | |
-| Sleep timer: auto-sleep window, rewind, shake to reset and sensitivity, reset feedback, almost-done chime, fade-out | `SleepTimer` | #55, #147, #183 | Done | |
+| Sleep timer: duration, end of chapter | `SleepTimerSheet`, `SleepTimer` | #55, #183, #600 | In progress (#600) | The app doesn't create the timer yet (#600). |
+| Sleep timer: auto-sleep window, rewind, shake to reset and sensitivity, reset feedback, almost-done chime, fade-out | `SleepTimer` | #55, #147, #183, #600 | In progress (#600) | The app doesn't create the timer yet (#600). |
 | Media-control seeking | `NowPlayingController` | #183 | Done | |
 | Lock Screen, remote commands, Now Playing | `NowPlayingController`, `NowPlayingBridge` | #54, #183 | Done | #54 and #183 are closed. The runtime check on devices is part of #44. |
 | Queue, next episode | `PlaybackQueue` | #60, #156 | In progress (#60) | The auto-advance core and queue composition (PR #445) are merged, and so are the queue sheet, the queue inspector and "Play next" / "Add to queue" (#156, still open). Background-safe auto-advance is wired (#160, PR #554; #587, PR #590). The iPhone Duo player's Up Next pane shows the queue (#84). |
-| Haptics | ABSUI `Haptics` | #147 | Done | |
+| Haptics | ABSUI `Haptics` | #147 | Done | The player's transport controls use the haptics setting. The sleep timer's reset feedback waits on #600. |
 | Cast and routes | ABSUI `RoutePicker` (AirPlay) | #183 | Done | Cast was never confirmed in legacy; AirPlay only. |
 | Close player | `MiniPlayerView`, `PlayerSlot` | #183 | Done | |
 | Total track, scale elapsed time by speed, lock player | `PlayerOptionsMenu` | #505, PR #526 | Done | Listed under Gaps found in the first draft. |
@@ -151,11 +151,11 @@ open.
 | `Order`, `Filter` modals | `LibrarySortMenu`, `LibraryFilterSheet` | #63 | Done | |
 | `Dialog` modal | System alerts | — | Done | |
 | `ItemMoreMenu`, `ItemDetails` modals | `ItemDetailMoreMenu`, `ItemDetailInfoSheet` | #67, #342 | Done | |
-| `SleepTimerLength`, `AutoSleepTimerRewindLength` modals | `SleepTimerLengthPicker`, `SleepTimerSettingsSection` | #55, #91 | Done | |
+| `SleepTimerLength`, `AutoSleepTimerRewindLength` modals | `SleepTimerLengthPicker`, `SleepTimerSettingsSection` | #55, #91, #600 | In progress (#600) | The app doesn't create the timer yet (#600). |
 | `Fullscreen` modal | `NowPlayingView` | #183 | Done | |
 | `FullscreenCover` modal | Cover viewer in `ItemDetailContent` | #66 | Done | |
 | Native `AudioPlayer`, `PlayerHandler`, `PlayerProgress`, rate managers | ABSPlayback `AudioEngine`, `PlaybackCoordinator`, `ProgressSyncer` | #183, #184 | Done | |
-| Native `AudioPlayerSleepTimer` | `SleepTimer` | #55 | Done | |
+| Native `AudioPlayerSleepTimer` | `SleepTimer` | #55, #600 | In progress (#600) | The app doesn't create the timer yet (#600). |
 | Native `NowPlayingInfo`, `PlayerEvents`, `AbsAudioPlayer` | `NowPlayingController`, `PlaybackScope` | #183 | Done | |
 
 ## Settings
@@ -169,9 +169,9 @@ The settings mapping is in [Settings](settings.md); this table records status.
 | Display: orientation lock | — | — | Dropped | The system controls orientation ([ADR 0004](adr/0004-navigation.md), [Settings](settings.md)). |
 | Display: language | — | — | Dropped | Replaced by the system per-app language ([Settings](settings.md)). |
 | Playback: jump amounts, auto-rewind, MP3 index seeking, media-control seeking | `SettingsView` | #91 | Done | |
-| Sleep timer settings | `SleepTimerSettingsSection` | #91 | Done | |
+| Sleep timer settings | `SleepTimerSettingsSection` | #91, #600 | In progress (#600) | The settings save, but the app doesn't create the timer yet (#600). |
 | Data: cellular download and stream policy | `SettingsView` | #91 | Done | |
-| Android Auto | — | #79, #80, #81 | Dropped | Replaced by a CarPlay design ([Settings](settings.md)). CarPlay is In progress: the scene shows the Continue, Library and Latest tabs (PRs #544, #567) and the Now Playing buttons (PR #564); #79, #80 and #81 are open for their manual checks, and the CarPlay entitlement isn't granted yet. |
+| Android Auto | — | #79, #80, #81 | Dropped | Replaced by a CarPlay design ([Settings](settings.md)). CarPlay is In progress (#80): the scene shows the Continue, Library and Latest tabs (PRs #544, #567) and the Now Playing buttons (PR #564). It has no Downloads tab yet: PR #567 deferred it under #80. The Now Playing sleep timer button needs #600. #79, #80 and #81 are open, and the CarPlay entitlement isn't granted yet. |
 
 ## Offline native references
 
