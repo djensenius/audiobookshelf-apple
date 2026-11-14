@@ -127,15 +127,20 @@ jobs:
       # The runner's instances share one CoreSimulator device set, so the job makes its own iPhone
       # Duo (simctl picks the newest runtime for it) and deletes it below. Not abs-ci-<run>-*:
       # build-and-test deletes those, possibly while this job still uses its simulator.
+      # Boot it before the tests: the first launch on a cold simulator can outlast XCTest's launch
+      # timeout. The UDID is saved first, so the cleanup step deletes it even if the boot fails.
       - name: Create an iPhone Duo simulator
         run: |
           udid="$(xcrun simctl create "abs-ui-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" com.apple.CoreSimulator.SimDeviceType.iPhone-Duo)"
           echo "IOS_SIMULATOR_ID=$udid" >> "$GITHUB_ENV"
+          xcrun simctl bootstatus "$udid" -b
 
+      # On a shared runner a launch can still time out, so a failed test runs once more; one that
+      # fails twice fails the step. Local runs of test:ui don't retry.
       - name: UI tests on the iPhone Duo simulator
         env:
           ABS_UI_PLATFORM: ios
-        run: mise run test:ui
+        run: mise run test:ui -- -retry-tests-on-failure -test-iterations 2
 
       # XCUITest on macOS needs Automation Mode, which only an administrator on the runner can
       # enable (docs/testing/ui-tests.md). Until then, warn rather than pass silently.

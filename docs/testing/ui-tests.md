@@ -21,8 +21,12 @@ On macOS, XCUITest needs Automation Mode. If a run stops with an authentication 
 ## In CI
 
 The CI workflow's *UI tests* job runs beside *Lint, build, and test*, so its cold builds don't
-lengthen that job. It creates its own iPhone Duo simulator (`abs-ui-<run>-<attempt>`), runs
-`ABS_UI_PLATFORM=ios mise run test:ui` on it with `IOS_SIMULATOR_ID`, and always deletes it.
+lengthen that job. It creates its own iPhone Duo simulator (`abs-ui-<run>-<attempt>`), boots it
+and waits for the boot to finish (`xcrun simctl bootstatus <udid> -b`, as a cold simulator's
+first launch can time out), runs `ABS_UI_PLATFORM=ios mise run test:ui` on it with
+`IOS_SIMULATOR_ID`, and always deletes it. In CI only, a failed test runs once more
+(`-retry-tests-on-failure -test-iterations 2`), so a launch timeout on a busy runner is retried
+while a test that fails twice still fails the job.
 
 It then runs `mise run test:ui` on macOS only if `automationmodetool` reports Automation Mode
 enabled on the runner. Otherwise the step passes with a *macOS UI tests skipped* warning
