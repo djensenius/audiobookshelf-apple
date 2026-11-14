@@ -23,6 +23,9 @@ public struct DownloadsListing: Sendable, Equatable {
         public var id: UUID
         public var serverConnectionID: UUID
         public var libraryItemId: String
+        /// The server library the item belongs to, whose settings give its cover's shape; `nil`
+        /// for items downloaded before it was stored.
+        public var libraryId: String?
         public var mediaType: MediaType
         public var title: String
         public var author: String?
@@ -139,7 +142,8 @@ public struct DownloadsListing: Sendable, Equatable {
     private static func item(_ item: LocalLibraryItemDTO) -> Item {
         Item(
             id: item.id, serverConnectionID: item.serverConnectionID, libraryItemId: item.libraryItemId,
-            mediaType: item.mediaType, title: item.title, author: item.authorName, coverUpdatedAt: item.coverUpdatedAt,
+            libraryId: item.libraryId, mediaType: item.mediaType, title: item.title, author: item.authorName,
+            coverUpdatedAt: item.coverUpdatedAt,
             byteCount: item.files.reduce(0) { adding($0, max($1.size, 0)) },
             trackCount: item.files.count { $0.kind == .audio }, hasEbook: item.files.contains { $0.kind == .ebook },
             episodes: item.mediaType == .podcast ? episodes(of: item) : [])
