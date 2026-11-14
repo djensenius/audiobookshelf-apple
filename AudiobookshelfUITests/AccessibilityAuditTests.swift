@@ -43,24 +43,38 @@ final class AccessibilityAuditTests: XCTestCase {
     }
 
     /// Audits what's on screen and fails once for every issue that isn't a ``KnownAuditIssue``,
-    /// naming the screen, the text size, the audit type, the element and the issue.
+    /// naming the screen, the text size, the audit type, the element and the issue. An issue
+    /// ``KnownAuditIssue/isUnnamedContrastUnderBottomBar(_:on:in:)`` defers is checked by a
+    /// second contrast audit with Item detail's metadata clear of the bottom bar.
     @MainActor
     private func audit(
         _ screen: FixtureScreen, for types: XCUIAccessibilityAuditType, in app: XCUIApplication, textSize: String
     ) {
         var failures: [String] = []
+        var deferred = false
         do {
             try app.performAccessibilityAudit(for: types) { issue in
                 if KnownAuditIssue.all.contains(where: { $0.matches(issue, on: screen, in: app) }) { return true }
-                // Without an element, the detailed description names the kind of node at least.
-                let description =
-                    issue.element == nil
-                    ? "\(issue.compactDescription) (\(issue.detailedDescription))" : issue.compactDescription
-                failures.append(
-                    "\(screen.name) (\(textSize)): \(Self.auditTypeName(issue.auditType)) on \(Self.elementName(issue.element)): "
-                        + description)
+                if KnownAuditIssue.isUnnamedContrastUnderBottomBar(issue, on: screen, in: app) {
+                    deferred = true
+                    return true
+                }
+                failures.append("\(screen.name) (\(textSize)): \(Self.failure(issue))")
                 // Reported below, with the screen's name.
                 return true
+            }
+            if deferred {
+                scrollMetadataClearOfBottomBar(in: app)
+                // Only an issue with no element fails here: with the metadata clear of the bar, it
+                // isn't a covered label. Named text the scroll brought on screen wasn't on screen for
+                // the audit above, so it isn't what was deferred.
+                try app.performAccessibilityAudit(for: .contrast) { issue in
+                    if issue.element == nil {
+                        failures.append(
+                            "\(screen.name) (\(textSize), metadata clear of the bottom bar): \(Self.failure(issue))")
+                    }
+                    return true
+                }
             }
         } catch {
             XCTFail("\(screen.name) (\(textSize)): the accessibility audit failed to run: \(error)")
@@ -74,6 +88,28 @@ final class AccessibilityAuditTests: XCTestCase {
         continueAfterFailure = true
         for failure in failures { XCTFail(failure) }
         continueAfterFailure = false
+    }
+
+    /// The audit type, the element and the issue. Without an element, the detailed description
+    /// names the kind of node at least.
+    @MainActor
+    private static func failure(_ issue: XCUIAccessibilityAuditIssue) -> String {
+        let description =
+            issue.element == nil
+            ? "\(issue.compactDescription) (\(issue.detailedDescription))" : issue.compactDescription
+        return "\(auditTypeName(issue.auditType)) on \(elementName(issue.element)): \(description)"
+    }
+
+    /// Scrolls Item detail up until its metadata (`item.metadata`, whose frame includes the labels
+    /// hidden from VoiceOver) is clear of the bottom bar: above it, or off the top.
+    @MainActor
+    private func scrollMetadataClearOfBottomBar(in app: XCUIApplication) {
+        let screen = app.descendants(matching: .any)[FixtureScreen.item.identifier].firstMatch
+        for _ in 0..<8 where KnownAuditIssue.metadataOverlapsBottomBar(in: app) {
+            screen.swipeUp(velocity: .slow)
+        }
+        XCTAssertFalse(
+            KnownAuditIssue.metadataOverlapsBottomBar(in: app), "Item detail's metadata is still under the bottom bar")
     }
 
     private static func elementName(_ element: XCUIElement?) -> String {
@@ -183,15 +219,28 @@ struct KnownAuditIssue {
             all += [FixtureScreen.home, .library, .item, .settings, .downloads].map {
                 KnownAuditIssue(screen: $0, type: .contrast, element: isUnderBottomBar)
             }
-            // The same for a label of Item detail's metadata under the bar. The labels are hidden
-            // from VoiceOver (each value speaks its label, as in #613), so the audit reports one
-            // with no element ("Contrast failed for SwiftUI.AccessibilityNode"), as it did once in
-            // four runs for "Duration" at AX5 on a 6.3-inch iPhone. Only with no element, and only
-            // while an element of the metadata (`item.metadata`) overlaps the bar. #623
-            all.append(KnownAuditIssue(screen: .item, type: .contrast, element: isUnnamedWithMetadataUnderBottomBar))
         #endif
         return all
     }()
+
+    /// Whether `issue` is contrast with no element on Item detail while its metadata is under the
+    /// bottom bar. That's probably a metadata label under the bar's glass, as "Duration" was in one
+    /// AX5 run in four on a 6.3-inch iPhone: the labels are hidden from VoiceOver (each value speaks
+    /// its label, as in #613), so the audit can't name one. Deferred, not filtered: the test audits
+    /// contrast again with the metadata clear of the bar, where an issue with no element fails. #623
+    @MainActor
+    static func isUnnamedContrastUnderBottomBar(
+        _ issue: XCUIAccessibilityAuditIssue, on screen: FixtureScreen, in app: XCUIApplication
+    ) -> Bool {
+        screen == .item && issue.auditType == .contrast && issue.element == nil && metadataOverlapsBottomBar(in: app)
+    }
+
+    /// Whether Item detail's metadata (`item.metadata`) overlaps the tab bar or the mini player.
+    @MainActor
+    static func metadataOverlapsBottomBar(in app: XCUIApplication) -> Bool {
+        let metadata = app.descendants(matching: .any)["item.metadata"].firstMatch
+        return metadata.exists && bottomBars(in: app).contains { $0.frame.intersects(metadata.frame) }
+    }
 
     /// Whether `element` is text in an item card (`item.<id>`), which the card speaks in full, not
     /// one of the item screen's `item.` elements.
@@ -226,16 +275,6 @@ struct KnownAuditIssue {
             && !bars.contains {
                 $0.label.contains(element.label) || $0.descendants(matching: .any).matching(ownText).firstMatch.exists
             }
-    }
-
-    /// Whether there's no `element` while an element of the item screen's metadata
-    /// (`item.metadata`) overlaps the bottom bar.
-    @MainActor
-    private static func isUnnamedWithMetadataUnderBottomBar(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
-        guard element == nil else { return false }
-        let bars = bottomBars(in: app)
-        let rows = app.descendants(matching: .any)["item.metadata"].firstMatch.descendants(matching: .any)
-        return rows.allElementsBoundByIndex.contains { row in bars.contains { $0.frame.intersects(row.frame) } }
     }
 
     /// The tab bar and the mini player, where they exist.

@@ -206,9 +206,11 @@ element, each with the reason and its issue:
   the bar's own text, is filtered. The full player covers the bar, so the Player isn't. Item
   detail's metadata labels are hidden from VoiceOver (each value speaks its label), so the
   audit can report one under the bar with no element ("Contrast failed for
-  SwiftUI.AccessibilityNode"), as it did once in four runs for "Duration" at AX5. On Item
-  detail only, a contrast issue with no element is filtered while an element of the metadata
-  (`item.metadata`) overlaps the bar.
+  SwiftUI.AccessibilityNode"), as it did once in four runs for "Duration" at AX5. That isn't
+  filtered but deferred: when Item detail has a contrast issue with no element while its
+  metadata (`item.metadata`) overlaps the bar, the test scrolls the metadata clear of the bar
+  and audits contrast again, and any issue with no element there fails. Named text the scroll
+  brings on screen isn't judged by that second audit.
 - The Player's remaining times, "Contrast failed" on the chapter's ("-0:26") on an iPhone 17
   every run (#623). Its pixels measure 5.7:1 on the backdrop, and the elapsed time's beside
   it, which passes in the same font and colour, 5.6:1. This is the false positive the
