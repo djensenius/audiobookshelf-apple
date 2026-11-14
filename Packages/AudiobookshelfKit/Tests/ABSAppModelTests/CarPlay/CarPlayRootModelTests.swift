@@ -12,7 +12,7 @@ private let carAccountB = SessionIdentity(
     connectionID: UUID(uuidString: "00000000-0000-0000-0000-00000000000B") ?? UUID(), userID: "user-1")
 private let labels = CarPlayLabels(
     continueListening: "Continue", libraries: "Libraries", books: "Books", podcasts: "Podcasts", series: "Series",
-    authors: "Authors", latest: "Latest", more: "More")
+    authors: "Authors", latest: "Latest", downloads: "Downloads", more: "More")
 
 private func key(_ identity: SessionIdentity) -> LibraryConnectionKey {
     LibraryConnectionKey(connectionID: identity.connectionID, userID: identity.userID)

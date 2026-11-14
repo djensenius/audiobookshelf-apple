@@ -23,6 +23,11 @@
     /// signed-in account: a row that opens a list pushes it, "More…" replaces the list's rows with
     /// its next page in place, and a book or episode plays like a Continue row. The Latest tab is
     /// shown while the account has a podcast library. Each list reloads when it shows again.
+    ///
+    /// The Downloads tab (#80), last, shows ``CarPlayDownloadsModel``'s list of the account's
+    /// downloaded books and episodes, one model per signed-in account, which follows the local
+    /// item store, so it needs no server and changes as downloads complete or are deleted. Its rows
+    /// play like a Continue row, from their files. It's shown while the app has a download stack.
     final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate,
         CPInterfaceControllerDelegate, CPTabBarTemplateDelegate
     {
@@ -55,6 +60,19 @@
         /// The images of the rows shown, by tab, so neither tab's covers evict the other's.
         private var continueImages: Set<ImageKey> = []
         private var browseImages: Set<ImageKey> = []
+        private var downloadsTemplate: CPListTemplate?
+        /// The local item store's snapshots, `nil` without a download stack (no Downloads tab).
+        private var downloadUpdates: DownloadedShelfModel.Updates?
+        /// The Downloads tab's model for the signed-in account, and the task following its items.
+        private var downloads: CarPlayDownloadsModel?
+        private var downloadsTask: Task<Void, Never>?
+        /// The Downloads page shown, from "More…", and what it shows, so it isn't rebuilt unchanged.
+        private var downloadsOffset = 0
+        private var downloadsShown: (CarPlayList, CarPlayBrowseStatus)?
+        private var downloadsHasAppeared = false
+        /// Bumped by each ``observeDownloads()``, so only the latest observation renders again.
+        private var downloadsObservation = 0
+        private var downloadsImages: Set<ImageKey> = []
 
         func templateApplicationScene(
             _ templateApplicationScene: CPTemplateApplicationScene,
@@ -103,7 +121,13 @@
             let latest = CPListTemplate(title: Self.labels.latest, sections: [])
             latest.tabImage = UIImage(systemName: "clock")
             latestTemplate = latest
-            let tabs = CPTabBarTemplate(templates: [list, library])
+            downloadUpdates = environment.makeDownloadsServices()?.localItemUpdates
+            if downloadUpdates != nil {
+                let downloads = CPListTemplate(title: Self.labels.downloads, sections: [])
+                downloads.tabImage = UIImage(systemName: "arrow.down.circle")
+                downloadsTemplate = downloads
+            }
+            let tabs = CPTabBarTemplate(templates: [list, library] + [downloadsTemplate].compactMap { $0 })
             tabs.delegate = self
             tabBar = tabs
             interfaceController.setRootTemplate(tabs, animated: false, completion: nil)
@@ -111,6 +135,7 @@
             observeLoadTrigger()
             observeAlert()
             observeBrowse()
+            observeDownloads()
         }
 
         func templateApplicationScene(
@@ -132,8 +157,17 @@
             tabBar = nil
             libraryTemplate = nil
             latestTemplate = nil
+            downloadsTask?.cancel()
+            downloadsTask = nil
+            downloads = nil
+            downloadsTemplate = nil
+            downloadUpdates = nil
+            downloadsOffset = 0
+            downloadsShown = nil
+            downloadsHasAppeared = false
             continueImages = []
             browseImages = []
+            downloadsImages = []
             nowPlaying?.disconnect()
             nowPlaying = nil
             self.interfaceController = nil
@@ -162,6 +196,7 @@
             loadedTrigger = trigger
             Task { await model.update() }
             updateBrowse(for: trigger.identity)
+            updateDownloads(for: trigger.identity)
         }
 
         private func observeAlert() {
@@ -178,6 +213,7 @@
         func templateWillAppear(_ aTemplate: CPTemplate, animated: Bool) {
             // Back on the tab bar, from a pushed list or Now Playing: its selected tab shows again.
             refreshBrowse((aTemplate as? CPTabBarTemplate)?.selectedTemplate ?? aTemplate)
+            refreshDownloads((aTemplate as? CPTabBarTemplate)?.selectedTemplate ?? aTemplate)
             guard let model, aTemplate is CPTabBarTemplate || aTemplate === continueTemplate else { return }
             if hasShownContinue { Task { await model.refresh() } }
             hasShownContinue = true
@@ -210,7 +246,7 @@
 
         private func listItem(for row: CarPlayRow, isPlaying: Bool) -> CPListItem {
             let image = row.image.flatMap(cover(for:)).map { UIImage(cgImage: $0.cgImage) }
-            let item = CPListItem(text: row.text, detailText: nil, image: image)
+            let item = CPListItem(text: row.text, detailText: row.detail, image: image)
             if let progress = row.progress { item.playbackProgress = CGFloat(progress) }
             item.isPlaying = isPlaying
             item.isEnabled = row.isEnabled
@@ -333,13 +369,15 @@
                 }
                 browseTemplates.forEach { $0.shown = nil }
                 observeBrowse()
+                downloadsShown = nil
+                observeDownloads()
             }
             return nil
         }
 
         /// Drops the covers and decodes of rows no longer shown in any tab.
         private func keepCovers() {
-            let keys = continueImages.union(browseImages)
+            let keys = continueImages.union(browseImages).union(downloadsImages)
             covers = covers.filter { keys.contains($0.key) }
             for (key, load) in coverLoads where !keys.contains(key) {
                 load.cancel()
@@ -445,12 +483,11 @@
                 }
                 latestTemplate.updateSections([])
             }
-            let templates =
-                destination == nil
-                ? [continueTemplate, libraryTemplate]
-                : [
-                    continueTemplate, libraryTemplate, latestTemplate,
-                ]
+            // Continue, Library, Latest, then Downloads, within the car's tab limit.
+            let templates = Array(
+                ([continueTemplate, libraryTemplate]
+                    + [destination.map { _ in latestTemplate }, downloadsTemplate]
+                    .compactMap { $0 }).prefix(CPTabBarTemplate.maximumTabCount))
             if tabBar.templates.count != templates.count { tabBar.updateTemplates(templates) }
             return changed
         }
@@ -519,9 +556,10 @@
             }
         }
 
-        /// The Library or Latest tab selected: reloads it like a list showing again.
+        /// The Library, Latest or Downloads tab selected: reloads it like a list showing again.
         func tabBarTemplate(_ tabBarTemplate: CPTabBarTemplate, didSelect selectedTemplate: CPTemplate) {
             refreshBrowse(selectedTemplate)
+            refreshDownloads(selectedTemplate)
         }
 
         /// Reloads a browse list when it shows again, for example after Now Playing or a pushed
@@ -546,6 +584,114 @@
             }
         }
 
+        // MARK: - Downloads tab (#80)
+
+        /// Replaces the Downloads model when the signed-in account changes, following the new
+        /// account's items from the first page, and drops it when signed out.
+        private func updateDownloads(for identity: SessionIdentity?) {
+            guard downloads?.identity != identity else { return }
+            downloadsTask?.cancel()
+            downloadsTask = nil
+            downloads = nil
+            if let identity, let downloadUpdates {
+                let model = CarPlayDownloadsModel(
+                    identity: identity, updates: downloadUpdates, limits: limits, labels: Self.labels,
+                    imageBucket: imageBucket)
+                downloads = model
+                downloadsTask = Task { await model.observe() }
+            }
+            downloadsOffset = 0
+            downloadsShown = nil
+            observeDownloads()
+        }
+
+        /// Shows the Downloads list, again each time it changes; without a model (signed out,
+        /// loading), the root content's message. A page emptied by deletions goes back to the
+        /// first page, as it has no "More…" to leave it.
+        private func observeDownloads() {
+            guard let template = downloadsTemplate else { return }
+            downloadsObservation += 1
+            let observation = downloadsObservation
+            let downloads = downloads
+            let model = model
+            let offset = downloadsOffset
+            let (page, content) = withObservationTracking {
+                (
+                    downloads.map { ($0.list(offset: $0.offset(afterChangeFrom: offset)), $0.status) },
+                    downloads == nil ? model?.content : nil
+                )
+            } onChange: { [weak self] in
+                Task { @MainActor in
+                    guard let self, self.downloadsObservation == observation else { return }
+                    self.observeDownloads()
+                }
+            }
+            guard let page else {
+                downloadsShown = nil
+                downloadsImages = []
+                keepCovers()
+                let content = content ?? .loading
+                template.emptyViewTitleVariants = [Self.title(of: content)]
+                template.emptyViewSubtitleVariants = Self.subtitle(of: content).map { [$0] } ?? []
+                template.updateSections([])
+                return
+            }
+            let (list, status) = page
+            downloadsOffset = list.offset
+            downloadsImages = Set(list.rows.compactMap(\.image))
+            keepCovers()
+            if let shown = downloadsShown, shown.0 == list, shown.1 == status { return }
+            downloadsShown = page
+            let message =
+                switch status {
+                case .loading: "MessageLoading"
+                case .failed: "MessageDownloadsLoadFailed"
+                case .loaded: "MessageNoDownloads"
+                }
+            template.emptyViewTitleVariants = [L10n.string(message)]
+            template.emptyViewSubtitleVariants = []
+            let sections = list.sections.map { section in
+                CPListSection(
+                    items: section.rows.map { row in
+                        let item = listItem(for: row, isPlaying: false)
+                        item.handler = { [weak self] _, completion in
+                            self?.selectDownload(row, page: list)
+                            completion()
+                        }
+                        return item
+                    },
+                    header: section.header, sectionIndexTitle: nil)
+            }
+            template.updateSections(sections)
+        }
+
+        /// A tapped Downloads row: plays it, or shows the next page.
+        private func selectDownload(_ row: CarPlayRow, page: CarPlayList) {
+            guard let downloads, let model else { return }
+            switch row.action {
+            case .play:
+                guard let play = model.play(row, offset: page.offset, of: downloads) else { return }
+                showNowPlaying(after: play)
+            case .more(.downloads, let offset):
+                guard downloadsOffset == page.offset else { return }
+                downloadsOffset = offset
+                observeDownloads()
+            case .open, .more:
+                break
+            }
+        }
+
+        /// The Downloads tab showing again: its list follows the store, so only a failed read is
+        /// retried. Not when it first shows.
+        private func refreshDownloads(_ template: CPTemplate) {
+            guard let downloads, template === downloadsTemplate else { return }
+            guard downloadsHasAppeared else {
+                downloadsHasAppeared = true
+                return
+            }
+            downloads.retry()
+        }
+
         // MARK: - Strings
 
         private static var labels: CarPlayLabels {
@@ -553,7 +699,8 @@
                 continueListening: L10n.string("LabelContinueListening"), libraries: L10n.string("HeaderLibraries"),
                 books: L10n.string("LabelBooks"), podcasts: L10n.string("LabelPodcasts"),
                 series: L10n.string("LabelSeries"), authors: L10n.string("LabelAuthors"),
-                latest: L10n.string("ButtonLatest"), more: L10n.string("LabelMore"))
+                latest: L10n.string("ButtonLatest"), downloads: L10n.string("HeaderDownloads"),
+                more: L10n.string("LabelMore"))
         }
 
         private static func title(of content: CarPlayRootContent) -> String {

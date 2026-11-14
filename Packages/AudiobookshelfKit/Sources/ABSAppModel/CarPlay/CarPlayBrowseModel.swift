@@ -106,7 +106,7 @@ public final class CarPlayBrowseModel {
         let empty = CarPlayList(destination: destination, title: title(of: destination), sections: [])
         guard isServed else { return empty }
         switch destination {
-        case .continueListening:
+        case .continueListening, .downloads:
             return empty
         case .libraries:
             return builder.libraries(store.libraries, offset: offset)
@@ -141,7 +141,7 @@ public final class CarPlayBrowseModel {
     /// Whether `destination`'s list has loaded, for the message an empty list shows.
     public func status(_ destination: CarPlayDestination) -> CarPlayBrowseStatus {
         switch destination {
-        case .continueListening:
+        case .continueListening, .downloads:
             return .loaded
         case .libraries, .library:
             if store.hasLoaded { return .loaded }
@@ -191,7 +191,7 @@ public final class CarPlayBrowseModel {
     public func load(_ destination: CarPlayDestination, offset: Int = 0) async {
         guard isServed else { return }
         switch destination {
-        case .continueListening:
+        case .continueListening, .downloads:
             return
         case .libraries, .library:
             if !store.hasLoaded { await store.refresh() }
@@ -219,7 +219,7 @@ public final class CarPlayBrowseModel {
     public func refresh(_ destination: CarPlayDestination, offset: Int = 0) async {
         guard isServed else { return }
         switch destination {
-        case .continueListening:
+        case .continueListening, .downloads:
             return
         case .libraries, .library:
             await store.refresh()
@@ -282,6 +282,7 @@ public final class CarPlayBrowseModel {
         case .series: return labels.series
         case .authors: return labels.authors
         case .latestEpisodes: return labels.latest
+        case .downloads: return labels.downloads
         case .seriesBooks, .authorBooks, .podcastEpisodes: return titles[destination] ?? ""
         }
     }
@@ -343,7 +344,7 @@ public final class CarPlayBrowseModel {
                         results: response.episodes.compactMap(LatestEpisode.init).map(\.summary), total: nil,
                         limit: response.limit, page: response.page, rawCount: response.rawCount)
                 })
-        case .continueListening, .libraries, .library:
+        case .continueListening, .libraries, .library, .downloads:
             return nil
         }
         sources[destination] = source
