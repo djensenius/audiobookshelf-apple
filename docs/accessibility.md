@@ -167,6 +167,14 @@ The player is paused before its audit, so its times hold still. Downloads is aud
 empty state: fixture launches have their own empty download stack. CI runs them on iOS with the
 other UI tests; on macOS they build but don't run yet (#46).
 
+Item detail's Chapters and Audio Tracks headers are below the metadata, so the walk never has
+them on screen. `ItemDetailSectionsAuditTests` (iOS) scrolls them clear of the tab bar
+(`item.chapters`, `item.tracks`) and audits contrast there, failing only for issues on the
+headers. Their counts took the disclosure group's accent tint, 2.7:1 on the `ABSColor.border`
+capsule in light and 3.7:1 in dark; they now use `ABSColor.foreground`, 8.3:1 and 6.5:1
+(#638). The test audits the simulator's appearance, light on CI, and doesn't switch to dark:
+a newly created simulator ignores appearance changes until it's rebooted.
+
 Known issues are filtered in `KnownAuditIssue.all`, by screen, audit type, description and
 element, each with the reason and its issue:
 

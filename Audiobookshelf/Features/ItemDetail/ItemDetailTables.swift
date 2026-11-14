@@ -20,7 +20,9 @@ struct ItemDetailTables: View {
     var body: some View {
         VStack(alignment: .leading, spacing: ABSSpacing.medium) {
             if !model.chapters.isEmpty {
-                ItemDetailTableSection(titleKey: "HeaderChapters", count: model.chapters.count) {
+                ItemDetailTableSection(
+                    titleKey: "HeaderChapters", count: model.chapters.count, identifier: "item.chapters"
+                ) {
                     ItemDetailTableHeader(keys: ["LabelTitle", "LabelStart", "LabelDuration"])
                     // Row IDs are positions, since the server's IDs may repeat.
                     ForEach(model.chapters) { chapter in
@@ -34,7 +36,9 @@ struct ItemDetailTables: View {
                 }
             }
             if !model.tracks.isEmpty {
-                ItemDetailTableSection(titleKey: "HeaderAudioTracks", count: model.tracks.count) {
+                ItemDetailTableSection(
+                    titleKey: "HeaderAudioTracks", count: model.tracks.count, identifier: "item.tracks"
+                ) {
                     ItemDetailTableHeader(keys: ["LabelFilename", "LabelDuration"])
                     ForEach(model.tracks) { track in
                         ItemDetailTableRow(
@@ -45,7 +49,9 @@ struct ItemDetailTables: View {
                 }
             }
             if !model.ebookFiles.isEmpty {
-                ItemDetailTableSection(titleKey: "HeaderEbookFiles", count: model.ebookFiles.count) {
+                ItemDetailTableSection(
+                    titleKey: "HeaderEbookFiles", count: model.ebookFiles.count, identifier: "item.ebookFiles"
+                ) {
                     ItemDetailTableHeader(keys: ["LabelFilename", "LabelSize"])
                     ForEach(model.ebookFiles) { file in
                         ItemDetailEbookFileRow(file: file)
@@ -61,6 +67,8 @@ struct ItemDetailTables: View {
 private struct ItemDetailTableSection<Content: View>: View {
     let titleKey: String
     let count: Int
+    /// The header's accessibility identifier, for UI tests.
+    let identifier: String
     @ViewBuilder let content: Content
     @Environment(\.locale) private var locale
 
@@ -77,12 +85,16 @@ private struct ItemDetailTableSection<Content: View>: View {
                     .foregroundStyle(ABSColor.foreground)
                 Text(verbatim: count.formatted(.number.locale(locale)))
                     .font(.caption.monospacedDigit())
+                    // Not the accent tint the disclosure group gives its label, which fails
+                    // contrast on the capsule (#638).
+                    .foregroundStyle(ABSColor.foreground)
                     .padding(.horizontal, ABSSpacing.small)
                     .padding(.vertical, ABSSpacing.xxSmall)
                     .background(ABSColor.border, in: .capsule)
             }
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
+            .accessibilityIdentifier(identifier)
         }
         .padding(ABSSpacing.medium)
         .background(ABSColor.secondarySurface, in: .rect(cornerRadius: ABSRadius.medium))
