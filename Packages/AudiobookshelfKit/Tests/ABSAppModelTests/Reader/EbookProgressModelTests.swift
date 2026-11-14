@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSDownloads
 import Foundation
 import SwiftData
 import Testing
@@ -984,9 +985,34 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
 
     /// The session's factory over `items`, as the participant builds it.
     func makeFactory(_ items: [LocalLibraryItemDTO]) -> EbookProgressFactory {
+        makeFactory(DownloadedItems(items))
+    }
+
+    func makeFactory(_ items: DownloadedItems) -> EbookProgressFactory {
         EbookProgressFactory(
             serverConnectionID: connection, store: store,
-            sources: EbookProgressSources(service: service, syncer: syncer), localItems: DownloadedItems(items))
+            sources: EbookProgressSources(service: service, syncer: syncer), localItems: items)
+    }
+
+    /// The row once it exists with `localLibraryItemID`, polled: a released model saves later.
+    func linked(_ itemID: UUID?) async -> Bool {
+        for attempt in 0..<2_000 {
+            if let row = try? await store.progress(for: key), row.localLibraryItemID == itemID { return true }
+            if attempt < 200 { await Task.yield() } else { try? await Task.sleep(for: .milliseconds(1)) }
+        }
+        return false
+    }
+
+    /// Turns to page 3 in the factory's model, then saves it by flushing, or by releasing the
+    /// model (its `deinit` save).
+    func turnAndSave(_ factory: EbookProgressFactory, viaRelease: Bool) async throws {
+        var model: EbookProgressModel? = try #require(factory(key, .pdf, nil))
+        turn(try #require(model), to: 3)
+        if viaRelease {
+            model = nil
+        } else {
+            await model?.flush()
+        }
     }
 
     /// A turn in the factory's model for `key`, saved and sent.
@@ -1024,18 +1050,64 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
 
         #expect(try await row().localLibraryItemID == nil)
     }
+
+    /// A download completing between a save's lookup and its write, in the download manager's
+    /// order (the item, then the link, which finds no row yet): the saved row is still linked,
+    /// so pruning keeps it. Also for a released model's save.
+    @Test(arguments: [false, true])
+    func aDownloadCompletedDuringASaveIsLinked(viaRelease: Bool) async throws {
+        let download = downloadedItem(on: connection, files: [.ebook])
+        let items = DownloadedItems([])
+        let linker = LocalProgressStoreLinker(store: store)
+        items.afterFirstLookup.value = {
+            items.items.value.append(download)
+            try? await linker.link(key: key, itemID: download.id)
+        }
+        try await turnAndSave(makeFactory(items), viaRelease: viaRelease)
+
+        #expect(await linked(download.id))
+        await syncer.drainPendingProgress()
+        #expect(try await store.pruneSynced() == 0)
+        #expect(try await row().localLibraryItemID == download.id)
+    }
+
+    /// A download deleted between a save's lookup and its write, in the download manager's order
+    /// (the item, then the detach, which finds no linked row yet): the saved row isn't left
+    /// linked to it. Also for a released model's save.
+    @Test(arguments: [false, true])
+    func aDownloadDeletedDuringASaveIsUnlinked(viaRelease: Bool) async throws {
+        let download = downloadedItem(on: connection, files: [.ebook])
+        let items = DownloadedItems([download])
+        let linker = LocalProgressStoreLinker(store: store)
+        items.afterFirstLookup.value = {
+            items.items.value = []
+            try? await linker.detach(itemID: download.id)
+        }
+        try await turnAndSave(makeFactory(items), viaRelease: viaRelease)
+
+        #expect(await linked(nil))
+        #expect(try await store.progress(localLibraryItemID: download.id).isEmpty)
+    }
 }
 
 /// Downloaded items by connection and library item, as `LocalItemStore` finds them.
-private struct DownloadedItems: LocalItemReading {
-    let items: [LocalLibraryItemDTO]
+/// `afterFirstLookup` runs once, after the first lookup has read its answer and before it returns.
+final class DownloadedItems: LocalItemReading {
+    let items: Locked<[LocalLibraryItemDTO]>
+    let afterFirstLookup = Locked<(@Sendable () async -> Void)?>(nil)
 
     init(_ items: [LocalLibraryItemDTO]) {
-        self.items = items
+        self.items = Locked(items)
     }
 
     func item(serverConnectionID: UUID, libraryItemId: String) async throws -> LocalLibraryItemDTO? {
-        items.first { $0.serverConnectionID == serverConnectionID && $0.libraryItemId == libraryItemId }
+        let answer = items.value.first {
+            $0.serverConnectionID == serverConnectionID && $0.libraryItemId == libraryItemId
+        }
+        let hook = afterFirstLookup.value
+        afterFirstLookup.value = nil
+        await hook?()
+        return answer
     }
 }
 

@@ -56,16 +56,18 @@ public final class EbookProgressFactory {
         let localItems = localItems
         return EbookProgressModel(
             key: key, kind: kind, store: store, service: sources.service, syncer: sources.syncer,
-            localLibraryItemID: { await Self.downloadedItemID(of: key, in: localItems) },
+            localLibraryItemID: { try await Self.downloadedItemID(of: key, in: localItems) },
             serverProgress: serverProgress)
     }
 
     /// The downloaded item holding `key`'s media on its connection, by the download manager's
-    /// test: a book's audio or ebook file, or an episode's file. `nil` when there is none or the
-    /// store can't be read.
-    nonisolated static func downloadedItemID(of key: MediaKey, in items: (any LocalItemReading)?) async -> UUID? {
+    /// test: a book's audio or ebook file, or an episode's file; `nil` when there is none.
+    /// Throws when the store can't be read.
+    nonisolated static func downloadedItemID(of key: MediaKey, in items: (any LocalItemReading)?) async throws
+        -> UUID?
+    {
         guard
-            let item = try? await items?.item(
+            let item = try await items?.item(
                 serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
         else { return nil }
         let holds =

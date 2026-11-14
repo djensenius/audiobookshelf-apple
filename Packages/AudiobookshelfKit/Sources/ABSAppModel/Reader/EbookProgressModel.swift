@@ -77,23 +77,23 @@ public final class EbookProgressModel {
     @ObservationIgnored private let store: LocalProgressStore
     @ObservationIgnored private let service: any EbookProgressService
     @ObservationIgnored private let syncer: any ProgressDraining
-    @ObservationIgnored private let localLibraryItemID: @Sendable () async -> UUID?
+    @ObservationIgnored private let localLibraryItemID: @Sendable () async throws -> UUID?
     @ObservationIgnored private let debounce: Duration
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let now: @Sendable () -> Date
 
     /// - Parameters:
     ///   - syncer: Sends saved rows: the account's `ProgressSyncer`, which must use `store`.
-    ///   - localLibraryItemID: The downloaded item, if any, linked to the row on save. Read at each
-    ///     save, so a download finished while the book is open is linked, and one deleted meanwhile
-    ///     isn't linked again (`nil` keeps the row's link).
+    ///   - localLibraryItemID: The downloaded item, if any, linked to the row on save; it throws
+    ///     when the downloads can't be read. Read at each save, and again after it to correct the
+    ///     link (``linkDownload(store:key:lookup:)``).
     ///   - serverProgress: Progress already known (for example from `ProgressCache`), used when
     ///     ``resume()`` can't reach the server and there is no row.
     ///   - clock: Times the debounce; tests pass a manual clock.
     ///   - now: Dates local edits, when a page turn is recorded.
     public init(
         key: MediaKey, kind: ReaderKind, store: LocalProgressStore, service: any EbookProgressService,
-        syncer: any ProgressDraining, localLibraryItemID: @escaping @Sendable () async -> UUID? = { nil },
+        syncer: any ProgressDraining, localLibraryItemID: @escaping @Sendable () async throws -> UUID? = { nil },
         serverProgress: MediaProgress? = nil,
         debounce: Duration = defaultDebounce, clock: any Clock<Duration> = ContinuousClock(),
         now: @escaping @Sendable () -> Date = { .now }
@@ -119,7 +119,8 @@ public final class EbookProgressModel {
             do {
                 try await store.recordEbookEdit(
                     pending.edit, for: key, token: pending.token, serverProgress: seed,
-                    localLibraryItemID: await itemID(), now: pending.at)
+                    localLibraryItemID: try? await itemID(), now: pending.at)
+                await Self.linkDownload(store: store, key: key, lookup: itemID)
             } catch {
                 logger.error("Saving ebook progress on close failed: \(Self.caseName(error), privacy: .public)")
             }
@@ -289,7 +290,8 @@ public final class EbookProgressModel {
     /// the turn is kept for the next save, unless a newer one replaced it.
     private func save() async -> Bool {
         guard unsaved != nil else { return true }
-        let itemID = await localLibraryItemID()
+        // `nil` when unreadable keeps the row's link.
+        let itemID = try? await localLibraryItemID()
         // Saves run one at a time, so only a newer turn replaced it meanwhile.
         guard let pending = unsaved else { return true }
         unsaved = nil
@@ -304,6 +306,7 @@ public final class EbookProgressModel {
                 hasUnsyncedChanges = row.ebookDirty
             }
             saveError = nil
+            await Self.linkDownload(store: store, key: key, lookup: localLibraryItemID)
             return true
         } catch {
             if unsaved == nil { unsaved = pending }
@@ -311,6 +314,34 @@ public final class EbookProgressModel {
             lastError = saveError
             logger.error("Saving ebook progress failed: \(Self.caseName(error), privacy: .public)")
             return false
+        }
+    }
+
+    /// Sets the row's link to the downloaded item `lookup` finds now, until the two agree.
+    ///
+    /// A save looks the download up before it writes, so a download completed or deleted between
+    /// the two would be missed: completion links only a row that exists, so a row created after
+    /// it stays unlinked and `pruneSynced()` can delete it; a deletion's detach before the write
+    /// leaves a stale link that keeps the row. Completion adds the item to the downloads before
+    /// it links existing rows, and deletion removes it before it detaches them, each under the
+    /// download manager's per-item hold (`DownloadManager`). So once a read of the row after the
+    /// save is followed by a lookup that agrees with it, any later change to the downloads is
+    /// followed by its own link or detach, which finds the row. Each step is one store
+    /// transaction (`LocalProgressStore.setLocalLibraryItemID(_:for:)`, as the linker uses).
+    /// A lookup or read that fails leaves the link; a few rounds at most.
+    nonisolated static func linkDownload(
+        store: LocalProgressStore, key: MediaKey, lookup: @Sendable () async throws -> UUID?
+    ) async {
+        for _ in 0..<3 {
+            do {
+                guard let row = try await store.progress(for: key) else { return }
+                let itemID = try await lookup()
+                if itemID == row.localLibraryItemID { return }
+                guard try await store.setLocalLibraryItemID(itemID, for: key) else { return }
+            } catch {
+                logger.error("Linking ebook progress to its download failed: \(caseName(error), privacy: .public)")
+                return
+            }
         }
     }
 
@@ -336,7 +367,7 @@ public final class EbookProgressModel {
             lastUpdate: Date(timeIntervalSince1970: Double(lastUpdate) / 1000))
     }
 
-    private static func caseName(_ error: any Error) -> String {
+    private nonisolated static func caseName(_ error: any Error) -> String {
         String(String(describing: error).prefix { $0 != "(" })
     }
 }
