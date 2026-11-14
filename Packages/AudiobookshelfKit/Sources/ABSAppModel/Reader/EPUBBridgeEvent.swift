@@ -39,10 +39,14 @@ public struct EPUBRelocation: Sendable, Hashable, Decodable {
     public var href: String?
     public var atStart: Bool
     public var atEnd: Bool
+    /// Whether epub.js lays the book's pages out from right to left (its
+    /// `page-progression-direction`), whatever the app's language. A page without the field sends
+    /// left to right.
+    public var rightToLeft: Bool
 
     public init(
         startCfi: String, endCfi: String, progress: Double, href: String? = nil, atStart: Bool = false,
-        atEnd: Bool = false
+        atEnd: Bool = false, rightToLeft: Bool = false
     ) {
         self.startCfi = startCfi
         self.endCfi = endCfi
@@ -50,10 +54,11 @@ public struct EPUBRelocation: Sendable, Hashable, Decodable {
         self.href = href
         self.atStart = atStart
         self.atEnd = atEnd
+        self.rightToLeft = rightToLeft
     }
 
     private enum CodingKeys: String, CodingKey {
-        case startCfi, endCfi, progress, href, atStart, atEnd
+        case startCfi, endCfi, progress, href, atStart, atEnd, rightToLeft
     }
 
     public init(from decoder: any Decoder) throws {
@@ -64,7 +69,8 @@ public struct EPUBRelocation: Sendable, Hashable, Decodable {
             progress: try container.decode(Double.self, forKey: .progress),
             href: try container.decodeIfPresent(String.self, forKey: .href),
             atStart: try container.decode(Bool.self, forKey: .atStart),
-            atEnd: try container.decode(Bool.self, forKey: .atEnd))
+            atEnd: try container.decode(Bool.self, forKey: .atEnd),
+            rightToLeft: try container.decodeIfPresent(Bool.self, forKey: .rightToLeft) ?? false)
     }
 }
 
@@ -106,7 +112,8 @@ public enum EPUBBridgeEvent: Sendable, Equatable {
     public static let maxMessageBytes = 4 << 20
 
     /// Decodes one message. Unknown types decode to ``unknown(_:)``. Optional fields (`href`,
-    /// `phase`, a TOC entry's `subitems`) may be missing, and extra fields are ignored.
+    /// `rightToLeft`, `phase`, a TOC entry's `subitems`) may be missing, and extra fields are
+    /// ignored.
     ///
     /// - Parameter skipping: Types the caller ignores; they decode to ``unknown(_:)`` without their
     ///   body (for example a book's whole table of contents) being decoded.

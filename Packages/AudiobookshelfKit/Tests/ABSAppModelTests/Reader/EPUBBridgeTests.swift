@@ -63,6 +63,18 @@ import Testing
         #expect(try decode(json) == .relocated(EPUBRelocation(startCfi: "a", endCfi: "b", progress: 0, atStart: true)))
     }
 
+    /// The book's page direction; a page that leaves it out (an older reader script) reads left to
+    /// right.
+    @Test(arguments: [(true as Bool?, true), (false, false), (nil, false)])
+    func relocatedCarriesThePageDirection(sent: Bool?, expected: Bool) throws {
+        let json = sent.map { Self.relocated(["rightToLeft": $0]) } ?? Self.relocated()
+        guard case .relocated(let relocation) = try decode(json) else {
+            Issue.record("not relocated")
+            return
+        }
+        #expect(relocation.rightToLeft == expected)
+    }
+
     @Test(arguments: [(-0.5, 0.0), (1.7, 1.0), (1, 1), (0.5, 0.5)])
     func progressIsClamped(sent: Double, expected: Double) throws {
         let json = Self.relocated(["progress": sent])
@@ -215,5 +227,26 @@ import Testing
 
     @Test func settingsThatEncodeToANonObjectThrow() {
         #expect(throws: EPUBBridgeCommandError.settingsNotAnObject) { try EPUBSettingsJSON(encoding: ["a", "b"]) }
+    }
+
+    // MARK: Page turns
+
+    /// Arrow keys follow the book: in a right-to-left book the left arrow goes forward.
+    @Test func arrowKeysFollowTheBooksDirection() {
+        #expect(EPUBBridgeCommand.pageTurn(toward: .right, rightToLeft: false) == .next)
+        #expect(EPUBBridgeCommand.pageTurn(toward: .left, rightToLeft: false) == .prev)
+        #expect(EPUBBridgeCommand.pageTurn(toward: .left, rightToLeft: true) == .next)
+        #expect(EPUBBridgeCommand.pageTurn(toward: .right, rightToLeft: true) == .prev)
+    }
+
+    /// A tap near the left or right edge turns toward it in the book's direction; one in the middle
+    /// doesn't turn (it toggles the chrome).
+    @Test(arguments: [
+        (0.0, false, EPUBBridgeCommand.prev as EPUBBridgeCommand?), (0.1, false, .prev), (0.9, false, .next),
+        (1.0, false, .next), (0.1, true, .next), (0.9, true, .prev), (0.25, false, nil), (0.5, true, nil),
+        (0.75, true, nil),
+    ])
+    func tapsAtTheSidesTurnInTheBooksDirection(x: Double, rightToLeft: Bool, expected: EPUBBridgeCommand?) {
+        #expect(EPUBBridgeCommand.pageTurn(forTapAt: x, rightToLeft: rightToLeft) == expected)
     }
 }

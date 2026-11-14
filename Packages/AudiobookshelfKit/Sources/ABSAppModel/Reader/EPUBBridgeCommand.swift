@@ -74,3 +74,26 @@ public enum EPUBBridgeCommand: Sendable, Hashable {
         }
     }
 }
+
+extension EPUBBridgeCommand {
+    /// The tap zone at each side of the page, as a fraction of the viewport's width: a tap nearer
+    /// the edge turns the page, one between them shows or hides the chrome.
+    public static let pageTurnZone = 0.25
+
+    /// The page turn for the arrow key pointing at `edge`: toward the next page on the book's
+    /// reading side. epub.js lays a right-to-left book's pages (`page-progression-direction="rtl"`)
+    /// from right to left, so there the left arrow goes forward. It's the book's direction, not the
+    /// app's language, as in the comic reader (``ComicReaderLayout/step(for:rightToLeft:)``).
+    public static func pageTurn(toward edge: ComicReaderLayout.Arrow, rightToLeft: Bool) -> EPUBBridgeCommand {
+        ComicReaderLayout.step(for: edge, rightToLeft: rightToLeft) > 0 ? .next : .prev
+    }
+
+    /// The page turn for a tap `x` of the way across the viewport (from its left edge, 0...1), or
+    /// `nil` for a tap in the middle, which shows or hides the chrome. The edges follow the book's
+    /// direction, as ``pageTurn(toward:rightToLeft:)``.
+    public static func pageTurn(forTapAt x: Double, rightToLeft: Bool) -> EPUBBridgeCommand? {
+        if x < pageTurnZone { return pageTurn(toward: .left, rightToLeft: rightToLeft) }
+        if x > 1 - pageTurnZone { return pageTurn(toward: .right, rightToLeft: rightToLeft) }
+        return nil
+    }
+}

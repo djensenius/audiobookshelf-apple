@@ -53,7 +53,7 @@ struct AccountView: View {
                     Button(role: .destructive) {
                         signOutOrigin = lifecycle.readySession
                     } label: {
-                        label("ButtonLogout", systemImage: "rectangle.portrait.and.arrow.right")
+                        label("ButtonLogout", systemImage: "rectangle.portrait.and.arrow.forward")
                     }
                     .disabled(isSigningOut || !lifecycle.acceptsAccountChanges)
                 }
