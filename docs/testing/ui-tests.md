@@ -58,11 +58,19 @@ Type the fixture address on the connect screen and sign in with any username and
 
 The replies are the `fixture-*` files in `Audiobookshelf/Fixtures/Resources/`: status, ping,
 login and authorize, `/api/me`, the libraries, the library with its filter data, the
-personalized shelves, one page of items, one page of series (*Barsoom*, with its three books;
-series detail isn't served, so opening a series fails), the expanded *Pride and Prejudice*
+personalized shelves, one page of items, one page of series (*Barsoom*, with its three books),
+*Barsoom*'s detail (`GET /api/series/ser_barsoom`, `fixture-series-ser_barsoom.json`) and its books
+(`fixture-items-series-ser_barsoom.json`), the expanded *Pride and Prejudice*
 (`fixture-item-li_pride.json`, with one audio file and track) and a cover for every item. A request without a fixture is
 a 404, logged to the `api` category as `Fixture server: no fixture for <method> <path>`, so a
 missing fixture shows up in Console or the test's log.
+
+Routes match on the path, except the items list: with a series filter
+(`filter=series.<id>`, the ID Base64-encoded and percent-encoded as `LibraryFilter.encode` sends it)
+it answers with `fixture-items-series-<id>.json`, the series' books in sequence order with the
+`series` context a real server adds, and any other query gets the whole page. So opening *Barsoom*
+from the Series grid or Home's *Recent Series* shelf shows *A Princess of Mars*, *The Gods of Mars*
+and *The Warlord of Mars*; any other series, or a filter that doesn't decode, is a 404.
 
 ### Fixture covers
 
@@ -106,7 +114,7 @@ If its length changes, change the session's `duration`, track and chapters to ma
 
 The metadata is public-domain LibriVox material, matching `SampleLibrary` (library
 `lib_sample`, the same item IDs and titles); narrators are "LibriVox Volunteers". To add an
-endpoint, add a route in `FixtureServer.resource(method:path:)` and a `fixture-*` file; the file
+endpoint, add a route in `FixtureServer.resource(method:path:query:bundle:)` and a `fixture-*` file; the file
 names must be unique, because the synchronized folder copies resources flat into the app.
 
 Release builds compile `FixtureServer` out (`#if DEBUG`) and leave the files out, the audio

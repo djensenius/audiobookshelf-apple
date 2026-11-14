@@ -67,6 +67,35 @@ struct FixtureServerTests {
         #expect(summary.covers.count == books.count)
     }
 
+    /// *Barsoom*'s screen, loaded as `SeriesDetailModel.load()` does: the series, then its books from the items
+    /// list with the series filter, in series order. Another series has neither.
+    @Test(arguments: [false, true])
+    func servesTheSampleSeriesDetail(collapseSeries: Bool) async throws {
+        let response = try await client.seriesDetail(id: "ser_barsoom")
+        #expect(response.series.name == "Barsoom")
+        #expect(response.series.libraryId == SampleLibrary.libraryID)
+        let books = [SampleLibrary.princessOfMars, SampleLibrary.godsOfMars, SampleLibrary.warlordOfMars]
+        #expect(response.progress?.libraryItemIds == books.map(\.id))
+        let model = SeriesDetailModel(
+            seriesID: "ser_barsoom", libraryID: SampleLibrary.libraryID, collapseSeries: collapseSeries,
+            service: client, cache: ProgressCache())
+        let page = try await client.filteredBooksPage(libraryID: SampleLibrary.libraryID, query: model.booksQuery)
+        #expect(page.results.map(\.id) == books.map(\.id))
+        #expect(page.results.map(\.book?.metadata.title) == books.map(\.book?.metadata.title))
+        #expect(page.rawCount == page.results.count)
+
+        await model.load()
+        #expect(model.phase == .loaded)
+        #expect(model.detail?.books.map(\.id) == books.map(\.id))
+        #expect(model.detail?.books.map(\.sequence) == ["1", "2", "3"])
+
+        await #expect(throws: APIError.notFound) { try await client.seriesDetail(id: "ser_unknown") }
+        let unknown = LibraryQuery(filter: .series(id: "ser_unknown"))
+        await #expect(throws: APIError.notFound) {
+            try await client.filteredBooksPage(libraryID: SampleLibrary.libraryID, query: unknown)
+        }
+    }
+
     @Test func servesAnItemAndItsCover() async throws {
         let item = try await client.send(ItemEndpoints.item(id: SampleLibrary.prideAndPrejudice.id))
         #expect(item.book?.metadata.title == "Pride and Prejudice")
