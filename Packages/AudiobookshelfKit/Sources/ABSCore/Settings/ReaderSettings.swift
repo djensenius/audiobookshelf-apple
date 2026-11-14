@@ -61,12 +61,15 @@ public struct ReaderSettings: Sendable, Hashable, Codable {
     public var lineSpacing: Int { didSet { lineSpacing = Self.lineSpacingScale.clamp(lineSpacing) } }
     public var textStroke: Int { didSet { textStroke = Self.textStrokeScale.clamp(textStroke) } }
     public var spread: Spread
+    /// Keeps the screen from sleeping while a reader is shown (legacy `keepScreenAwake`).
+    public var keepScreenAwake: Bool
 
     public init(
         theme: Theme = .matchSystem, fontFamily: FontFamily = .serif,
         fontScale: Int = ReaderSettings.fontScaleScale.defaultValue,
         lineSpacing: Int = ReaderSettings.lineSpacingScale.defaultValue,
-        textStroke: Int = ReaderSettings.textStrokeScale.defaultValue, spread: Spread = .auto
+        textStroke: Int = ReaderSettings.textStrokeScale.defaultValue, spread: Spread = .auto,
+        keepScreenAwake: Bool = false
     ) {
         self.theme = theme
         self.fontFamily = fontFamily
@@ -74,10 +77,11 @@ public struct ReaderSettings: Sendable, Hashable, Codable {
         self.lineSpacing = Self.lineSpacingScale.clamp(lineSpacing)
         self.textStroke = Self.textStrokeScale.clamp(textStroke)
         self.spread = spread
+        self.keepScreenAwake = keepScreenAwake
     }
 
     private enum CodingKeys: String, CodingKey {
-        case theme, fontFamily, fontScale, lineSpacing, textStroke, spread
+        case theme, fontFamily, fontScale, lineSpacing, textStroke, spread, keepScreenAwake
     }
 
     public init(from decoder: any Decoder) throws {
@@ -90,6 +94,7 @@ public struct ReaderSettings: Sendable, Hashable, Codable {
             theme: value(.theme) ?? defaults.theme, fontFamily: value(.fontFamily) ?? defaults.fontFamily,
             fontScale: value(.fontScale) ?? defaults.fontScale,
             lineSpacing: value(.lineSpacing) ?? defaults.lineSpacing,
-            textStroke: value(.textStroke) ?? defaults.textStroke, spread: value(.spread) ?? defaults.spread)
+            textStroke: value(.textStroke) ?? defaults.textStroke, spread: value(.spread) ?? defaults.spread,
+            keepScreenAwake: value(.keepScreenAwake) ?? defaults.keepScreenAwake)
     }
 }

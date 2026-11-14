@@ -4,8 +4,8 @@ import ABSUI
 import SwiftUI
 
 /// The reader settings (legacy `Reader.vue`'s settings sheet), saved in `AppSettings` for every
-/// book. Theme and layout apply to every reader; the text settings only to EPUB (PDF and comic
-/// themes change only the page and chrome, ADR 0008).
+/// book. Theme, layout and keeping the screen awake apply to every reader; the text settings only
+/// to EPUB (PDF and comic themes change only the page and chrome, ADR 0008).
 struct ReaderSettingsMenu: View {
     let kind: ReaderKind
     @Environment(AppSettings.self) private var settings: AppSettings?
@@ -26,6 +26,9 @@ struct ReaderSettingsMenu: View {
                     stepper(
                         .textStroke, value: $settings.readerSettings.textStroke,
                         scale: ReaderSettings.textStrokeScale)
+                }
+                Toggle(isOn: $settings.readerSettings.keepScreenAwake) {
+                    Text(verbatim: L10n.string(ReaderSettingsLabel.keepScreenAwake.titleKey))
                 }
             }
         } label: {

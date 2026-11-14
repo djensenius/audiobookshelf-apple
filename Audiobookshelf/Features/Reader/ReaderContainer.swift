@@ -126,6 +126,7 @@ struct ReaderContainer: View {
                 Task { await model.flush() }
             }
         }
+        .modifier(ReaderKeepsScreenAwake())
     }
 
     private func makeModel() -> ReaderContainerModel? {

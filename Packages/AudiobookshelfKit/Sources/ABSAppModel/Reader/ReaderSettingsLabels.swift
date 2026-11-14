@@ -41,6 +41,7 @@ public enum ReaderSettingsLabel: String, CaseIterable, Sendable {
     case lineSpacing = "LabelLineSpacing"
     case textStroke = "LabelFontBoldness"
     case spread = "LabelLayout"
+    case keepScreenAwake = "LabelKeepScreenAwake"
 
     public var titleKey: String { rawValue }
 }
