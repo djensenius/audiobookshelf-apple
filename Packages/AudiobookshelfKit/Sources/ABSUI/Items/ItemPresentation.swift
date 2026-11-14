@@ -195,14 +195,16 @@ extension View {
     }
 }
 
-/// A downloaded item's mark (legacy `LazyBookCard.vue`'s `download_done` icon): a down arrow in a
-/// green circle, so its shape, not only its colour, says it. Sized by the surrounding font, so it
-/// scales with Dynamic Type. The cell speaks the state in its accessibility value.
+/// A downloaded item's mark (legacy `LazyBookCard.vue`'s `download_done` icon): a black down arrow
+/// in a green (``ABSColor/success``) circle, so its shape, not only its colour, says it. Black on
+/// that green is 7.56:1, above the 3:1 non-text minimum; white would be only 2.78:1. Sized by the
+/// surrounding font, so it scales with Dynamic Type. The cell speaks the state in its
+/// accessibility value.
 struct DownloadedIndicator: View {
     var body: some View {
         Image(systemName: "arrow.down.circle.fill")
             .symbolRenderingMode(.palette)
-            .foregroundStyle(.white, ABSColor.success)
+            .foregroundStyle(.black, ABSColor.success)
             .accessibilityHidden(true)
     }
 }

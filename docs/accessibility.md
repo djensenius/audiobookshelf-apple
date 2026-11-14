@@ -37,7 +37,8 @@ it for free; app-side views follow the same rules.
   The cover fade-in is a short cross-fade, which Reduce Motion allows.
 - **Differentiate Without Color.** When colour is the only cue, add a shape. A finished
   card adds a check next to its title (`ItemPresentation.showsFinishedCheck`). The downloaded
-  mark is a down-arrow symbol, not a colour.
+  mark is a down-arrow symbol, not a colour: a black arrow on the green success circle
+  (7.56:1, above the 3:1 non-text minimum).
 - **Strings.** New labels, values and hints go through `Localization/native/en-us.json` and
   `mise run strings` ([localization](localization.md)). Never build a spoken string by hand
   from numbers; use `DurationStyle.accessibilityString` and the percent format.
