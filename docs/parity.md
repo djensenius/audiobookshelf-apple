@@ -37,7 +37,7 @@ Now Playing runtime check on devices is still open under #44.
 | Legacy | Native | Tracking | Status | Notes |
 | --- | --- | --- | --- | --- |
 | Personalised shelves, continue listening | `HomeView`, `HomeShelvesView` | #62, PRs #295, #313 | Done | |
-| Local (downloaded) shelves | `DownloadedShelfModel` (ABSAppModel), `HomeView` | #76, PRs #455, #546 | In progress (#76) | Home shows the downloaded shelves; #76 is still open. |
+| Local (downloaded) shelves | `DownloadedShelfModel` (ABSAppModel), `HomeView` | #76, PRs #455, #509, #546, #549, #588, #595 | Done | Home shows the downloaded shelves and the disconnected state. Manual checks are in #210. |
 | Disconnected messaging | `ConnectionBannerModel`, `ServerActionAvailability` (ABSAppModel), `ConnectionBannerHost`, `ConnectionIndicatorToolbar` | #76, PRs #455, #509, #588, #595 | In progress (#76) | The banner, the toolbar indicator (#595, part of #59) and offline gating of server-only menu actions are in the app; #76 is still open. |
 | `BookshelfNavBar`, `BookshelfToolbar` | `MainTabView`, `LibraryPickerHeader`, `LibraryToolbar` | #44 | In progress (#44) | #183 and #184 are closed; the shell issue stays open for its manual checks. |
 
