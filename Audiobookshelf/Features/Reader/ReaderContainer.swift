@@ -209,8 +209,8 @@ struct ReaderContent: View {
             ErrorStateView(title: L10n.string("MessageReaderLoadFailed"), systemImage: "book") {
                 Task { await model.load() }
             }
-        case .unsupported:
-            ReaderUnsupportedView(model: model, serverURL: serverURL)
+        case .unsupported(let file):
+            ReaderUnsupportedView(model: model, file: file, serverURL: serverURL)
         case .pdf(let url):
             PDFReaderHost(model: model, url: url, isSpread: layout.isTwoUp, theme: theme)
         case .epub(let url):
@@ -312,10 +312,11 @@ private struct ReaderCloseButton: View {
     }
 }
 
-/// A format the app doesn't open: CBR, MOBI and AZW3 in v1 (ADR 0008 §4 and §5). The web client
-/// reads it.
+/// A format the app doesn't open: CBR, MOBI and AZW3 in v1 (ADR 0008 §4 and §5). "Open In…" hands
+/// the file to another app, fetching it first unless it's downloaded, and the web client reads it.
 private struct ReaderUnsupportedView: View {
     let model: ReaderContainerModel
+    let file: ReaderContainerModel.UnsupportedFile
     let serverURL: URL?
 
     var body: some View {
@@ -325,7 +326,25 @@ private struct ReaderUnsupportedView: View {
             } icon: {
                 Image(systemName: "book.closed").accessibilityHidden(true)
             }
+        } description: {
+            if file == .failed {
+                Text(verbatim: L10n.string("MessageReaderLoadFailed"))
+            }
         } actions: {
+            switch file {
+            case .ready(let url):
+                ShareLink(item: url) {
+                    Text(verbatim: L10n.string("ButtonOpenIn"))
+                }
+            case .loading:
+                ProgressView().accessibilityLabel(Text(verbatim: L10n.string("MessageLoading")))
+            case .notLoaded, .failed:
+                Button {
+                    Task { await model.loadUnsupportedFile() }
+                } label: {
+                    Text(verbatim: L10n.string("ButtonOpenIn"))
+                }
+            }
             if let serverURL {
                 Link(destination: ItemDetailModel.webURL(serverURL: serverURL, itemID: model.request.itemID)) {
                     Text(verbatim: L10n.string("ButtonReadInBrowser"))
