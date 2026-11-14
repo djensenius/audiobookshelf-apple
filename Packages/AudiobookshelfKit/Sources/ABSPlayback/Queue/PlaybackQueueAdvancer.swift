@@ -48,9 +48,12 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     /// The current item's baseline can still be taken: from its load until a listing gives it,
     /// a near-end refresh (whose listing may hold this play's own finish) or its end.
     private var takesBaseline = false
-    /// The current item's baseline can still be read from ``serverFinishedAt``: from its load, or
-    /// attaching to it, before its last chapter and seconds, until a read, a near-end refresh or
-    /// its end; a read returning after these is dropped (#587).
+    /// The current item's baseline can still be read from ``serverFinishedAt`` (#587). Only while
+    /// its position has stayed outside every near-end trigger since its load (or attaching to it),
+    /// and it hasn't ended or been finished meanwhile: in a trigger its progress syncs within
+    /// seconds of the end, where the server finishes it, so the store may hold this play's own
+    /// finish. Closed by ``closeCachedBaselineIfNearEnd(at:)`` on every event and again when a read
+    /// returns, which is dropped once closed; only a load or attaching opens it.
     private var takesCachedBaseline = false
     private let serverFinishedAt: (@Sendable (MediaKey) async -> Date?)?
     /// When the last preparation finished, with or without a next item.
@@ -100,9 +103,8 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         queue.onItemsChange = { [weak self] in self?.queueDidChange() }
         if coordinator.phase == .loaded, let key = coordinator.mediaKey {
             current = key
-            // Inside the last chapter or seconds, or at the end, this play's own finish may have
-            // synced already (#587).
-            takesCachedBaseline = nearEndTriggers(at: coordinator.currentTime).isEmpty
+            takesCachedBaseline = true
+            closeCachedBaselineIfNearEnd(at: coordinator.currentTime)
             recompute(refetchListing: true)
         }
     }
@@ -138,6 +140,8 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         guard key.serverConnectionID == queue.serverConnectionID else { return }
         // Also while it is still loaded: the server may report the finish before the advance.
         if kind == .finished, endedEpisodes.contains(key) { confirmedEndings.insert(key) }
+        // A finish during this play isn't one from before it (#587).
+        if kind == .finished, key == current { takesCachedBaseline = false }
         guard key != current else { return }
         // Even with nothing loaded: playing again later must not skip it.
         if kind == .reset, confirmedEndings.remove(key) != nil {
@@ -198,6 +202,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     // MARK: Following playback
 
     private func handle(_ event: PlaybackCoordinatorEvent) {
+        defer { closeCachedBaselineIfNearEnd(after: event) }
         switch event {
         case .itemChanged(let key):
             let advancing = candidate?.isQueued == true && key == candidate?.key ? key : nil
@@ -219,9 +224,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
             rearmOnStart = false
             // Loading inside a trigger prepares anyway.
             refreshed = nearEndTriggers(at: coordinator?.currentTime ?? 0)
-            // No tick clears the cached read there, and this play's own finish may sync before it
-            // returns, as on attach (#587).
-            takesCachedBaseline = refreshed.isEmpty
+            takesCachedBaseline = true
             recompute(refetchListing: true)
         case .playbackStarted:
             guard rearmOnStart else { return }
@@ -246,6 +249,28 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         case .failed, .sessionWillClose:
             break
         }
+    }
+
+    /// Closes the cached-baseline read once `event` leaves the current item in a near-end
+    /// trigger: at the time it carries (a load's, which may be its seek's target, a tick's, a
+    /// pause's, a seek's or a closing session's last position) or the coordinator's position
+    /// after it (#587). Every event passes here, so a new one is covered too.
+    private func closeCachedBaselineIfNearEnd(after event: PlaybackCoordinatorEvent) {
+        switch event {
+        case .loaded(let time), .paused(let time), .didSeek(let time), .tick(let time):
+            closeCachedBaselineIfNearEnd(at: time)
+        case .sessionWillClose(let closing) where closing.key == current:
+            closeCachedBaselineIfNearEnd(at: closing.currentTime)
+        default:
+            break
+        }
+        closeCachedBaselineIfNearEnd(at: coordinator?.currentTime)
+    }
+
+    /// Closes the cached-baseline read when `time` is in a near-end trigger, or unknown.
+    private func closeCachedBaselineIfNearEnd(at time: Double?) {
+        if let time, nearEndTriggers(at: time).isEmpty { return }
+        takesCachedBaseline = false
     }
 
     private func refreshIfNearEnd(at time: Double) {
@@ -341,7 +366,9 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
             let finishedAt = await serverFinishedAt(key)
             // A superseded read leaves it to the preparation that superseded it.
             guard self.revision == revision, !Task.isCancelled else { return nil }
-            // One that returns after the end (or a reset) may hold this play's own finish.
+            // One that returns after the end, a reset or a near-end position may hold this play's
+            // own finish.
+            closeCachedBaselineIfNearEnd(at: coordinator?.currentTime)
             if takesCachedBaseline, key == current {
                 takesCachedBaseline = false
                 if let finishedAt { finishBaselines[key] = max(finishBaselines[key] ?? finishedAt, finishedAt) }

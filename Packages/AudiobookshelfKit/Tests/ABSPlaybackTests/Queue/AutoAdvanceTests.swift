@@ -382,6 +382,64 @@ struct AutoAdvanceTests {
         #expect(await resetAndFinishNext() == e1)
     }
 
+    /// Replays e1, finished on the server, with e2 queued and the cached-finish read held; runs
+    /// `meanwhile`, then lets the read return this play's own synced finish, which the listing
+    /// after the end has too. Then resumes, ends e1 and e2 with e1 reset in between, and returns
+    /// what follows e2 (#587).
+    private func replayWithHeldCachedRead(_ meanwhile: () async -> Void) async -> MediaKey? {
+        let e1 = a.key("P", episode: "e1")
+        let finishedAt = Date()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": finishedAt])
+        a.queue.addToEnd(QueueItem(libraryItemID: "P", episodeID: "e2", title: "e2"))
+        let gate = Gate()
+        a.cachedFinishes.state.withLock { $0.gate = gate }
+        await coordinator.play(itemID: "P", episodeID: "e1")
+        while a.cachedFinishes.reads < 1 { await Task.yield() }
+
+        await meanwhile()
+        a.cachedFinishes.set(e1, finishedAt)
+        gate.open()
+        await a.advancer.waitForPreparation()
+        await coordinator.resume()
+        await a.advancer.waitForPreparation()
+        await a.finish()
+        #expect(coordinator.mediaKey == a.key("P", episode: "e2"))
+        return await resetAndFinishNext()
+    }
+
+    /// Paused, then sought into the last seconds, where the seek's sync can finish it, while the
+    /// read is in flight: what it returns before any tick is no baseline (#587).
+    @Test func pausedSeekIntoTheLastSecondsEndsTheCachedRead() async {
+        let next = await replayWithHeldCachedRead {
+            coordinator.pause()
+            _ = await coordinator.seek(to: 3590)
+        }
+
+        #expect(next == a.key("P", episode: "e1"))
+    }
+
+    /// Sought into the last seconds and back out while the read is in flight: the finish may have
+    /// synced in between, so what it returns is still no baseline (#587).
+    @Test func seekIntoTheLastSecondsAndBackEndsTheCachedRead() async {
+        let next = await replayWithHeldCachedRead {
+            coordinator.pause()
+            _ = await coordinator.seek(to: 3590)
+            _ = await coordinator.seek(to: 100)
+        }
+
+        #expect(next == a.key("P", episode: "e1"))
+    }
+
+    /// Finished on the server while it plays (marked finished, or another device): that finish
+    /// isn't from before this play, so a read returning after it is no baseline (#587).
+    @Test func finishDuringThePlayEndsTheCachedRead() async {
+        let next = await replayWithHeldCachedRead {
+            a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .finished)
+        }
+
+        #expect(next == a.key("P", episode: "e1"))
+    }
+
     /// The server's finish of an episode first seen in a near-end refresh is this play's own
     /// (synced near the end), not a baseline: a listing after the end with it confirms the end, so
     /// a discard or mark-not-finished after it makes the episode eligible again (#554).
