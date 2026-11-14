@@ -65,6 +65,9 @@ public struct LocalItemDetail: Sendable, Equatable {
     public var id: UUID
     public var serverConnectionID: UUID
     public var libraryItemId: String
+    /// The server library the item belongs to, whose settings give its cover's shape; `nil` for
+    /// items downloaded before it was stored.
+    public var libraryId: String?
     public var mediaType: MediaType
     public var title: String
     public var author: String?
@@ -100,6 +103,7 @@ public struct LocalItemDetail: Sendable, Equatable {
         id = item.id
         serverConnectionID = item.serverConnectionID
         libraryItemId = item.libraryItemId
+        libraryId = item.libraryId
         mediaType = item.mediaType
         title = item.title
         author = item.authorName
