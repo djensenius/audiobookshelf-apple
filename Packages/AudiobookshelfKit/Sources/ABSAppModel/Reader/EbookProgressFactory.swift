@@ -22,18 +22,29 @@ public struct EbookProgressSources {
 ///
 /// It serves only its own connection: a key for another (a reader opened for account A while B's
 /// session runs) gets `nil`, so a reader never writes one account's progress under another.
+///
+/// A book downloaded on this connection links its row to the downloaded item on each save, as the
+/// download manager links an existing row when a download completes (#74), so
+/// `LocalProgressStore.pruneSynced()` keeps it for an offline reopen.
 @MainActor
 public final class EbookProgressFactory {
     public let serverConnectionID: UUID
     private let store: LocalProgressStore
     private let sources: EbookProgressSources
+    private let localItems: (any LocalItemReading)?
 
     /// - Parameters:
     ///   - store: The local progress store `sources.syncer` drains.
-    public init(serverConnectionID: UUID, store: LocalProgressStore, sources: EbookProgressSources) {
+    ///   - localItems: The downloaded items (the scopes' `LocalDownloadFiles/items`); `nil` links
+    ///     no row.
+    public init(
+        serverConnectionID: UUID, store: LocalProgressStore, sources: EbookProgressSources,
+        localItems: (any LocalItemReading)? = nil
+    ) {
         self.serverConnectionID = serverConnectionID
         self.store = store
         self.sources = sources
+        self.localItems = localItems
     }
 
     /// The progress model for `key`, read as `kind`, seeded with `serverProgress`; `nil` when
@@ -42,9 +53,30 @@ public final class EbookProgressFactory {
         -> EbookProgressModel?
     {
         guard key.serverConnectionID == serverConnectionID else { return nil }
+        let localItems = localItems
         return EbookProgressModel(
             key: key, kind: kind, store: store, service: sources.service, syncer: sources.syncer,
+            localLibraryItemID: { try await Self.downloadedItemID(of: key, in: localItems) },
             serverProgress: serverProgress)
+    }
+
+    /// The downloaded item holding `key`'s media on its connection, by the download manager's
+    /// test: a book's audio or ebook file, or an episode's file; `nil` when there is none.
+    /// Throws when the store can't be read.
+    nonisolated static func downloadedItemID(of key: MediaKey, in items: (any LocalItemReading)?) async throws
+        -> UUID?
+    {
+        guard
+            let item = try await items?.item(
+                serverConnectionID: key.serverConnectionID, libraryItemId: key.libraryItemId)
+        else { return nil }
+        let holds =
+            if let episodeID = key.episodeId {
+                item.files.contains { $0.episodeId == episodeID }
+            } else {
+                item.files.contains { $0.kind == .audio || $0.kind == .ebook }
+            }
+        return holds ? item.id : nil
     }
 }
 
