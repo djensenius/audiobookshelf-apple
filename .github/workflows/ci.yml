@@ -100,3 +100,58 @@ jobs:
 
       - name: Test app on macOS
         run: mise run test:app
+
+  ui-tests:
+    name: UI tests
+    runs-on: xcode-27
+    # A job of its own, so its cold app builds run beside build-and-test rather than after it.
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      MISE_TASK_RUN_AUTO_INSTALL: "false"
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install tools
+        uses: jdx/mise-action@b44d12e7d0d8ee7461bb893e1b1993500433185b # v5.2.7
+        with:
+          version: 2026.11.4
+          install: false
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      # The runner's instances share one CoreSimulator device set, so the job makes its own iPhone
+      # Duo (simctl picks the newest runtime for it) and deletes it below. Not abs-ci-<run>-*:
+      # build-and-test deletes those, possibly while this job still uses its simulator.
+      - name: Create an iPhone Duo simulator
+        run: |
+          udid="$(xcrun simctl create "abs-ui-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" com.apple.CoreSimulator.SimDeviceType.iPhone-Duo)"
+          echo "IOS_SIMULATOR_ID=$udid" >> "$GITHUB_ENV"
+
+      - name: UI tests on the iPhone Duo simulator
+        env:
+          ABS_UI_PLATFORM: ios
+        run: mise run test:ui
+
+      # XCUITest on macOS needs Automation Mode, which only an administrator on the runner can
+      # enable (docs/testing/ui-tests.md). Until then, warn rather than pass silently.
+      - name: UI tests on macOS
+        if: ${{ !cancelled() }}
+        run: |
+          status="$(automationmodetool)"
+          echo "$status"
+          if grep -q "Automation Mode is disabled" <<< "$status"; then
+            echo "::warning title=macOS UI tests skipped::Automation Mode is disabled on this runner, so the macOS UI tests didn't run. An administrator must run 'sudo automationmodetool enable-automationmode-without-authentication' on it."
+            exit 0
+          fi
+          mise run test:ui
+
+      - name: Delete the iPhone Duo simulator
+        if: always() && env.IOS_SIMULATOR_ID != ''
+        run: |
+          xcrun simctl shutdown "$IOS_SIMULATOR_ID" || true
+          xcrun simctl delete "$IOS_SIMULATOR_ID"

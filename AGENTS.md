@@ -101,7 +101,7 @@ packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 | `mise run test:tools` | Tests for repository tools in `Tools/` (the strings importer), plus `test:release` (the release scripts) |
 | `mise run strings` / `strings:check` | Generate or verify ABSUI's `Localizable.xcstrings` from `strings/*.json` and `Localization/native/`; see [docs/localization.md](docs/localization.md) |
 | `mise run test:ios` | App tests on an iPhone Duo simulator (override with `IOS_SIMULATOR_ID`; local only, not in CI) |
-| `mise run test:ui` | UI tests against the fixture server on macOS (`ABS_UI_PLATFORM=ios` for the simulator; local only, not in CI); see [docs/testing/ui-tests.md](docs/testing/ui-tests.md) |
+| `mise run test:ui` | UI tests against the fixture server on macOS (`ABS_UI_PLATFORM=ios` for the simulator; CI runs iOS, and macOS once the runner has Automation Mode); see [docs/testing/ui-tests.md](docs/testing/ui-tests.md) |
 | `mise run xcproj:check` / `xcproj:format` | Check or rewrite `project.xcproj` in canonical form |
 | `mise run release:version <x.y.z>` | Set `MARKETING_VERSION` for every target, then `xcproj:check` ([docs/release.md](docs/release.md#versioning)) |
 

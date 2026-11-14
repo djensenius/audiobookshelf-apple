@@ -37,6 +37,9 @@ struct LibraryView: View {
                     messages: LibraryPresentation.messages(for: mediaType))
             }
         }
+        // For UI tests.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("library.screen")
         .navigationTitle(Text(verbatim: L10n.string(AppTab.library.titleKey)))
         .onGeometryChange(for: CGFloat.self) {
             $0.size.width

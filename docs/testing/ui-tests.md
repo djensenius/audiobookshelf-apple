@@ -12,12 +12,22 @@ ABS_UI_PLATFORM=ios mise run test:ui               # the iPhone Duo simulator (I
 mise run test:ui -- -only-testing:AudiobookshelfUITests/FixtureSmokeTests -jobs 2
 ```
 
-`test:app` and `test:ios` skip `AudiobookshelfUITests`; `test:ui` runs only it. CI doesn't run
-UI tests yet (#46).
+`test:app` and `test:ios` skip `AudiobookshelfUITests`; `test:ui` runs only it.
 
 On macOS, XCUITest needs Automation Mode. If a run stops with an authentication prompt or
 "Automation Mode is disabled", check it with `automationmodetool` and enable it once with
 `sudo automationmodetool enable-automationmode-without-authentication`.
+
+## In CI
+
+The CI workflow's *UI tests* job runs beside *Lint, build, and test*, so its cold builds don't
+lengthen that job. It creates its own iPhone Duo simulator (`abs-ui-<run>-<attempt>`), runs
+`ABS_UI_PLATFORM=ios mise run test:ui` on it with `IOS_SIMULATOR_ID`, and always deletes it.
+
+It then runs `mise run test:ui` on macOS only if `automationmodetool` reports Automation Mode
+enabled on the runner. Otherwise the step passes with a *macOS UI tests skipped* warning
+annotation on the run: an administrator must enable Automation Mode on the runner (the command
+above) before CI covers macOS.
 
 ## The fixture server
 
@@ -82,5 +92,11 @@ language. The connect flow has `connect.address`, `connect.submit`, `connect.use
 `connect.password` and `connect.signIn`; Home is `home.screen`. Add an identifier where a test
 needs one; don't change visible strings for a test.
 
-Not covered yet (#46): a CI job, HLS and podcast playback fixtures, screenshots (#109) and
-accessibility audits (#106).
+`FixtureSmokeTests` signs in (`testConnectsAndSignsIn`), then opens the Library tab
+(`tab.library`; every tab is `tab.<AppTab raw value>`), checks `library.screen`, opens
+*Pride and Prejudice*'s card (`item.li_pride`; library cards and rows are `item.<item ID>`) and
+checks the item screen, `item.detail`, and its loaded title, `item.title`
+(`testOpensLibraryItem`). Each test launches the app afresh, so a failure names the step.
+
+Not covered yet (#46): HLS and podcast playback fixtures, screenshots (#109) and accessibility
+audits (#106).

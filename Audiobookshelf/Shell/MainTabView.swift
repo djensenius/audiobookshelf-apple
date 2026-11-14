@@ -91,6 +91,7 @@ struct MainTabView<Root: View>: View {
             } icon: {
                 Image(systemName: tab.systemImage)
             }
+            .accessibilityIdentifier("tab.\(tab.rawValue)")
         }
     }
 }
