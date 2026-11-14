@@ -113,6 +113,7 @@
             case ("GET", library): return ("fixture-library", "json")
             case ("GET", library + "/personalized"): return ("fixture-personalized", "json")
             case ("GET", library + "/items"): return ("fixture-items", "json")
+            case ("GET", library + "/series"): return ("fixture-series", "json")
             case ("GET", _) where parts.count == 4 && parts[0...1] == ["api", "items"] && parts[3] == "cover":
                 let own = "fixture-cover-\(parts[2])"
                 return (bundle.url(forResource: own, withExtension: "png") == nil ? "fixture-cover" : own, "png")

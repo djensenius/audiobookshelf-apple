@@ -51,6 +51,22 @@ struct FixtureServerTests {
         #expect(items.rawCount == items.results.count)
     }
 
+    /// The Series screen's first page, queried as `ItemListModel.series` does.
+    @Test func servesTheSampleSeries() async throws {
+        let query = LibraryQuery(sort: "name", descending: false, page: 0, limit: 20)
+        let page = try await client.seriesPage(libraryID: SampleLibrary.libraryID, query: query)
+        #expect(page.results.map(\.id) == ["ser_barsoom"])
+        #expect(page.rawCount == page.results.count)
+        #expect(page.total == 1)
+        let barsoom = try #require(page.results.first)
+        let books = [SampleLibrary.princessOfMars, SampleLibrary.godsOfMars, SampleLibrary.warlordOfMars]
+        #expect(barsoom.books?.map(\.id) == books.map(\.id))
+        #expect(barsoom.books?.map(\.book?.metadata.title) == books.map(\.book?.metadata.title))
+        let summary = SeriesSummary(series: barsoom)
+        #expect(summary.name == "Barsoom")
+        #expect(summary.covers.count == books.count)
+    }
+
     @Test func servesAnItemAndItsCover() async throws {
         let item = try await client.send(ItemEndpoints.item(id: SampleLibrary.prideAndPrejudice.id))
         #expect(item.book?.metadata.title == "Pride and Prejudice")
