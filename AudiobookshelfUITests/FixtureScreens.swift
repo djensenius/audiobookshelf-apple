@@ -75,7 +75,11 @@ extension XCTestCase {
             let title = element.descendants(matching: .any)["item.title"]
             XCTAssertTrue(title.waitForExistence(timeout: Self.fixtureTimeout), "The item didn't load")
         case .player:
-            guard !element.exists else { break }
+            // Already open: just make sure it's paused (pausing is idempotent).
+            guard !element.exists else {
+                pause(in: app)
+                break
+            }
             let play = app.buttons["item.play"].firstMatch
             if !(play.exists && play.isHittable) { open(.item, in: app) }
             XCTAssertTrue(play.waitForEnabled(timeout: Self.fixtureTimeout), "The item's Play button isn't enabled")
