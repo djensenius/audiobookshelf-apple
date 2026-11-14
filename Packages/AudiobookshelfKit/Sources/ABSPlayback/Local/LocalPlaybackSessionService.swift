@@ -100,6 +100,15 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
         self.now = now
     }
 
+    /// Whether the book or episode `episodeID` has a completed download on this connection
+    /// (``LocalPlaybackSessionBuilder/hasDownload(of:episodeID:)``), whether or not its files are
+    /// all there; `false` when the store can't be read.
+    public func hasDownload(itemID: String, episodeID: String?) async -> Bool {
+        guard let item = try? await items.item(serverConnectionID: serverConnectionID, libraryItemId: itemID)
+        else { return false }
+        return LocalPlaybackSessionBuilder.hasDownload(of: item, episodeID: episodeID)
+    }
+
     /// The downloaded item when every file the book or episode `episodeID` plays exists; `nil` when
     /// the media has no download (``LocalPlaybackSessionBuilder/hasDownload(of:episodeID:)``).
     ///

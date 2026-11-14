@@ -16,6 +16,8 @@ private struct LocalScope {
     let host: String
     let writer: LocalProgressStore
     let files = LocalFiles()
+    let policy = StubStreamingPolicy()
+    let engine = CoordinatorTestEngine()
     let scope: PlaybackScope
 
     init(downloaded: Bool = true) throws {
@@ -29,7 +31,7 @@ private struct LocalScope {
         var configuration = PlaybackScope.Configuration(
             connectionID: connectionID, client: client, features: ServerFeatures(version: ServerVersion(2, 37, 2)),
             deviceIdentifiers: LocalTestDevice(), writer: writer, settings: StubPlaybackSettings(),
-            policy: StubStreamingPolicy(), engine: CoordinatorTestEngine(), tickInterval: 0.5,
+            policy: policy, engine: engine, tickInterval: 0.5,
             lastPlayed: { _ in InMemoryLastPlayedStore() }, queueStore: AdvanceQueueStore())
         let files = files
         configuration.downloads = LocalDownloadFiles(
@@ -38,6 +40,16 @@ private struct LocalScope {
     }
 
     var key: MediaKey { MediaKey(serverConnectionID: connectionID, libraryItemId: "book") }
+
+    /// Streaming is "never" on the metered path, for every check.
+    func denyStreaming() {
+        policy.decision = .denied(.cellular)
+        policy.currentDecision = .denied(.cellular)
+    }
+
+    func playRequests(_ item: String) -> Int {
+        requests.filter { $0.hasPrefix("/api/items/\(item)/play") }.count
+    }
 
     /// The paths of the requests the server received.
     var requests: [String] { LocalServerProtocol.requests(host) }
@@ -98,6 +110,94 @@ struct PlaybackScopeLocalTests {
         await t.finish()
     }
 
+    // MARK: Streaming policy
+
+    /// A download streams nothing, so streaming "never" on a metered path doesn't block it, and
+    /// the policy isn't even asked. The negative control: the same item without a download is
+    /// blocked.
+    @Test(arguments: [true, false])
+    func aDownloadPlaysWhereStreamingIsNotAllowed(downloaded: Bool) async throws {
+        let t = try LocalScope(downloaded: downloaded)
+        t.denyStreaming()
+
+        await t.scope.play(itemID: "book", episodeID: nil, startTime: nil)
+
+        if downloaded {
+            #expect(await eventually { t.scope.coordinator.isPlaying })
+            #expect(t.scope.coordinator.error == nil)
+            #expect(t.policy.checks == 0)
+        } else {
+            #expect(t.scope.coordinator.error == .streamingNotAllowed(.cellular, key: t.key))
+            #expect(t.scope.coordinator.session == nil)
+        }
+        #expect(t.playRequests("book") == 0)
+        await t.finish()
+    }
+
+    /// "Ask" on a metered path doesn't prompt for a download either.
+    @Test func aDownloadPlaysWithoutAskingOnAMeteredPath() async throws {
+        let t = try LocalScope()
+        t.policy.decision = .askUser(.cellular)
+        t.policy.currentDecision = .askUser(.cellular)
+
+        await t.scope.play(itemID: "book", episodeID: nil, startTime: nil)
+
+        #expect(await eventually { t.scope.coordinator.isPlaying })
+        #expect(t.scope.coordinator.error == nil)
+        await t.finish()
+    }
+
+    /// A download missing a file shows that, not a streaming block: no policy prompt comes first.
+    @Test func aDownloadMissingAFileIsReportedBeforeAnyStreamingBlock() async throws {
+        let t = try LocalScope()
+        t.files.remove("book/2.m4b")
+        t.denyStreaming()
+
+        await t.scope.play(itemID: "book", episodeID: nil, startTime: nil)
+
+        #expect(t.scope.coordinator.error == .downloadFilesMissing(t.key))
+        await t.finish()
+    }
+
+    /// "Stream instead" streams, so the policy decides it: "never" blocks it.
+    @Test func streamInsteadIsStillCheckedByTheStreamingPolicy() async throws {
+        let t = try LocalScope()
+        t.files.remove("book/2.m4b")
+        await t.scope.play(itemID: "book", episodeID: nil, startTime: nil)
+        #expect(t.scope.coordinator.error == .downloadFilesMissing(t.key))
+        t.denyStreaming()
+
+        await t.scope.streamInsteadOfDownload()
+
+        #expect(t.scope.coordinator.error == .streamingNotAllowed(.cellular, key: t.key))
+        #expect(t.playRequests("book") == 0)
+        await t.finish()
+    }
+
+    /// The queue advances from a stream to a downloaded item where streaming has since become
+    /// "never": the download plays. The negative control: a streamed next item is blocked.
+    @Test(arguments: [true, false])
+    func theQueueAdvancesToADownloadWhereStreamingIsNotAllowed(downloaded: Bool) async throws {
+        let t = try LocalScope(downloaded: downloaded)
+        await t.scope.play(itemID: "A", episodeID: nil, startTime: nil)
+        #expect(await eventually { t.scope.coordinator.isPlaying })
+        t.scope.editQueue { $0.addToEnd(QueueItem(libraryItemID: "book", title: "Dune")) }
+        await t.scope.advancer?.waitForPreparation()
+        t.denyStreaming()
+
+        t.engine.finish()
+        await t.scope.coordinator.waitForAutoAdvance()
+
+        if downloaded {
+            #expect(await eventually { t.scope.coordinator.mediaKey == t.key && t.scope.coordinator.isPlaying })
+            #expect(t.scope.coordinator.error == nil)
+        } else {
+            #expect(t.scope.coordinator.error == .streamingNotAllowed(.cellular, key: t.key))
+        }
+        #expect(t.playRequests("book") == 0)
+        await t.finish()
+    }
+
     @Test func streamInsteadWithoutAMissingDownloadDoesNothing() async throws {
         let t = try LocalScope()
 
@@ -121,7 +221,7 @@ struct PlaybackScopeLocalTests {
     }
 }
 
-/// Answers book `book`'s play with a session, and any other request with an empty 200, on the
+/// Answers an item's play with a session for it, and any other request with an empty 200, on the
 /// hosts of its clients, recording each request's path by host.
 private final class LocalServerProtocol: URLProtocol {
     private static let log = Mutex<[String: [String]]>([:])
@@ -141,15 +241,20 @@ private final class LocalServerProtocol: URLProtocol {
                 url: url, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])
         else { return }
         Self.log.withLock { $0[host, default: []].append(url.path()) }
-        let session = PlaybackSession(
-            id: "sess-book", libraryItemId: "book", mediaType: .book, displayTitle: "Dune", duration: 250,
-            audioTracks: [
-                AudioTrack(
-                    index: 1, startOffset: 0, duration: 250, contentUrl: "/api/items/book/file/1",
-                    mimeType: "audio/mpeg")
-            ])
-        let isPlay = url.path().hasPrefix("/api/items/book/play")
-        let body = isPlay ? (try? JSONEncoder().encode(session)) : nil
+        // `/api/items/<id>/play`
+        let parts = url.path().split(separator: "/")
+        var body: Data?
+        if parts.count == 4, parts[0] == "api", parts[1] == "items", parts[3] == "play" {
+            let item = String(parts[2])
+            let session = PlaybackSession(
+                id: "sess-\(item)", libraryItemId: item, mediaType: .book, displayTitle: item, duration: 250,
+                audioTracks: [
+                    AudioTrack(
+                        index: 1, startOffset: 0, duration: 250, contentUrl: "/api/items/\(item)/file/1",
+                        mimeType: "audio/mpeg")
+                ])
+            body = try? JSONEncoder().encode(session)
+        }
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: body ?? Data("{}".utf8))
         client?.urlProtocolDidFinishLoading(self)

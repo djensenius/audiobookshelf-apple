@@ -408,7 +408,12 @@ public final class PlaybackCoordinator {
 
         let checkedGeneration = generation
         pendingPlayKey = key
-        let decision = await policy.streamingDecision()
+        let decision: NetworkDecision
+        if await playsLocally(key, forceTranscode: forceTranscode) {
+            decision = .allowed
+        } else {
+            decision = await policy.streamingDecision()
+        }
         guard check == policyCheck else { return }
         pendingPlayKey = nil
         guard checkedGeneration == generation else { return }
@@ -461,6 +466,15 @@ public final class PlaybackCoordinator {
         else { return }
         sessions.streamInstead(key)
         await play(itemID: key.libraryItemId, episodeID: key.episodeId)
+    }
+
+    /// Whether `key`'s next start plays from a download on this device (#74), so it streams nothing
+    /// and the streaming policy doesn't apply: a downloaded item plays on a metered network set to
+    /// "ask" or "never". A forced transcode always streams. A "Stream instead" start streams, so
+    /// it's checked as any stream is.
+    private func playsLocally(_ key: MediaKey, forceTranscode: Bool = false) async -> Bool {
+        guard !forceTranscode, let sessions = sessions as? any LocalPlaybackDeciding else { return false }
+        return await sessions.playsLocally(key)
     }
 
     /// Everything after a play passed the streaming policy. A `prepared` start (an auto-advance)
@@ -1308,12 +1322,15 @@ public final class PlaybackCoordinator {
     private func advance(after key: MediaKey, provider: any NextItemProvider, _ ended: AdvanceSnapshot) async {
         var next = provider.preparedNext(after: key)
         if next == nil { next = await provider.prepareNext(after: key) }
+        // A downloaded next item streams nothing, so no policy applies to it (#74).
+        var playsLocally = false
+        if let next { playsLocally = await self.playsLocally(next.key) }
         // Anything the user did meanwhile (play, pause, seek, stop), or a detach, cancels it.
         guard let next, !Task.isCancelled, nextItemProvider === provider,
             isAdvancing(after: key, ended)
         else { return }
         // The path and setting now decide, not the prepared (possibly stale) decision; no waiting.
-        switch policy.currentStreamingDecision() {
+        switch playsLocally ? .allowed : policy.currentStreamingDecision() {
         case .allowed: break
         // Nobody can agree to a metered network at the lock screen; the item stays queued, and
         // ``confirmMeteredStreaming()`` plays it.
@@ -1509,7 +1526,13 @@ public final class PlaybackCoordinator {
         at target: Double, playing: Bool, forceTranscode: Bool
     ) async -> PlaybackRecoveryRebuild {
         guard let key = mediaKey, phase == .loaded || phase == .unloaded else { return .superseded }
-        switch policy.currentStreamingDecision() {
+        // A download rebuilt from its files streams nothing, so no policy applies to it (#74).
+        let checkedGeneration = generation
+        let playsLocally = await playsLocally(key, forceTranscode: forceTranscode || transcodeForced)
+        guard generation == checkedGeneration, mediaKey == key, phase == .loaded || phase == .unloaded else {
+            return .superseded
+        }
+        switch playsLocally ? .allowed : policy.currentStreamingDecision() {
         case .allowed: break
         case .askUser where meteredConsent == key: break
         case .askUser(let reason):
