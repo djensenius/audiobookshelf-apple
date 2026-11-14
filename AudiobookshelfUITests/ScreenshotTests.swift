@@ -1,5 +1,9 @@
 import XCTest
 
+#if os(macOS)
+    import AppKit
+#endif
+
 /// App Store screenshots (#109): the fixture journey (`FixtureJourney.swift`), attaching a full-screen screenshot of
 /// each screen named `appstore-<screen>`. `scripts/screenshots.sh` (`mise run screenshots`) runs this class on each
 /// device and locale and exports the attachments to `build/screenshots/`; see docs/testing/screenshots.md.
@@ -19,10 +23,9 @@ final class ScreenshotTests: XCTestCase {
     // scripts/screenshots.sh.
     @MainActor
     func testHomeLibraryAndItem() {
-        let app = signIn(launchArguments: Self.localeArguments)
+        let app = signIn(launchArguments: Self.localeArguments + Self.noRestorationArguments)
         #if os(macOS)
-            // Full screen, so the main display shows only the app.
-            app.typeKey("f", modifierFlags: [.command, .control])
+            enterFullScreen(app)
         #endif
         capture("home")
 
@@ -42,6 +45,43 @@ final class ScreenshotTests: XCTestCase {
         let tag = ProcessInfo.processInfo.environment["ABS_SCREENSHOT_LOCALE"] ?? "en-US"
         return ["-AppleLanguages", "(\(tag))", "-AppleLocale", tag.replacingOccurrences(of: "-", with: "_")]
     }
+
+    /// On macOS, don't restore windows from an earlier run (such as one left full screen), so each launch starts
+    /// from the same window state. These are AppKit defaults, set for this launch only.
+    private static var noRestorationArguments: [String] {
+        #if os(macOS)
+            ["-ApplePersistenceIgnoreState", "YES", "-NSQuitAlwaysKeepsWindows", "NO"]
+        #else
+            []
+        #endif
+    }
+
+    #if os(macOS)
+        /// Makes the main window full screen, so the main display shows only the app, and fails unless it is.
+        /// ⌃⌘F toggles full screen, so it's pressed only when the window isn't already.
+        @MainActor
+        private func enterFullScreen(_ app: XCUIApplication) {
+            let window = app.windows.firstMatch
+            XCTAssertTrue(window.waitForExistence(timeout: Self.fixtureTimeout), "The main window didn't appear")
+            // XCUIScreen.main is the primary display, NSScreen.screens.first; frames are in points on both.
+            guard let screen = NSScreen.screens.first?.frame.size else {
+                XCTFail("No display to capture")
+                return
+            }
+            let isFullScreen = { window.frame.size == screen }
+            if !isFullScreen() {
+                app.typeKey("f", modifierFlags: [.command, .control])
+            }
+            let deadline = Date().addingTimeInterval(10)
+            while !isFullScreen(), Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.25)
+            }
+            XCTAssertTrue(
+                isFullScreen(),
+                "The main window is \(window.frame.size), not full screen (\(screen)); the screenshot would show the desktop"
+            )
+        }
+    #endif
 
     /// Attaches the whole main screen, status bar included, as `appstore-<screen>`, after a moment for covers and
     /// transitions to settle (a screenshot doesn't wait for the app to be idle).
