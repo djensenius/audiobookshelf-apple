@@ -174,11 +174,9 @@ struct KnownAuditIssue {
         return all
     }()
 
-    /// Whether `element` is text whose whole label is in the label of an element matching
-    /// `predicate`: text cut short in a view that speaks it in full.
-    @MainActor
     /// Whether `element` is text shortened in an item card (`item.<id>`), not one of the item
     /// screen's `item.` elements.
+    @MainActor
     private static func isShortenedInCard(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
         isShortened(
             element,
@@ -187,6 +185,9 @@ struct KnownAuditIssue {
             in: app)
     }
 
+    /// Whether `element` is text whose whole label is in the label of an element matching
+    /// `predicate`: text cut short in a view that speaks it in full.
+    @MainActor
     private static func isShortened(
         _ element: XCUIElement?, inElementMatching predicate: String, in app: XCUIApplication
     ) -> Bool {
