@@ -1,0 +1,18 @@
+{
+  "id": "ser_barsoom",
+  "name": "Barsoom",
+  "nameIgnorePrefix": "Barsoom",
+  "description": null,
+  "addedAt": 1700000000000,
+  "updatedAt": 1700000000000,
+  "libraryId": "lib_sample",
+  "progress": {
+    "libraryItemIds": [
+      "li_barsoom_1",
+      "li_barsoom_2",
+      "li_barsoom_3"
+    ],
+    "libraryItemIdsFinished": [],
+    "isFinished": false
+  }
+}

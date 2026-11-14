@@ -98,10 +98,13 @@
             static let notFound = Reply(status: 404, contentType: "application/json", body: Data(#"{}"#.utf8))
         }
 
-        /// The fixture resource that answers `method` and `path`, or `nil` for a request without one.
+        /// The fixture resource that answers `method` and `path` with `query`, or `nil` for a request without one.
         /// An item's cover is its own `fixture-cover-<id>.png` in `bundle` (`scripts/fixture-covers.swift`),
-        /// or the shared `fixture-cover.png` for an item without one.
-        static func resource(method: String, path: String, bundle: Bundle = .main) -> (name: String, ext: String)? {
+        /// or the shared `fixture-cover.png` for an item without one. Only the items list reads `query`: a
+        /// series filter (``seriesID(filter:)``) answers with that series' page, and any other query with every item.
+        static func resource(method: String, path: String, query: [URLQueryItem] = [], bundle: Bundle = .main) -> (
+            name: String, ext: String
+        )? {
             let parts = path.split(separator: "/").map(String.init)
             let library = "/api/libraries/\(SampleLibrary.libraryID)"
             switch (method, path) {
@@ -112,8 +115,18 @@
             case ("GET", "/api/libraries"): return ("fixture-libraries", "json")
             case ("GET", library): return ("fixture-library", "json")
             case ("GET", library + "/personalized"): return ("fixture-personalized", "json")
-            case ("GET", library + "/items"): return ("fixture-items", "json")
+            // A series' books (`SeriesDetailModel.booksQuery`) are the series' own page; an unknown series has none.
+            // The Library's "no series" filter (`LibraryFilter.noSeries`) isn't a series, so it gets every item.
+            case ("GET", library + "/items"):
+                guard let filter = query.first(where: { $0.name == "filter" })?.value, filter.hasPrefix("series.")
+                else { return ("fixture-items", "json") }
+                let id = seriesID(filter: filter)
+                if id == LibraryFilter.noSeries.value { return ("fixture-items", "json") }
+                return id.map { ("fixture-items-series-\($0)", "json") }
             case ("GET", library + "/series"): return ("fixture-series", "json")
+            // A series' metadata and progress (`SeriesEndpoints.detail(id:)`).
+            case ("GET", _) where parts.count == 3 && parts[0...1] == ["api", "series"]:
+                return ("fixture-series-\(parts[2])", "json")
             case ("GET", _) where parts.count == 4 && parts[0...1] == ["api", "items"] && parts[3] == "cover":
                 let own = "fixture-cover-\(parts[2])"
                 return (bundle.url(forResource: own, withExtension: "png") == nil ? "fixture-cover" : own, "png")
@@ -132,19 +145,35 @@
             }
         }
 
-        /// The reply to `method` and `path` from `bundle`. A request without a fixture is a 404,
-        /// logged with its path so a missing fixture is obvious.
-        static func reply(method: String, path: String, bundle: Bundle = .main) -> Reply {
+        /// The series ID in a `series.<value>` filter, or `nil` when the value doesn't decode to one. `filter` is the
+        /// query value `URLComponents` decoded once, still the percent-encoded Base64 of `LibraryFilter.encode`, so
+        /// this decodes it as the server does: percent-decoding, then Base64. Only letters, digits, `_` and `-` make
+        /// an ID, so it names a fixture file.
+        static func seriesID(filter: String) -> String? {
+            let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+            guard let encoded = filter.dropFirst("series.".count).removingPercentEncoding,
+                let data = Data(base64Encoded: encoded), let id = String(data: data, encoding: .utf8), !id.isEmpty,
+                id.unicodeScalars.allSatisfy(allowed.contains)
+            else { return nil }
+            return id
+        }
+
+        /// The reply to `method` and `path` with `query` from `bundle`. A request without a fixture is a 404,
+        /// logged with its path and query so a missing fixture is obvious.
+        static func reply(method: String, path: String, query: [URLQueryItem] = [], bundle: Bundle = .main) -> Reply {
             // `/logout` returns no end-session URL for a local sign-in, and a session's `/sync` and
             // `/close` return nothing the app reads.
             if method == "POST", path == "/logout" || isSessionReport(path) {
                 return Reply(status: 200, contentType: "application/json", body: Data(#"{}"#.utf8))
             }
-            guard let resource = resource(method: method, path: path, bundle: bundle),
+            guard let resource = resource(method: method, path: path, query: query, bundle: bundle),
                 let url = bundle.url(forResource: resource.name, withExtension: resource.ext),
                 var body = try? Data(contentsOf: url)
             else {
-                Log.api.error("Fixture server: no fixture for \(method, privacy: .public) \(path, privacy: .public)")
+                var components = URLComponents()
+                components.queryItems = query.isEmpty ? nil : query
+                let target = components.percentEncodedQuery.map { "\(path)?\($0)" } ?? path
+                Log.api.error("Fixture server: no fixture for \(method, privacy: .public) \(target, privacy: .public)")
                 return .notFound
             }
             if let sessionID = sessionID(method: method, path: path) {
@@ -210,7 +239,8 @@
 
         override func startLoading() {
             guard let url = request.url else { return }
-            let reply = FixtureServer.reply(method: request.httpMethod ?? "GET", path: url.path())
+            let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let reply = FixtureServer.reply(method: request.httpMethod ?? "GET", path: url.path(), query: query)
             let response = HTTPURLResponse(
                 url: url, statusCode: reply.status, httpVersion: "HTTP/1.1",
                 headerFields: ["Content-Type": reply.contentType, "Content-Length": String(reply.body.count)])!
