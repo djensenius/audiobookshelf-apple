@@ -151,7 +151,7 @@ final class AppEnvironment {
             writer: localProgress, accounts: accounts, lifecycle: lifecycle, settings: settings,
             deviceIdentifiers: deviceIdentifiers, library: library,
             history: playbackHistory.map { PlaybackHistoryRecorder(store: $0) }, current: current,
-            mediaLeases: mediaLeases)
+            mediaLeases: mediaLeases, downloads: downloads?.playbackFiles)
         self.playback = playback
         self.player = playback.player
         self.downloads = downloads

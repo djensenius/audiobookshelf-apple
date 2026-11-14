@@ -439,6 +439,20 @@ public final class PlaybackCoordinator {
         error = nil
     }
 
+    /// The user chose "Stream instead" after ``PlaybackCoordinatorError/downloadFilesMissing(_:)``
+    /// (ADR 0007 §7, #74): the media's next start streams
+    /// (``PreferringLocalSessionService/streamInstead(_:)``), and it plays again where it stopped,
+    /// as a resume of the unloaded item does; the streaming policy is checked as for any play.
+    /// Does nothing unless that is still the error, for the item still in the player, and its
+    /// sessions can stream a download instead.
+    public func streamInsteadOfDownload() async {
+        guard case .downloadFilesMissing(let key) = error, key == mediaKey, phase == .unloaded,
+            let sessions = sessions as? PreferringLocalSessionService
+        else { return }
+        sessions.streamInstead(key)
+        await play(itemID: key.libraryItemId, episodeID: key.episodeId)
+    }
+
     /// Everything after a play passed the streaming policy. A `prepared` start (an auto-advance)
     /// reuses its server progress instead of fetching it. `forceTranscode` asks `/play` for an HLS
     /// transcode (a recovery rebuild's, ``transcodeForced``).
@@ -1835,6 +1849,7 @@ public final class PlaybackCoordinator {
 
     private static func sessionError(_ error: any Error) -> PlaybackCoordinatorError {
         if let error = error as? APIError { return .sessionStartFailed(error) }
+        if case LocalPlaybackError.downloadFilesMissing(let key) = error { return .downloadFilesMissing(key) }
         return .unexpected(String(describing: error))
     }
 

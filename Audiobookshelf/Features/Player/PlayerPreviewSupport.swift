@@ -94,6 +94,10 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
         error = nil
     }
 
+    func streamInsteadOfDownload() async {
+        error = nil
+    }
+
     private static let session = PlaybackSession(
         id: "preview", libraryItemId: "li_preview", mediaType: .book, mediaMetadata: .book(BookMetadata(title: "Dune")),
         chapters: [

@@ -22,6 +22,9 @@ public enum PlayerErrorMessage: Sendable, Hashable {
     case streamingInterrupted
     /// "The server or a proxy in front of it rejected the stream." (ADR 0007's 401 path).
     case streamRejected
+    /// The item is downloaded but a file is missing, so it didn't play (ADR 0007 §7, #74): stream
+    /// it instead, or cancel.
+    case downloadFilesMissing
 
     init(_ error: PlaybackCoordinatorError) {
         switch error {
@@ -31,18 +34,21 @@ public enum PlayerErrorMessage: Sendable, Hashable {
         case .streamUnavailable: self = .streamUnavailable
         case .recoveryExhausted: self = .streamingInterrupted
         case .streamRejected: self = .streamRejected
+        case .downloadFilesMissing: self = .downloadFilesMissing
         case .engine, .playback, .unexpected: self = .playbackFailed
         }
     }
 
     /// The alert's buttons, in order. Recovery giving up offers Retry, which starts a fresh
     /// recovery attempt, and Cancel, which stops playback (ADR 0007). A metered network set to
-    /// "ask" offers to stream anyway, and Cancel, which only clears the failure (#376). The
-    /// others only dismiss.
+    /// "ask" offers to stream anyway, and Cancel, which only clears the failure (#376). A
+    /// download missing a file offers to stream it instead, and Cancel, which stops playback
+    /// (#74). The others only dismiss.
     public var actions: [PlayerErrorAction] {
         switch self {
         case .streamingInterrupted: [.retry, .cancel]
         case .streamingNeedsConfirmation: [.streamAnyway, .cancel]
+        case .downloadFilesMissing: [.streamInstead, .cancel]
         case .streamingNotAllowed, .sessionStartFailed, .streamUnavailable, .playbackFailed, .streamRejected:
             [.dismiss]
         }
@@ -71,6 +77,8 @@ public enum PlayerErrorAction: Sendable, Hashable {
     case retry
     /// Plays what the streaming policy's "ask" blocked on the metered network ("Stream").
     case streamAnyway
+    /// Streams the download whose files are missing from the server ("Stream instead", #74).
+    case streamInstead
     /// Clears the failure: stops playback after recovery gave up, and leaves it as it is after a
     /// metered-network confirmation.
     case cancel
@@ -496,6 +504,8 @@ public final class PlayerViewModel {
         case (.retry, _): await playback.resume(rewindingBy: nil)
         // Replays the blocked play on the metered network; "never" still blocks.
         case (.streamAnyway, _): await playback.confirmMeteredStreaming()
+        // The user's explicit choice: a download never streams silently (ADR 0007 §7).
+        case (.streamInstead, _): await playback.streamInsteadOfDownload()
         // Declining the metered network leaves whatever plays as it is.
         case (.cancel, .streamingNeedsConfirmation): playback.declineMeteredStreaming()
         case (.cancel, _): close()

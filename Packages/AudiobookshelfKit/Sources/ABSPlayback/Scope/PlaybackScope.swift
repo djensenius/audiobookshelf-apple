@@ -123,6 +123,12 @@ public final class PlaybackScope {
         /// app sets it only for a UI-test fixture launch, whose tracks play from a bundled file
         /// (#46). `nil` plays the server's URLs.
         public var trackURLOverride: (@Sendable (URL) -> URL)?
+        /// Downloaded media, which the scope plays from its files instead of streaming, reporting
+        /// through local sessions the uploader sends (ADR 0007, decision 7; #74); the app sets its
+        /// download store and root. A download missing a file fails with
+        /// ``PlaybackCoordinatorError/downloadFilesMissing(_:)`` rather than streaming. `nil`
+        /// streams everything.
+        public var downloads: LocalDownloadFiles?
 
         public init(
             connectionID: UUID, client: APIClient?, features: ServerFeatures?,
@@ -213,7 +219,9 @@ public final class PlaybackScope {
     /// sleep timer, if configured, then the Now Playing bridge, which the scope holds strongly,
     /// and the queue's advancer, whose podcast fallback reads episodes through the services'
     /// current client. The local-session uploader sends through the services too, so it follows
-    /// reconnects.
+    /// reconnects. With configured ``Configuration/downloads``, the coordinator plays them through
+    /// ``PreferringLocalSessionService`` and the syncer reports their local sessions through
+    /// ``LocalSessionProgressSyncService``, each save starting an upload (#74).
     public static func make(
         _ configuration: Configuration, makeNowPlaying: (PlaybackCoordinator) -> any NowPlayingHandle
     ) -> PlaybackScope {
@@ -221,14 +229,23 @@ public final class PlaybackScope {
             serverConnectionID: configuration.connectionID, client: configuration.client,
             features: configuration.features, deviceIdentifiers: configuration.deviceIdentifiers,
             trackURLOverride: configuration.trackURLOverride)
+        let local = configuration.downloads.map { downloads in
+            LocalPlaybackSessionService(
+                serverConnectionID: configuration.connectionID, items: downloads.items, progress: configuration.writer,
+                fileURL: downloads.fileURL, fileExists: downloads.fileExists,
+                deviceIdentifiers: configuration.deviceIdentifiers)
+        }
+        let sessions: any PlaybackSessionService =
+            local.map { PreferringLocalSessionService(local: $0, remote: services) } ?? services
+        let localSync = local.map { LocalSessionProgressSyncService(local: $0, remote: services) }
         let coordinator = PlaybackCoordinator(
-            engine: configuration.engine, sessions: services, progressStore: configuration.writer,
+            engine: configuration.engine, sessions: sessions, progressStore: configuration.writer,
             settings: configuration.settings, policy: configuration.policy,
             lastPlayedStore: configuration.lastPlayed(configuration.connectionID),
             backgroundActivity: configuration.backgroundActivity, networkPaths: configuration.networkPaths,
             mediaLeases: configuration.mediaLeases)
         let syncer = ProgressSyncer(
-            source: coordinator, service: services, store: configuration.writer,
+            source: coordinator, service: localSync ?? services, store: configuration.writer,
             tickInterval: configuration.tickInterval, paths: configuration.networkPaths, history: configuration.history)
         let sleepTimer = configuration.makeSleepTimer?(coordinator)
         let queue = PlaybackQueue(serverConnectionID: configuration.connectionID, store: configuration.queueStore)
@@ -239,6 +256,9 @@ public final class PlaybackScope {
         let uploader = LocalSessionUploader(
             serverConnectionID: configuration.connectionID, store: configuration.writer, service: services,
             deviceIdentifiers: configuration.deviceIdentifiers)
+        // Reports while playing a download online; offline the pass fails fast and the
+        // reconnect's sync uploads them.
+        localSync?.setLocalSaveHandler { Task { await uploader.sync() } }
         return PlaybackScope(
             coordinator: coordinator, syncer: syncer, services: services, nowPlaying: makeNowPlaying(coordinator),
             queue: queue, episodes: episodes, sleepTimer: sleepTimer, uploader: uploader,
@@ -321,6 +341,14 @@ public final class PlaybackScope {
     /// Playing session, as a user play does.
     public func confirmMeteredStreaming() async {
         await coordinator.confirmMeteredStreaming()
+        await claimSystemPrimaryOnceActive()
+    }
+
+    /// Streams the download whose files are missing, as the user chose ("Stream instead",
+    /// ``PlaybackCoordinator/streamInsteadOfDownload()``), then claims the system's primary Now
+    /// Playing session, as a user play does.
+    public func streamInsteadOfDownload() async {
+        await coordinator.streamInsteadOfDownload()
         await claimSystemPrimaryOnceActive()
     }
 

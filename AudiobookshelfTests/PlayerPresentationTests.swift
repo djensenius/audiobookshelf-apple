@@ -58,7 +58,7 @@ import Testing
 
     @Test(arguments: [
         PlayerErrorMessage.streamingNeedsConfirmation, .streamingNotAllowed, .sessionStartFailed,
-        .streamUnavailable, .streamingInterrupted, .streamRejected, .playbackFailed,
+        .streamUnavailable, .streamingInterrupted, .streamRejected, .playbackFailed, .downloadFilesMissing,
     ])
     func everyPlayerErrorHasAResolvableMessage(_ error: PlayerErrorMessage) {
         let key = PlayerSlot.messageKey(for: error)
@@ -77,6 +77,13 @@ import Testing
         #expect(actions.map(PlayerSlot.labelKey(for:)) == ["ButtonRetry", "ButtonCancel"])
         #expect(actions.map(PlayerSlot.role(for:)) == [nil, .cancel])
         #expect(PlayerErrorMessage.playbackFailed.actions.map(PlayerSlot.labelKey(for:)) == ["ButtonOk"])
+    }
+
+    /// #74: a download missing a file offers "Stream Instead", then Cancel (the cancel role).
+    @Test func aMissingDownloadsAlertOffersStreamInsteadThenCancel() {
+        let actions = PlayerErrorMessage.downloadFilesMissing.actions
+        #expect(actions.map(PlayerSlot.labelKey(for:)) == ["ButtonStreamInstead", "ButtonCancel"])
+        #expect(actions.map(PlayerSlot.role(for:)) == [nil, .cancel])
     }
 
     @Test func theWaitingForNetworkLineIsLocalized() {

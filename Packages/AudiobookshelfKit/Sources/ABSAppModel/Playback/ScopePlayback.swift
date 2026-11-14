@@ -82,6 +82,14 @@ final class ScopePlayback: PlayerPlaybackControlling {
         coordinator.declineMeteredStreaming()
     }
 
+    func streamInsteadOfDownload() async {
+        if let scope {
+            await scope.streamInsteadOfDownload()
+        } else {
+            await coordinator.streamInsteadOfDownload()
+        }
+    }
+
     func handleStreamReset(sessionID: String) {
         coordinator.handleStreamReset(sessionID: sessionID)
     }

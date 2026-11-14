@@ -11,6 +11,28 @@ public protocol LocalItemReading: Sendable {
 
 extension LocalItemStore: LocalItemReading {}
 
+/// Where a ``PlaybackScope`` finds downloaded media, to play it from its files (#74): the
+/// downloaded items, and the file URL of a path relative to the downloads root.
+public struct LocalDownloadFiles: Sendable {
+    public var items: any LocalItemReading
+    /// Throws for a path that leaves the downloads root (`DownloadLocations.fileURL(forRelativePath:)`
+    /// in the app).
+    public var fileURL: @Sendable (String) throws -> URL
+    /// Whether a file is on disk; tests replace it.
+    public var fileExists: @Sendable (URL) -> Bool
+
+    public init(
+        items: any LocalItemReading, fileURL: @escaping @Sendable (String) throws -> URL,
+        fileExists: @escaping @Sendable (URL) -> Bool = {
+            FileManager.default.fileExists(atPath: $0.path(percentEncoded: false))
+        }
+    ) {
+        self.items = items
+        self.fileURL = fileURL
+        self.fileExists = fileExists
+    }
+}
+
 /// Why ``LocalPlaybackSessionService`` can't start a session.
 public enum LocalPlaybackError: Error, Sendable, Hashable {
     /// The media has no completed download on this device: it streams.
@@ -190,6 +212,24 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
         session.isActive = false
         try await progress.saveSession(session)
         open.withLock { _ = $0.removeValue(forKey: id) }
+    }
+
+    /// Saves session `id` for upload while it plays, still active: `currentTime` from `report`, and
+    /// its listening time added to the saved total, as ``closeSession(id:report:)`` does (#74). The
+    /// progress syncer's periodic report for a local session
+    /// (``LocalSessionProgressSyncService``), so offline listening survives a relaunch. A session
+    /// this service doesn't know, or another connection's saved one with its id, is ignored.
+    public func syncSession(id: String, report: PlaybackSyncReport) async throws {
+        let started = open.withLock { $0[id] }
+        let stored = try await progress.session(id: id)
+        if let stored, stored.key.serverConnectionID != serverConnectionID { return }
+        guard var session = stored ?? started else { return }
+        session.currentTime = report.currentTime
+        session.timeListening += report.timeListened
+        if report.duration > 0 { session.duration = report.duration }
+        session.updatedAt = now()
+        session.isActive = true
+        try await progress.saveSession(session)
     }
 
     /// Nothing to refresh: local files need no token.

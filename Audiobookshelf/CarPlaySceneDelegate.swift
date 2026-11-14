@@ -269,9 +269,22 @@
         }
 
         /// The alert for `message`, with the player's strings: Stream or Cancel for a streaming
-        /// confirmation, OK otherwise.
+        /// confirmation, Stream instead or Cancel for a download missing files (#74), OK otherwise.
         private func template(for message: PlayerErrorMessage) -> CPAlertTemplate {
             let title = L10n.string(PlayerSlot.messageKey(for: message))
+            if message == .downloadFilesMissing {
+                return CPAlertTemplate(
+                    titleVariants: [title],
+                    actions: [
+                        CPAlertAction(title: L10n.string("ButtonStreamInstead"), style: .default) { [weak self] _ in
+                            guard let play = self?.model?.streamInstead() else { return }
+                            self?.showNowPlaying(after: play)
+                        },
+                        CPAlertAction(title: L10n.string("ButtonCancel"), style: .cancel) { [weak self] _ in
+                            self?.model?.dismissAlert()
+                        },
+                    ])
+            }
             guard message == .streamingNeedsConfirmation else {
                 return CPAlertTemplate(
                     titleVariants: [title],

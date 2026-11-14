@@ -252,8 +252,9 @@ public final class CarPlayRootModel {
     }
 
     /// What CarPlay shows about its own last play: a streaming block to confirm
-    /// (``PlayerErrorMessage/streamingNeedsConfirmation``: Stream or Cancel) or explain, or a
-    /// failure (OK alone). Only while the account's session is the play's and its error is still
+    /// (``PlayerErrorMessage/streamingNeedsConfirmation``: Stream or Cancel) or explain, a
+    /// download missing files (``PlayerErrorMessage/downloadFilesMissing``: Stream instead or
+    /// Cancel), or a failure (OK alone). Only while the account's session is the play's and its error is still
     /// the player's: `nil` once it changes or clears, for example when the phone answered it.
     public var alert: PlayerErrorMessage? {
         guard let failedPlay, isCurrent(failedPlay.origin), playback?.error == failedPlay.error else { return nil }
@@ -280,6 +281,28 @@ public final class CarPlayRootModel {
                 Self.isItem(key, of: blocked.origin)
             else { return CarPlayPlayOutcome.discarded }
             await playback.confirmMeteredStreaming()
+            return finish(origin, threw: false)
+        }
+        pendingPlay = PendingPlay(origin: origin, task: task)
+        return task
+    }
+
+    /// Stream instead for ``PlayerErrorMessage/downloadFilesMissing`` (ADR 0007 §7, #74): streams
+    /// the downloaded item whose files are missing from the server. `nil` without that alert. As
+    /// for ``confirmStreaming()``, the choice goes to the player only if, when the task runs, the
+    /// error is still the one asked about, for the item the driver tapped, in the same session,
+    /// with no later operation; while the stream starts, it's that row's play.
+    @discardableResult
+    public func streamInstead() -> Task<CarPlayPlayOutcome, Never>? {
+        guard alert == .downloadFilesMissing, let failed = failedPlay, let playback, let identity else { return nil }
+        let origin = begin(identity, action: failed.origin.action)
+        let task = Task {
+            defer { if pendingPlay?.origin.operation == origin.operation { pendingPlay = nil } }
+            guard origin.operation == operation, isCurrent(origin), isCurrent(failed.origin),
+                playback.error == failed.error, let key = Self.blockedKey(failed.error),
+                Self.isItem(key, of: failed.origin)
+            else { return CarPlayPlayOutcome.discarded }
+            await playback.streamInsteadOfDownload()
             return finish(origin, threw: false)
         }
         pendingPlay = PendingPlay(origin: origin, task: task)
@@ -338,9 +361,9 @@ public final class CarPlayRootModel {
     /// The outcome of an operation that has returned, by the player's error; a failure or block
     /// is kept for ``alert``. Discarded once a later operation started or the account's session
     /// changed: the playback may then be unbound (no error, which isn't a start) or another
-    /// account's. Also discarded when the error is a streaming block for another item, as when
-    /// the phone played something else meanwhile: that block is the phone's to answer, and Stream
-    /// here would authorize an item the driver didn't tap.
+    /// account's. Also discarded when the error is a streaming block or a missing download for
+    /// another item, as when the phone played something else meanwhile: that block is the phone's
+    /// to answer, and Stream here would authorize an item the driver didn't tap.
     private func finish(_ origin: Origin, threw: Bool) -> CarPlayPlayOutcome {
         guard origin.operation == operation, isCurrent(origin) else { return .discarded }
         let error = playback?.error
@@ -354,10 +377,12 @@ public final class CarPlayRootModel {
         }
     }
 
-    /// The item a streaming block is for; `nil` for other errors, which carry no item.
+    /// The item a streaming block or a missing download is for; `nil` for other errors, which
+    /// carry no item.
     private static func blockedKey(_ error: PlaybackCoordinatorError?) -> MediaKey? {
         switch error {
-        case .streamingNeedsConfirmation(_, let key), .streamingNotAllowed(_, let key): key
+        case .streamingNeedsConfirmation(_, let key), .streamingNotAllowed(_, let key), .downloadFilesMissing(let key):
+            key
         default: nil
         }
     }

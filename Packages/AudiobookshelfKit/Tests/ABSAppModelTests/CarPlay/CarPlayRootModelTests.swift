@@ -304,6 +304,33 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
         }
     }
 
+    /// #74: a tapped download missing a file is shown on CarPlay; Stream instead streams it, and
+    /// the alert goes (ADR 0007 §7: never silently).
+    @Test func aMissingDownloadAsksAndStreamInsteadPlaysIt() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            harness.playError = .downloadFilesMissing(Self.sherlockKey)
+            let model = harness.model()
+            await model.update()
+            let row = try #require(tabRows(model.content).first)
+            // Negative control: nothing to stream before the play.
+            #expect(model.streamInstead() == nil)
+            #expect(await model.play(row)?.value == .failed)
+            #expect(model.alert == .downloadFilesMissing)
+            harness.playError = nil
+            #expect(harness.playback.calls.isEmpty)
+
+            let stream = try #require(model.streamInstead())
+            #expect(model.alert == nil)
+            #expect(await stream.value == .started)
+            #expect(harness.playback.calls == [.streamInsteadOfDownload])
+            #expect(harness.playback.error == nil)
+            #expect(model.streamInstead() == nil)
+        }
+    }
+
     /// #544: Stream's consent goes to the player only for the block it was asked about. If the
     /// phone blocks another item, or the playback rebinds to another session, before its task
     /// runs, nothing is forwarded.

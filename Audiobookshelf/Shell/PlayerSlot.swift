@@ -118,6 +118,7 @@ struct PlayerSlot: ViewModifier {
         case .streamUnavailable: "MessagePlaybackStreamUnavailable"
         case .streamingInterrupted: "MessagePlaybackStreamingInterrupted"
         case .streamRejected: "MessagePlaybackStreamRejected"
+        case .downloadFilesMissing: "MessagePlaybackDownloadFilesMissing"
         }
     }
 
@@ -127,6 +128,7 @@ struct PlayerSlot: ViewModifier {
         case .dismiss: "ButtonOk"
         case .retry: "ButtonRetry"
         case .streamAnyway: "ButtonStream"
+        case .streamInstead: "ButtonStreamInstead"
         case .cancel: "ButtonCancel"
         }
     }
@@ -135,7 +137,7 @@ struct PlayerSlot: ViewModifier {
     nonisolated static func role(for action: PlayerErrorAction) -> ButtonRole? {
         switch action {
         case .dismiss, .cancel: .cancel
-        case .retry, .streamAnyway: nil
+        case .retry, .streamAnyway, .streamInstead: nil
         }
     }
 
