@@ -6,7 +6,7 @@ replacement, the issue or PR that tracks it, or a decision to drop it. It was
 written for [#111](https://github.com/djensenius/audiobookshelf-apple/issues/111)
 (PR #506) and is updated as issues close.
 
-The statuses were taken from GitHub and the code at main `79dbcfe9`
+The statuses were taken from GitHub and the code at main `17ca60dc`
 (2026-11-14). They will go stale. Update a row when its issue closes.
 
 ## Status legend
@@ -27,7 +27,7 @@ own `PlaybackScope`
 ([#183](https://github.com/djensenius/audiobookshelf-apple/issues/183), PR #481)
 with progress sync
 ([#184](https://github.com/djensenius/audiobookshelf-apple/issues/184), PR #534),
-and downloaded items play from their local files (PR #594, part of #74). The
+and downloaded items play from their local files (#74, PR #594). The
 Now Playing runtime check on devices is still open under #44.
 
 ## Pages and workflows
@@ -38,7 +38,7 @@ Now Playing runtime check on devices is still open under #44.
 | --- | --- | --- | --- | --- |
 | Personalised shelves, continue listening | `HomeView`, `HomeShelvesView` | #62, PRs #295, #313 | Done | |
 | Local (downloaded) shelves | `DownloadedShelfModel` (ABSAppModel), `HomeView` | #76, PRs #455, #509, #546, #549, #588, #595 | Done | Home shows the downloaded shelves and the disconnected state. Manual checks are in #210. |
-| Disconnected messaging | `ConnectionBannerModel`, `ServerActionAvailability` (ABSAppModel), `ConnectionBannerHost`, `ConnectionIndicatorToolbar` | #76, PRs #455, #509, #588, #595 | In progress (#76) | The banner, the toolbar indicator (#595, part of #59) and offline gating of server-only menu actions are in the app; #76 is still open. |
+| Disconnected messaging | `ConnectionBannerModel`, `ServerActionAvailability` (ABSAppModel), `ConnectionBannerHost`, `ConnectionIndicatorToolbar` | #76, PRs #455, #509, #588, #595 | Done | The banner, the toolbar indicator (#595, part of #59) and offline gating of server-only menu actions are in the app. Manual checks are in #210. |
 | `BookshelfNavBar`, `BookshelfToolbar` | `MainTabView`, `LibraryPickerHeader`, `LibraryToolbar` | #44 | In progress (#44) | #183 and #184 are closed; the shell issue stays open for its manual checks. |
 
 ### Library and discovery
@@ -183,7 +183,7 @@ The settings mapping is in [Settings](settings.md); this table records status.
 | `AbsLogger`, `Logger` | ABSCore `Log`, `LogExporter` | #27 | Done | |
 | `DownloadItem`, `DownloadItemPart` | `DownloadRecord`, `DownloadPart` | #73, PR #500 | Done | |
 | `LocalFile`, `LocalLibraryItem`, `LocalPodcastEpisode` | `LocalFile`, `LocalLibraryItem`, `LocalItemStore` | #73 | Done | |
-| `LocalMediaProgress` | `LocalMediaProgress`, `LocalProgressStore` | #74, PRs #496, #512, #594 | In progress (#74) | Downloaded items play from their local files with local sessions, which upload on reconnect; #74 is still open. |
+| `LocalMediaProgress` | `LocalMediaProgress`, `LocalProgressStore` | #74, PRs #496, #512, #594, #603 | Done | Downloaded items play from their local files with local sessions, which upload on reconnect. Downloaded ebooks keep their reading progress linked to the download (PR #603). Manual checks are in #210. |
 | `MediaProgress` | ABSCore `MediaProgress` | #25 | Done | |
 | `ApiClient` | ABSAPI `APIClient` | #29 | Done | |
 | `SecureStorage` | `KeychainStore` | #154 | Done | |
