@@ -42,21 +42,26 @@ struct NowPlayingView: View {
     var body: some View {
         NavigationStack {
             PlayerLayoutReader(forcedLayout: forcedLayout) { layout in
-                actionsToolbar(content(layout), layout: layout)
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) {
-                            Button {
-                                dismiss()
-                            } label: {
-                                Label {
-                                    Text(verbatim: L10n.string("LabelMinimizePlayer"))
-                                } icon: {
-                                    Image(systemName: "chevron.down")
-                                }
-                                .labelStyle(.iconOnly)
+                // For UI tests.
+                actionsToolbar(
+                    content(layout).accessibilityElement(children: .contain).accessibilityIdentifier("player.screen"),
+                    layout: layout
+                )
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button {
+                            dismiss()
+                        } label: {
+                            Label {
+                                Text(verbatim: L10n.string("LabelMinimizePlayer"))
+                            } icon: {
+                                Image(systemName: "chevron.down")
                             }
+                            .labelStyle(.iconOnly)
                         }
+                        .accessibilityIdentifier("player.minimize")
                     }
+                }
             }
             .bookmarkEditor(model: model, target: $bookmarkEditor)
         }
@@ -243,7 +248,7 @@ private struct NowPlayingTitles: View {
             if let chapter = model.chapterTitle {
                 Text(verbatim: chapter)
                     .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ABSColor.mutedForeground)
             }
             Text(verbatim: model.title)
                 .font(.title2.weight(.bold))
@@ -251,7 +256,7 @@ private struct NowPlayingTitles: View {
             if !model.author.isEmpty {
                 Text(verbatim: model.author)
                     .font(.headline)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(ABSColor.mutedForeground)
             }
         }
         .multilineTextAlignment(.center)

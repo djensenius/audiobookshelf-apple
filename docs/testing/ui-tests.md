@@ -106,6 +106,22 @@ checks the item screen, `item.detail`, and its loaded title, `item.title`
 journey lives in `FixtureJourney.swift` (`signIn(launchArguments:screenshotPrefix:)` and
 `openLibraryItem(in:screenshotPrefix:)`), so other test classes reuse it.
 
+`FixtureScreens.swift` opens the screens tests need from the signed-in app:
+`open(_ screen: FixtureScreen, in: app)` opens Home, Library, Item detail (*Pride and
+Prejudice*), Player, Settings or Downloads from wherever the app is, waits for the screen's
+loaded content and returns its element (`FixtureScreen.identifier`): `home.screen`,
+`library.screen`, `item.detail`, `player.screen`, `settings.screen` or `downloads.screen`.
+The player plays *Pride and Prejudice* (`item.play`), opens from the mini player
+(`player.mini`) and is paused (`player.playPause`); another screen minimizes it first
+(`player.minimize`). Settings is the Account tab's `account.settings` row on iOS and ⌘, on a
+Mac. Two things about the tab bar: on the iPhone Duo's outer display it's too short for every
+tab, so Downloads and Account are in its More tab, and it minimizes as the content scrolls
+(`tabBarMinimizeBehavior`); `open` handles both. The item's metadata is `item.metadata`.
+
+`AccessibilityAuditTests` audits each of those screens at the default text size and at AX5;
+see docs/accessibility.md, "Automated audits". The default size takes about 80 seconds on the
+simulator and AX5 about 100.
+
 ## Localized runs and screenshots
 
 `LocalizedSmokeTests` runs the same journey with launch arguments for another language:
@@ -132,5 +148,4 @@ xcrun xcresulttool export attachments --path /tmp/ui.xcresult --output-path /tmp
 `manifest.json` in the output maps each exported file to its name (`suggestedHumanReadableName`).
 CI runs the localized tests with the rest (about 25 seconds each on the simulator).
 
-Not covered yet (#46): HLS and podcast playback fixtures, App Store screenshots (#109) and
-accessibility audits (#106).
+Not covered yet (#46): HLS and podcast playback fixtures and App Store screenshots (#109).

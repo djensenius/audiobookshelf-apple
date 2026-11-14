@@ -66,6 +66,7 @@ struct AccountView: View {
                     NavigationLink(value: Route.settings) {
                         label("HeaderSettings", systemImage: "gearshape")
                     }
+                    .accessibilityIdentifier("account.settings")
                 #endif
                 NavigationLink(value: Route.logs) {
                     label("ButtonLogs", systemImage: "doc.text.magnifyingglass")

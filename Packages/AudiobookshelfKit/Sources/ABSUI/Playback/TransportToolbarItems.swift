@@ -117,6 +117,8 @@ struct TransportToolbarEntry: Equatable {
             .disabled(!entry.isEnabled)
             .accessibilityLabel(Text(verbatim: entry.accessibilityLabel))
             .accessibilityValue(Text(verbatim: entry.accessibilityValue))
+            // For UI tests.
+            .accessibilityIdentifier(entry.action == .playPause ? "player.playPause" : "")
             .absHaptic(haptic, trigger: taps)
         }
     }

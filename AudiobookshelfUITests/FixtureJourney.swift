@@ -42,26 +42,15 @@ extension XCTestCase {
         return app
     }
 
-    /// Opens the Library tab, then *Pride and Prejudice*, and checks its title. With a
-    /// `screenshotPrefix`, attaches `<prefix>-library` and `<prefix>-item`.
+    /// Opens the Library tab, then *Pride and Prejudice* (`open(_:in:)`), and checks its title.
+    /// With a `screenshotPrefix`, attaches `<prefix>-library` and `<prefix>-item`.
     @MainActor
     func openLibraryItem(in app: XCUIApplication, screenshotPrefix: String? = nil) {
-        app.descendants(matching: .any)["tab.library"].firstMatch.press()
-        let library = app.descendants(matching: .any)["library.screen"]
-        XCTAssertTrue(library.waitForExistence(timeout: Self.fixtureTimeout), "The Library screen didn't appear")
-
-        // The first card of `fixture-items.json`.
-        let item = library.descendants(matching: .any)["item.li_pride"]
-        XCTAssertTrue(item.waitForExistence(timeout: Self.fixtureTimeout), "The library's items didn't appear")
+        open(.library, in: app)
         attachScreenshot(of: app, prefix: screenshotPrefix, screen: "library")
-        item.press()
-
-        let detail = app.descendants(matching: .any)["item.detail"]
-        XCTAssertTrue(detail.waitForExistence(timeout: Self.fixtureTimeout), "The item screen didn't appear")
-        let title = detail.descendants(matching: .any)["item.title"]
-        XCTAssertTrue(title.waitForExistence(timeout: Self.fixtureTimeout), "The item didn't load")
+        let detail = open(.item, in: app)
         // Server data isn't localized, so the title is the same in every language.
-        XCTAssertEqual(title.label, "Pride and Prejudice")
+        XCTAssertEqual(detail.descendants(matching: .any)["item.title"].label, "Pride and Prejudice")
         attachScreenshot(of: app, prefix: screenshotPrefix, screen: "item")
     }
 

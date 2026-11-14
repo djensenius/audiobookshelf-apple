@@ -315,6 +315,7 @@ private struct ItemDetailActions: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(!play.isEnabled)
+            .accessibilityIdentifier("item.play")
             if model.hasEbook {
                 Button {
                     openReader?()

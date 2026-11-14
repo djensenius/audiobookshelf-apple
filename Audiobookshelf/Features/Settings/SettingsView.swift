@@ -32,6 +32,9 @@ struct SettingsView: View {
             #endif
         }
         .formStyle(.grouped)
+        // For UI tests.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("settings.screen")
         .navigationTitle(Text(verbatim: L10n.string("HeaderSettings")))
         #if os(iOS)
             .scrollContentBackground(.hidden)

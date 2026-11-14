@@ -95,11 +95,11 @@ struct MiniPlayerView: View {
                         // Recovery waits for the network (ADR 0007's "Waiting for network").
                         Text(verbatim: L10n.string(Self.waitingForNetworkKey))
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(ABSColor.mutedForeground)
                     } else if layout.showsCoverAndAuthor, !model.author.isEmpty {
                         Text(verbatim: model.author)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(ABSColor.mutedForeground)
                     }
                 }
                 .lineLimit(1)
@@ -114,6 +114,7 @@ struct MiniPlayerView: View {
             Text(verbatim: model.isWaitingForNetwork ? L10n.string(Self.waitingForNetworkKey) : "")
         )
         .accessibilityHint(Text(verbatim: L10n.string("LabelMiniPlayerHint")))
+        .accessibilityIdentifier("player.mini")
         .contextMenu {
             Button {
                 router.isQueueInspectorPresented = true
@@ -148,7 +149,7 @@ struct MiniPlayerView: View {
             .labelStyle(.iconOnly)
         }
         .buttonStyle(.borderless)
-        .foregroundStyle(.secondary)
+        .foregroundStyle(ABSColor.mutedForeground)
     }
 }
 

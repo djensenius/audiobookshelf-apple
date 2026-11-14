@@ -179,6 +179,8 @@ public struct TransportControls: View {
         }
         .accessibilityLabel(Text(verbatim: Self.playPauseLabel(showsPause: showsPause)))
         .accessibilityValue(Text(verbatim: Self.playPauseAccessibilityValue(isBuffering: isBuffering)))
+        // For UI tests.
+        .accessibilityIdentifier("player.playPause")
     }
 
     private func jumpButton(forward: Bool) -> some View {

@@ -131,22 +131,47 @@ walk each screen with VoiceOver and record what you hear against what's expected
 
 ## Automated audits
 
-There's no UI test target yet. When #46a adds one and its `test:ui` task, part two of #106
-(106b) adds audit tests there:
+`AccessibilityAuditTests` (in `AudiobookshelfUITests`; see docs/testing/ui-tests.md) signs in
+to the fixture server, opens each screen above in turn (`FixtureScreen`, in order: Home,
+Library, Item detail, Player, Settings, Downloads) and calls
+`XCUIApplication.performAccessibilityAudit(for:)` on it. Each issue the audit reports fails the
+test with its screen, text size, audit type, element and description, for example
+`Player (default text size): contrast on text label 'Jane Austen': Contrast nearly passed`, and
+a screenshot of the screen, `audit-<screen>`, is attached. Two tests walk every screen, one
+launch each:
 
-- one test per screen above that launches the app with fixture data, opens the screen and
-  calls `XCUIApplication.performAccessibilityAudit()`, failing on any issue it reports;
-- known false positives filtered by audit type and element, each with a comment and an
-  issue;
-- the same tests run at AX5 through the launch environment.
+- `testScreens`, at the default text size, with every audit type but Dynamic Type and clipped
+  text. At this size those two predict larger sizes, and report text that does scale and
+  doesn't clip (a `Form` row's label, the player's times);
+- `testScreensAtAccessibilitySize`, at AX5 (`-UIPreferredContentSizeCategoryName
+  UICTContentSizeCategoryAccessibilityXXXL`), with every audit type.
 
-Until then, package tests cover the pure helpers: the labels and values in `ItemViewsTests`,
-and the Voice Control names and Reduce Motion helpers in `AccessibilityTests`.
+The player is paused before its audit, so its times hold still. CI runs them on iOS with the
+other UI tests; on macOS they build but don't run yet (#46).
+
+Known issues are filtered in `KnownAuditIssue.all`, by screen, audit type and element, each with
+the reason and its issue:
+
+- Item detail: the metadata rows are smaller than 44 points tall; the Author, Narrator and
+  Genres links among them are controls (#TODO-ISSUE). The audit also sometimes reports
+  "potentially inaccessible text" with no element, most likely the metadata's labels, hidden
+  from VoiceOver because each value speaks its label (#TODO-ISSUE).
+- Player: the book's remaining time fails contrast while the elapsed time beside it, the same
+  color and size, passes (#TODO-ISSUE).
+- Cards' titles and authors, which they cut short by design and speak in full, and the mini
+  player's title, which can be cut to a letter in narrow windows such as the iPhone Duo's
+  (#TODO-ISSUE), count as clipped text.
+
+Add a filter only for an issue that isn't the app's to fix or that has its own issue; fix the
+rest. Package tests cover the pure helpers: the labels and values in `ItemViewsTests`, and the
+Voice Control names and Reduce Motion helpers in `AccessibilityTests`.
 
 ## Known gaps
 
 - Cards and rows mark completed downloads only; a download under way shows nothing until it
   completes.
 - Series and author cards have no context menu, so they have no custom actions to mirror.
+- The automated audits' known issues above, and the screens they don't open yet (sheets,
+  search, series, authors, collections, playlists, stats and CarPlay).
 - The connection indicator tells a metered connection from an unmetered one by colour alone;
   its message, which is its value and tooltip, says which.

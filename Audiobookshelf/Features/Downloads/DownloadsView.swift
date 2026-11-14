@@ -15,6 +15,9 @@ struct DownloadsView: View {
                 DownloadsUnavailableView()
             }
         }
+        // For UI tests.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("downloads.screen")
         .navigationTitle(Text(verbatim: L10n.string("HeaderDownloads")))
     }
 }
