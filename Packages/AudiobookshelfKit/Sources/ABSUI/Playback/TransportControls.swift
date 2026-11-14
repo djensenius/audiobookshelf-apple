@@ -5,6 +5,9 @@ import SwiftUI
 /// chapter around them in the full player (port of the legacy player's controls row).
 ///
 /// It owns no state: values in, closures out. Each tap plays the `haptic` impact.
+///
+/// The mini player's styles (``Style/compact`` and ``Style/playPauseOnly``) show each button in the
+/// Large Content Viewer on a long press, since the mini player caps its text size.
 public struct TransportControls: View {
     /// How much the controls show.
     public enum Style: Sendable, Hashable {
@@ -183,6 +186,11 @@ public struct TransportControls: View {
             .frame(minWidth: 44, minHeight: 44)
             .contentShape(.rect)
         }
+        .modifier(
+            LargeContent(
+                isEnabled: style != .full, title: Self.playPauseLabel(showsPause: showsPause),
+                systemImage: showsPause ? "pause.fill" : "play.fill")
+        )
         .accessibilityLabel(Text(verbatim: Self.playPauseLabel(showsPause: showsPause)))
         .accessibilityValue(Text(verbatim: Self.playPauseAccessibilityValue(isBuffering: isBuffering)))
         // For UI tests.
@@ -208,7 +216,14 @@ public struct TransportControls: View {
             .frame(minWidth: 44, minHeight: 44)
             .contentShape(.rect)
         }
+        .modifier(
+            LargeContent(
+                isEnabled: style != .full, title: Self.jumpLabel(forward: forward, seconds: seconds, locale: locale),
+                systemImage: Self.jumpSymbol(forward: forward, seconds: seconds))
+        )
         .accessibilityLabel(Text(verbatim: Self.jumpLabel(forward: forward, seconds: seconds, locale: locale)))
+        // For UI tests.
+        .accessibilityIdentifier(forward ? "player.jumpForward" : "player.jumpBackward")
     }
 
     private func chapterButton(_ action: Action) -> some View {
@@ -223,6 +238,28 @@ public struct TransportControls: View {
         }
         .disabled(next ? !hasNextChapter : !hasPreviousChapter)
         .accessibilityLabel(Text(verbatim: Self.chapterLabel(next: next)))
+    }
+}
+
+/// Shows a button in the Large Content Viewer, when `isEnabled`, as its label and symbol: for a
+/// bar whose text size is capped, as the tab bar's is (HIG, Accessibility, Large Content Viewer).
+private struct LargeContent: ViewModifier {
+    let isEnabled: Bool
+    let title: String
+    let systemImage: String
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.accessibilityShowsLargeContentViewer {
+                Label {
+                    Text(verbatim: title)
+                } icon: {
+                    Image(systemName: systemImage)
+                }
+            }
+        } else {
+            content
+        }
     }
 }
 

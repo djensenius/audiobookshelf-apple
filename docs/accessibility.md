@@ -72,6 +72,9 @@ default text size and at AX5. Record failures as issues that reference #106.
 - [ ] The description's Read more and Read less are buttons, and the text resizes without
   animation with Reduce Motion.
 - [ ] Chapters and files read as rows, and episodes read their date, badges and summary.
+- [ ] Each metadata link reads its name and its label ("Jane Austen, Author, link"), and
+  each plain row reads as one element ("Duration, 11 hours 36 minutes"); the labels
+  themselves are hidden. Each link and row is at least 44 points tall (#612).
 
 ### Player
 
@@ -81,6 +84,8 @@ default text size and at AX5. Record failures as issues that reference #106.
   names, and toggles report their state.
 - [ ] The cover is hidden or named, and the chapter title reads once.
 - [ ] With Reduce Motion, the thumb doesn't animate as it grows.
+- [ ] The total track (when shown) reads "Total Track" with both times; its times use
+  `.caption`, as the chapter's do (#614).
 - [ ] Voice Control: "Tap Play", "Tap Pause" and the jump buttons work by name.
 
 ### Settings
@@ -103,6 +108,18 @@ default text size and at AX5. Record failures as issues that reference #106.
 - Cards keep two lines for their title (`lineLimit(2, reservesSpace: true)`); at AX5 the
   shelves get taller rather than truncating more.
 - Touch targets stay at least 44 × 44 points, and the scrubber's track grows with its thumb.
+  The item screen's metadata rows are padded to 44 points tall (#612).
+- The mini player (the tab bar's bottom accessory on iOS) stops growing its text at xLarge
+  (`MiniPlayerView.largestTextSize`): the system gives the accessory a fixed height, which fits
+  two lines up to that size, as the tab bar keeps its own size. At accessibility sizes it shows
+  the title on up to two lines, play/pause and close; in narrow windows (iPhone Duo) a
+  `ViewThatFits` drops the jumps, then the cover and author, so the title keeps about a dozen
+  characters (#616). Its button speaks the full title. Since its text is capped at xLarge, a
+  long press on the title, play/pause, the jumps or close shows the Large Content Viewer, as on
+  the tab bar. At accessibility sizes, where the viewer works, the title's long press shows it
+  in place of the Up Next context menu; Up Next stays in the full player and in VoiceOver's
+  actions. `MiniPlayerTests` (UI tests) checks the narrow layout and which of the two the long
+  press gets; XCUITest can't see the viewer's HUD, which closes when the press ends.
 - Previews at `.accessibility5` exist for `ItemCard` and `ItemRow`; add one for any new
   view whose layout changes with the text size.
 
@@ -150,19 +167,27 @@ The player is paused before its audit, so its times hold still. Downloads is aud
 empty state: fixture launches have their own empty download stack. CI runs them on iOS with the
 other UI tests; on macOS they build but don't run yet (#46).
 
-Known issues are filtered in `KnownAuditIssue.all`, by screen, audit type and element, each with
-the reason and its issue:
+Known issues are filtered in `KnownAuditIssue.all`, by screen, audit type, description and
+element, each with the reason and its issue:
 
-- Item detail: the metadata rows are smaller than 44 points tall; the Author, Narrator and
-  Genres links among them are controls (#612). The audit also sometimes reports
-  "potentially inaccessible text" with no element, most likely the metadata's labels, hidden
-  from VoiceOver because each value speaks its label (#613).
-- Player: the book's remaining time fails contrast while the elapsed time beside it, the same
-  color and size, passes (#614).
+- Item detail: "potentially inaccessible text" with no element (#613). These are the labels of
+  the metadata's link rows (Author, Narrator, Genres), hidden from VoiceOver on purpose: each
+  link speaks its label ("Jane Austen, Author, link"), since VoiceOver often skips a
+  container's label. Bisected on the iPhone Duo simulator: with the labels shown to VoiceOver
+  there are no reports; with only the link rows' labels hidden there are three, one per label.
+  The plain rows' hidden labels aren't reported because their row's own label is the same text.
+  Giving the links' container that label (`.contain`) doesn't help, and showing the labels
+  would add a VoiceOver stop per row that repeats what the links already say, so this is a
+  false positive, kept filtered.
 - Cards' titles and authors on Home and Library, which they cut short by design and speak in
-  full (#615; only text inside an `item.<id>` card, not the item screen's own `item.` elements), and the mini
-  player's title, which can be cut to a letter in narrow windows such as the iPhone Duo's
-  (#616), count as clipped text.
+  full (#615; only text inside an `item.<id>` card, not the item screen's own `item.`
+  elements), count as clipped text. See "Decisions".
+
+Two findings that used to be filtered are fixed instead. The Player's whole-book remaining time
+failed contrast at `.caption2` (11 points), though its pixels measure as the elapsed time's do,
+about 5.4:1 on the backdrop; it now uses `.caption`, like the chapter's times, and passes
+(#614). The mini player's title, cut to a letter on the iPhone Duo, keeps a readable width
+(#616; see "Dynamic Type up to AX5").
 
 Add a filter only for an issue that isn't the app's to fix or that has its own issue; fix the
 rest. Package tests cover the pure helpers: the labels and values in `ItemViewsTests`, and the
@@ -175,5 +200,13 @@ Voice Control names and Reduce Motion helpers in `AccessibilityTests`.
 - Series and author cards have no context menu, so they have no custom actions to mirror.
 - The automated audits' known issues above, and the screens they don't open yet (sheets,
   search, series, authors, collections, playlists, stats and CarPlay).
+
+### Decisions
+
+- Cards keep cutting their title at two lines and their author at one, at every text size,
+  like Apple Books (#615). More lines would make the cards, already taller at large sizes,
+  taller still, showing fewer books at a time; and the card, one accessibility element, speaks both in full, so nothing
+  is lost to VoiceOver; the full text is also on the item screen. The audit's clipped-text
+  reports for cards are filtered (above).
 - The connection indicator tells a metered connection from an unmetered one by colour alone;
   its message, which is its value and tooltip, says which.

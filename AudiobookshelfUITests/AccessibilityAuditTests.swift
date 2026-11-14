@@ -118,42 +118,33 @@ final class AccessibilityAuditTests: XCTestCase {
 }
 
 /// An audit issue that isn't the app's to fix, or that has its own issue: filtered by screen,
-/// audit type and element. Each one says why, and names its issue.
+/// audit type, description and element. Each one says why, and names its issue.
 struct KnownAuditIssue {
     /// `nil` for every screen.
     var screen: FixtureScreen?
     var type: XCUIAccessibilityAuditType
+    /// Text the issue's compact description must contain; `nil` for any.
+    var description: String? = nil
     /// Matches the issue's element (`nil` when the issue has none) in the app.
     var element: @MainActor (XCUIElement?, XCUIApplication) -> Bool
 
     @MainActor
     func matches(_ issue: XCUIAccessibilityAuditIssue, on screen: FixtureScreen, in app: XCUIApplication) -> Bool {
-        (self.screen == nil || self.screen == screen) && issue.auditType == type && element(issue.element, app)
+        (self.screen == nil || self.screen == screen) && issue.auditType == type
+            && (description.map { issue.compactDescription.contains($0) } ?? true) && element(issue.element, app)
     }
 
     @MainActor static let all: [KnownAuditIssue] = {
         var all: [KnownAuditIssue] = [
-            // The metadata rows (ItemDetailMetadata) are text-sized, about 18 pt tall: the plain
-            // ones ("Duration, 11 hours 36 minutes") aren't controls, but the Author, Narrator and
-            // Genres links are, and are smaller than 44 pt. #612
-            KnownAuditIssue(screen: .item, type: .hitRegion) { element, app in
-                guard let element else { return false }
-                let metadata = app.descendants(matching: .any)["item.metadata"].firstMatch
-                return metadata.exists && metadata.frame.contains(element.frame)
-            },
-            // "Potentially inaccessible text", with no element, and not on every run: most likely
-            // the metadata's labels ("Author", "Duration", …), hidden from VoiceOver on purpose
-            // because each value speaks its label ("Jane Austen, Author, link"; VoiceOver often
-            // skips a container's label). #613
-            KnownAuditIssue(screen: .item, type: .elementDetection) { element, _ in element == nil },
-            // The whole book's remaining time, over the player's chapter scrubber, fails contrast on
-            // every run, while the elapsed time beside it, the same color and size, passes, as do
-            // the chapter's times: muted foreground on the thick material backdrop, about 5:1.
-            // #614
-            KnownAuditIssue(screen: .player, type: .contrast) { element, _ in
-                guard let element, element.elementType == .staticText else { return false }
-                return element.label.hasPrefix("-") || element.label.hasPrefix("\u{2212}")
-            },
+            // "Potentially inaccessible text", with no element: the labels of the metadata's link
+            // rows ("Author", "Narrator", "Genres"), hidden from VoiceOver on purpose because each
+            // link speaks its label ("Jane Austen, Author, link"; VoiceOver often skips a
+            // container's label). Bisected: shown to VoiceOver, there are no reports; the plain
+            // rows' labels pass because their row's label is the same text. Not a gap: see
+            // docs/accessibility.md, "Automated audits". #613
+            KnownAuditIssue(
+                screen: .item, type: .elementDetection, description: "Potentially inaccessible text"
+            ) { element, _ in element == nil }
         ]
         #if os(iOS)
             all += [
@@ -163,12 +154,6 @@ struct KnownAuditIssue {
                 // whose clipping isn't by design. #615
                 KnownAuditIssue(screen: .home, type: .textClipped, element: isShortenedInCard),
                 KnownAuditIssue(screen: .library, type: .textClipped, element: isShortenedInCard),
-                // The mini player cuts its title and author short at one line, to as little as a
-                // letter in narrow windows (iPhone Duo); its button speaks the full title.
-                // #616
-                KnownAuditIssue(screen: nil, type: .textClipped) { element, _ in
-                    element?.identifier == "player.mini"
-                },
             ]
         #endif
         return all

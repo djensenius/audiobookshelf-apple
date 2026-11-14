@@ -10,17 +10,18 @@ import SwiftUI
 ///
 /// On iOS it is the tab view's bottom accessory; when the tab bar collapses it to the inline
 /// placement only play/pause stays. At accessibility text sizes the cover, author and jumps go, so
-/// the title, play/pause and close keep fitting. On macOS it is a bar under the content.
+/// the title, on up to two lines, play/pause and close keep fitting. In a narrow window, such as
+/// the iPhone Duo's, the jumps go, then the cover and author, so the title keeps a readable width
+/// (#616). On iOS its text stops growing at ``largestTextSize``; a long press on the title or a
+/// button shows it in the Large Content Viewer, as on the tab bar. On macOS it is a bar under the
+/// content.
 struct MiniPlayerView: View {
     let model: PlayerViewModel
     let router: Router
-    @Environment(AppSettings.self) private var settings: AppSettings?
     #if os(iOS)
         @Environment(\.tabViewBottomAccessoryPlacement) private var placement
     #endif
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @ScaledMetric(relativeTo: .body) private var coverHeight: CGFloat = 40
-    private var libraries = LibraryCoverSettings()
 
     /// What the mini player shows for its placement and text size.
     enum Layout: Equatable {
@@ -41,6 +42,12 @@ struct MiniPlayerView: View {
         var showsCloseAndProgress: Bool { self != .inline }
     }
 
+    /// The largest text size the mini player shows. The system gives the bottom accessory a fixed
+    /// height, which fits two lines of text (the title and author, or the title on two lines) up
+    /// to this size; larger sizes, including the accessibility ones, keep it, as the tab bar keeps
+    /// its own size.
+    static let largestTextSize = DynamicTypeSize.xLarge
+
     private var layout: Layout {
         #if os(iOS)
             let isInline = placement == .inline
@@ -51,19 +58,53 @@ struct MiniPlayerView: View {
     }
 
     var body: some View {
-        HStack(spacing: 8) {
-            openButton
-            TransportControls(
-                style: model.displayOptions.showsSkipControls ? layout.transportStyle : .playPauseOnly,
-                showsPause: model.showsPause,
-                isBuffering: model.isBuffering, jumpBackwardSeconds: model.jumpBackwardSeconds,
-                jumpForwardSeconds: model.jumpForwardSeconds, haptic: settings?.hapticFeedback ?? .off
-            ) { action in
-                Task { await model.perform(action) }
+        // The layout comes from the text size the user picked; the bar's text stops growing.
+        MiniPlayerBar(
+            model: model, router: router, layout: layout,
+            showsUpNextMenu: !dynamicTypeSize.isAccessibilitySize
+        )
+        #if os(iOS)
+            .dynamicTypeSize(...Self.largestTextSize)
+        #endif
+    }
+
+    /// The line shown, in place of the author, while recovery waits for the network.
+    static let waitingForNetworkKey = "MessageNoNetworkConnection"
+}
+
+/// The mini player's content for ``MiniPlayerView/Layout``.
+private struct MiniPlayerBar: View {
+    let model: PlayerViewModel
+    let router: Router
+    let layout: MiniPlayerView.Layout
+    /// Whether a long press on the title shows the Up Next menu. At accessibility text sizes the
+    /// long press shows the Large Content Viewer instead (the two can't share it); Up Next stays
+    /// in the full player and in the VoiceOver actions.
+    let showsUpNextMenu: Bool
+    @Environment(AppSettings.self) private var settings: AppSettings?
+    @ScaledMetric(relativeTo: .body) private var coverHeight: CGFloat = 40
+    /// The width the title keeps before the jumps, then the cover and author, give way to it:
+    /// about a dozen characters.
+    @ScaledMetric(relativeTo: .subheadline) private var readableTitleWidth: CGFloat = 110
+    private var libraries = LibraryCoverSettings()
+
+    init(model: PlayerViewModel, router: Router, layout: MiniPlayerView.Layout, showsUpNextMenu: Bool) {
+        self.model = model
+        self.router = router
+        self.layout = layout
+        self.showsUpNextMenu = showsUpNextMenu
+    }
+
+    var body: some View {
+        // The first that fits with the title at its readable width; the last one otherwise.
+        ViewThatFits(in: .horizontal) {
+            if layout == .regular {
+                row(showsJumps: model.displayOptions.showsSkipControls, showsCoverAndAuthor: true)
+                if model.displayOptions.showsSkipControls {
+                    row(showsJumps: false, showsCoverAndAuthor: true)
+                }
             }
-            if layout.showsCloseAndProgress {
-                closeButton
-            }
+            row(showsJumps: false, showsCoverAndAuthor: false)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 4)
@@ -74,12 +115,31 @@ struct MiniPlayerView: View {
         }
     }
 
-    private var openButton: some View {
-        Button {
+    private func row(showsJumps: Bool, showsCoverAndAuthor: Bool) -> some View {
+        HStack(spacing: 8) {
+            openButton(showsCoverAndAuthor: showsCoverAndAuthor)
+            TransportControls(
+                style: showsJumps ? .compact : .playPauseOnly,
+                showsPause: model.showsPause,
+                isBuffering: model.isBuffering, jumpBackwardSeconds: model.jumpBackwardSeconds,
+                jumpForwardSeconds: model.jumpForwardSeconds, haptic: settings?.hapticFeedback ?? .off
+            ) { action in
+                Task { await model.perform(action) }
+            }
+            if layout.showsCloseAndProgress {
+                closeButton
+            }
+        }
+    }
+
+    private func openButton(showsCoverAndAuthor: Bool) -> some View {
+        let showsWaiting = layout.showsCloseAndProgress && model.isWaitingForNetwork
+        let showsAuthor = showsCoverAndAuthor && !model.author.isEmpty
+        return Button {
             router.isFullPlayerPresented = true
         } label: {
             HStack(spacing: 10) {
-                if layout.showsCoverAndAuthor {
+                if showsCoverAndAuthor {
                     CoverView(
                         key: model.coverKey, title: model.title, author: model.author,
                         shape: model.coverShape(in: libraries),
@@ -91,48 +151,45 @@ struct MiniPlayerView: View {
                 VStack(alignment: .leading, spacing: 0) {
                     Text(verbatim: model.title)
                         .font(.subheadline.weight(.semibold))
-                    if layout.showsCloseAndProgress, model.isWaitingForNetwork {
+                        // Two lines when nothing else needs the second (except inline, which is short).
+                        .lineLimit(layout == .inline || showsWaiting || showsAuthor ? 1 : 2)
+                        // For UI tests, which check its width; VoiceOver hears the button.
+                        .accessibilityIdentifier("player.mini.title")
+                    if showsWaiting {
                         // Recovery waits for the network (ADR 0007's "Waiting for network").
-                        Text(verbatim: L10n.string(Self.waitingForNetworkKey))
+                        Text(verbatim: L10n.string(MiniPlayerView.waitingForNetworkKey))
                             .font(.caption)
                             .foregroundStyle(ABSColor.mutedForeground)
-                    } else if layout.showsCoverAndAuthor, !model.author.isEmpty {
+                            .lineLimit(1)
+                    } else if showsAuthor {
                         Text(verbatim: model.author)
                             .font(.caption)
                             .foregroundStyle(ABSColor.mutedForeground)
+                            .lineLimit(1)
                     }
                 }
-                .lineLimit(1)
-                Spacer(minLength: 0)
+                // Asks for a readable width, so a narrower window drops the jumps, then the cover.
+                .frame(idealWidth: readableTitleWidth, maxWidth: .infinity, alignment: .leading)
             }
             .frame(minHeight: 44)
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        // The capped text size's stand-in (HIG): the title, large, on a long press.
+        .accessibilityShowsLargeContentViewer {
+            Text(verbatim: model.title)
+        }
         .accessibilityLabel(Text(verbatim: L10n.string("LabelMiniPlayerAccessibility", model.title)))
         .accessibilityValue(
-            Text(verbatim: model.isWaitingForNetwork ? L10n.string(Self.waitingForNetworkKey) : "")
+            Text(verbatim: model.isWaitingForNetwork ? L10n.string(MiniPlayerView.waitingForNetworkKey) : "")
         )
         .accessibilityHint(Text(verbatim: L10n.string("LabelMiniPlayerHint")))
         .accessibilityIdentifier("player.mini")
-        .contextMenu {
-            Button {
-                router.isQueueInspectorPresented = true
-            } label: {
-                Label {
-                    Text(verbatim: L10n.string("HeaderUpNext"))
-                } icon: {
-                    Image(systemName: "list.bullet")
-                }
-            }
-        }
+        .modifier(UpNextMenu(isEnabled: showsUpNextMenu, router: router))
         .accessibilityAction(named: Text(verbatim: L10n.string("HeaderUpNext"))) {
             router.isQueueInspectorPresented = true
         }
     }
-
-    /// The line shown, in place of the author, while recovery waits for the network.
-    static let waitingForNetworkKey = "MessageNoNetworkConnection"
 
     private var closeButton: some View {
         Button {
@@ -150,6 +207,41 @@ struct MiniPlayerView: View {
         }
         .buttonStyle(.borderless)
         .foregroundStyle(ABSColor.mutedForeground)
+        // For UI tests.
+        .accessibilityIdentifier("player.mini.close")
+        .accessibilityShowsLargeContentViewer {
+            Label {
+                Text(verbatim: L10n.string("LabelClosePlayer"))
+            } icon: {
+                Image(systemName: "xmark")
+            }
+        }
+    }
+}
+
+/// The mini player's context menu, with Up Next, when `isEnabled`.
+private struct UpNextMenu: ViewModifier {
+    let isEnabled: Bool
+    let router: Router
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.contextMenu {
+                Button {
+                    router.isQueueInspectorPresented = true
+                } label: {
+                    Label {
+                        Text(verbatim: L10n.string("HeaderUpNext"))
+                    } icon: {
+                        Image(systemName: "list.bullet")
+                    }
+                }
+                // For UI tests.
+                .accessibilityIdentifier("player.mini.upNext")
+            }
+        } else {
+            content
+        }
     }
 }
 
@@ -201,6 +293,12 @@ extension PlayerViewModel {
 #Preview("Buffering") {
     MiniPlayerView(model: .preview(playing: true, buffering: true), router: Router())
         .frame(maxWidth: 420)
+}
+
+#Preview("Narrow") {
+    // About the iPhone Duo's accessory: the jumps and cover give way to the title.
+    MiniPlayerView(model: .preview(playing: true), router: Router())
+        .frame(maxWidth: 290)
 }
 
 #Preview("Accessibility size") {
