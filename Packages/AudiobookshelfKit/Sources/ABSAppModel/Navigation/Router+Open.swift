@@ -18,6 +18,8 @@ extension Router {
     ///
     /// Every link that navigates also dismisses the full player, which would cover the
     /// destination, and replaces any earlier pending play link, search query or server switch.
+    /// Every link, even one for another server, advances ``navigationGeneration``, so a play-link
+    /// confirmation already asked no longer plays.
     /// Links other than `library` also cancel a pending library request, so resolving it later
     /// can't reset the paths they opened; a `library` link replaces it.
     ///
@@ -25,6 +27,7 @@ extension Router {
     /// (``resetForIdentityChange(serverID:userID:)``) and its restored ``snapshot``: the
     /// server check needs ``serverID``, and a restore resets the paths and pending state.
     public func open(_ link: DeepLink) {
+        navigationGeneration += 1
         if let linkServer = link.serverID, !Self.isSameServer(linkServer, serverID) {
             pendingServerSwitch = link
             return
@@ -82,6 +85,15 @@ extension Router {
     func dropPendingPlayLinkIfOffPath() {
         guard pendingPlayLink != nil, !self[path: .library].starts(with: pendingPlayLinkPath) else { return }
         clearPendingPlayLink()
+    }
+
+    /// ``pendingPlayLink`` for the screen showing `route`, only while that screen is the one the
+    /// link opened and tops the Library path (#577). A screen pushed on top hides it until it is
+    /// popped again; an older screen for the same item lower in the path never gets it.
+    public func pendingPlayLink(for route: Route) -> PlayLink? {
+        guard let pendingPlayLink, pendingPlayLinkPath.last == route, self[path: .library] == pendingPlayLinkPath
+        else { return nil }
+        return pendingPlayLink
     }
 
     private static func itemRoutes(id: String, episodeID: String?) -> [Route] {

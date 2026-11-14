@@ -99,6 +99,11 @@ struct ItemDetailScreen: View {
     var playlists: (any PlaylistEditingService)?
 
     var body: some View {
+        screen
+            .confirmsPlayLink(for: .item(id: model.itemID), screen: .item(model))
+    }
+
+    @ViewBuilder private var screen: some View {
         if model.hasLoaded, model.mediaType == .podcast {
             // The podcast screen has its own title.
             PodcastDetailView(model: model)
