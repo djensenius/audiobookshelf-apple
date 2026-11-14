@@ -13,6 +13,7 @@ import Testing
         #expect(settings.lineSpacing == 115)
         #expect(settings.textStroke == 0)
         #expect(settings.spread == .auto)
+        #expect(!settings.keepScreenAwake)
     }
 
     @Test func rawValuesAreTheStoredAndBridgeStrings() {
@@ -47,7 +48,8 @@ import Testing
 
     @Test func codableRoundTrips() throws {
         let settings = ReaderSettings(
-            theme: .sepia, fontFamily: .sansSerif, fontScale: 140, lineSpacing: 180, textStroke: 25, spread: .none)
+            theme: .sepia, fontFamily: .sansSerif, fontScale: 140, lineSpacing: 180, textStroke: 25, spread: .none,
+            keepScreenAwake: true)
         let data = try JSONEncoder().encode(settings)
         #expect(try JSONDecoder().decode(ReaderSettings.self, from: data) == settings)
 
@@ -55,6 +57,19 @@ import Testing
         #expect(object["theme"] as? String == "sepia")
         #expect(object["fontFamily"] as? String == "sans-serif")
         #expect(object["spread"] as? String == "none")
+        #expect(object["keepScreenAwake"] as? Bool == true)
+    }
+
+    /// Settings saved before the setting existed keep the screen's normal sleep.
+    @Test func settingsWithoutKeepScreenAwakeDecodeWithItOff() throws {
+        let json =
+            #"{"theme":"sepia","fontFamily":"serif","fontScale":120,"lineSpacing":115,"textStroke":0,"spread":"auto"}"#
+        let settings = try JSONDecoder().decode(ReaderSettings.self, from: Data(json.utf8))
+        #expect(settings == ReaderSettings(theme: .sepia, fontScale: 120))
+        #expect(!settings.keepScreenAwake)
+        #expect(
+            try JSONDecoder().decode(ReaderSettings.self, from: Data(#"{"keepScreenAwake":"yes"}"#.utf8))
+                == ReaderSettings())
     }
 
     @Test func decodingIsLenientFieldByField() throws {
