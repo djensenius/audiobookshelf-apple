@@ -65,6 +65,13 @@ public enum LocalPlaybackError: Error, Sendable, Hashable {
 ///   session never saved is dropped.
 /// - ``sessionStatus(id:)`` reports a session it started as open: no server can end it.
 ///
+/// Each session's saves and its close are its own row's only writers, and each reads the row then
+/// writes it back. They run one at a time per session id, in the order called, whatever awaits or
+/// cancels their callers, and a session closed here stays closed: a later ``syncSession(id:report:)``
+/// for it only adds its listening time to the closed row, which stays inactive with the close's
+/// position, so it never reopens it or replaces its totals with older ones (#74). So however a
+/// teardown's deadline cuts its wait for a save short, the save and the close can't overlap.
+///
 /// Saved sessions are shared by every connection in one store; this service only accepts its own
 /// connection's.
 public final class LocalPlaybackSessionService: PlaybackSessionService {
@@ -80,6 +87,13 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
     /// which an upload may delete while it plays (the first sync after login deletes active
     /// sessions too), and the next save starts from the snapshot, never from zero.
     private let open = Mutex<[String: OpenSession]>([:])
+
+    /// Per session id, the last save or close called: the next one waits for it (#74).
+    private let tails = Mutex<[String: (token: UUID, task: Task<Void, Never>)]>([:])
+    /// The sessions closed here: a save for one only adds its listening time, so none reopens (#74).
+    private let closed = Mutex<Set<String>>([])
+    /// Tests only: runs between a write's read of the saved row and its save, to hold it there.
+    let afterRead = Mutex<(@Sendable (String) async -> Void)?>(nil)
 
     private struct OpenSession {
         var session: PendingLocalSessionDTO
@@ -210,8 +224,16 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
     /// only marked inactive, even when an upload already deleted its row. A session this service
     /// doesn't know is ignored.
     public func closeSession(id: String, report: PlaybackSyncReport?) async throws {
+        try await serialized(id) { [self] in
+            closed.withLock { _ = $0.insert(id) }
+            try await close(id: id, report: report)
+        }
+    }
+
+    private func close(id: String, report: PlaybackSyncReport?) async throws {
         let started = open.withLock { $0[id] }
         let stored = try await progress.session(id: id)
+        await afterRead.withLock { $0 }?(id)
         // Another connection's saved session with this id is never replaced.
         if let stored, stored.key.serverConnectionID != serverConnectionID {
             open.withLock { _ = $0.removeValue(forKey: id) }
@@ -238,10 +260,25 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
     /// progress syncer's periodic report for a local session
     /// (``LocalSessionProgressSyncService``), so offline listening survives a relaunch. A session
     /// this service doesn't know, or another connection's saved one with its id, is ignored.
+    /// After ``closeSession(id:report:)`` for `id` (a save the syncer had begun as playback
+    /// stopped), only its listening time is added, to the saved row: it stays inactive, at the
+    /// close's position.
     public func syncSession(id: String, report: PlaybackSyncReport) async throws {
+        try await serialized(id) { [self] in
+            try await sync(id: id, report: report, isClosed: closed.withLock { $0.contains(id) })
+        }
+    }
+
+    private func sync(id: String, report: PlaybackSyncReport, isClosed: Bool) async throws {
         let started = open.withLock { $0[id] }
         let stored = try await progress.session(id: id)
+        await afterRead.withLock { $0 }?(id)
         if let stored, stored.key.serverConnectionID != serverConnectionID { return }
+        if isClosed {
+            guard var session = stored, report.timeListened > 0 else { return }
+            session.timeListening += report.timeListened
+            return try await progress.saveSession(session)
+        }
         guard var session = stored ?? started?.session else { return }
         session.currentTime = report.currentTime
         session.timeListening += report.timeListened
@@ -253,6 +290,23 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
         // closed meanwhile isn't reopened.
         let saved = session
         open.withLock { if $0[id] != nil { $0[id] = OpenSession(session: saved, isSaved: true) } }
+    }
+
+    /// Runs `body` after every write to `id` called before it, in a task of its own, so a caller's
+    /// cancellation neither skips it nor lets the next one start before it ends (#74).
+    private func serialized(_ id: String, _ body: @escaping @Sendable () async throws -> Void) async throws {
+        let token = UUID()
+        let task = tails.withLock { tails in
+            let previous = tails[id]?.task
+            let task = Task<Void, any Error> {
+                await previous?.value
+                try await body()
+            }
+            tails[id] = (token, Task { _ = try? await task.value })
+            return task
+        }
+        defer { tails.withLock { if $0[id]?.token == token { $0[id] = nil } } }
+        try await task.value
     }
 
     /// Nothing to refresh: local files need no token.

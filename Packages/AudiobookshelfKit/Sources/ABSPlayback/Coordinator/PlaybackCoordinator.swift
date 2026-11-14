@@ -1680,9 +1680,10 @@ public final class PlaybackCoordinator {
             try? await handoff?.waitForSessionSync(timeout: Self.closeWaitTimeout, sleep: sleep)
             guard !Task.isCancelled else {
                 // An account end cancelled it before it was sent: a session on this device is
-                // still closed there, without the network (#74).
+                // still closed there, without the network (#74), once the save it cut short ends.
                 if let local = sessions as? any LocalPlaybackDeciding {
-                    _ = try? await local.closeLocalSession(id: sessionID, report: handoff?.report ?? report)
+                    await Self.closeLocally(sessionID, in: local, after: handoff, report: handoff?.report ?? report)
+                        .value
                 }
                 operation.transport.resolve(.success(false))
                 return
@@ -1716,19 +1717,30 @@ public final class PlaybackCoordinator {
             operation.transport.resolve(.success(false))
             return
         }
-        let sessionID = operation.sessionID
-        let handoff = operation.handoff
-        let sleep = self.sleep
+        let close = Self.closeLocally(operation.sessionID, in: local, after: operation.handoff, report: report)
         Task {
-            // The syncer's save in flight for this session lands first, so the close is the last write.
-            try? await handoff?.waitForSessionSync(timeout: Self.closeWaitTimeout, sleep: sleep)
+            await close.value
+            operation.transport.resolve(.success(false))
+        }
+    }
+
+    /// Closes session `sessionID` on this device (#74), in a task nothing cancels: after the
+    /// syncer's save in flight for it, however long that takes, so the close is the last write.
+    /// Only a caller's wait has a deadline (``waitForClose(timeout:)``); the write itself always
+    /// ends. The service orders the two anyway (``LocalPlaybackSessionService``): this wait keeps
+    /// the closed row whole for an upload that runs between them.
+    private static func closeLocally(
+        _ sessionID: String, in local: any LocalPlaybackDeciding, after handoff: PlaybackCloseHandoff?,
+        report: PlaybackSyncReport?
+    ) -> Task<Void, Never> {
+        Task {
+            _ = try? await handoff?.sessionSync?.wait()
             do {
                 _ = try await local.closeLocalSession(id: sessionID, report: report)
             } catch {
                 logger.error(
                     "Closing a local session at account end failed: \(String(describing: error), privacy: .public)")
             }
-            operation.transport.resolve(.success(false))
         }
     }
 

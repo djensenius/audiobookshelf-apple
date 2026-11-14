@@ -31,6 +31,18 @@ public enum CarPlayPlayOutcome: Sendable, Hashable {
     case discarded
 }
 
+/// An alert CarPlay shows (``CarPlayRootModel/presentedAlert``): its message and the failure it's
+/// about, by item, account, playback binding, start and operation, so the alert is presented again
+/// when the failure changes, and its buttons do nothing once it isn't the current one (#74).
+public struct CarPlayAlert: Sendable, Hashable {
+    public let message: PlayerErrorMessage
+    let item: MediaKey?
+    let connectionID: UUID
+    let playbackSession: ObjectIdentifier?
+    let startGeneration: Int
+    let operation: Int?
+}
+
 /// CarPlay's root (#79): which template to show for the session, the Continue tab's rows and
 /// what a tapped row plays. The CarPlay delegate is a thin adapter over it: it shows
 /// ``content``, calls ``update()`` each time ``loadTrigger`` changes, and ``play(_:)`` for a
@@ -266,6 +278,41 @@ public final class CarPlayRootModel {
             return failedPlay.message
         }
         return missingDownload == nil ? nil : .downloadFilesMissing
+    }
+
+    /// ``alert`` with the failure it's about, for the delegate to present and to pass back with the
+    /// button tapped (``streamInstead(for:)``, ``confirmStreaming(for:)``, ``dismissAlert(_:)``).
+    /// A different value is a different alert, even with the same message.
+    public var presentedAlert: CarPlayAlert? {
+        guard let message = alert, let identity else { return nil }
+        let failed = failedPlay.flatMap { isCurrent($0.origin) && playback?.error == $0.error ? $0 : nil }
+        return CarPlayAlert(
+            message: message, item: Self.blockedKey(playback?.error), connectionID: identity.connectionID,
+            playbackSession: playbackSession().map(ObjectIdentifier.init),
+            startGeneration: playback?.startGeneration ?? 0, operation: failed?.origin.operation)
+    }
+
+    /// ``streamInstead()`` for a tap on `alert`'s button: nothing unless `alert` is still the
+    /// current one, so an alert left on screen after the item, account or playback changed can't
+    /// stream another download (#74).
+    @discardableResult
+    public func streamInstead(for alert: CarPlayAlert) -> Task<CarPlayPlayOutcome, Never>? {
+        guard presentedAlert == alert else { return nil }
+        return streamInstead()
+    }
+
+    /// ``confirmStreaming()`` for a tap on `alert`'s button, only while it's the current one.
+    @discardableResult
+    public func confirmStreaming(for alert: CarPlayAlert) -> Task<CarPlayPlayOutcome, Never>? {
+        guard presentedAlert == alert else { return nil }
+        return confirmStreaming()
+    }
+
+    /// ``dismissAlert()`` for a tap on `alert`'s button, only while it's the current one, so a stale
+    /// Cancel never stops or declines another failure (#74).
+    public func dismissAlert(_ alert: CarPlayAlert) {
+        guard presentedAlert == alert else { return }
+        dismissAlert()
     }
 
     /// The item whose download is missing files, while that's the player's error on the signed-in

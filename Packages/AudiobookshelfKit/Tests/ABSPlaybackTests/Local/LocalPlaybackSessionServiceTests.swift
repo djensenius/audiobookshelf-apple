@@ -253,6 +253,60 @@ struct LocalPlaybackSessionServiceTests {
         #expect(closed.currentTime == (closesWithReport ? 80 : 70) && !closed.isActive)
     }
 
+    /// #74: a save held between its read and its write while the session closes: the close waits
+    /// its turn, so it neither overwrites the save's listening time nor is reopened by it. The row
+    /// ends inactive, at the close's position, with both reports' time.
+    @Test func aCloseWaitsForASaveInProgressAndIsTheLastWrite() async throws {
+        items.add(.book())
+        files.addAll(for: .book())
+        let service = service()
+        let session = try await service.startSession(itemID: "book", episodeID: nil)
+        let held = Gate()
+        let reached = Gate()
+        service.afterRead.withLock { hook in
+            hook = { _ in
+                reached.open()
+                await held.wait()
+            }
+        }
+        let save = Task {
+            try await service.syncSession(
+                id: session.id,
+                report: try #require(PlaybackSyncReport(currentTime: 40, timeListened: 30, duration: 250)))
+        }
+        await reached.wait()
+        let close = Task {
+            try await service.closeSession(
+                id: session.id,
+                report: try #require(PlaybackSyncReport(currentTime: 50, timeListened: 10, duration: 250)))
+        }
+        try await Task.sleep(for: .milliseconds(50))
+        held.open()
+        try await save.value
+        try await close.value
+
+        let saved = try #require(try await store.session(id: session.id))
+        #expect(!saved.isActive && saved.timeListening == 40 && saved.currentTime == 50)
+    }
+
+    /// #74: a save that reaches the service after the session closed (the syncer had begun it as
+    /// playback stopped) adds its listening time to the closed row, which stays inactive at the
+    /// close's position.
+    @Test func aSaveAfterTheCloseNeverReopensTheSession() async throws {
+        items.add(.book())
+        files.addAll(for: .book())
+        let service = service()
+        let session = try await service.startSession(itemID: "book", episodeID: nil)
+        try await service.closeSession(
+            id: session.id, report: try #require(PlaybackSyncReport(currentTime: 50, timeListened: 10, duration: 250)))
+
+        try await service.syncSession(
+            id: session.id, report: try #require(PlaybackSyncReport(currentTime: 40, timeListened: 30, duration: 250)))
+
+        let saved = try #require(try await store.session(id: session.id))
+        #expect(!saved.isActive && saved.timeListening == 40 && saved.currentTime == 50)
+    }
+
     /// Saved sessions of every connection share one store: another connection's with the same id
     /// is neither owned nor replaced.
     @Test func anotherConnectionsSessionIsNotOwnedOrReplaced() async throws {

@@ -355,6 +355,49 @@ private func tabRows(_ content: CarPlayRootContent) -> [CarPlayRow] {
         }
     }
 
+    /// What changed while a missing download's alert was shown.
+    enum AlertChange: CaseIterable, Sendable {
+        case item, account, playback, restart
+    }
+
+    /// #74: an alert left on screen after its failure changed (another item, another account, a
+    /// replaced playback, or the same item failing again) acts on nothing: its Stream instead and
+    /// Cancel are no-ops, and the current failure gets an alert of its own, which still works.
+    @Test(arguments: AlertChange.allCases)
+    func aStaleMissingDownloadAlertDoesNothing(change: AlertChange) async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountA))
+            let harness = Harness(store: store)
+            let model = harness.model()
+            await model.update()
+            harness.playback.error = .downloadFilesMissing(Self.sherlockKey)
+            let stale = try #require(model.presentedAlert)
+
+            switch change {
+            case .item: harness.playback.error = .downloadFilesMissing(Self.frankensteinKey)
+            case .account:
+                await store.connect(client: service([SampleLibrary.sherlock]), connectionKey: key(carAccountB))
+                harness.gate = .ready(carAccountB, isOffline: false)
+                harness.playback.error = .downloadFilesMissing(Self.sherlockOnServerB)
+            case .playback: harness.session = PlaybackSessionToken()
+            case .restart: harness.playback.startGeneration += 1
+            }
+            let current = try #require(model.presentedAlert)
+            #expect(current.message == .downloadFilesMissing && current != stale)
+
+            #expect(model.streamInstead(for: stale) == nil)
+            model.dismissAlert(stale)
+            #expect(harness.playback.calls.isEmpty)
+            #expect(model.presentedAlert == current)
+
+            // Negative control: the current alert's Cancel stops playback.
+            model.dismissAlert(current)
+            #expect(harness.playback.calls == [.stop(.user)])
+            #expect(model.presentedAlert == nil)
+        }
+    }
+
     /// #74: Cancel on a missing download stops playback, as the phone's does, so the failure
     /// clears everywhere and a later resume doesn't retry the item; tapped or advanced to.
     @Test(arguments: [false, true])

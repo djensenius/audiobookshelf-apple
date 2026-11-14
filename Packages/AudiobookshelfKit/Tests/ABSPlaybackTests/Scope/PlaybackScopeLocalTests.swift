@@ -242,6 +242,38 @@ struct PlaybackScopeLocalTests {
         #expect(t.requests.filter { !$0.hasPrefix("/api/session/local") } == before)
     }
 
+    /// #74: the syncer's save in flight at an account end outlives every deadline (the close's own
+    /// two-second wait and the retirement's): the local close still waits for it and lands last,
+    /// so the session ends inactive, never reopened by the late save.
+    @Test func anAccountEndClosesADownloadAfterASaveThatOutlivesTheDeadline() async throws {
+        let t = try LocalScope()
+        await t.scope.play(itemID: "book", episodeID: nil, startTime: nil)
+        #expect(await eventually { t.scope.coordinator.isPlaying })
+        let sessionID = try #require(t.scope.coordinator.session?.id)
+        let local = try #require(t.scope.syncer.service as? LocalSessionProgressSyncService).local
+        let held = Gate()
+        let reached = Gate()
+        local.afterRead.withLock { hook in
+            hook = { _ in
+                reached.open()
+                await held.wait()
+            }
+        }
+        let flush = Task { await t.scope.syncer.flush() }
+        await reached.wait()
+
+        t.scope.retire(reason: .signOut)
+        _ = await t.scope.finishRetirement(timeout: .milliseconds(100))
+        try await Task.sleep(for: PlaybackCoordinator.closeWaitTimeout + .milliseconds(500))
+        held.open()
+        await flush.value
+
+        // The close's task follows the released save; give it time to land.
+        try await Task.sleep(for: .milliseconds(500))
+        let saved = try #require(try await t.writer.session(id: sessionID))
+        #expect(!saved.isActive && saved.key == t.key)
+    }
+
     /// #74: a local save uploads through the scope's guarded sync: while the scope serves, a save
     /// uploads the pending sessions; once it retired, a late save starts no upload with the
     /// retired account's client.
