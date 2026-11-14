@@ -169,7 +169,9 @@ These need the maintainer's Apple account or a signed build:
       age rating, App Privacy answers and review information above.
 - [ ] Generate the privacy report from a signed archive (Xcode Organizer › the archive
       › Generate Privacy Report), and check it matches [App privacy](#app-privacy-nutrition-label).
-- [ ] Take screenshots for each required device size (`mise run screenshots`) and upload
-      them ([testing/screenshots.md](testing/screenshots.md#uploading)).
+- [ ] Take screenshots for each required device size (`mise run screenshots`: Home, Library,
+      an item, the player, Settings and Downloads) and upload them
+      ([testing/screenshots.md](testing/screenshots.md#uploading)). The iPhone Duo's inner
+      display and the Mac need a hand: unfolding the Duo, and Automation Mode (#46).
 - [ ] Publish the privacy policy and support pages, and fill in their URLs.
 - [ ] Set up the demo server and the review account.

@@ -51,7 +51,38 @@
     },
     "coverPath": "/metadata/items/li_pride/cover.jpg",
     "tags": [],
-    "audioFiles": [],
+    "audioFiles": [
+      {
+        "index": 1,
+        "ino": "11",
+        "metadata": {
+          "filename": "pride_and_prejudice.m4a",
+          "ext": ".m4a",
+          "path": "/audiobooks/Jane Austen/Pride and Prejudice/pride_and_prejudice.m4a",
+          "relPath": "pride_and_prejudice.m4a",
+          "size": 5980,
+          "mtimeMs": 1700000000000,
+          "ctimeMs": 1700000000000,
+          "birthtimeMs": 0
+        },
+        "addedAt": 1700000000000,
+        "updatedAt": 1700000000000,
+        "manuallyVerified": false,
+        "exclude": false,
+        "error": null,
+        "format": "QuickTime / MOV",
+        "duration": 41760,
+        "bitRate": 64000,
+        "language": "und",
+        "codec": "aac",
+        "timeBase": "1/44100",
+        "channels": 1,
+        "channelLayout": "mono",
+        "chapters": [],
+        "embeddedCoverArt": null,
+        "mimeType": "audio/mp4"
+      }
+    ],
     "chapters": [
       {
         "id": 0,
@@ -61,7 +92,41 @@
       }
     ],
     "ebookFile": null,
-    "tracks": [],
+    "tracks": [
+      {
+        "index": 1,
+        "ino": "11",
+        "metadata": {
+          "filename": "pride_and_prejudice.m4a",
+          "ext": ".m4a",
+          "path": "/audiobooks/Jane Austen/Pride and Prejudice/pride_and_prejudice.m4a",
+          "relPath": "pride_and_prejudice.m4a",
+          "size": 5980,
+          "mtimeMs": 1700000000000,
+          "ctimeMs": 1700000000000,
+          "birthtimeMs": 0
+        },
+        "addedAt": 1700000000000,
+        "updatedAt": 1700000000000,
+        "manuallyVerified": false,
+        "exclude": false,
+        "error": null,
+        "format": "QuickTime / MOV",
+        "duration": 41760,
+        "bitRate": 64000,
+        "language": "und",
+        "codec": "aac",
+        "timeBase": "1/44100",
+        "channels": 1,
+        "channelLayout": "mono",
+        "chapters": [],
+        "embeddedCoverArt": null,
+        "mimeType": "audio/mp4",
+        "title": "pride_and_prejudice.m4a",
+        "startOffset": 0,
+        "contentUrl": "/api/items/li_pride/file/11"
+      }
+    ],
     "duration": 41760,
     "size": 334080000,
     "numTracks": 1,

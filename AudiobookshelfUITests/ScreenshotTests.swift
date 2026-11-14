@@ -4,9 +4,10 @@ import XCTest
     import AppKit
 #endif
 
-/// App Store screenshots (#109): the fixture journey (`FixtureJourney.swift`), attaching a full-screen screenshot of
-/// each screen named `appstore-<screen>`. `scripts/screenshots.sh` (`mise run screenshots`) runs this class on each
-/// device and locale and exports the attachments to `build/screenshots/`; see docs/testing/screenshots.md.
+/// App Store screenshots (#109): the fixture journey (`FixtureJourney.swift`, `FixtureScreens.swift`), attaching a
+/// full-screen screenshot of each screen named `appstore-<screen>`. `scripts/screenshots.sh` (`mise run screenshots`)
+/// runs this class on each device and locale and exports the attachments to `build/screenshots/`; see
+/// docs/testing/screenshots.md.
 ///
 /// Skipped unless `ABS_SCREENSHOTS` is `1` (the script passes `TEST_RUNNER_ABS_SCREENSHOTS=1`), so `mise run test:ui`
 /// and CI don't spend time on it.
@@ -18,25 +19,37 @@ final class ScreenshotTests: XCTestCase {
             "App Store screenshots run only from scripts/screenshots.sh (mise run screenshots)")
     }
 
-    /// Home, Library and *Pride and Prejudice*.
-    // TODO(#109): add Player, Downloads and Settings with #106b's navigation helpers, and their names to SCREENS in
-    // scripts/screenshots.sh.
+    /// Home, Library, *Pride and Prejudice*, the player (paused), Settings, and Downloads with *Pride and Prejudice*
+    /// downloaded, opened with `open(_:in:)` (`FixtureScreens.swift`).
     @MainActor
-    func testHomeLibraryAndItem() {
+    func testAppStoreScreens() {
         let app = signIn(launchArguments: Self.localeArguments + Self.noRestorationArguments)
         #if os(macOS)
             enterFullScreen(app)
         #endif
-        capture("home")
+        for screen in [FixtureScreen.home, .library, .item, .player, .settings] {
+            open(screen, in: app)
+            capture(screen.rawValue)
+        }
+        download(in: app)
+        let downloads = open(.downloads, in: app)
+        // The book's row; its title is fixture data, so it's the same in every language.
+        let book = downloads.descendants(matching: .any)
+            .matching(NSPredicate(format: "label BEGINSWITH %@", "Pride and Prejudice, ")).firstMatch
+        XCTAssertTrue(book.waitForExistence(timeout: Self.fixtureTimeout), "Downloads doesn't list the downloaded book")
+        capture(FixtureScreen.downloads.rawValue)
+    }
 
-        app.descendants(matching: .any)["tab.library"].firstMatch.press()
-        let item = app.descendants(matching: .any)["library.screen"].descendants(matching: .any)["item.li_pride"]
-        XCTAssertTrue(item.waitForExistence(timeout: Self.fixtureTimeout), "The library's items didn't appear")
-        capture("library")
-
-        // Already on Library, so this opens the item and checks its title.
-        openLibraryItem(in: app)
-        capture("item")
+    /// Downloads *Pride and Prejudice* from its screen and waits until it's downloaded. The fixture server answers
+    /// the download with the bundled audio (`FixtureServer.resource(method:path:)`).
+    @MainActor
+    private func download(in app: XCUIApplication) {
+        open(.item, in: app)
+        let download = app.buttons["item.download"].firstMatch
+        XCTAssertTrue(download.waitForEnabled(timeout: Self.fixtureTimeout), "The item's Download button isn't enabled")
+        download.press()
+        XCTAssertTrue(
+            app.buttons["item.downloaded"].firstMatch.waitForExistence(timeout: 60), "The download didn't finish")
     }
 
     /// `-AppleLanguages` and `-AppleLocale` for `ABS_SCREENSHOT_LOCALE` (a BCP 47 tag such as `en-US`, default

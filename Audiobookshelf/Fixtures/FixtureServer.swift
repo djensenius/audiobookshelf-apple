@@ -123,6 +123,10 @@
             // Only Pride and Prejudice has a session fixture, so every open session is one of its.
             case ("GET", _) where parts.count == 3 && parts[0...1] == ["api", "session"]:
                 return ("fixture-play-\(SampleLibrary.prideAndPrejudice.id)", "json")
+            // A track's download (`DownloadRequests.filePath(itemID:ino:)`): every fixture file is the bundled audio.
+            case ("GET", _)
+            where parts.count == 6 && parts[0...1] == ["api", "items"] && parts[3] == "file" && parts[5] == "download":
+                return audio
             default: return nil
             }
         }
@@ -145,8 +149,16 @@
             if let sessionID = sessionID(method: method, path: path) {
                 body = Data(String(decoding: body, as: UTF8.self).replacing(sessionPlaceholder, with: sessionID).utf8)
             }
-            return Reply(
-                status: 200, contentType: resource.ext == "png" ? "image/png" : "application/json", body: body)
+            return Reply(status: 200, contentType: contentType(ext: resource.ext), body: body)
+        }
+
+        /// The `Content-Type` of a fixture file with extension `ext`.
+        private static func contentType(ext: String) -> String {
+            switch ext {
+            case "png": "image/png"
+            case audio.ext: "audio/mp4"
+            default: "application/json"
+            }
         }
 
         /// What AVPlayer loads for a resolved track `url`: the bundled ``audio`` for a fixture
@@ -200,7 +212,7 @@
             let reply = FixtureServer.reply(method: request.httpMethod ?? "GET", path: url.path())
             let response = HTTPURLResponse(
                 url: url, statusCode: reply.status, httpVersion: "HTTP/1.1",
-                headerFields: ["Content-Type": reply.contentType])!
+                headerFields: ["Content-Type": reply.contentType, "Content-Length": String(reply.body.count)])!
             guard !isStopped.withLock({ $0 }) else { return }
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: reply.body)
