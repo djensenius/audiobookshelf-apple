@@ -12,9 +12,6 @@ struct ServerAddressView: View {
     var body: some View {
         Form {
             Section {
-                // Read-only while validating rather than `.disabled`: disabling resigns the field and
-                // starts a keyboard hide that LoginView's focus merges into a show, which on iOS 27
-                // can lose a UIViewPropertyAnimator completion and leave the app never idle (#627).
                 // l10n-ignore: an example address, not prose.
                 TextField(text: address, prompt: Text(verbatim: "https://abs.example.com")) {
                     Text(verbatim: L10n.string("LabelServerAddress"))
@@ -65,11 +62,14 @@ struct ServerAddressView: View {
         .formStyle(.grouped)
     }
 
+    /// The address field is read-only while validating rather than `.disabled`: disabling resigns
+    /// the field and starts a keyboard hide that LoginView's focus merges into a show, which on
+    /// iOS 27 can lose a UIViewPropertyAnimator completion and leave the app never idle (#627).
     private var address: Binding<String> {
         Binding {
             model.address
         } set: { newValue in
-            if !model.isBusy { model.address = newValue }
+            model.editAddress(newValue)
         }
     }
 

@@ -256,6 +256,15 @@ public final class ConnectViewModel {
         }
     }
 
+    /// Sets ``address`` from the address field, ignoring edits while a check or sign-in is in
+    /// progress. The field stays enabled then rather than disabled, because disabling it hides the
+    /// keyboard just before the login step shows it again, which can leave the app never idle on
+    /// iOS 27 (#627).
+    public func editAddress(_ text: String) {
+        guard !isBusy else { return }
+        address = text
+    }
+
     /// Reads the typed server's status with the custom headers, then moves to ``Phase/login``.
     public func submitAddress() async {
         guard phase == .address else { return }
