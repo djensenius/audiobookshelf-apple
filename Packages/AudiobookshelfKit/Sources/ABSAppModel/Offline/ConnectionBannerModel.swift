@@ -62,10 +62,12 @@ public final class ConnectionBannerModel {
     /// Checks the server, then follows the network path until the calling task is cancelled.
     /// Any change of online path (another interface, or an `onlineEpoch` showing an offline path
     /// the stream coalesced away) checks the server again: the new route may not reach it.
+    /// Each run starts as a route change does: the path may have changed while nothing followed
+    /// it, so the run's first confirming ping bumps ``verifiedRevision`` (#570).
     public func run() async {
         runGeneration &+= 1
         let generation = runGeneration
-        send(.retry)
+        send(.routeChanged)
         var previous: NetworkPath?
         for await path in paths() {
             guard !Task.isCancelled, generation == runGeneration else { break }

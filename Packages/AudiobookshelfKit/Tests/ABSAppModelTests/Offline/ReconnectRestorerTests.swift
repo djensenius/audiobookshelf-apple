@@ -227,4 +227,19 @@ private final class Account {
         run.cancel()
         await run.value
     }
+
+    /// A run that restarts (the shell reappears) doesn't know what the path did while nothing
+    /// followed it, so its first confirming ping bumps the verified revision again (#570).
+    @Test func aRestartedRunBumpsTheVerifiedRevisionOnceItsPingConfirms() async {
+        let model = ConnectionBannerModel(paths: { AsyncStream { _ in } }, ping: {}, clock: ManualClock())
+        let first = Task { await model.run() }
+        #expect(await eventually { model.verifiedRevision == 1 })
+        first.cancel()
+        await first.value
+        let second = Task { await model.run() }
+        #expect(await eventually { model.verifiedRevision == 2 })
+        #expect(model.state == .online)
+        second.cancel()
+        await second.value
+    }
 }
