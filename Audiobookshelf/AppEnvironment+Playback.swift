@@ -162,7 +162,9 @@ struct AppPlayback {
     /// item actions (`nil` holds nothing, so every caller passes it explicitly). The same path
     /// tells the auto-advance to prepare the next item again, which it starts under
     /// `backgroundActivity` (#160). The syncer records `history`. `downloads` play from their
-    /// files instead of streaming (#74).
+    /// files instead of streaming (#74). Each scope gets its own sleep timer (#185, #600), with the
+    /// platform's chime and haptics and, on iOS, shake to reset; it follows `settings` as they
+    /// change, and the scope cancels it when it retires.
     static func configuration(
         for request: PlaybackScopeRequest, settings: AppSettings, policy: NetworkPolicy,
         engine: any AudioEngineProtocol, mediaLeases: MediaLeases?,
@@ -181,15 +183,16 @@ struct AppPlayback {
         configuration.history = history
         configuration.trackURLOverride = fixtureTrackURL
         configuration.downloads = downloads
+        configuration.makeSleepTimer = { SleepTimerAttachment(coordinator: $0, settings: settings) }
         return configuration
     }
 }
 
 /// Sets `\.playItem`, `\.bookmarkStore`, `\.sleepTimer` and `\.playbackQueue` from the running account session's
-/// playback, each `nil` between sessions; the sleep timer is `nil` until the scope has one (#185).
-/// A view modifier, so it follows the participant as each session starts and ends. The signed-in
-/// shell passes the participant only while it serves the shell's account
-/// (``RootView/playback(_:accounts:for:)``).
+/// playback, each `nil` between sessions. Each session's sleep timer is its scope's own (#600), so
+/// it never outlives the account. A view modifier, so it follows the participant as each session
+/// starts and ends. The signed-in shell passes the participant only while it serves the shell's
+/// account (``RootView/playback(_:accounts:for:)``).
 struct PlaybackEnvironment: ViewModifier {
     let participant: PlaybackSessionParticipant?
 
