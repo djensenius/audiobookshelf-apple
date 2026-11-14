@@ -27,8 +27,7 @@ duo-inner com.apple.CoreSimulator.SimDeviceType.iPhone-Duo 2007 2853
 mac - 2880 1800"
 DEFAULT_DEVICES="iphone-6.9 ipad-13 duo-outer"
 # The attachments ScreenshotTests makes, as appstore-<screen>.
-# TODO(#109): add player, downloads and settings once ScreenshotTests captures them.
-SCREENS="home library item"
+SCREENS="home library item player settings downloads"
 
 OUT=build/screenshots
 WORK=.build/screenshots

@@ -112,7 +112,11 @@ extension XCTestCase {
             // list once a test has downloaded something, replaces the loading indicator once the downloads are read.
             let content = element.descendants(matching: .any)
                 .matching(NSPredicate(format: "identifier IN %@", ["downloads.empty", "downloads.list"])).firstMatch
-            XCTAssertTrue(content.waitForExistence(timeout: Self.fixtureTimeout), "The downloads didn't load")
+            // The screen's identifier replaces the list's (`downloads.list`), so the loaded list is the screen itself.
+            let lists: [XCUIElement.ElementType] = [.collectionView, .table, .outline]
+            XCTAssertTrue(
+                wait(for: { content.exists || lists.contains(element.elementType) }, timeout: Self.fixtureTimeout),
+                "The downloads didn't load")
         }
         return element
     }
