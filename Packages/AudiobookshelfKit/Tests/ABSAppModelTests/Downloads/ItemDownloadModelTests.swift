@@ -133,7 +133,8 @@ struct ItemDownloadModelTests {
     private func makeHarness(
         episodeID: String? = nil, records: [DownloadRecordDTO] = [], items: [LocalLibraryItemDTO] = [],
         followsUpdates: Bool = true, sharesFeed: Bool = false, requester: Requester = Requester(),
-        control: FakeControl = FakeControl()
+        control: FakeControl = FakeControl(),
+        onlyWhileOpen: @escaping @Sendable (UUID) async -> Bool = { _ in false }
     ) async throws -> Harness {
         let suiteName = "ABSAppModelTests.ItemDownload.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -155,7 +156,8 @@ struct ItemDownloadModelTests {
             ? DownloadedItemsFeed(connectionID: Self.connection, libraryItemID: Self.bookID, services: services) : nil
         let model = ItemDownloadModel(
             libraryItemID: Self.bookID, episodeID: episodeID, connectionID: Self.connection,
-            access: DownloadAccess(requester: requester, status: Status()), services: services, feed: feed)
+            access: DownloadAccess(requester: requester, status: Status(), onlyWhileOpen: onlyWhileOpen),
+            services: services, feed: feed)
         let (reloads, report) = AsyncStream.makeStream(of: Void.self)
         let observing: Task<Void, Never>
         if let feed {
@@ -412,6 +414,80 @@ struct ItemDownloadModelTests {
             episodeID: "ep-1", items: [Self.downloaded(episodeId: "ep-1")], requester: offline)
         defer { downloaded.cleanUp() }
         #expect(downloaded.model.isShown)
+    }
+
+    // MARK: - Downloads only while open
+
+    /// Whether a connection downloads only while the app is open, which a test can change.
+    private final class Foreground: @unchecked Sendable {
+        private let lock = NSLock()
+        private var connections: Set<UUID>
+
+        init(_ connections: Set<UUID>) { self.connections = connections }
+
+        func set(_ connections: Set<UUID>) { lock.withLock { self.connections = connections } }
+        func contains(_ connection: UUID) -> Bool { lock.withLock { connections.contains(connection) } }
+    }
+
+    @Test func aForegroundConnectionsDownloadUnderWayIsNoted() async throws {
+        let foreground = Foreground([Self.connection])
+        let idle = try await makeHarness(onlyWhileOpen: { foreground.contains($0) })
+        defer { idle.cleanUp() }
+        #expect(idle.model.onlyWhileOpen)
+        // Nothing under way yet: only the cellular question would say so.
+        #expect(!idle.model.notesOnlyWhileOpen)
+
+        let queued = try await makeHarness(
+            records: [DownloadsListingTests.record("Walden", state: .queued)],
+            onlyWhileOpen: { foreground.contains($0) })
+        defer { queued.cleanUp() }
+        #expect(queued.model.notesOnlyWhileOpen)
+
+        let downloaded = try await makeHarness(
+            items: [Self.downloaded()], onlyWhileOpen: { foreground.contains($0) })
+        defer { downloaded.cleanUp() }
+        #expect(!downloaded.model.notesOnlyWhileOpen)
+    }
+
+    @Test func aBackgroundConnectionsDownloadIsntNoted() async throws {
+        // Another connection downloads only while open; this one doesn't.
+        let connection = Self.connection
+        let harness = try await makeHarness(
+            records: [DownloadsListingTests.record("Walden", state: .downloading)],
+            onlyWhileOpen: { $0 != connection })
+        defer { harness.cleanUp() }
+
+        #expect(!harness.model.onlyWhileOpen)
+        #expect(!harness.model.notesOnlyWhileOpen)
+    }
+
+    @Test func aDownloadReadsWhetherItRunsOnlyWhileOpenAgain() async throws {
+        let foreground = Foreground([])
+        let requester = Requester()
+        requester.outcome = .needsConfirmation(.cellular, Self.ticket)
+        let harness = try await makeHarness(requester: requester, onlyWhileOpen: { foreground.contains($0) })
+        defer { harness.cleanUp() }
+        #expect(!harness.model.onlyWhileOpen)
+
+        // The connection gained custom headers since the screen opened.
+        foreground.set([Self.connection])
+        await harness.model.download(item: Self.item)
+
+        #expect(harness.model.prompt == .meteredConfirmation)
+        #expect(harness.model.onlyWhileOpen)
+    }
+
+    @Test func aModelWithAFeedReadsWhetherItRunsOnlyWhileOpen() async throws {
+        let connection = Self.connection
+        let harness = try await makeHarness(
+            records: [DownloadsListingTests.record("Walden", state: .queued)], sharesFeed: true,
+            onlyWhileOpen: { $0 == connection })
+        defer { harness.cleanUp() }
+        #expect(!harness.model.notesOnlyWhileOpen)
+
+        await harness.model.observe()
+
+        #expect(harness.model.notesOnlyWhileOpen)
     }
 
     // MARK: - Shared feed
