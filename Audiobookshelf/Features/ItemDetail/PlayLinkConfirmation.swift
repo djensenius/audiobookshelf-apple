@@ -27,8 +27,10 @@ struct PlayLinkPrompt: Equatable {
 /// What an item or episode screen tells its play-link confirmation (#577): its title, and
 /// whether it has anything to play.
 struct PlayLinkScreen: Equatable {
-    /// The book or episode's title; `nil` while the screen is loading, and `""` once loading ended
-    /// without it (not found, a failed load, or a podcast without the linked episode).
+    /// The book or episode's title once the screen has loaded; `nil` while it is loading. The
+    /// server's title can be empty, so emptiness never decides anything: a load that ended
+    /// without the media (not found, a failed load, or a podcast without the linked episode)
+    /// reports `""` with ``isPlayable`` off, which is what dismisses the link.
     let title: String?
     /// Whether the loaded media has something to play, before ``gone`` is applied.
     let isPlayable: Bool
@@ -49,8 +51,7 @@ struct PlayLinkScreen: Equatable {
     /// and playable. A refresh that answers 404, drops the episode or removes the audio
     /// withdraws it, as it disables Play.
     func keepsPrompt(given goneState: ItemDetailGoneState) -> Bool {
-        guard let title, !title.isEmpty else { return false }
-        return isPlayable(given: goneState)
+        title != nil && isPlayable(given: goneState)
     }
 
     /// The item screen: a book with audio that isn't missing. A podcast's own screen has nothing
@@ -202,12 +203,21 @@ enum PlayLinkConfirmationPresentation {
         _ link: PlayLink, isResume: Bool, title: String, startTime: TimeInterval?, locale: Locale
     ) -> PlayLinkPrompt {
         let message: String
-        if let startTime {
+        // An untitled book or episode (the server's title can be blank) is asked without its title.
+        let isUntitled = title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        switch (startTime.map { DurationStyle.timestamp.string($0, locale: locale) }, isUntitled) {
+        case (let time?, false):
             message = L10n.string(
-                isResume ? "MessagePlayLinkResumeFrom" : "MessagePlayLinkPlayFrom", title,
-                DurationStyle.timestamp.string(startTime, locale: locale), locale: locale)
-        } else {
+                isResume ? "MessagePlayLinkResumeFrom" : "MessagePlayLinkPlayFrom", title, time, locale: locale)
+        case (let time?, true):
+            message = L10n.string(
+                isResume ? "MessagePlayLinkResumeFromUntitled" : "MessagePlayLinkPlayFromUntitled", time,
+                locale: locale)
+        case (nil, false):
             message = L10n.string(isResume ? "MessagePlayLinkResume" : "MessagePlayLinkPlay", title, locale: locale)
+        case (nil, true):
+            message = L10n.string(
+                isResume ? "MessagePlayLinkResumeUntitled" : "MessagePlayLinkPlayUntitled", locale: locale)
         }
         return PlayLinkPrompt(link: link, isResume: isResume, message: message)
     }

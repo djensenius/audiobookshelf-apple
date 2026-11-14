@@ -393,7 +393,17 @@ import Testing
     }()
 
     /// The preview podcast without episode `pe_2`, as a refresh might find it.
-    private static let podcastWithoutEpisode: ABSCore.LibraryItem = {
+    private static let podcastWithoutEpisode = podcast { $0.filter { $0.id != "pe_2" } }
+
+    /// The preview podcast with `pe_2` untitled, as the server sends an episode without a title.
+    private static let podcastWithUntitledEpisode = podcast { episodes in
+        episodes.map { $0.id == "pe_2" ? PodcastEpisode(id: "pe_2", index: 2, title: "", duration: 2_100) : $0 }
+    }
+
+    /// The preview podcast with its episodes changed by `change`.
+    private static func podcast(
+        episodes change: ([PodcastEpisode]) -> [PodcastEpisode]
+    ) -> ABSCore.LibraryItem {
         let item = PodcastDetailPreviewData.podcast
         guard case .podcast(let podcast) = item.media else { return item }
         return ABSCore.LibraryItem(
@@ -401,7 +411,19 @@ import Testing
             media: .podcast(
                 Podcast(
                     id: podcast.id, libraryItemId: podcast.libraryItemId, metadata: podcast.metadata,
-                    episodes: podcast.episodes?.filter { $0.id != "pe_2" })))
+                    episodes: change(podcast.episodes ?? []))))
+    }
+
+    /// The preview book with a blank title and its audio.
+    private static let untitledBook: ABSCore.LibraryItem = {
+        let item = ItemDetailPreviewData.book
+        guard case .book(let book) = item.media else { return item }
+        return ABSCore.LibraryItem(
+            id: item.id, libraryId: item.libraryId, updatedAt: 16, mediaType: .book,
+            media: .book(
+                Book(
+                    id: book.id, metadata: BookMetadata(title: ""), tracks: book.tracks, duration: book.duration,
+                    numTracks: book.numTracks)))
     }()
 
     /// Asks `screen()`'s link, lets `refresh` run, then confirms as the alert would: with the
@@ -476,6 +498,78 @@ import Testing
             }
             #expect(started == expected)
         }
+    }
+
+    @Test func anUntitledBookIsAskedPlaysAndIsStillWithdrawnWhenGone() async throws {
+        let book = Self.untitledBook
+        let link = PlayLink(itemID: book.id, startTime: 90)
+        let route = Route.item(id: book.id)
+        let loaded = ItemDetailModel(itemID: book.id, service: ScriptedItemService(item: book), cache: ProgressCache())
+        await loaded.load()
+        let screen = PlayLinkScreen.item(loaded)
+        #expect(screen.title == "")
+        #expect(screen.isPlayable)
+        guard case .ask(let prompt) = resolve(route, on: router(opening: link), screen: screen) else {
+            Issue.record("expected a Play prompt")
+            return
+        }
+        #expect(prompt.message == "Play from 1:30?")
+
+        for (change, expected) in [
+            ({ (_: ScriptedItemService) in }, 1),
+            ({ (service: ScriptedItemService) in await service.fail(with: APIError.notFound) }, 0),
+            ({ (service: ScriptedItemService) in await service.serve(Self.bookWithoutAudio) }, 0),
+        ] {
+            let service = ScriptedItemService(item: book)
+            let model = ItemDetailModel(itemID: book.id, service: service, cache: ProgressCache())
+            await model.load()
+            let started = try await confirmAfterRefresh(link, route: route, screen: { .item(model) }) {
+                await change(service)
+                await model.load()
+            }
+            #expect(started == expected)
+        }
+    }
+
+    @Test func anUntitledEpisodeIsAskedPlaysAndIsStillWithdrawnWhenRemoved() async throws {
+        let podcast = Self.podcastWithUntitledEpisode
+        let link = PlayLink(itemID: podcast.id, episodeID: "pe_2")
+        let route = Route.episode(itemID: podcast.id, episodeID: "pe_2")
+        let paused = MediaKey(serverConnectionID: Self.server, libraryItemId: podcast.id, episodeId: "pe_2")
+        for (change, expected) in [
+            ({ (_: ScriptedItemService) in }, 1),
+            ({ (service: ScriptedItemService) in await service.fail(with: APIError.notFound) }, 0),
+            ({ (service: ScriptedItemService) in await service.serve(Self.podcastWithoutEpisode) }, 0),
+        ] {
+            let service = ScriptedItemService(item: podcast)
+            let detail = ItemDetailModel(itemID: podcast.id, service: service, cache: ProgressCache())
+            let model = EpisodeDetailModel(detail: detail, episodeID: "pe_2", cache: ProgressCache())
+            await detail.load()
+            #expect(PlayLinkScreen.episode(model).title == "")
+            #expect(PlayLinkScreen.episode(model).isPlayable)
+            let started = try await confirmAfterRefresh(link, route: route, screen: { .episode(model) }) {
+                await change(service)
+                await detail.load()
+            }
+            #expect(started == expected)
+        }
+
+        // Without a start time, asked without the title too.
+        let detail = ItemDetailModel(
+            itemID: podcast.id, service: ScriptedItemService(item: podcast), cache: ProgressCache())
+        let model = EpisodeDetailModel(detail: detail, episodeID: "pe_2", cache: ProgressCache())
+        await detail.load()
+        let router = router(opening: link)
+        guard case .ask(let play) = resolve(route, on: router, screen: .episode(model)) else {
+            Issue.record("expected a Play prompt")
+            return
+        }
+        #expect(play.message == "Start playback?")
+        guard case .ask(let resume) = resolve(route, on: router, nowPlaying: paused, screen: .episode(model)) else {
+            Issue.record("expected a Resume prompt")
+            return
+        }
+        #expect(resume.message == "Resume playback?")
     }
 
     @Test func handoffPlayerActivityAsksLikeAPlayURL() throws {
