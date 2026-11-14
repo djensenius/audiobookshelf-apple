@@ -29,9 +29,14 @@ struct MainTabView<Root: View>: View {
         TabView(selection: $router.selectedTab) {
             tab(.home)
             tab(.library)
-            // Sidebar only. The compact tab bar reaches these through the Library root's section
-            // picker, which `Router.normalize(isCompact:)` keeps in step. Only the sections the
-            // current library shows for this user are listed, as in the legacy `BookshelfNavBar.vue`.
+            // The sidebar's Browse section. The compact tab bar reaches these through the Library
+            // root's section menu (`LibrarySectionToolbar`), which `Router.normalize(isCompact:)`
+            // keeps in step. Only the sections the current library shows for this user are listed,
+            // as in the legacy `BookshelfNavBar.vue`. The compact tab bar ignores
+            // `defaultVisibility` (#617): it showed Series and moved Downloads and Account into
+            // More, so the section is hidden there. Hiding it, rather than leaving it out, keeps the
+            // tabs' identity across a size class change. A regular-width tab bar (an iPad's, with
+            // the sidebar closed) shows the section as one Browse tab.
             if !router.visibleSections.isEmpty {
                 TabSection {
                     ForEach(router.visibleSections, id: \.self) { section in
@@ -41,6 +46,7 @@ struct MainTabView<Root: View>: View {
                     Text(verbatim: L10n.string("HeaderBrowse"))
                 }
                 .defaultVisibility(.hidden, for: .tabBar)
+                .hidden(horizontalSizeClass == .compact)
             }
             tab(.downloads)
             tab(.account)
@@ -78,6 +84,10 @@ struct MainTabView<Root: View>: View {
                         // The sidebar header picks the library in regular width.
                         if horizontalSizeClass == .compact, tab.isLibraryScoped, tab != .search {
                             LibraryPickerToolbar()
+                        }
+                        // The sidebar lists the sections in regular width.
+                        if horizontalSizeClass == .compact, tab == .library, !router.visibleSections.isEmpty {
+                            LibrarySectionToolbar(router: router)
                         }
                         ConnectionIndicatorToolbar()
                     }

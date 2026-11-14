@@ -121,6 +121,7 @@ WindowGroup(id: "main")                       // iOS + macOS, one Router per win
       ├─ Tab "Home"       NavigationStack(path: $router[path: .home])      // [Route]
       ├─ Tab "Library"    NavigationStack(path: $router[path: .library])
       ├─ TabSection "Browse" .defaultVisibility(.hidden, for: .tabBar)   // sidebar only
+      │    .hidden(horizontalSizeClass == .compact)     // #617, see the compact-width rule
       │    Series · Collections · Authors               (books)
       │    Latest · Add podcast (admins)                (podcasts)
       │    Playlists                                    (both, if the user has any)
@@ -146,12 +147,16 @@ CarPlay scene (UIKit, CPTemplateApplicationSceneDelegate) // no Router, shares A
 | Tab | Holds |
 | --- | --- |
 | Home | Personalized shelves. Port of `pages/bookshelf/index.vue`. |
-| Library | The library grid. In compact width, a section picker reaches Series, Collections, Authors, Playlists, Latest and Add, which replaces `BookshelfNavBar.vue`. |
+| Library | The library grid. In compact width, a section menu in the root's toolbar (`LibrarySectionToolbar`) reaches Series, Collections, Authors, Playlists, Latest and Add, which replaces `BookshelfNavBar.vue`. |
 | Search | `pages/search.vue`. |
 | Downloads | `downloads.vue`, `downloading.vue` and `localMedia/*`. |
 | Account | `account.vue`. Stats, Logs, Servers and (on iOS) Settings are pushed from here, which replaces `SideDrawer.vue`. |
 
 #### Compact-width rule
+
+The compact tab bar shows Home, Library, Downloads, Account and Search. It ignores `.defaultVisibility(.hidden, for: .tabBar)` on the `TabSection` (#617, iOS 27 SDK): it showed the first section (Series) as a tab and moved Downloads and Account into the system More tab. So the section also has `.hidden(horizontalSizeClass == .compact)`. Hiding it keeps the section tabs in the `TabView` and their identity across a size-class change, which an `if` around the section loses. A regular-width tab bar (an iPad's, with the sidebar closed) shows the section as one Browse tab.
+
+In compact width, the Library root's toolbar has a section menu (`LibrarySectionToolbar`, `library.sectionPicker`): Library (the grid, `librarySection == nil`), then `Router.visibleSections` in sidebar order, so Add podcast is there for admins in podcast libraries. Choosing one sets `Router.librarySection`; the menu is only on the root, where the Library path is empty. Its label shows the section shown. On a crowded vertical bar (an iPhone Duo's outer display) it moves into the bar's overflow menu, below the Library screen's filter and sort (#85).
 
 The sidebar-only section tabs need a fallback. If the size class becomes compact while a sidebar-only section is selected (for example on an iPhone Duo fold or a narrowed iPad window), `Router.normalize(isCompact: true)` keeps the user on the same screen:
 
@@ -724,6 +729,7 @@ None of this was run for this ADR. Each item is an acceptance criterion of the i
 - **Performed in #66 (P3-11):** the detail `ArrangementView` shows inline secondary content when not split.
 - **Performed in #83 (P5-06) and #82 (P5-05):** multiple windows, menus and commands, and `supportsMultipleWindows` on iPad, iPhone Duo inner and Mac.
 - **Performed in #79 and #80 (P5-02, P5-03):** CarPlay starts from, and writes back, the `AppSettings` last-used library.
+- **Performed in #617:** on iPhone 17 Pro Max and iPhone Duo (iOS 27.2), the compact tab bar ignored `.defaultVisibility(.hidden, for: .tabBar)`, and `.defaultVisibility` on each section `Tab` didn't help. `.hidden(horizontalSizeClass == .compact)` gives the five tabs; the section tabs keep their identity when an iPhone rotates to the regular-width sidebar and back, and `normalize(isCompact:)` still moves a selected section into Library. `TabBarTests` covers the tab bar and the section menu.
 - **Simulator caveats.** Black screenshots appear for minutes after boot. VoiceOver is unavailable on iPhone Duo in 27.2.
 
 ## References
