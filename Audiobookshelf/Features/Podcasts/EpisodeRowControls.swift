@@ -41,7 +41,19 @@ struct EpisodeRowControlsState: Equatable {
     }
 }
 
-/// Play with the time left, the finished toggle and the progress bar under an episode row, on the podcast screen
+/// An episode row's Download control (``ItemDownloadButton``): the episode, the podcast's expanded item to request
+/// it with, and the screen's shared downloaded items, so the rows don't each observe the store.
+struct EpisodeRowDownload {
+    let libraryItemID: String
+    let episodeID: String
+    let episodeTitle: String
+    /// The podcast's expanded item; `nil` disables Download (the podcast is gone from the server).
+    let item: ABSCore.LibraryItem?
+    let feed: DownloadedItemsFeed
+}
+
+/// Play with the time left, the finished toggle, the episode's Download control (legacy `EpisodeRow.vue`'s download
+/// icon, where `download` is given) and the progress bar under an episode row, on the podcast screen
 /// (``PodcastEpisodeRow``) and the Latest screen (``LatestEpisodeRow``).
 struct EpisodeRowControls: View {
     let status: PodcastDetailModel.EpisodeStatus
@@ -50,6 +62,8 @@ struct EpisodeRowControls: View {
     let isStarting: Bool
     let isOtherStarting: Bool
     let isUpdating: Bool
+    /// The episode's Download control, or `nil` where the row has none.
+    var download: EpisodeRowDownload?
     let perform: (ItemActionKind) -> Void
     @Environment(\.locale) private var locale
 
@@ -99,6 +113,11 @@ struct EpisodeRowControls: View {
                 .buttonStyle(.borderless)
                 .disabled(!state.canToggle)
                 .help(Text(verbatim: state.toggleTitle))
+                if let download {
+                    ItemDownloadButton(
+                        libraryItemID: download.libraryItemID, episodeID: download.episodeID,
+                        episodeTitle: download.episodeTitle, item: download.item, feed: download.feed, style: .compact)
+                }
                 Spacer(minLength: 0)
             }
             if let fraction = state.progressFraction {

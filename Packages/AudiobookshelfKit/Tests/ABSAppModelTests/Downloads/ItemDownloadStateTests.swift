@@ -120,4 +120,64 @@ struct ItemDownloadStateTests {
         // The book's state ignores the episode's record.
         #expect(Self.state(records: [record]) == .none)
     }
+
+    // MARK: - Episodes
+
+    @Test func anEpisodeIgnoresTheItemsOtherRecords() {
+        let book = Self.record(.downloading)
+        let otherEpisode = DownloadsListingTests.record("Walden", state: .queued, episodeId: "ep-2")
+        let elsewhere = DownloadsListingTests.record(
+            "Walden", state: .queued, connection: DownloadsListingTests.otherConnection, episodeId: "ep-1")
+        #expect(Self.state(episodeID: "ep-1", records: [book, otherEpisode, elsewhere]) == .none)
+    }
+
+    @Test func anEpisodesRecordMapsToItsState() {
+        let queued = DownloadsListingTests.record("Walden", state: .queued, episodeId: "ep-1")
+        #expect(Self.state(episodeID: "ep-1", records: [queued]) == .queued(recordID: queued.id))
+
+        let downloading = DownloadsListingTests.record(
+            "Walden", state: .downloading, episodeId: "ep-1", parts: [(expected: 200, written: 50)])
+        // Picked among the item's other records, with its live progress.
+        let others = [
+            Self.record(.downloading), DownloadsListingTests.record("Walden", state: .failed, episodeId: "ep-2"),
+        ]
+        #expect(
+            Self.state(episodeID: "ep-1", records: others + [downloading])
+                == .downloading(recordID: downloading.id, fraction: 0.25))
+        let live = [downloading.id: DownloadsController.Progress(fraction: 0.8, bytes: 160)]
+        #expect(
+            Self.state(episodeID: "ep-1", records: [downloading], progress: live)
+                == .downloading(recordID: downloading.id, fraction: 0.8))
+
+        let paused = DownloadsListingTests.record(
+            "Walden", state: .paused, episodeId: "ep-1", parts: [(expected: 100, written: 40)])
+        #expect(Self.state(episodeID: "ep-1", records: [paused]) == .paused(recordID: paused.id, fraction: 0.4))
+    }
+
+    @Test func anEpisodeIsDownloadedOnlyWithItsOwnFile() {
+        let id = UUID()
+        // The podcast's other episodes, and a file of no episode, don't count.
+        let others = DownloadsListingTests.item(
+            "Walden", mediaType: .podcast, id: id,
+            files: [
+                DownloadsListingTests.file(size: 10, episodeId: "ep-2"),
+                DownloadsListingTests.file(size: 10, name: "other.mp3"),
+            ])
+        #expect(Self.state(episodeID: "ep-1", items: [others]) == .none)
+        let elsewhere = DownloadsListingTests.item(
+            "Walden", mediaType: .podcast, connection: DownloadsListingTests.otherConnection,
+            files: [DownloadsListingTests.file(size: 10, episodeId: "ep-1")])
+        #expect(Self.state(episodeID: "ep-1", items: [others, elsewhere]) == .none)
+
+        let own = DownloadsListingTests.item(
+            "Walden", mediaType: .podcast, id: id,
+            files: [
+                DownloadsListingTests.file(size: 10, episodeId: "ep-2"),
+                DownloadsListingTests.file(size: 10, episodeId: "ep-1", name: "ep1.mp3"),
+            ])
+        #expect(Self.state(episodeID: "ep-1", items: [own]) == .downloaded(localItemID: id))
+        // Its record under way wins, as for a book.
+        let retry = DownloadsListingTests.record("Walden", state: .failed, episodeId: "ep-1")
+        #expect(Self.state(episodeID: "ep-1", records: [retry], items: [own]) == .failed(recordID: retry.id))
+    }
 }

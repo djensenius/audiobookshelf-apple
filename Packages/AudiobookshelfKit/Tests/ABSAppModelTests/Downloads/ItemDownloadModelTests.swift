@@ -122,14 +122,18 @@ struct ItemDownloadModelTests {
         let requester: Requester
         let control: FakeControl
         let source: ItemSource
+        /// The shared feed the model reads, when made with `sharesFeed`.
+        let feed: DownloadedItemsFeed?
         let cleanUp: () -> Void
     }
 
     /// A model observing `source` (with store updates when `followsUpdates`), returned after its
-    /// first read, over a started controller holding `records`.
+    /// first read, over a started controller holding `records`. With `sharesFeed`, the model reads
+    /// a ``DownloadedItemsFeed`` of the book, which the harness observes instead of the model.
     private func makeHarness(
         episodeID: String? = nil, records: [DownloadRecordDTO] = [], items: [LocalLibraryItemDTO] = [],
-        followsUpdates: Bool = true, requester: Requester = Requester(), control: FakeControl = FakeControl()
+        followsUpdates: Bool = true, sharesFeed: Bool = false, requester: Requester = Requester(),
+        control: FakeControl = FakeControl()
     ) async throws -> Harness {
         let suiteName = "ABSAppModelTests.ItemDownload.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -146,16 +150,27 @@ struct ItemDownloadModelTests {
         let services = DownloadsServices(
             controller: controller, control: control, localItemUpdates: updates,
             localItems: { await source.read($0) }, availableCapacity: { 0 })
+        let feed =
+            sharesFeed
+            ? DownloadedItemsFeed(connectionID: Self.connection, libraryItemID: Self.bookID, services: services) : nil
         let model = ItemDownloadModel(
             libraryItemID: Self.bookID, episodeID: episodeID, connectionID: Self.connection,
-            access: DownloadAccess(requester: requester, status: Status()), services: services)
+            access: DownloadAccess(requester: requester, status: Status()), services: services, feed: feed)
         let (reloads, report) = AsyncStream.makeStream(of: Void.self)
-        model.reloaded = { report.yield() }
-        let observing = Task { await model.observe() }
-        for await _ in reloads { break }
-        model.reloaded = nil
+        let observing: Task<Void, Never>
+        if let feed {
+            feed.reloaded = { report.yield() }
+            observing = Task { await feed.observe() }
+            for await _ in reloads { break }
+            feed.reloaded = nil
+        } else {
+            model.reloaded = { report.yield() }
+            observing = Task { await model.observe() }
+            for await _ in reloads { break }
+            model.reloaded = nil
+        }
         return Harness(
-            model: model, controller: controller, requester: requester, control: control, source: source,
+            model: model, controller: controller, requester: requester, control: control, source: source, feed: feed,
             cleanUp: {
                 observing.cancel()
                 defaults.removePersistentDomain(forName: suiteName)
@@ -371,5 +386,98 @@ struct ItemDownloadModelTests {
 
         #expect(await harness.control.deletedEpisodes == ["ep-1"])
         #expect(await harness.control.deletedItems.isEmpty)
+    }
+
+    // MARK: - Visibility
+
+    @Test func theButtonHidesOnlyWhenItCantStartADownload() async throws {
+        let requester = Requester()
+        requester.canDownload = false
+        let idle = try await makeHarness(requester: requester)
+        defer { idle.cleanUp() }
+        // Offline or without the permission, nothing to download: hidden.
+        #expect(!idle.model.isShown)
+        requester.canDownload = true
+        #expect(idle.model.isShown)
+
+        // Cancel and delete stay available without the permission.
+        let offline = Requester()
+        offline.canDownload = false
+        let queued = try await makeHarness(
+            episodeID: "ep-1", records: [DownloadsListingTests.record("Walden", state: .queued, episodeId: "ep-1")],
+            requester: offline)
+        defer { queued.cleanUp() }
+        #expect(queued.model.isShown)
+        let downloaded = try await makeHarness(
+            episodeID: "ep-1", items: [Self.downloaded(episodeId: "ep-1")], requester: offline)
+        defer { downloaded.cleanUp() }
+        #expect(downloaded.model.isShown)
+    }
+
+    // MARK: - Shared feed
+
+    @Test func aModelWithAFeedReadsItsItemsAndDoesntObserveTheStore() async throws {
+        let id = UUID()
+        let harness = try await makeHarness(
+            episodeID: "ep-1", items: [Self.downloaded(id: id, episodeId: "ep-1")], sharesFeed: true)
+        defer { harness.cleanUp() }
+        let readsBefore = await harness.source.reads
+
+        await harness.model.observe()
+
+        #expect(await harness.source.reads == readsBefore)
+        #expect(harness.model.state == .downloaded(localItemID: id))
+        #expect(harness.model.localItems.map(\.id) == [id])
+    }
+
+    @Test func aFeedKeepsItsItemAndFollowsTheStore() async throws {
+        let harness = try await makeHarness(episodeID: "ep-1", sharesFeed: true)
+        defer { harness.cleanUp() }
+        let feed = try #require(harness.feed)
+        #expect(harness.model.state == .none)
+
+        let episode = Self.downloaded(episodeId: "ep-1")
+        let otherBook = DownloadsListingTests.item("Emma", files: [DownloadsListingTests.file(size: 10)])
+        let (reloads, report) = AsyncStream.makeStream(of: Void.self)
+        feed.reloaded = { report.yield() }
+        await harness.source.set([episode, otherBook])
+        for await _ in reloads { break }
+
+        #expect(feed.items.map(\.id) == [episode.id])
+        #expect(harness.model.state == .downloaded(localItemID: episode.id))
+    }
+
+    @Test func aFeedWithoutStoreUpdatesReadsAgainAfterACompletion() async throws {
+        let harness = try await makeHarness(episodeID: "ep-1", followsUpdates: false, sharesFeed: true)
+        defer { harness.cleanUp() }
+        let feed = try #require(harness.feed)
+        let local = Self.downloaded(episodeId: "ep-1")
+        await harness.source.set([local])
+
+        let (reloads, report) = AsyncStream.makeStream(of: Void.self)
+        feed.reloaded = { report.yield() }
+        await harness.control.send(
+            .completed(
+                recordID: UUID(), itemID: local.id,
+                key: MediaKey(serverConnectionID: Self.connection, libraryItemId: Self.bookID, episodeId: "ep-1")))
+        for await _ in reloads { break }
+
+        #expect(await harness.source.reads == 2)
+        #expect(harness.model.state == .downloaded(localItemID: local.id))
+    }
+
+    @Test func deletingAnEpisodeReadsTheFeedAgain() async throws {
+        let id = UUID()
+        let harness = try await makeHarness(
+            episodeID: "ep-1", items: [Self.downloaded(id: id, episodeId: "ep-1")], followsUpdates: false,
+            sharesFeed: true)
+        defer { harness.cleanUp() }
+        #expect(harness.model.state == .downloaded(localItemID: id))
+        await harness.source.set([])
+
+        await harness.model.delete()
+
+        #expect(await harness.control.deletedEpisodes == ["ep-1"])
+        #expect(harness.model.state == .none)
     }
 }

@@ -16,12 +16,24 @@ import SwiftUI
 /// - A long press (a secondary click on the Mac) shows the same actions in a context menu.
 ///
 /// It builds one ``ItemDownloadModel`` per server item, episode and connection, observing the
-/// downloaded items while it is on screen.
+/// downloaded items while it is on screen; or, in a list (a podcast's episode rows, `feed`), reading
+/// the screen's shared ``DownloadedItemsFeed`` so the rows don't each observe the store.
 struct ItemDownloadButton: View {
+    /// How the button is drawn: bordered on a detail screen, or a compact symbol in a row.
+    enum Style {
+        case bordered
+        case compact
+    }
+
     let libraryItemID: String
     var episodeID: String?
+    /// The episode's title, which the delete confirmation names; `nil` for a book.
+    var episodeTitle: String?
     /// The expanded item a download is requested with; `nil` until loaded, which disables Download.
     let item: ABSCore.LibraryItem?
+    /// The screen's shared downloaded items, of the active connection; `nil` to observe them here.
+    var feed: DownloadedItemsFeed?
+    var style: Style = .bordered
     @Environment(\.serverID) private var serverID
     @Environment(\.downloadAccess) private var access
     @Environment(\.downloads) private var downloads
@@ -31,25 +43,31 @@ struct ItemDownloadButton: View {
         let libraryItemID: String
         let episodeID: String?
         let connectionID: UUID?
+        let feed: ObjectIdentifier?
     }
 
     var body: some View {
         Group {
             if let model, model.libraryItemID == libraryItemID, model.episodeID == episodeID,
-                model.connectionID == serverID, model.canRequest || !model.state.canStart
+                model.connectionID == serverID, model.feed === feed, model.isShown
             {
-                ItemDownloadControl(model: model, item: item)
+                ItemDownloadControl(model: model, item: item, episodeTitle: episodeTitle, style: style)
             }
         }
-        .task(id: Key(libraryItemID: libraryItemID, episodeID: episodeID, connectionID: serverID)) {
-            guard let serverID, let access, let downloads else {
+        .task(
+            id: Key(
+                libraryItemID: libraryItemID, episodeID: episodeID, connectionID: serverID,
+                feed: feed.map(ObjectIdentifier.init))
+        ) {
+            guard let serverID, let access, let downloads, feed.map({ $0.connectionID == serverID }) ?? true else {
                 model = nil
                 return
             }
             let model = ItemDownloadModel(
                 libraryItemID: libraryItemID, episodeID: episodeID, connectionID: serverID, access: access,
-                services: downloads)
+                services: downloads, feed: feed)
             self.model = model
+            // Returns at once with a feed, which the screen observes.
             await model.observe()
         }
     }
@@ -59,12 +77,15 @@ struct ItemDownloadButton: View {
 private struct ItemDownloadControl: View {
     let model: ItemDownloadModel
     let item: ABSCore.LibraryItem?
+    let episodeTitle: String?
+    let style: ItemDownloadButton.Style
     @Environment(\.locale) private var locale
     @State private var showsActions = false
 
     var body: some View {
         let state = model.state
         let presentation = ItemDownloadPresentation(state: state, locale: locale)
+        let deletion = ItemDownloadDeletion(episodeTitle: episodeTitle)
         Button {
             if state.canStart {
                 start()
@@ -82,20 +103,22 @@ private struct ItemDownloadControl: View {
                 }
             }
             .labelStyle(.iconOnly)
+            // A row's symbol keeps a 44-point target.
+            .frame(minWidth: style == .compact ? 44 : nil, minHeight: style == .compact ? 44 : nil)
+            .contentShape(.rect)
         }
-        .buttonStyle(.bordered)
+        .itemDownloadButtonStyle(style, state: state)
         .disabled(model.isWorking || (state.canStart && item == nil))
         .help(Text(verbatim: presentation.title))
         .accessibilityValue(Text(verbatim: presentation.value ?? ""))
         .contextMenu {
-            if !state.canStart { actions(state, confirmingDelete: false) }
+            if !state.canStart { actions(state, deletion: deletion, confirmingDelete: false) }
         }
         .confirmationDialog(
-            Text(
-                verbatim: state.localItemID == nil ? presentation.title : L10n.string("MessageConfirmDeleteLocalFiles")),
+            Text(verbatim: state.localItemID == nil ? presentation.title : deletion.message),
             isPresented: $showsActions, titleVisibility: .visible
         ) {
-            actions(model.state, confirmingDelete: true)
+            actions(model.state, deletion: deletion, confirmingDelete: true)
             Button(L10n.string("ButtonCancel"), role: .cancel) {}
         }
         // A finished or removed download leaves nothing to act on.
@@ -127,7 +150,9 @@ private struct ItemDownloadControl: View {
     /// Cancel Download and Retry for a download under way; Delete for a downloaded one, which the
     /// context menu sends to the confirmation first.
     @ViewBuilder
-    private func actions(_ state: ItemDownloadState, confirmingDelete: Bool) -> some View {
+    private func actions(
+        _ state: ItemDownloadState, deletion: ItemDownloadDeletion, confirmingDelete: Bool
+    ) -> some View {
         if state.canRetry {
             Button {
                 start()
@@ -150,7 +175,7 @@ private struct ItemDownloadControl: View {
                     showsActions = true
                 }
             } label: {
-                Label(L10n.string("ButtonDeleteLocalItem"), systemImage: "trash")
+                Label(deletion.button, systemImage: "trash")
             }
         }
     }
@@ -158,6 +183,41 @@ private struct ItemDownloadControl: View {
     private func start() {
         guard let item else { return }
         Task { await model.download(item: item) }
+    }
+}
+
+extension View {
+    /// Bordered on a detail screen; in a row, a large borderless symbol, green once downloaded,
+    /// like the row's finished toggle.
+    @ViewBuilder
+    fileprivate func itemDownloadButtonStyle(_ style: ItemDownloadButton.Style, state: ItemDownloadState) -> some View {
+        switch style {
+        case .bordered:
+            buttonStyle(.bordered)
+        case .compact:
+            self
+                .buttonStyle(.borderless)
+                .imageScale(.large)
+                .foregroundStyle(
+                    state.localItemID == nil ? AnyShapeStyle(.tint) : AnyShapeStyle(ABSColor.success))
+        }
+    }
+}
+
+/// The delete action's title and confirmation: the downloaded files of a book, or one downloaded
+/// episode by its title.
+struct ItemDownloadDeletion: Equatable {
+    let button: String
+    let message: String
+
+    init(episodeTitle: String?) {
+        if let episodeTitle {
+            button = L10n.string("ButtonDeleteLocalEpisode")
+            message = L10n.string("MessageConfirmDeleteLocalEpisode", episodeTitle)
+        } else {
+            button = L10n.string("ButtonDeleteLocalItem")
+            message = L10n.string("MessageConfirmDeleteLocalFiles")
+        }
     }
 }
 
