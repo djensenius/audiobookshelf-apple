@@ -182,6 +182,17 @@ element, each with the reason and its issue:
 - Cards' titles and authors on Home and Library, which they cut short by design and speak in
   full (#615; only text inside an `item.<id>` card, not the item screen's own `item.`
   elements), count as clipped text. See "Decisions".
+- Library at AX5: "Dynamic Type font sizes are partially unsupported" on the first card's
+  title and author, about one run in ten on the iPhone Duo (#622), though both use text styles
+  and scale. The audit steps the text size from the smallest up to AX5 in about a second.
+  Where it crosses into the accessibility sizes, the grid drops from two columns to one
+  (`ItemGridMetrics.minimumCellWidth`). A screen recording of a failing run shows the app
+  still drawing the first accessibility size about 0.3 seconds after that relayout, then
+  jumping ahead, so the audit measured the text not growing. The cover had loaded long
+  before, so waiting before the audit doesn't help. This is a timing false positive, kept
+  filtered: only "partially unsupported", only on Library and only for text in an `item.<id>`
+  card. Home audits the same card unfiltered, and its shelf has no columns to change, so a card
+  font that really doesn't scale still fails there.
 
 Two findings that used to be filtered are fixed instead. The Player's whole-book remaining time
 failed contrast at `.caption2` (11 points), though its pixels measure as the elapsed time's do,

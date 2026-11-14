@@ -152,17 +152,29 @@ struct KnownAuditIssue {
                 // Apple Books); the card, one element, speaks both in full. Only on the screens
                 // of cards, and only in a card (`item.<id>`), not the item screen's own elements,
                 // whose clipping isn't by design. #615
-                KnownAuditIssue(screen: .home, type: .textClipped, element: isShortenedInCard),
-                KnownAuditIssue(screen: .library, type: .textClipped, element: isShortenedInCard),
+                KnownAuditIssue(screen: .home, type: .textClipped, element: isCardText),
+                KnownAuditIssue(screen: .library, type: .textClipped, element: isCardText),
+                // "Dynamic Type font sizes are partially unsupported" on Library's first card's
+                // title and author, about one run in ten on the iPhone Duo, though they scale with
+                // every text style. The audit steps the text size up to AX5 in about a second, and
+                // where it crosses into the accessibility sizes the grid drops from two columns to
+                // one (`ItemGridMetrics.minimumCellWidth`); a recording of a failing run shows the
+                // app still drawing the first accessibility size about 0.3 seconds after that
+                // relayout, so the audit measures the text not growing. The same card is audited on
+                // Home, unfiltered, whose shelf has no columns to change. Only "partially", only in
+                // a card. #622
+                KnownAuditIssue(
+                    screen: .library, type: .dynamicType, description: "partially unsupported",
+                    element: isCardText),
             ]
         #endif
         return all
     }()
 
-    /// Whether `element` is text shortened in an item card (`item.<id>`), not one of the item
-    /// screen's `item.` elements.
+    /// Whether `element` is text in an item card (`item.<id>`), which the card speaks in full, not
+    /// one of the item screen's `item.` elements.
     @MainActor
-    private static func isShortenedInCard(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
+    private static func isCardText(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
         isShortened(
             element,
             inElementMatching:
