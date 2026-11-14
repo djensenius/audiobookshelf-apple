@@ -135,7 +135,7 @@ struct KnownAuditIssue {
         var all: [KnownAuditIssue] = [
             // The metadata rows (ItemDetailMetadata) are text-sized, about 18 pt tall: the plain
             // ones ("Duration, 11 hours 36 minutes") aren't controls, but the Author, Narrator and
-            // Genres links are, and are smaller than 44 pt. #TODO-ISSUE
+            // Genres links are, and are smaller than 44 pt. #612
             KnownAuditIssue(screen: .item, type: .hitRegion) { element, app in
                 guard let element else { return false }
                 let metadata = app.descendants(matching: .any)["item.metadata"].firstMatch
@@ -144,12 +144,12 @@ struct KnownAuditIssue {
             // "Potentially inaccessible text", with no element, and not on every run: most likely
             // the metadata's labels ("Author", "Duration", …), hidden from VoiceOver on purpose
             // because each value speaks its label ("Jane Austen, Author, link"; VoiceOver often
-            // skips a container's label). #TODO-ISSUE
+            // skips a container's label). #613
             KnownAuditIssue(screen: .item, type: .elementDetection) { element, _ in element == nil },
             // The whole book's remaining time, over the player's chapter scrubber, fails contrast on
             // every run, while the elapsed time beside it, the same color and size, passes, as do
             // the chapter's times: muted foreground on the thick material backdrop, about 5:1.
-            // #TODO-ISSUE
+            // #614
             KnownAuditIssue(screen: .player, type: .contrast) { element, _ in
                 guard let element, element.elementType == .staticText else { return false }
                 return element.label.hasPrefix("-") || element.label.hasPrefix("\u{2212}")
@@ -158,13 +158,13 @@ struct KnownAuditIssue {
         #if os(iOS)
             all += [
                 // Cards cut their title and author short at two lines and one (by design, like
-                // Apple Books); the card, one element, speaks both in full. #TODO-ISSUE
+                // Apple Books); the card, one element, speaks both in full. #615
                 KnownAuditIssue(screen: nil, type: .textClipped) { element, app in
                     isShortened(element, inElementMatching: "identifier BEGINSWITH 'item.'", in: app)
                 },
                 // The mini player cuts its title and author short at one line, to as little as a
                 // letter in narrow windows (iPhone Duo); its button speaks the full title.
-                // #TODO-ISSUE
+                // #616
                 KnownAuditIssue(screen: nil, type: .textClipped) { element, _ in
                     element?.identifier == "player.mini"
                 },

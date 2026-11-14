@@ -153,14 +153,14 @@ Known issues are filtered in `KnownAuditIssue.all`, by screen, audit type and el
 the reason and its issue:
 
 - Item detail: the metadata rows are smaller than 44 points tall; the Author, Narrator and
-  Genres links among them are controls (#TODO-ISSUE). The audit also sometimes reports
+  Genres links among them are controls (#612). The audit also sometimes reports
   "potentially inaccessible text" with no element, most likely the metadata's labels, hidden
-  from VoiceOver because each value speaks its label (#TODO-ISSUE).
+  from VoiceOver because each value speaks its label (#613).
 - Player: the book's remaining time fails contrast while the elapsed time beside it, the same
-  color and size, passes (#TODO-ISSUE).
-- Cards' titles and authors, which they cut short by design and speak in full, and the mini
+  color and size, passes (#614).
+- Cards' titles and authors, which they cut short by design and speak in full (#615), and the mini
   player's title, which can be cut to a letter in narrow windows such as the iPhone Duo's
-  (#TODO-ISSUE), count as clipped text.
+  (#616), count as clipped text.
 
 Add a filter only for an issue that isn't the app's to fix or that has its own issue; fix the
 rest. Package tests cover the pure helpers: the labels and values in `ItemViewsTests`, and the
