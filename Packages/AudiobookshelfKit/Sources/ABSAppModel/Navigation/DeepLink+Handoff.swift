@@ -64,6 +64,30 @@ extension DeepLink {
         return userInfo
     }
 
+    /// The `userInfo` the full player publishes for Handoff: the playing item's (or episode's)
+    /// entries, as ``handoffUserInfo(itemID:episodeID:account:)`` gives them, and its `position` in
+    /// whole seconds, so the receiver reads it as a play link from there, which asks before it
+    /// plays (ADR 0004, "Handoff").
+    ///
+    /// The account is `active`'s, and only while the playing media is on that connection
+    /// (`key.serverConnectionID`): during an account switch the player still holds the outgoing
+    /// account's item, whose IDs mean nothing on the next account, so nothing is published. `nil`
+    /// too without an active connection, or when the IDs or account aren't valid. A `position`
+    /// that is `nil`, not finite or past ``maxStartTime`` is left out, so the activity opens the
+    /// item instead; a negative one counts as 0.
+    public static func handoffUserInfo(
+        playing key: MediaKey, position: TimeInterval?, active: ServerConnectionDTO?
+    ) -> [String: Any]? {
+        guard let active, active.id == key.serverConnectionID, let account = HandoffAccount(connection: active),
+            let entries = handoffUserInfo(itemID: key.libraryItemId, episodeID: key.episodeId, account: account)
+        else { return nil }
+        var userInfo: [String: Any] = entries
+        if let position, position.isFinite, position <= maxStartTime {
+            userInfo["position"] = max(position, 0).rounded(.down)
+        }
+        return userInfo
+    }
+
     /// A start time from an activity: a number from 0 to ``maxStartTime``. Booleans are
     /// `NSNumber`s too, so they are told apart, or `true` would start the item at one second.
     private static func handoffPosition(_ value: Any?) -> TimeInterval? {
