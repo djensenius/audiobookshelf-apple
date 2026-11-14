@@ -75,6 +75,15 @@ public final class PlaybackCoordinator {
     public private(set) var restoredRecord: LastPlayedRecord?
     /// The media a play is checking the streaming policy for, before it commits (a loading hint).
     public private(set) var pendingPlayKey: MediaKey?
+    /// Changes when a start begins, on stop, and on a restore: a start still pending under the
+    /// same value is the one seen earlier, not one begun after a stop. Not observed; read it again.
+    public var startGeneration: Int { generation }
+    /// Counts plays, and what cancels a play awaiting its streaming check; each play takes the next count, at once.
+    public var playRequestCount: Int { policyCheck }
+    /// The ``playRequestCount`` of the play that began the current start; `nil` when no play did (an auto-advance
+    /// began it), or after a stop or a restore. Recovery's rebuilds (the HLS fallback among them) and a gone
+    /// session's replacement keep it: they carry on the same play.
+    @ObservationIgnored public private(set) var startPlayRequest: Int?
     /// The play that ``error``'s `.streamingNeedsConfirmation` blocked, which
     /// ``confirmMeteredStreaming()`` replays; `forceTranscode` for a blocked recovery rebuild's HLS
     /// fallback, which the replay keeps.
@@ -412,7 +421,8 @@ public final class PlaybackCoordinator {
         case .denied(let reason): return block(.streamingNotAllowed(reason, key: key))
         }
         meteredConsent = allowingMeteredNetwork ? key : nil
-        await start(key: key, startTime: startTime, prepared: nil, forceTranscode: forceTranscode)
+        await start(
+            key: key, startTime: startTime, prepared: nil, forceTranscode: forceTranscode, playRequest: check)
     }
 
     /// The user agreed to stream on a metered network: replays the play (or queue advance) that
@@ -444,7 +454,7 @@ public final class PlaybackCoordinator {
     /// transcode (a recovery rebuild's, ``transcodeForced``).
     private func start(
         key: MediaKey, startTime: Double?, prepared: PreparedNextItem?, playing: Bool = true,
-        forceTranscode: Bool = false
+        forceTranscode: Bool = false, playRequest: Int? = nil
     ) async {
         // Consent is for one item: an auto-advance (or anything else) starting another drops it,
         // so coming back to the item later asks again; its own rebuilds keep it.
@@ -453,6 +463,7 @@ public final class PlaybackCoordinator {
         let episodeID = key.episodeId
         generation += 1
         let current = generation
+        startPlayRequest = playRequest
         transcodeForced = forceTranscode
         streamKind = nil
         playsLocalFiles = false
@@ -950,6 +961,10 @@ public final class PlaybackCoordinator {
     /// "Waiting for network"), spending none of its budget; it gives up after five minutes.
     public var isWaitingForNetwork: Bool { recovery.isWaitingForNetwork(at: generation) }
 
+    /// Whether recovery is running for the current item: between a failure (such as a direct play's decode error,
+    /// before its HLS fallback) and the rebuild that recovers it, or its terminal failure.
+    public var isRecovering: Bool { recovery.isRecovering(at: generation) }
+
     /// Sets and saves the playback rate. Rates the settings reject are ignored.
     public func setRate(_ rate: Double) {
         settings.playbackRate = rate
@@ -972,7 +987,7 @@ public final class PlaybackCoordinator {
         if heldPlay?.generation == generation { heldPlay?.generation = generation + 1 }
         await start(
             key: key, startTime: currentTime, prepared: nil, playing: isPlaybackRequested,
-            forceTranscode: transcodeForced)
+            forceTranscode: transcodeForced, playRequest: startPlayRequest)
     }
 
     /// Ordinary user stop remains reusable and clears LastPlayed. Account end permanently
@@ -996,6 +1011,7 @@ public final class PlaybackCoordinator {
             if reason == .accountSwitch || reason == .expired { preserveLastPlayedAtAccountEnd() }
         }
         generation += 1
+        startPlayRequest = nil
         policyCheck += 1
         pendingPlayKey = nil
         dropHeldPlay()
@@ -1032,6 +1048,7 @@ public final class PlaybackCoordinator {
             mediaLeases?.isHeld(record.key, by: .progressAction) != true
         else { return false }
         generation += 1
+        startPlayRequest = nil
         mediaKey = record.key
         restoredRecord = record
         unloadedPosition = record.position.isFinite ? max(record.position, 0) : 0
@@ -1303,6 +1320,7 @@ public final class PlaybackCoordinator {
             nextItemProvider?.isStillNext(next.key) == false
         else { return await holdUntilAudioPlays(generation: attempt) }
         generation += 1
+        startPlayRequest = nil
         mediaKey = key
         restoredRecord = lastPlayedStore.load().flatMap { $0.key == key ? $0 : nil }
         unloadedPosition = endedAt.position
@@ -1500,7 +1518,7 @@ public final class PlaybackCoordinator {
         }
         await start(
             key: key, startTime: target, prepared: nil, playing: playing,
-            forceTranscode: forceTranscode || transcodeForced)
+            forceTranscode: forceTranscode || transcodeForced, playRequest: startPlayRequest)
         guard generation == attempt else { return .superseded }
         if phase == .loaded { return .recovered(generation: attempt) }
         guard let error = recoveryAttemptError else { return .superseded }

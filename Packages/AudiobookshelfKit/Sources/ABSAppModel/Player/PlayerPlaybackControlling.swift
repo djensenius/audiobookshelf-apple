@@ -15,6 +15,12 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     var session: PlaybackSession? { get }
     var restoredRecord: LastPlayedRecord? { get }
     var error: PlaybackCoordinatorError? { get }
+    /// ``PlaybackCoordinator/startGeneration``: tells a pending start apart from one begun after a stop.
+    var startGeneration: Int { get }
+    /// ``PlaybackCoordinator/playRequestCount``.
+    var playRequestCount: Int { get }
+    /// ``PlaybackCoordinator/startPlayRequest``: which play began the current start.
+    var startPlayRequest: Int? { get }
     /// Global seconds.
     var currentTime: Double { get }
     var duration: Double { get }
@@ -25,6 +31,8 @@ public protocol PlayerPlaybackControlling: AnyObject, Observable {
     var isPlaybackRequested: Bool { get }
     /// Whether recovery is waiting for the network before its next attempt.
     var isWaitingForNetwork: Bool { get }
+    /// ``PlaybackCoordinator/isRecovering``.
+    var isRecovering: Bool { get }
     /// The loaded timeline; `nil` unless media is loaded.
     var timeline: PlaybackTimeline? { get }
     var chapterIndex: Int? { get }

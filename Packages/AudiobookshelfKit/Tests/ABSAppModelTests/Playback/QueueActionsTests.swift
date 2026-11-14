@@ -189,4 +189,273 @@ struct QueueActionsTests {
         #expect(!queue.add(item("c"), at: .end))
         #expect(queue.items.map(\.id) == ["a|"])
     }
+
+    // MARK: Replacing the queue (play-all)
+
+    /// A scope whose player has loaded `started`, and its queue, checking a pending start every millisecond.
+    private func startedScope(_ started: String, items: [QueueItem]) throws -> (
+        QueueScope, PlaybackQueueControl, MediaKey
+    ) {
+        let scope = QueueScope(items: items)
+        let queue = try #require(PlaybackQueueControl(scope: scope))
+        queue.startPollInterval = .milliseconds(1)
+        let key = item(started).key(serverConnectionID: queue.serverConnectionID)
+        scope.control.mediaKey = key
+        scope.control.phase = .loaded
+        return (scope, queue, key)
+    }
+
+    /// Lets a waiting replace check the pending start a few times.
+    private func letItWait() async throws {
+        try await Task.sleep(for: .milliseconds(20))
+    }
+
+    @Test func aSucceededStartReplacesTheQueueInOrderWithoutTheCurrentMediaOrDuplicates() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x"), item("y")])
+
+        let replaced = await queue.replace(
+            with: [item("b"), item("a"), item("c"), item("b")], afterStarting: started, request: queue.beginPlayAll())
+        #expect(replaced)
+        #expect(queue.items.map(\.id) == ["b|", "c|"])
+        #expect(scope.queueStore.saved[queue.serverConnectionID]?.map(\.id) == ["b|", "c|"])
+    }
+
+    /// A start that failed, was cancelled (unloaded), was superseded by other media, or is another
+    /// connection's leaves the previous queue.
+    @Test func anUnsucceededStartKeepsThePreviousQueue() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        let replacement = [item("b"), item("c")]
+
+        scope.control.error = .recoveryExhausted
+        #expect(!(await queue.replace(with: replacement, afterStarting: started, request: queue.beginPlayAll())))
+        scope.control.error = nil
+
+        scope.control.phase = .unloaded
+        #expect(!(await queue.replace(with: replacement, afterStarting: started, request: queue.beginPlayAll())))
+        scope.control.phase = .idle
+        #expect(!(await queue.replace(with: replacement, afterStarting: started, request: queue.beginPlayAll())))
+        scope.control.phase = .loaded
+
+        scope.control.mediaKey = item("other").key(serverConnectionID: queue.serverConnectionID)
+        #expect(!(await queue.replace(with: replacement, afterStarting: started, request: queue.beginPlayAll())))
+        scope.control.mediaKey = started
+
+        let elsewhere = item("a").key(serverConnectionID: UUID())
+        #expect(!(await queue.replace(with: replacement, afterStarting: elsewhere, request: queue.beginPlayAll())))
+
+        #expect(queue.items.map(\.id) == ["x|"])
+    }
+
+    /// Another screen's start of the media is pending: the queue is replaced only once it loads.
+    @Test func aPendingStartThatSucceedsThenReplacesTheQueue() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        scope.control.phase = .starting
+
+        let request = queue.beginPlayAll()
+        let replacing = Task { await queue.replace(with: [item("b")], afterStarting: started, request: request) }
+        try await letItWait()
+        #expect(queue.items.map(\.id) == ["x|"])
+
+        scope.control.phase = .loaded
+        #expect(await replacing.value)
+        #expect(queue.items.map(\.id) == ["b|"])
+    }
+
+    @Test func aPendingStartThatFailsKeepsThePreviousQueue() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        scope.control.phase = .starting
+
+        let request = queue.beginPlayAll()
+        let replacing = Task { await queue.replace(with: [item("b")], afterStarting: started, request: request) }
+        try await letItWait()
+        scope.control.error = .recoveryExhausted
+        scope.control.phase = .unloaded
+
+        #expect(!(await replacing.value))
+        #expect(queue.items.map(\.id) == ["x|"])
+    }
+
+    /// The pending start is stopped and the same media started again between two checks: the play-all joined the
+    /// stopped start, so the new one's load doesn't replace the queue; a play-all of the new start does.
+    @Test func aPendingStartStoppedAndRestartedBetweenChecksKeepsThePreviousQueue() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        scope.control.phase = .starting
+
+        let request = queue.beginPlayAll()
+        let replacing = Task { await queue.replace(with: [item("b")], afterStarting: started, request: request) }
+        try await letItWait()
+        scope.control.phase = .idle
+        scope.control.mediaKey = nil
+        scope.control.startGeneration += 1
+        scope.control.mediaKey = started
+        scope.control.phase = .starting
+        scope.control.startGeneration += 1
+        try await letItWait()
+        scope.control.phase = .loaded
+
+        #expect(!(await replacing.value))
+        #expect(queue.items.map(\.id) == ["x|"])
+        #expect(await queue.replace(with: [item("c")], afterStarting: started, request: queue.beginPlayAll()))
+        #expect(queue.items.map(\.id) == ["c|"])
+    }
+
+    /// A play of `key` beginning a start, as the coordinator records it: the play takes the next play request, and
+    /// the start the next generation and that request.
+    private func play(_ key: MediaKey, on control: FakePlaybackControl) {
+        control.playRequestCount += 1
+        control.startGeneration += 1
+        control.startPlayRequest = control.playRequestCount
+        control.mediaKey = key
+        control.phase = .starting
+    }
+
+    /// A stop, as the coordinator records it.
+    private func stop(_ control: FakePlaybackControl) {
+        control.playRequestCount += 1
+        control.startGeneration += 1
+        control.startPlayRequest = nil
+        control.mediaKey = nil
+        control.phase = .idle
+    }
+
+    /// The play-all's own play began the start.
+    @Test func thePlayAllsOwnStartReplacesTheQueue() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        stop(scope.control)
+        let request = queue.beginPlayAll()
+        play(started, on: scope.control)
+        scope.control.phase = .loaded
+
+        #expect(await queue.replace(with: [item("b")], afterStarting: started, request: request))
+        #expect(queue.items.map(\.id) == ["b|"])
+    }
+
+    /// Another surface played the same media while the play-all's play awaited its streaming check, so the play-all's
+    /// play never began a start, and the other's start is the only one since ``beginPlayAll()``: its load doesn't
+    /// replace the queue.
+    @Test func aNewerPlayOfTheSameMediaThatSupersededThePlayAllsKeepsThePreviousQueue() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        stop(scope.control)
+        let request = queue.beginPlayAll()
+        scope.control.playRequestCount += 1
+        play(started, on: scope.control)
+        scope.control.phase = .loaded
+
+        #expect(!(await queue.replace(with: [item("b")], afterStarting: started, request: request)))
+        #expect(queue.items.map(\.id) == ["x|"])
+    }
+
+    /// The player is stopped and the same media started again while the play-all's play is still returning (the
+    /// scope's Now Playing claim awaits after the start), so before the replace begins: the restart's load doesn't
+    /// replace the queue, whether the play-all joined a pending start or began its own.
+    @Test(arguments: [false, true])
+    func aStopAndRestartBeforeTheReplaceBeginsKeepsThePreviousQueue(ownStart: Bool) async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        if ownStart { stop(scope.control) } else { play(started, on: scope.control) }
+        let request = queue.beginPlayAll()
+        if ownStart { play(started, on: scope.control) }
+        stop(scope.control)
+        play(started, on: scope.control)
+        scope.control.phase = .loaded
+
+        #expect(!(await queue.replace(with: [item("b")], afterStarting: started, request: request)))
+        #expect(queue.items.map(\.id) == ["x|"])
+    }
+
+    /// The play-all's play hit a direct-play decode error at load, so its `play` returned while recovery runs its HLS
+    /// fallback: the queue waits for the fallback's outcome, and a user stop during it ends the wait.
+    enum Fallback: CaseIterable {
+        case succeeds, fails, isStopped, isStoppedAndPlayedAgain
+    }
+
+    @Test(arguments: Fallback.allCases)
+    func aPlayRecoveringThroughItsFallback(_ fallback: Fallback) async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        stop(scope.control)
+        let request = queue.beginPlayAll()
+        play(started, on: scope.control)
+        scope.control.phase = .unloaded
+        scope.control.isRecovering = true
+
+        let replacing = Task { await queue.replace(with: [item("b")], afterStarting: started, request: request) }
+        try await letItWait()
+        #expect(queue.items.map(\.id) == ["x|"])
+        switch fallback {
+        case .succeeds, .fails:
+            // The rebuild: a new start of the same play.
+            scope.control.startGeneration += 1
+            scope.control.phase = .starting
+            scope.control.isRecovering = false
+            try await letItWait()
+            if fallback == .succeeds { scope.control.phase = .loaded } else { scope.control.error = .recoveryExhausted }
+        case .isStopped:
+            scope.control.isRecovering = false
+            stop(scope.control)
+        case .isStoppedAndPlayedAgain:
+            scope.control.isRecovering = false
+            stop(scope.control)
+            play(started, on: scope.control)
+            try await letItWait()
+            scope.control.phase = .loaded
+        }
+
+        #expect(await replacing.value == (fallback == .succeeds))
+        #expect(queue.items.map(\.id) == (fallback == .succeeds ? ["b|"] : ["x|"]))
+    }
+
+    @Test func aPendingStartThatNeverLoadsTimesOut() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        scope.control.phase = .starting
+        queue.startTimeout = .milliseconds(10)
+
+        #expect(!(await queue.replace(with: [item("b")], afterStarting: started, request: queue.beginPlayAll())))
+        #expect(queue.items.map(\.id) == ["x|"])
+    }
+
+    /// Two windows play groups starting with the same media while it loads: the newer one's queue wins, whichever
+    /// finishes waiting first.
+    @Test func theNewerOfOverlappingPlayAllsWins() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        scope.control.phase = .starting
+
+        let older = queue.beginPlayAll()
+        let olderReplace = Task { await queue.replace(with: [item("b")], afterStarting: started, request: older) }
+        let newer = queue.beginPlayAll()
+        let newerReplace = Task { await queue.replace(with: [item("c")], afterStarting: started, request: newer) }
+        try await letItWait()
+        scope.control.phase = .loaded
+
+        #expect(await newerReplace.value)
+        #expect(!(await olderReplace.value))
+        #expect(queue.items.map(\.id) == ["c|"])
+
+        // A late older replace, after the newer one's, changes nothing either.
+        #expect(!(await queue.replace(with: [item("b")], afterStarting: started, request: older)))
+        #expect(queue.items.map(\.id) == ["c|"])
+    }
+
+    /// A cancelled caller replaces nothing, even with the media already loaded.
+    @Test func aCancelledReplaceKeepsThePreviousQueue() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        let request = queue.beginPlayAll()
+
+        let replacing = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await queue.replace(with: [item("b")], afterStarting: started, request: request)
+        }
+
+        #expect(!(await replacing.value))
+        #expect(queue.items.map(\.id) == ["x|"])
+        // The scope is kept, so only the cancellation refused it: the same request then replaces.
+        #expect(await queue.replace(with: [item("b")], afterStarting: started, request: request))
+        #expect(scope.queueStore.saved[queue.serverConnectionID]?.map(\.id) == ["b|"])
+    }
+
+    @Test func aRetiredSessionsQueueIsntReplaced() async throws {
+        let (scope, queue, started) = try startedScope("a", items: [item("x")])
+        scope.retire(reason: .signOut)
+
+        #expect(!(await queue.replace(with: [item("b")], afterStarting: started, request: queue.beginPlayAll())))
+        #expect(queue.items.map(\.id) == ["x|"])
+    }
 }
