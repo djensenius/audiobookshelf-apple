@@ -29,6 +29,9 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     var session: PlaybackSession?
     var restoredRecord: LastPlayedRecord?
     var error: PlaybackCoordinatorError?
+    var startGeneration = 0
+    var playRequestCount = 0
+    var startPlayRequest: Int?
     var currentTime: Double = 0
     var duration: Double = 0
     var rate: Double = 1
@@ -36,6 +39,7 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
     var isBuffering = false
     var isPlaybackRequested = false
     var isWaitingForNetwork = false
+    var isRecovering = false
     var timeline: PlaybackTimeline?
     /// Whether seeks land; one that doesn't returns `nil` and leaves playback where it was.
     var seeksLand = true

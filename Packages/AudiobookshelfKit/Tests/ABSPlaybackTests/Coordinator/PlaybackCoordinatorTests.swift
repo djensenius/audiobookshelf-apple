@@ -378,6 +378,54 @@ struct PlaybackCoordinatorTests {
         #expect(service.closes.isEmpty)
     }
 
+    /// A start advances the generation once; a play joining it keeps it; a stop and a new start of the same item
+    /// each advance it.
+    @Test func theStartGenerationTellsAPendingStartFromARestart() async throws {
+        let gate = Gate()
+        engine.loadGates = [gate]
+        let before = coordinator.startGeneration
+        let first = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { engine.loads.count == 1 }
+        let pending = coordinator.startGeneration
+        #expect(pending == before + 1)
+        await coordinator.play(itemID: "A")
+        #expect(coordinator.startGeneration == pending)
+
+        coordinator.stop()
+        let stopped = coordinator.startGeneration
+        #expect(stopped != pending)
+        gate.open()
+        await first.value
+        await coordinator.play(itemID: "A")
+
+        #expect(coordinator.phase == .loaded)
+        #expect(coordinator.mediaKey == h.key("A"))
+        #expect(coordinator.startGeneration == stopped + 1)
+    }
+
+    /// A start records the play that began it; a play superseded during its streaming check began none, so the start
+    /// a newer play of the same item began isn't its, though the generation advanced only once.
+    @Test func theStartRecordsThePlayThatBeganIt() async throws {
+        let generation = coordinator.startGeneration
+        let request = coordinator.playRequestCount
+        h.policy.gate = Gate()
+        let gate = try #require(h.policy.gate)
+        let superseded = Task { await coordinator.play(itemID: "A") }
+        await yieldUntil { h.policy.checks == 1 }
+        await coordinator.play(itemID: "A")
+        gate.open()
+        await superseded.value
+
+        #expect(coordinator.phase == .loaded)
+        #expect(coordinator.startGeneration == generation + 1)
+        #expect(coordinator.startPlayRequest == request + 2)
+
+        coordinator.stop()
+        #expect(coordinator.startPlayRequest == nil)
+        await coordinator.play(itemID: "A")
+        #expect(coordinator.startPlayRequest == coordinator.playRequestCount)
+    }
+
     @Test func startTimeOrSeekWhileStartingIsAppliedOnLoad() async throws {
         let gate = Gate()
         engine.loadGates = [gate]

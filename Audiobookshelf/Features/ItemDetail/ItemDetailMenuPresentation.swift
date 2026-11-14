@@ -51,6 +51,44 @@ enum ItemDetailMenuPresentation {
         action == .discardProgress ? .destructive : nil
     }
 
+    /// Whether a More menu entry can be chosen, and why not.
+    struct EntryState: Equatable {
+        var isDisabled: Bool
+        /// The key of why the server is needed and can't be reached (#76), shown under the
+        /// entry's title; `nil` when the entry is available, or only busy.
+        var reasonKey: String?
+    }
+
+    /// An entry's state: disabled with the reason while it needs the server and the server can't
+    /// be reached (``ServerActionAvailability``), and a progress action also while another runs.
+    static func entryState(
+        for action: ItemDetailMenuAction, availability: ServerActionAvailability, isPerforming: Bool = false
+    ) -> EntryState {
+        let reasonKey = availability.reasonKey(for: action)
+        let isBusy: Bool
+        switch action {
+        case .markFinished, .markNotFinished, .discardProgress, .hideFromContinueListening:
+            isBusy = isPerforming
+        case .addToPlaylist, .share, .details, .history:
+            isBusy = false
+        }
+        return EntryState(isDisabled: isBusy || reasonKey != nil, reasonKey: reasonKey)
+    }
+
+    /// Performs a progress action as ``perform(_:on:actions:)`` does, unless the server can't be
+    /// reached now: the connection may have dropped while a confirmation was open. Nothing is
+    /// sent then, and nothing is queued.
+    ///
+    /// - Returns: The key of why the server can't be reached, or ``perform(_:on:actions:)``'s.
+    @MainActor
+    static func perform(
+        _ action: ItemDetailMenuAction, on summary: ItemSummary, actions: any ItemActionPerforming,
+        availability: ServerActionAvailability
+    ) async -> String? {
+        if let reasonKey = availability.reasonKey(for: action) { return reasonKey }
+        return await perform(action, on: summary, actions: actions)
+    }
+
     /// Performs a progress action on the book: marking and hiding as the item cards do
     /// (``ItemCardActions``), discarding through ``ItemActionPerforming/discardProgress(_:)``.
     /// Share, More info, History and Add to playlist are the view's.

@@ -20,7 +20,7 @@ extension View {
 /// failure alert and remembers a 404. Share links to the web client, so it needs the server's
 /// address; History pushes its route on the scene's ``Router`` (ADR 0004), so it is hidden
 /// without one (previews); Add to playlist opens ``AddToPlaylistSheet`` for the book, so it needs the account's
-/// playlist writes (`playlists`).
+/// playlist writes (`playlists`), and is disabled with the reason while the server can't be reached (#76).
 ///
 /// Play Next and Add to Queue (``QueueActionButtons``) follow the actions while the book can be
 /// played and isn't gone.
@@ -42,6 +42,7 @@ private struct ItemDetailMoreMenu: ViewModifier {
     let playlists: (any PlaylistEditingService)?
     @Environment(Router.self) private var router: Router?
     @Environment(AccountManager.self) private var accounts: AccountManager?
+    @Environment(\.connectionBanner) private var connectionBanner
     @State private var showsDetails = false
     /// For the item model; given the account's new client when it changes.
     @State private var ebookActions: EbookActionsModel?
@@ -207,13 +208,18 @@ private struct ItemDetailMoreMenu: ViewModifier {
                 DetailMoreMenuLabel(action: action)
             }
         case .addToPlaylist:
+            let state = ItemDetailMenuPresentation.entryState(
+                for: action, availability: ServerActionAvailability(session: connectionBanner))
             Button {
-                guard let playlists, let libraryID = model.item?.libraryId else { return }
+                guard ServerActionAvailability(session: connectionBanner).reasonKey(for: action) == nil,
+                    let playlists, let libraryID = model.item?.libraryId
+                else { return }
                 addToPlaylist = AddToPlaylistModel(
                     entries: [PlaylistEntryKey(itemID: model.itemID)], libraryID: libraryID, service: playlists)
             } label: {
-                DetailMoreMenuLabel(action: action)
+                DetailMoreMenuLabel(action: action, reasonKey: state.reasonKey)
             }
+            .detailMoreMenuEntry(state)
         case .markFinished, .markNotFinished, .discardProgress, .hideFromContinueListening:
             // Shown by ``DetailMoreMenu``.
             EmptyView()

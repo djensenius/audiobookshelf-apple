@@ -82,6 +82,13 @@ jobs:
       - name: Test iOS-only ShakeDetector package suite
         run: mise run test:kit:ios
 
+      # In CI test:kit:ios creates its own abs-ci-<run>-<attempt>-* simulator, because the runner's
+      # instances share one CoreSimulator device set, and deletes it. If the job was killed first,
+      # delete it here. GITHUB_RUN_ID and GITHUB_RUN_ATTEMPT come from the runner's environment.
+      - name: Delete this run's iOS test simulators
+        if: always()
+        run: scripts/test-kit-ios.sh --delete-run-simulators
+
       - name: Slow AudiobookshelfKit tests
         if: github.event_name == 'push'
         run: mise run test:kit:slow

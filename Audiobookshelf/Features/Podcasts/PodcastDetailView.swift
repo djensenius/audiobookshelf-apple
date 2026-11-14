@@ -28,7 +28,8 @@ struct PodcastDetailView: View {
 /// The podcast screen over one ``PodcastDetailModel``. Plays and marks episodes through the
 /// environment's `playItem` and `itemActions`, as Home does, and shows an alert when that fails.
 /// Admins also get the server-side episode management (``podcastEpisodeManagement(model:access:removing:)``),
-/// as the signed-in account's user allows it.
+/// as the signed-in account's user allows it. The episode rows' Download controls share one
+/// ``DownloadedItemsFeed`` of this podcast, which the screen observes while it is shown.
 struct PodcastDetailScreen: View {
     @State private var model: PodcastDetailModel
     /// The episode whose Play is starting, so no other Play starts meanwhile.
@@ -43,6 +44,10 @@ struct PodcastDetailScreen: View {
     @State private var width: CGFloat?
     /// The episode whose removal from the server is being confirmed.
     @State private var removingEpisode: PodcastEpisode?
+    /// The podcast's downloaded episodes, for the rows' Download controls; `nil` without a download stack.
+    @State private var downloadedItems: DownloadedItemsFeed?
+    @Environment(\.serverID) private var serverID
+    @Environment(\.downloads) private var downloads
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(\.itemActions) private var itemActions
     @Environment(\.playItem) private var playItem
@@ -89,7 +94,8 @@ struct PodcastDetailScreen: View {
                             isStarting: startingEpisodeID == episode.id,
                             isOtherStarting: startingEpisodeID != nil && startingEpisodeID != episode.id,
                             isUpdating: updatingEpisodeIDs.contains(episode.id),
-                            remove: access.canRemoveEpisodes ? { removingEpisode = episode } : nil
+                            remove: access.canRemoveEpisodes ? { removingEpisode = episode } : nil,
+                            downloadedItems: downloadedItems
                         ) { kind in
                             perform(kind, on: episode)
                         }
@@ -124,6 +130,20 @@ struct PodcastDetailScreen: View {
             Button(L10n.string("ButtonOk")) {}
         }
         .podcastEpisodeManagement(model: model, access: access, removing: $removingEpisode)
+        .task(id: DownloadedItemsKey(connectionID: serverID, itemID: model.itemID)) {
+            guard let serverID, let downloads else {
+                downloadedItems = nil
+                return
+            }
+            let feed = DownloadedItemsFeed(connectionID: serverID, libraryItemID: model.itemID, services: downloads)
+            downloadedItems = feed
+            await feed.observe()
+        }
+    }
+
+    private struct DownloadedItemsKey: Hashable {
+        let connectionID: UUID?
+        let itemID: String
     }
 
     /// No episodes at all, or none the filter and search let through, with Clear Filter.

@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSPlayback
 import ABSRealtime
 import Foundation
 import Observation
@@ -265,8 +266,23 @@ public final class GroupDetailModel<Kind: GroupDetailKind> {
     /// What play-all starts: the first playable member that isn't finished, or `nil` when every
     /// playable member is finished or none is playable (legacy then plays nothing).
     public var nextToPlay: GroupPlayTarget? {
-        playTargets.first { target in
-            !(cache.progress(libraryItemID: target.itemID, episodeID: target.episodeID)?.isFinished ?? false)
+        playTargets.first { !isFinished($0) }
+    }
+
+    /// What play-all queues after starting `target` (#354): the playable members after it that aren't finished, in
+    /// order, an episode as its episode. Empty when `target` isn't a member.
+    public func queue(after target: GroupPlayTarget) -> [QueueItem] {
+        guard let members = detail?.members, let index = members.firstIndex(where: { $0.target == target }) else {
+            return []
         }
+        return members[(index + 1)...].filter { $0.isPlayable && !isFinished($0.target) }.map { member in
+            QueueItem(
+                libraryItemID: member.target.itemID, episodeID: member.target.episodeID, title: member.summary.title,
+                subtitle: member.summary.subtitle, coverPath: member.coverPath, duration: member.summary.duration)
+        }
+    }
+
+    private func isFinished(_ target: GroupPlayTarget) -> Bool {
+        cache.progress(libraryItemID: target.itemID, episodeID: target.episodeID)?.isFinished ?? false
     }
 }

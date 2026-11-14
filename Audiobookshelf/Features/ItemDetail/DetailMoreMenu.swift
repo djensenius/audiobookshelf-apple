@@ -32,6 +32,11 @@ extension EpisodeDetailModel: DetailMoreMenuModel {}
 /// progress action runs at a time, and one is performed only while still offered. Every other
 /// entry is the screen's own, from `entry`, and `extra` adds entries after the actions (shown
 /// only while there are actions).
+///
+/// While the shell's connection banner says the server can't be reached (#76), the progress
+/// actions stay in the menu, disabled with the reason
+/// (``ItemDetailMenuPresentation/entryState(for:availability:isPerforming:)``), and one confirmed
+/// meanwhile isn't sent: the reason shows in the failure alert instead.
 struct DetailMoreMenu<Model: DetailMoreMenuModel, Entry: View, Extra: View>: ViewModifier {
     let model: Model
     /// The entries to offer, given whether the item is gone from the server.
@@ -41,6 +46,7 @@ struct DetailMoreMenu<Model: DetailMoreMenuModel, Entry: View, Extra: View>: Vie
     /// The screen's entries after the actions, given whether the item is gone from the server.
     let extra: @MainActor (_ isGone: Bool) -> Extra
     @Environment(\.itemActions) private var itemActions
+    @Environment(\.connectionBanner) private var connectionBanner
     /// The action waiting for confirmation, kept while the alert is dismissed.
     @State private var pendingAction: ItemDetailMenuAction?
     @State private var showsConfirmation = false
@@ -68,6 +74,11 @@ struct DetailMoreMenu<Model: DetailMoreMenuModel, Entry: View, Extra: View>: Vie
 
     private var offered: [ItemDetailMenuAction] {
         actions(isGone)
+    }
+
+    /// Which entries the server is needed for while it can't be reached.
+    private var availability: ServerActionAvailability {
+        ServerActionAvailability(session: connectionBanner)
     }
 
     func body(content: Content) -> some View {
@@ -112,12 +123,14 @@ struct DetailMoreMenu<Model: DetailMoreMenuModel, Entry: View, Extra: View>: Vie
             ForEach(actions, id: \.self) { action in
                 switch action {
                 case .markFinished, .markNotFinished, .discardProgress, .hideFromContinueListening:
+                    let state = ItemDetailMenuPresentation.entryState(
+                        for: action, availability: availability, isPerforming: isPerforming)
                     Button(role: ItemDetailMenuPresentation.role(for: action)) {
                         request(action)
                     } label: {
-                        DetailMoreMenuLabel(action: action)
+                        DetailMoreMenuLabel(action: action, reasonKey: state.reasonKey)
                     }
-                    .disabled(isPerforming)
+                    .detailMoreMenuEntry(state)
                 case .addToPlaylist, .share, .details, .history:
                     entry(action)
                 }
@@ -132,9 +145,13 @@ struct DetailMoreMenu<Model: DetailMoreMenuModel, Entry: View, Extra: View>: Vie
         }
     }
 
-    /// Asks first when the action needs it, else performs it.
+    /// Asks first when the action needs it, else performs it; explains instead while the server
+    /// can't be reached.
     private func request(_ action: ItemDetailMenuAction) {
-        if model.confirmationMessageKey(for: action) != nil {
+        if let reasonKey = availability.reasonKey(for: action) {
+            failureKey = reasonKey
+            showsFailure = true
+        } else if model.confirmationMessageKey(for: action) != nil {
             pendingAction = action
             showsConfirmation = true
         } else {
@@ -143,13 +160,16 @@ struct DetailMoreMenu<Model: DetailMoreMenuModel, Entry: View, Extra: View>: Vie
     }
 
     /// Performs a progress action that is still offered: a refresh while the confirmation was
-    /// open may have finished the book or episode, removed its progress or found it gone.
+    /// open may have finished the book or episode, removed its progress or found it gone, and
+    /// the server may have become unreachable, which sends nothing and explains why.
     private func perform(_ action: ItemDetailMenuAction) {
         guard !isPerforming, let summary = model.summary, offered.contains(action) else { return }
         isPerforming = true
         let itemActions = itemActions
+        let availability = availability
         Task {
-            let key = await ItemDetailMenuPresentation.perform(action, on: summary, actions: itemActions)
+            let key = await ItemDetailMenuPresentation.perform(
+                action, on: summary, actions: itemActions, availability: availability)
             isPerforming = false
             if let key {
                 failureKey = key
@@ -168,15 +188,32 @@ extension DetailMoreMenu where Extra == EmptyView {
     }
 }
 
-/// A More menu entry's title and icon (``ItemDetailMenuPresentation``).
+/// A More menu entry's title and icon (``ItemDetailMenuPresentation``), with why it's
+/// unavailable, if it is, as a subtitle that VoiceOver reads with the title.
 struct DetailMoreMenuLabel: View {
     let action: ItemDetailMenuAction
+    var reasonKey: String?
 
     var body: some View {
         Label {
             Text(verbatim: L10n.string(ItemDetailMenuPresentation.titleKey(for: action)))
+            if let reasonKey {
+                Text(verbatim: L10n.string(reasonKey))
+            }
         } icon: {
             Image(systemName: ItemDetailMenuPresentation.systemImage(for: action))
+        }
+    }
+}
+
+extension View {
+    /// Applies a More menu entry's ``ItemDetailMenuPresentation/EntryState``: disabled, and on
+    /// macOS the reason as its tooltip.
+    @ViewBuilder func detailMoreMenuEntry(_ state: ItemDetailMenuPresentation.EntryState) -> some View {
+        if let reasonKey = state.reasonKey {
+            disabled(state.isDisabled).help(Text(verbatim: L10n.string(reasonKey)))
+        } else {
+            disabled(state.isDisabled)
         }
     }
 }

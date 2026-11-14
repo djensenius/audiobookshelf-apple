@@ -96,7 +96,7 @@ env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xco
 run = "swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm --filter OSLogStoreIntegrationTests"
 
 [tasks."test:kit:ios"]
-description = "Run and verify the four iOS-only ShakeDetector package tests on an available iPhone"
+description = "Run and verify the four iOS-only ShakeDetector package tests on an available iPhone (a new, deleted one in CI)"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "scripts/test-kit-ios.sh"
 

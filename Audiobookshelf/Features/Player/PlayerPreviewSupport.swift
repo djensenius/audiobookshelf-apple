@@ -14,6 +14,9 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
     var session: PlaybackSession?
     var restoredRecord: LastPlayedRecord?
     var error: PlaybackCoordinatorError?
+    var startGeneration = 0
+    var playRequestCount = 0
+    var startPlayRequest: Int?
     var currentTime: Double = 0
     var duration: Double = 0
     var rate: Double = 1
@@ -21,6 +24,7 @@ final class PreviewPlaybackControl: PlayerPlaybackControlling {
     var isBuffering = false
     var isPlaybackRequested = false
     var isWaitingForNetwork = false
+    var isRecovering = false
     var timeline: PlaybackTimeline?
 
     var chapterIndex: Int? { timeline?.currentChapterIndex(at: currentTime) }
