@@ -132,13 +132,35 @@ struct TestDownloads {
 
             #expect(environment.accounts != nil)
             #expect(environment.downloads == nil)
-            #expect(environment.accounts?.credentialsRemoved == nil)
+            // Only Spotlight's recent items are deleted on a removal (RecentItemsDonorTests).
+            #expect(environment.accounts?.credentialsRemoved != nil)
             // A committed removal still deletes the saved play queue (PlaybackQueueWiringTests).
             #expect(environment.accounts?.connectionRemoved != nil)
 
             await environment.lifecycle.start()
 
             #expect(environment.lifecycle.gate == .connect)
+        }
+    }
+
+    /// The test host's shared environment uses the App Group store, but never the user's Spotlight
+    /// index or the donor bookkeeping (saved deletions) in the user's settings (#87).
+    @Test func theTestHostsSpotlightDonorIsIsolated() async throws {
+        try await withSettings { settings in
+            settings.defaults.set(["pending": ["li_1"]], forKey: RecentItemsDonor.pendingDomainsKey)
+
+            let host = AppEnvironment.recentItemsStorage(storeLocation: .appGroup, isTestHost: true, settings: settings)
+            let app = AppEnvironment.recentItemsStorage(storeLocation: .appGroup, isTestHost: false, settings: settings)
+            let fixture = AppEnvironment.recentItemsStorage(
+                storeLocation: .inMemory, isTestHost: true, settings: settings)
+
+            #expect(host.index is NoRecentItemsIndex)
+            #expect(host.defaults !== settings.defaults)
+            #expect(host.defaults.dictionary(forKey: RecentItemsDonor.pendingDomainsKey) == nil)
+            #expect(app.index is SpotlightRecentItemsIndex)
+            #expect(app.defaults === settings.defaults)
+            #expect(fixture.index is NoRecentItemsIndex)
+            #expect(fixture.defaults === settings.defaults)
         }
     }
 

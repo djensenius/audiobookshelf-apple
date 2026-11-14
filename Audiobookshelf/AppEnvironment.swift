@@ -24,10 +24,12 @@ final class AppEnvironment {
         #if DEBUG
             if FixtureServer.isEnabled { return FixtureServer.environment() }
         #endif
-        return AppEnvironment(
-            downloadsRoot: ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil
-                ? .applicationSupportDirectory : nil)
+        return AppEnvironment(downloadsRoot: isTestHost ? nil : .applicationSupportDirectory)
     }()
+
+    /// Whether this process is the app test host (`mise run test:app`), which builds ``shared``
+    /// on the real App Group store.
+    static let isTestHost = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
 
     let settings: AppSettings
     /// The on-device store, or `nil` when it couldn't be opened. ``lifecycle`` then shows
@@ -62,6 +64,8 @@ final class AppEnvironment {
     let images: ImageServices
     /// Writes the Continue Listening widget's snapshot (#89).
     let widgetSnapshots: WidgetSnapshotWriter
+    /// Donates recently played items to Spotlight (#87).
+    let recentItems: RecentItemsDonor
 
     /// - Parameters:
     ///   - settings: The settings every scene shares.
@@ -181,6 +185,11 @@ final class AppEnvironment {
         // The app's one player, across every account's session: its item and play state.
         widgetSnapshots.follow(playback.player)
         self.widgetSnapshots = widgetSnapshots
+
+        // Spotlight (#87).
+        recentItems = Self.makeRecentItemsDonor(
+            accounts: accounts, lifecycle: lifecycle, player: playback.player, settings: settings,
+            storeLocation: storeLocation)
     }
 
     /// Deletes the history events past ``PlaybackHistoryStore/retention`` (ADR 0003), off the main
