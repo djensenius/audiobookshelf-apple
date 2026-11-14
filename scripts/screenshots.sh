@@ -96,13 +96,25 @@ field() { # field <device> <column>
   printf '%s\n' "$MATRIX" | awk -v id="$1" -v col="$2" '$1 == id { print $col }'
 }
 
+# Prints a PNG's "<width> <height>" in pixels, or fails.
+measure() { # measure <png>
+  local out w h
+  out=$(sips -g pixelWidth -g pixelHeight "$1" 2>/dev/null) || return 1
+  w=$(printf '%s\n' "$out" | awk '/pixelWidth/ { print $2 }')
+  h=$(printf '%s\n' "$out" | awk '/pixelHeight/ { print $2 }')
+  [[ "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] || return 1
+  echo "$w $h"
+}
+
+# extract and the run_* functions are called as if conditions, where set -e doesn't apply, so
+# every step checks its own status.
 # Exports the result bundle's appstore-<screen> attachments to $OUT/<locale>/<device>/<screen>.png
 # and checks every expected screen is there at <width>x<height> pixels. A mac image of another
 # 16:10 size is scaled to fit first.
 extract() { # extract <xcresult> <locale> <device> <width> <height>
   local bundle=$1 locale=$2 device=$3 width=$4 height=$5
-  local export="$WORK/$locale-$device-attachments" dest="$OUT/$locale/$device" failed=0 screen file w h
-  rm -rf "$export" "$dest"
+  local export="$WORK/$locale-$device-attachments" dest="$OUT/$locale/$device" failed=0 screen file size w h
+  rm -rf "$export" "$dest" || return 1
   mkdir -p "$export" "$dest" || return 1
   xcrun xcresulttool export attachments --path "$bundle" --output-path "$export" >/dev/null || return 1
   python3 - "$export" "$dest" <<'PY' || return 1
@@ -123,12 +135,26 @@ PY
       failed=1
       continue
     fi
-    w=$(sips -g pixelWidth "$file" | awk '/pixelWidth/ { print $2 }')
-    h=$(sips -g pixelHeight "$file" | awk '/pixelHeight/ { print $2 }')
+    if ! size=$(measure "$file"); then
+      echo "error: can't read the pixel size of $file" >&2
+      failed=1
+      continue
+    fi
+    w=${size% *}
+    h=${size#* }
     if [[ "$device" == mac && "$w" != "$width" && $((w * height)) -eq $((h * width)) ]]; then
-      sips --resampleHeightWidth "$height" "$width" "$file" >/dev/null
-      w=$width
-      h=$height
+      if ! sips --resampleHeightWidth "$height" "$width" "$file" >/dev/null; then
+        echo "error: couldn't scale $file (${w}x${h}) to ${width}x${height}" >&2
+        failed=1
+        continue
+      fi
+      if ! size=$(measure "$file"); then
+        echo "error: can't read the pixel size of $file after scaling" >&2
+        failed=1
+        continue
+      fi
+      w=${size% *}
+      h=${size#* }
     fi
     if [[ "$w" != "$width" || "$h" != "$height" ]]; then
       echo "error: $file is ${w}x${h}, expected ${width}x${height}" >&2
@@ -150,7 +176,6 @@ build_ios() {
 
 run_simulator() { # run_simulator <device> <device type> <width> <height>
   local device=$1 type=$2 width=$3 height=$4 udid locale bundle
-  # Called as an if condition, where set -e doesn't apply, so every step checks its own status.
   build_ios || return 1
   udid=$(xcrun simctl create "abs-shots-$device-$$" "$type") || return 1
   created+=("$udid")
@@ -163,11 +188,11 @@ run_simulator() { # run_simulator <device> <device type> <width> <height>
       return 1
     fi
     open -a DeviceHub >/dev/null 2>&1 || true
-    read -r -p "Unfold abs-shots-$device-$$ fully in DeviceHub (hinge slider), then press Return: "
+    read -r -p "Unfold abs-shots-$device-$$ fully in DeviceHub (hinge slider), then press Return: " || return 1
   fi
   for locale in $locales; do
     bundle="$WORK/$locale-$device.xcresult"
-    rm -rf "$bundle"
+    rm -rf "$bundle" || return 1
     TEST_RUNNER_ABS_SCREENSHOTS=1 TEST_RUNNER_ABS_SCREENSHOT_LOCALE="$locale" \
       xcodebuild test-without-building "${PROJECT[@]}" -destination "platform=iOS Simulator,id=$udid" \
       "${ONLY[@]}" -resultBundlePath "$bundle" -quiet || return 1
@@ -176,15 +201,19 @@ run_simulator() { # run_simulator <device> <device type> <width> <height>
 }
 
 run_mac() { # run_mac <width> <height>
-  local width=$1 height=$2 locale bundle
-  if automationmodetool 2>&1 | grep -q "Automation Mode is disabled"; then
+  local width=$1 height=$2 locale bundle status
+  if ! status=$(automationmodetool 2>&1); then
+    echo "error: mac: automationmodetool failed: $status" >&2
+    return 1
+  fi
+  if grep -q "Automation Mode is disabled" <<<"$status"; then
     echo "error: mac: Automation Mode is disabled, so XCUITest can't drive the app (#46); enable it with" \
       "'sudo automationmodetool enable-automationmode-without-authentication'" >&2
     return 1
   fi
   for locale in $locales; do
     bundle="$WORK/$locale-mac.xcresult"
-    rm -rf "$bundle"
+    rm -rf "$bundle" || return 1
     TEST_RUNNER_ABS_SCREENSHOTS=1 TEST_RUNNER_ABS_SCREENSHOT_LOCALE="$locale" \
       xcodebuild test "${PROJECT[@]}" -destination 'platform=macOS' "${ONLY[@]}" -jobs 2 "${MAC_SIGNING[@]}" \
       -resultBundlePath "$bundle" -quiet || return 1
