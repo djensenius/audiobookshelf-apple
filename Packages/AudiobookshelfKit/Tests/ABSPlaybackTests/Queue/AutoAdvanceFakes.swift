@@ -78,9 +78,31 @@ final class StubEpisodeSource: PodcastEpisodeSource {
     }
 }
 
-/// The server finishes the advancer reads as baselines, as the progress store holds them (#587).
+/// The server finishes the advancer reads as baselines, as the progress store holds them (#587),
+/// counting reads, with an optional gate on the next read.
 final class CachedServerFinishes: Sendable {
-    let finishes = Mutex<[MediaKey: Date]>([:])
+    struct State {
+        var finishes: [MediaKey: Date] = [:]
+        var reads = 0
+        var gate: Gate?
+    }
+
+    let state = Mutex(State())
+
+    var reads: Int { state.withLock { $0.reads } }
+
+    func set(_ key: MediaKey, _ finishedAt: Date) { state.withLock { $0.finishes[key] = finishedAt } }
+
+    /// What the store holds once the gate, if any, opens.
+    func finishedAt(for key: MediaKey) async -> Date? {
+        let gate = state.withLock {
+            $0.reads += 1
+            defer { $0.gate = nil }
+            return $0.gate
+        }
+        await gate?.wait()
+        return state.withLock { $0.finishes[key] }
+    }
 }
 
 @MainActor
@@ -112,7 +134,7 @@ struct AdvanceHarness {
         let cachedFinishes = cachedFinishes
         advancer = PlaybackQueueAdvancer(
             queue: queue, episodes: podcastFallback ? episodes : nil,
-            serverFinishedAt: { key in cachedFinishes.finishes.withLock { $0[key] } },
+            serverFinishedAt: { await cachedFinishes.finishedAt(for: $0) },
             uptime: { clock.now.timeIntervalSince1970 })
         advancer.attach(to: h.coordinator)
     }

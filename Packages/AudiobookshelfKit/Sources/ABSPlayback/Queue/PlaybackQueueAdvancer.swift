@@ -49,7 +49,8 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     /// a near-end refresh (whose listing may hold this play's own finish) or its end.
     private var takesBaseline = false
     /// The current item's baseline can still be read from ``serverFinishedAt``: from its load, or
-    /// attaching to it, until a read, a near-end refresh or its end (#587).
+    /// attaching to it before its last chapter and seconds, until a read, a near-end refresh or
+    /// its end; a read returning after these is dropped (#587).
     private var takesCachedBaseline = false
     private let serverFinishedAt: (@Sendable (MediaKey) async -> Date?)?
     /// When the last preparation finished, with or without a next item.
@@ -99,7 +100,9 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         queue.onItemsChange = { [weak self] in self?.queueDidChange() }
         if coordinator.phase == .loaded, let key = coordinator.mediaKey {
             current = key
-            takesCachedBaseline = true
+            // Inside the last chapter or seconds, or at the end, this play's own finish may have
+            // synced already (#587).
+            takesCachedBaseline = nearEndTriggers(at: coordinator.currentTime).isEmpty
             recompute(refetchListing: true)
         }
     }
@@ -336,8 +339,11 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
             let finishedAt = await serverFinishedAt(key)
             // A superseded read leaves it to the preparation that superseded it.
             guard self.revision == revision, !Task.isCancelled else { return nil }
-            takesCachedBaseline = false
-            if let finishedAt { finishBaselines[key] = max(finishBaselines[key] ?? finishedAt, finishedAt) }
+            // One that returns after the end (or a reset) may hold this play's own finish.
+            if takesCachedBaseline, key == current {
+                takesCachedBaseline = false
+                if let finishedAt { finishBaselines[key] = max(finishBaselines[key] ?? finishedAt, finishedAt) }
+            }
         }
         if let queued = firstQueued(after: key) { return (queued, true) }
         guard let episodeID = key.episodeId, let episodes else { return nil }

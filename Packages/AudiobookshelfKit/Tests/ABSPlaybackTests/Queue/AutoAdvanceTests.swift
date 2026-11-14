@@ -263,7 +263,7 @@ struct AutoAdvanceTests {
     ) async -> MediaKey? {
         let e1 = a.key("P", episode: "e1")
         a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": finishedAt])
-        a.cachedFinishes.finishes.withLock { $0[e1] = finishedAt }
+        a.cachedFinishes.set(e1, finishedAt)
         if !attach { a.queue.addToEnd(QueueItem(libraryItemID: "P", episodeID: "e2", title: "e2")) }
         await a.play("P", episode: "e1")
         if attach {
@@ -305,6 +305,59 @@ struct AutoAdvanceTests {
             finishedAt: finishedAt, listedFinishedAt: finishedAt.addingTimeInterval(60), attach: attach)
 
         #expect(next == a.key("P", episode: "e1"))
+    }
+
+    /// Resets e1, which ended here, and returns what follows the next episode's end (#587).
+    private func resetAndFinishNext() async -> MediaKey? {
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+        return coordinator.mediaKey
+    }
+
+    /// A cached-finish read still in flight at the end, by when this play's own finish has synced,
+    /// is no baseline: a listing after the end with that finish confirms it, so a reset counts
+    /// (#587).
+    @Test func cachedFinishReadReturningAfterTheEndIsNoBaseline() async {
+        let e1 = a.key("P", episode: "e1")
+        let finishedAt = Date()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": finishedAt])
+        a.queue.addToEnd(QueueItem(libraryItemID: "P", episodeID: "e2", title: "e2"))
+        let gate = Gate()
+        a.cachedFinishes.state.withLock { $0.gate = gate }
+        await coordinator.play(itemID: "P", episodeID: "e1")
+        while a.cachedFinishes.reads < 1 { await Task.yield() }
+
+        a.cachedFinishes.set(e1, finishedAt)
+        a.h.engine.finish()
+        gate.open()
+        await coordinator.waitForAutoAdvance()
+        #expect(coordinator.mediaKey == a.key("P", episode: "e2"))
+
+        #expect(await resetAndFinishNext() == e1)
+    }
+
+    /// Attached inside the last seconds of a replay, whose own finish has synced: that finish is
+    /// no baseline, so a listing after the end with it confirms the end and a reset counts (#587).
+    @Test func attachingNearTheEndTakesNoCachedBaseline() async {
+        let e1 = a.key("P", episode: "e1")
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        await a.play("P", episode: "e1")
+        a.advancer.detach(from: coordinator)
+        _ = await coordinator.seek(to: 3590)
+        let finishedAt = Date()
+        a.cachedFinishes.set(e1, finishedAt)
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": finishedAt])
+
+        a.advancer.attach(to: coordinator)
+        await a.advancer.waitForPreparation()
+        #expect(a.cachedFinishes.reads == 1)
+        await a.finish()
+        #expect(coordinator.mediaKey == a.key("P", episode: "e2"))
+
+        #expect(await resetAndFinishNext() == e1)
     }
 
     /// The server's finish of an episode first seen in a near-end refresh is this play's own
