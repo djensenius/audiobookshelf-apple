@@ -58,7 +58,8 @@ Type the fixture address on the connect screen and sign in with any username and
 
 The replies are the `fixture-*` files in `Audiobookshelf/Fixtures/Resources/`: status, ping,
 login and authorize, `/api/me`, the libraries, the library with its filter data, the
-personalized shelves, one page of items, the expanded *Pride and Prejudice*
+personalized shelves, one page of items, one page of series (*Barsoom*, with its three books;
+series detail isn't served, so opening a series fails), the expanded *Pride and Prejudice*
 (`fixture-item-li_pride.json`, with one audio file and track) and a cover for every item. A request without a fixture is
 a 404, logged to the `api` category as `Fixture server: no fixture for <method> <path>`, so a
 missing fixture shows up in Console or the test's log.
