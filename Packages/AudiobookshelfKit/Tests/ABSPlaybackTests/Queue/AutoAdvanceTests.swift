@@ -382,19 +382,25 @@ struct AutoAdvanceTests {
         #expect(await resetAndFinishNext() == e1)
     }
 
-    /// Replays e1, finished on the server, with e2 queued and the cached-finish read held; runs
-    /// `meanwhile`, then lets the read return this play's own synced finish, which the listing
-    /// after the end has too. Then resumes, ends e1 and e2 with e1 reset in between, and returns
-    /// what follows e2 (#587).
-    private func replayWithHeldCachedRead(_ meanwhile: () async -> Void) async -> MediaKey? {
+    /// Replays e1 with the cached-finish read (or, with `holdListing`, the first listing) held,
+    /// with e2 queued or, without `queued`, next in the podcast; runs `meanwhile`, then lets the
+    /// read return this play's own synced finish, which every listing has too. Then resumes, ends
+    /// e1 and e2 with e1 reset in between, and returns what follows e2 (#587).
+    private func replayWithHeldCachedRead(
+        queued: Bool = true, holdListing: Bool = false, _ meanwhile: () async -> Void
+    ) async -> MediaKey? {
         let e1 = a.key("P", episode: "e1")
         let finishedAt = Date()
         a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": finishedAt])
-        a.queue.addToEnd(QueueItem(libraryItemID: "P", episodeID: "e2", title: "e2"))
+        if queued { a.queue.addToEnd(QueueItem(libraryItemID: "P", episodeID: "e2", title: "e2")) }
         let gate = Gate()
-        a.cachedFinishes.state.withLock { $0.gate = gate }
+        if holdListing {
+            a.episodes.state.withLock { $0.gate = gate }
+        } else {
+            a.cachedFinishes.state.withLock { $0.gate = gate }
+        }
         await coordinator.play(itemID: "P", episodeID: "e1")
-        while a.cachedFinishes.reads < 1 { await Task.yield() }
+        while (holdListing ? a.episodes.fetches : a.cachedFinishes.reads) < 1 { await Task.yield() }
 
         await meanwhile()
         a.cachedFinishes.set(e1, finishedAt)
@@ -408,9 +414,11 @@ struct AutoAdvanceTests {
     }
 
     /// Paused, then sought into the last seconds, where the seek's sync can finish it, while the
-    /// read is in flight: what it returns before any tick is no baseline (#587).
-    @Test func pausedSeekIntoTheLastSecondsEndsTheCachedRead() async {
-        let next = await replayWithHeldCachedRead {
+    /// read is in flight: what it returns before any tick is no baseline, nor, without a queued
+    /// successor, the listing fetched after it (#587).
+    @Test(arguments: [true, false])
+    func pausedSeekIntoTheLastSecondsEndsTheCachedRead(queued: Bool) async {
+        let next = await replayWithHeldCachedRead(queued: queued) {
             coordinator.pause()
             _ = await coordinator.seek(to: 3590)
         }
@@ -420,8 +428,9 @@ struct AutoAdvanceTests {
 
     /// Sought into the last seconds and back out while the read is in flight: the finish may have
     /// synced in between, so what it returns is still no baseline (#587).
-    @Test func seekIntoTheLastSecondsAndBackEndsTheCachedRead() async {
-        let next = await replayWithHeldCachedRead {
+    @Test(arguments: [true, false])
+    func seekIntoTheLastSecondsAndBackEndsTheCachedRead(queued: Bool) async {
+        let next = await replayWithHeldCachedRead(queued: queued) {
             coordinator.pause()
             _ = await coordinator.seek(to: 3590)
             _ = await coordinator.seek(to: 100)
@@ -431,10 +440,38 @@ struct AutoAdvanceTests {
     }
 
     /// Finished on the server while it plays (marked finished, or another device): that finish
-    /// isn't from before this play, so a read returning after it is no baseline (#587).
-    @Test func finishDuringThePlayEndsTheCachedRead() async {
-        let next = await replayWithHeldCachedRead {
+    /// isn't from before this play, so a read returning after it is no baseline, nor, without a
+    /// queued successor, the listing fetched after it (#587).
+    @Test(arguments: [true, false])
+    func finishDuringThePlayEndsTheCachedRead(queued: Bool) async {
+        let next = await replayWithHeldCachedRead(queued: queued) {
             a.advancer.progressDidChange(for: a.key("P", episode: "e1"), kind: .finished)
+        }
+
+        #expect(next == a.key("P", episode: "e1"))
+    }
+
+    /// Without a queued successor, sought into the last seconds while the read is in flight, then
+    /// prepared again (a reconnect) before it returns: the superseding preparation's listing is
+    /// no baseline either (#587).
+    @Test func preparationSupersededAfterANearEndSeekTakesNoListingBaseline() async {
+        let next = await replayWithHeldCachedRead(queued: false) {
+            coordinator.pause()
+            _ = await coordinator.seek(to: 3590)
+            a.advancer.connectionDidChange()
+            await a.advancer.waitForPreparation()
+            #expect(a.episodes.fetches == 1)
+        }
+
+        #expect(next == a.key("P", episode: "e1"))
+    }
+
+    /// Without a queued successor, the load's listing in flight across a paused seek into the
+    /// last seconds: returning after it, it is no baseline (#587).
+    @Test func listingReturningAfterANearEndSeekIsNoBaseline() async {
+        let next = await replayWithHeldCachedRead(queued: false, holdListing: true) {
+            coordinator.pause()
+            _ = await coordinator.seek(to: 3590)
         }
 
         #expect(next == a.key("P", episode: "e1"))
