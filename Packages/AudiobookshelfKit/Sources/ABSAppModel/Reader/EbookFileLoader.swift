@@ -282,6 +282,14 @@ public actor EbookFileLoader {
         return (url, .fetched)
     }
 
+    /// The item's downloaded copy of the file, if it's on disk; nothing is fetched or pinned.
+    public func downloadedCopy(_ request: EbookFileRequest) async -> URL? {
+        guard let url = await downloadedFile(request), FileManager.default.fileExists(atPath: url.path) else {
+            return nil
+        }
+        return url
+    }
+
     /// Writes `bytes` to a new file at `destination`, failing with ``EbookFileLoadError/tooLarge``
     /// as soon as they pass `maxBytes`.
     static func write<Bytes: AsyncSequence<UInt8, any Error>>(

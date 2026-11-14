@@ -8,6 +8,9 @@ import Observation
 /// - **Formats.** EPUB, PDF and CBZ open, each in its own reader (``display``); CBR, MOBI and AZW3
 ///   aren't opened in v1 (ADR 0008 §4 and §5) and show the unsupported state. A `.cbz` that is
 ///   really a RAR archive is found by the comic reader, which shows the same state.
+/// - **Open In.** The unsupported state can hand the file to another app. Loading it finds only
+///   the item's download; anything else is fetched when asked for (``loadUnsupportedFile()``), so
+///   a book the app can't show isn't downloaded unless it's wanted.
 /// - **Progress.** With an ``EbookProgressModel``, the reader resumes from it and every page turn
 ///   goes through it (local first, then the debounced sync); ``flush()`` sends at once, for
 ///   closing and backgrounding. Without one (until the account's progress store and syncer are
@@ -23,9 +26,19 @@ public final class ReaderContainerModel {
         case loading
         /// The file is on disk at the URL.
         case ready(URL)
-        /// The app doesn't open this format (yet).
-        case unsupported
+        /// The app doesn't open this format (yet); the file for Open In.
+        case unsupported(UnsupportedFile)
         /// The file couldn't be fetched.
+        case failed
+    }
+
+    /// An unsupported format's file, for Open In.
+    public enum UnsupportedFile: Sendable, Equatable {
+        /// Not on disk yet: ``loadUnsupportedFile()`` gets it.
+        case notLoaded
+        case loading
+        case ready(URL)
+        /// The file couldn't be fetched; ``loadUnsupportedFile()`` again retries.
         case failed
     }
 
@@ -34,7 +47,7 @@ public final class ReaderContainerModel {
     public enum Display: Sendable, Equatable {
         case loading
         case failed
-        case unsupported
+        case unsupported(UnsupportedFile)
         case epub(URL)
         case pdf(URL)
         case comic(URL)
@@ -104,13 +117,13 @@ public final class ReaderContainerModel {
         switch content {
         case .loading: .loading
         case .failed: .failed
-        case .unsupported: .unsupported
+        case .unsupported(let file): .unsupported(file)
         case .ready(let url):
             switch kind {
             case .epub: .epub(url)
             case .pdf: .pdf(url)
             case .comic: .comic(url)
-            case .unsupported: .unsupported
+            case .unsupported: .unsupported(.ready(url))
             }
         }
     }
@@ -130,10 +143,12 @@ public final class ReaderContainerModel {
     public var savesProgress: Bool { progressModel != nil }
 
     /// Fetches the file (or finds it on disk) and the resume point together. Again after a failure
-    /// retries.
+    /// retries. An unsupported format only looks for the item's download (``UnsupportedFile``).
     public func load() async {
         guard Self.opens(kind) else {
-            content = .unsupported
+            if case .unsupported(.ready) = content { return }
+            let downloaded = await loader.downloadedCopy(request)
+            content = .unsupported(downloaded.map { .ready($0) } ?? .notLoaded)
             return
         }
         content = .loading
@@ -146,9 +161,7 @@ public final class ReaderContainerModel {
             } onCancel: {
                 file.cancel()
             }
-            if let loadedFile { loader.release(loadedFile) }
-            loadedFile = isReleased ? nil : url
-            if isReleased { loader.release(url) }
+            keep(url)
             resumePoint = point
             if !turned {
                 location = point.location
@@ -159,6 +172,28 @@ public final class ReaderContainerModel {
             guard !(error is CancellationError), !Task.isCancelled else { return }
             content = .failed
         }
+    }
+
+    /// Gets an unsupported format's file onto disk for Open In: the download, a cached copy, or the
+    /// server's bytes, kept like a reader's file until ``releaseFile()``.
+    public func loadUnsupportedFile() async {
+        guard case .unsupported(let file) = content, file == .notLoaded || file == .failed else { return }
+        content = .unsupported(.loading)
+        do {
+            let url = try await loader.load(request).url
+            keep(url)
+            content = .unsupported(.ready(url))
+        } catch {
+            content = .unsupported(error is CancellationError || Task.isCancelled ? .notLoaded : .failed)
+        }
+    }
+
+    /// Pins `url` as the loaded file in place of the last, or releases it at once once the reader
+    /// has closed.
+    private func keep(_ url: URL) {
+        if let loadedFile { loader.release(loadedFile) }
+        loadedFile = isReleased ? nil : url
+        if isReleased { loader.release(url) }
     }
 
     private func resume() async -> EbookResumePoint {

@@ -78,6 +78,33 @@ final class StubEpisodeSource: PodcastEpisodeSource {
     }
 }
 
+/// The server finishes the advancer reads as baselines, as the progress store holds them (#587),
+/// counting reads, with an optional gate on the next read.
+final class CachedServerFinishes: Sendable {
+    struct State {
+        var finishes: [MediaKey: Date] = [:]
+        var reads = 0
+        var gate: Gate?
+    }
+
+    let state = Mutex(State())
+
+    var reads: Int { state.withLock { $0.reads } }
+
+    func set(_ key: MediaKey, _ finishedAt: Date) { state.withLock { $0.finishes[key] = finishedAt } }
+
+    /// What the store holds once the gate, if any, opens.
+    func finishedAt(for key: MediaKey) async -> Date? {
+        let gate = state.withLock {
+            $0.reads += 1
+            defer { $0.gate = nil }
+            return $0.gate
+        }
+        await gate?.wait()
+        return state.withLock { $0.finishes[key] }
+    }
+}
+
 @MainActor
 final class AdvanceQueueStore: PlaybackQueueStoring {
     var saved: [UUID: [QueueItem]] = [:]
@@ -92,6 +119,7 @@ final class AdvanceQueueStore: PlaybackQueueStoring {
 struct AdvanceHarness {
     let activity = RecordingBackgroundActivity()
     let episodes = StubEpisodeSource()
+    let cachedFinishes = CachedServerFinishes()
     let h: CoordinatorHarness
     let queue: PlaybackQueue
     let advancer: PlaybackQueueAdvancer
@@ -103,8 +131,11 @@ struct AdvanceHarness {
         activity.service = h.service
         queue = PlaybackQueue(serverConnectionID: h.connectionID, store: AdvanceQueueStore())
         let clock = h.clock
+        let cachedFinishes = cachedFinishes
         advancer = PlaybackQueueAdvancer(
-            queue: queue, episodes: podcastFallback ? episodes : nil, uptime: { clock.now.timeIntervalSince1970 })
+            queue: queue, episodes: podcastFallback ? episodes : nil,
+            serverFinishedAt: { await cachedFinishes.finishedAt(for: $0) },
+            uptime: { clock.now.timeIntervalSince1970 })
         advancer.attach(to: h.coordinator)
     }
 

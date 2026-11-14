@@ -218,8 +218,9 @@ public final class PlaybackScope {
     /// following the configured network path and recording the configured history), then the
     /// sleep timer, if configured, then the Now Playing bridge, which the scope holds strongly,
     /// and the queue's advancer, whose podcast fallback reads episodes through the services'
-    /// current client. The local-session uploader sends through the services too, so it follows
-    /// reconnects. With configured ``Configuration/downloads``, the coordinator plays them through
+    /// current client, and which reads finish baselines from the writer (#587). The local-session
+    /// uploader sends through the services too, so it follows reconnects. With configured
+    /// ``Configuration/downloads``, the coordinator plays them through
     /// ``PreferringLocalSessionService`` and the syncer reports their local sessions through
     /// ``LocalSessionProgressSyncService``, each save starting an upload (#74).
     public static func make(
@@ -256,10 +257,18 @@ public final class PlaybackScope {
         let uploader = LocalSessionUploader(
             serverConnectionID: configuration.connectionID, store: configuration.writer, service: services,
             deviceIdentifiers: configuration.deviceIdentifiers, mediaLeases: configuration.mediaLeases)
+        let writer = configuration.writer
         let scope = PlaybackScope(
             coordinator: coordinator, syncer: syncer, services: services, nowPlaying: makeNowPlaying(coordinator),
-            queue: queue, episodes: episodes, sleepTimer: sleepTimer, uploader: uploader,
-            paths: configuration.networkPaths)
+            queue: queue, episodes: episodes,
+            serverFinishedAt: { key in
+                // The server's finish as last seen or acknowledged (`serverBaseline`), never the
+                // row's own `finishedAt`, which may be a local finish not synced yet (#587).
+                guard let baseline = (try? await writer.progress(for: key))?.serverBaseline, baseline.isFinished
+                else { return nil }
+                return baseline.finishedAt
+            },
+            sleepTimer: sleepTimer, uploader: uploader, paths: configuration.networkPaths)
         // Reports while playing a download online; offline the pass fails fast and the
         // reconnect's sync uploads them. Through the scope's guarded sync, so a save that lands
         // after retirement starts no upload with the retired account's client (#74).
@@ -270,13 +279,15 @@ public final class PlaybackScope {
     }
 
     /// Test seam: a scope over a coordinator and a syncer already attached to it, an advancer
-    /// over `queue`, when one is given, attached to the coordinator, `sleepTimer`, detached
+    /// over `queue`, when one is given, reading episodes from `episodes` and finish baselines
+    /// from `serverFinishedAt`, attached to the coordinator, `sleepTimer`, detached
     /// when the scope retires, and again when it's released, `uploader`, sending through any
     /// services, and `paths`, followed for reconnects and, after its first path, to have the
     /// advancer prepare again on each change.
     init(
         coordinator: PlaybackCoordinator, syncer: ProgressSyncer, services: AccountPlaybackServices?,
         nowPlaying: any NowPlayingHandle, queue: PlaybackQueue? = nil, episodes: (any PodcastEpisodeSource)? = nil,
+        serverFinishedAt: (@Sendable (MediaKey) async -> Date?)? = nil,
         sleepTimer: SleepTimerAttachment? = nil, uploader: LocalSessionUploader? = nil,
         paths: (any NetworkPathSource)? = nil
     ) {
@@ -286,7 +297,9 @@ public final class PlaybackScope {
         self.nowPlaying = nowPlaying
         self.uploader = uploader
         sleepTimerAttachment = sleepTimer
-        advancer = queue.map { PlaybackQueueAdvancer(queue: $0, episodes: episodes) }
+        advancer = queue.map {
+            PlaybackQueueAdvancer(queue: $0, episodes: episodes, serverFinishedAt: serverFinishedAt)
+        }
         advancer?.attach(to: coordinator)
         observer = coordinator.addObserver { [weak self] event in self?.handle(event) }
         services?.setSessionGoneHandler { [weak self] sessionID in

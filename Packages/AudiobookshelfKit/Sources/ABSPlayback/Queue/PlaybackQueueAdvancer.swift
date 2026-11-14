@@ -40,13 +40,24 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     /// Bumped by every end, so a listing requested before one isn't evidence of its finish.
     private var endings = 0
     /// The server's finish of each episode from before its play began (in the listing held when
-    /// it was loaded, or the first one fetched after): a finish the server shows after the end
-    /// confirms that end only when it is later. Server times are only compared with server times,
-    /// so the device's clock doesn't matter.
+    /// it was loaded, the first one fetched after, or ``serverFinishedAt`` read after it loaded,
+    /// whichever is latest): a finish the server shows after the end confirms that end only when
+    /// it is later. Server times are only compared with server times, so the device's clock
+    /// doesn't matter.
     private var finishBaselines: [MediaKey: Date] = [:]
-    /// The current item's baseline can still be taken: from its load until a listing gives it,
-    /// a near-end refresh (whose listing may hold this play's own finish) or its end.
+    /// The current item's baseline can still be taken from a listing: from its load until a
+    /// listing gives it, and like ``takesCachedBaseline`` only while it stays clear of the end
+    /// (#587). A listing requested or returning after it closes is no baseline.
     private var takesBaseline = false
+    /// The current item's baseline can still be read from ``serverFinishedAt`` (#587). Only while
+    /// its position has stayed outside every near-end trigger since its load (or attaching to it),
+    /// and it hasn't ended or been finished meanwhile: in a trigger its progress syncs within
+    /// seconds of the end, where the server finishes it, so the store (or a listing) may hold this
+    /// play's own finish. Both windows are closed by ``closeBaselinesIfNearEnd(at:)`` on every
+    /// event and again when a read or listing returns, which is dropped once closed; only a load
+    /// (or, for this one, attaching) opens them.
+    private var takesCachedBaseline = false
+    private let serverFinishedAt: (@Sendable (MediaKey) async -> Date?)?
     /// When the last preparation finished, with or without a next item.
     private var preparedAt: TimeInterval = 0
     /// Near-end refreshes done since the load, a resume or a seek out of them.
@@ -68,13 +79,19 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
 
     /// - Parameters:
     ///   - episodes: Where podcast episodes come from; `nil` turns off the podcast fallback.
+    ///   - serverFinishedAt: The server's finish of an item as this device last saw or synced it,
+    ///     without local changes not acknowledged yet; read when an episode loads (or on
+    ///     attaching to one) as its baseline, so that one played from the queue, whose podcast's
+    ///     listing isn't fetched, or attached to mid-play, has one too (#587). `nil` reads none.
     ///   - uptime: Monotonic seconds, for the age of a preparation.
     public init(
         queue: PlaybackQueue, episodes: (any PodcastEpisodeSource)?,
+        serverFinishedAt: (@Sendable (MediaKey) async -> Date?)? = nil,
         uptime: @escaping @Sendable () -> TimeInterval = ProgressSyncClock.live.uptime
     ) {
         self.queue = queue
         self.episodes = episodes
+        self.serverFinishedAt = serverFinishedAt
         self.uptime = uptime
     }
 
@@ -88,6 +105,8 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         queue.onItemsChange = { [weak self] in self?.queueDidChange() }
         if coordinator.phase == .loaded, let key = coordinator.mediaKey {
             current = key
+            takesCachedBaseline = true
+            closeBaselinesIfNearEnd(at: coordinator.currentTime)
             recompute(refetchListing: true)
         }
     }
@@ -123,6 +142,8 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         guard key.serverConnectionID == queue.serverConnectionID else { return }
         // Also while it is still loaded: the server may report the finish before the advance.
         if kind == .finished, endedEpisodes.contains(key) { confirmedEndings.insert(key) }
+        // A finish during this play isn't one from before it (#587).
+        if kind == .finished, key == current { closeBaselines() }
         guard key != current else { return }
         // Even with nothing loaded: playing again later must not skip it.
         if kind == .reset, confirmedEndings.remove(key) != nil {
@@ -183,6 +204,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     // MARK: Following playback
 
     private func handle(_ event: PlaybackCoordinatorEvent) {
+        defer { closeBaselinesIfNearEnd(after: event) }
         switch event {
         case .itemChanged(let key):
             let advancing = candidate?.isQueued == true && key == candidate?.key ? key : nil
@@ -204,6 +226,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
             rearmOnStart = false
             // Loading inside a trigger prepares anyway.
             refreshed = nearEndTriggers(at: coordinator?.currentTime ?? 0)
+            takesCachedBaseline = true
             recompute(refetchListing: true)
         case .playbackStarted:
             guard rearmOnStart else { return }
@@ -217,7 +240,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         case .tick(let time):
             refreshIfNearEnd(at: time)
         case .ended:
-            takesBaseline = false
+            closeBaselines()
             if let current, current.episodeId != nil {
                 endedEpisodes.insert(current)
                 endings += 1
@@ -229,12 +252,40 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         }
     }
 
+    /// Closes both baseline windows once `event` leaves the current item in a near-end
+    /// trigger: at the time it carries (a load's, which may be its seek's target, a tick's, a
+    /// pause's, a seek's or a closing session's last position) or the coordinator's position
+    /// after it (#587). Every event passes here, so a new one is covered too.
+    private func closeBaselinesIfNearEnd(after event: PlaybackCoordinatorEvent) {
+        switch event {
+        case .loaded(let time), .paused(let time), .didSeek(let time), .tick(let time):
+            closeBaselinesIfNearEnd(at: time)
+        case .sessionWillClose(let closing) where closing.key == current:
+            closeBaselinesIfNearEnd(at: closing.currentTime)
+        default:
+            break
+        }
+        closeBaselinesIfNearEnd(at: coordinator?.currentTime)
+    }
+
+    /// Closes both baseline windows when `time` is in a near-end trigger, or unknown.
+    private func closeBaselinesIfNearEnd(at time: Double?) {
+        if let time, nearEndTriggers(at: time).isEmpty { return }
+        closeBaselines()
+    }
+
+    /// From now on, a finish the server shows may be this play's own.
+    private func closeBaselines() {
+        takesBaseline = false
+        takesCachedBaseline = false
+    }
+
     private func refreshIfNearEnd(at time: Double) {
         guard current != nil else { return }
         let due = nearEndTriggers(at: time).subtracting(refreshed)
         guard !due.isEmpty else { return }
         refreshed.formUnion(due)
-        takesBaseline = false
+        closeBaselines()
         // The earlier preparation stays usable until this one replaces it.
         recompute(refetchListing: true, keepPrepared: true)
     }
@@ -269,6 +320,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         listing = nil
         refreshed = []
         rearmOnStart = false
+        closeBaselines()
     }
 
     // MARK: Preparing
@@ -315,6 +367,19 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     /// Throws when the podcast's episodes can't be loaded.
     private func nextCandidate(after key: MediaKey, revision: Int) async throws -> (key: MediaKey, isQueued: Bool)? {
         guard key.serverConnectionID == queue.serverConnectionID else { return nil }
+        // Read before this play could finish the episode, even when no listing is fetched (#587).
+        if takesCachedBaseline, key == current, key.episodeId != nil, let serverFinishedAt {
+            let finishedAt = await serverFinishedAt(key)
+            // A superseded read leaves it to the preparation that superseded it.
+            guard self.revision == revision, !Task.isCancelled else { return nil }
+            // One that returns after the end, a reset or a near-end position may hold this play's
+            // own finish.
+            closeBaselinesIfNearEnd(at: coordinator?.currentTime)
+            if takesCachedBaseline, key == current {
+                takesCachedBaseline = false
+                if let finishedAt { finishBaselines[key] = max(finishBaselines[key] ?? finishedAt, finishedAt) }
+            }
+        }
         if let queued = firstQueued(after: key) { return (queued, true) }
         guard let episodeID = key.episodeId, let episodes else { return nil }
         var listing: PodcastEpisodeListing
@@ -329,9 +394,12 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
                 podcastItemID: key.libraryItemId, excluding: Set(ended).union([episodeID]))
             // A superseded request's listing may be older than what has happened since.
             guard self.revision == revision, !Task.isCancelled else { return nil }
-            // Requested before this play could finish the current episode: its server finish is
-            // the baseline.
-            if let playing, playing.libraryItemId == key.libraryItemId, let id = playing.episodeId {
+            // Requested and returned before this play could finish the current episode: its
+            // server finish is the baseline.
+            closeBaselinesIfNearEnd(at: coordinator?.currentTime)
+            if let playing, takesBaseline, playing == current, playing.libraryItemId == key.libraryItemId,
+                let id = playing.episodeId
+            {
                 takesBaseline = false
                 if let finishedAt = listing.serverFinishedAt[id] {
                     finishBaselines[playing] = max(finishBaselines[playing] ?? finishedAt, finishedAt)

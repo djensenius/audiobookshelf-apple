@@ -48,32 +48,96 @@ private func comicData(pages: Int) throws -> Data {
     }
 
     func makeModel(
-        _ kind: ReaderKind = .pdf, progress: EbookProgressModel? = nil, server: MediaProgress? = nil
+        _ kind: ReaderKind = .pdf, progress: EbookProgressModel? = nil, server: MediaProgress? = nil,
+        downloaded: URL? = nil
     ) -> ReaderContainerModel {
         let ext =
             switch kind {
             case .epub: "epub"
             case .comic: "cbz"
+            case .unsupported(let format): format.rawValue
             default: "pdf"
             }
         return ReaderContainerModel(
             request: request(ext: ext), kind: kind,
-            loader: EbookFileLoader(directory: readerTemporaryDirectory(), fetcher: fetcher), progress: progress,
-            serverProgress: server)
+            loader: EbookFileLoader(directory: readerTemporaryDirectory(), fetcher: fetcher) { _ in downloaded },
+            progress: progress, serverProgress: server)
     }
 
-    @Test func unsupportedFormatsFetchNothing() async {
+    @Test func unsupportedFormatsFetchNothingOnLoad() async {
         for (kind, name) in [(ReaderKind.unsupported(.mobi), "MOBI"), (.unsupported(.cbr), "CBR")] {
             let model = makeModel(kind)
             await model.load()
-            #expect(model.content == .unsupported)
-            #expect(model.display == .unsupported)
+            #expect(model.content == .unsupported(.notLoaded))
+            #expect(model.display == .unsupported(.notLoaded))
             #expect(model.formatName == name)
         }
         #expect(fetcher.calls.value.isEmpty)
         #expect(ReaderContainerModel.opens(.epub))
         #expect(ReaderContainerModel.opens(.pdf))
         #expect(ReaderContainerModel.opens(.comic))
+    }
+
+    /// Open In fetches an unsupported format's file on demand, keeps it pinned like a reader's file
+    /// until the reader closes, and fetches it only once.
+    @Test func openInFetchesAnUnsupportedFileOnDemandAndPinsIt() async throws {
+        let model = makeModel(.unsupported(.cbr))
+        await model.load()
+        await model.loadUnsupportedFile()
+        guard case .unsupported(.ready(let url)) = model.display else { throw ReaderTestFailure.notReady }
+        #expect(url.pathExtension == "cbr")
+        #expect(try Data(contentsOf: url) == Data("book".utf8))
+        #expect(EbookFileLoader.pins.isPinned(url))
+
+        await model.loadUnsupportedFile()
+        await model.load()
+        #expect(model.content == .unsupported(.ready(url)))
+        #expect(fetcher.calls.value.count == 1)
+
+        model.releaseFile()
+        #expect(!EbookFileLoader.pins.isPinned(url))
+
+        // Closed before the fetch finished: nothing stays pinned.
+        let closed = makeModel(.unsupported(.mobi))
+        await closed.load()
+        closed.releaseFile()
+        await closed.loadUnsupportedFile()
+        guard case .unsupported(.ready(let late)) = closed.content else { throw ReaderTestFailure.notReady }
+        #expect(!EbookFileLoader.pins.isPinned(late))
+    }
+
+    /// A downloaded file is ready for Open In as the reader loads, offline, without a fetch.
+    @Test func openInUsesTheDownloadedFile() async throws {
+        let directory = readerTemporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let downloaded = directory.appending(path: "book.mobi")
+        try Data("downloaded".utf8).write(to: downloaded)
+        fetcher.fails.value = true
+        let model = makeModel(.unsupported(.mobi), downloaded: downloaded)
+
+        await model.load()
+        #expect(model.display == .unsupported(.ready(downloaded)))
+
+        // A download that's gone is fetched on demand instead.
+        try FileManager.default.removeItem(at: downloaded)
+        let gone = makeModel(.unsupported(.mobi), downloaded: downloaded)
+        await gone.load()
+        #expect(gone.content == .unsupported(.notLoaded))
+        #expect(fetcher.calls.value.isEmpty)
+    }
+
+    @Test func aFailedOpenInFetchShowsTheFailureAndRetries() async throws {
+        fetcher.fails.value = true
+        let model = makeModel(.unsupported(.cbr))
+        await model.load()
+
+        await model.loadUnsupportedFile()
+        #expect(model.display == .unsupported(.failed))
+
+        fetcher.fails.value = false
+        await model.loadUnsupportedFile()
+        guard case .unsupported(.ready) = model.content else { throw ReaderTestFailure.notReady }
+        #expect(fetcher.calls.value.count == 2)
     }
 
     /// Each format's file goes to its own reader: comics to the comic pager, not the refusal.

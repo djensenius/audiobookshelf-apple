@@ -15,8 +15,8 @@ struct AppRealtime {
     let bridge: RealtimeBridge
     let offer: RemoteProgressOffer
     /// Kept for the environment's lifetime: its path stream ends, and with it the bridge's
-    /// following, when it's released.
-    private let monitor: NetworkMonitor
+    /// following, when it's released. The shell's connection indicator reads its path.
+    let monitor: NetworkMonitor
 
     static func make(
         library: LibraryParticipant, accounts: AccountManager, playback: AppPlayback,
