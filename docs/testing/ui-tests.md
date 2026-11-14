@@ -132,5 +132,6 @@ xcrun xcresulttool export attachments --path /tmp/ui.xcresult --output-path /tmp
 `manifest.json` in the output maps each exported file to its name (`suggestedHumanReadableName`).
 CI runs the localized tests with the rest (about 25 seconds each on the simulator).
 
-Not covered yet (#46): HLS and podcast playback fixtures, App Store screenshots (#109) and
-accessibility audits (#106).
+App Store screenshots use the same journey; see [screenshots.md](screenshots.md).
+
+Not covered yet (#46): HLS and podcast playback fixtures and accessibility audits (#106).
