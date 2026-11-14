@@ -35,6 +35,7 @@ struct SleepTimerSettingsSection: View {
                 isOn: $settings.enableSleepTimerAlmostDoneChime)
         } header: {
             Text(verbatim: L10n.string("HeaderSleepTimerSettings"))
+                .foregroundStyle(ABSColor.mutedForeground)
         }
     }
 }

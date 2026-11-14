@@ -39,11 +39,16 @@ struct AppDownloads {
     ///     directory.
     ///   - makeSession: ``DownloadEngine/backgroundSession()`` in the app; tests pass a
     ///     non-background session.
+    ///   - makeForegroundSession: ``DownloadEngine/foregroundSession()`` in the app, for
+    ///     connections with custom headers.
+    ///   - preflight: checks each request's redirects before its task is made.
     ///   - progress: the app's one local progress store (``AppEnvironment/localProgress``),
     ///     which downloads link their progress rows in.
     static func make(
         dataStack: DataStack, accounts: AccountManager, settings: AppSettings, root: URL,
-        makeSession: @escaping DownloadSessionFactory, progress: LocalProgressStore
+        makeSession: @escaping DownloadSessionFactory,
+        makeForegroundSession: DownloadSessionFactory? = DownloadEngine.foregroundSession(),
+        preflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight(), progress: LocalProgressStore
     ) -> AppDownloads {
         let locations = DownloadLocations(root: root)
         let store = DownloadStore(modelContainer: dataStack.container)
@@ -59,7 +64,8 @@ struct AppDownloads {
             credentials: credentials,
             vault: ResumeDataVault(directory: locations.resumeDataRoot),
             sweepsOrphanedResumeData: dataStack.resolvedLocation == .appGroup, locations: locations,
-            networkAccess: networkAccess.provider, makeSession: makeSession)
+            networkAccess: networkAccess.provider, makeSession: makeSession,
+            makeForegroundSession: makeForegroundSession, preflight: preflight)
         let manager = DownloadManager(
             store: store, localItems: localItems, engine: engine, locations: locations,
             capacity: VolumeStorageCapacity(locations: locations),

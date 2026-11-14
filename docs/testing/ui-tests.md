@@ -41,10 +41,15 @@ A Debug build launched with `-ABSFixtures` (`Audiobookshelf/Fixtures/FixtureServ
   is added only to the session configurations the app's `AppEnvironment` is given (API clients,
   sign-in and the cover pipeline), never registered globally;
 - keeps the store, Keychain and settings in memory, so every launch starts signed out and
-  touches nothing a normal launch saved.
+  touches nothing a normal launch saved;
 - caches covers in `AudiobookshelfFixtures/Covers` in the temporary directory, emptied on every
   fixture launch, instead of the app's cover cache, and loads them without waiting for the
-  network monitor, so fixture covers neither evict real ones nor fail offline.
+  network monitor, so fixture covers neither evict real ones nor fail offline;
+- keeps downloads in `AudiobookshelfFixtures/Downloads` in the temporary directory, emptied on
+  every fixture launch, and sends every part of a transfer (the redirect check, the download
+  session and the custom-header session) through `FixtureURLProtocol`, so the Downloads tab
+  starts empty (`downloads.empty`), never sees a real download and never reaches the network.
+  The fixtures don't serve audio files for download yet, so a fixture download fails (404).
 
 Type the fixture address on the connect screen and sign in with any username and password.
 
@@ -106,6 +111,28 @@ checks the item screen, `item.detail`, and its loaded title, `item.title`
 journey lives in `FixtureJourney.swift` (`signIn(launchArguments:screenshotPrefix:)` and
 `openLibraryItem(in:screenshotPrefix:)`), so other test classes reuse it.
 
+`FixtureScreens.swift` opens the screens tests need from the signed-in app:
+`open(_ screen: FixtureScreen, in: app)` opens Home, Library, Item detail (*Pride and
+Prejudice*), Player, Settings or Downloads from wherever the app is, waits for the screen's
+loaded content and returns its element (`FixtureScreen.identifier`): `home.screen`,
+`library.screen`, `item.detail`, `player.screen`, `settings.screen` or `downloads.screen`
+(loaded: its empty state, `downloads.empty`, or its list, `downloads.list`). Tabs keep their
+navigation stacks, so `open` goes back (`BackButton`) to the tab's root (`home.screen`,
+`library.screen`, `downloads.screen`, `account.screen`) before leaving it and after selecting
+a tab; an open Settings screen is reused.
+The player plays *Pride and Prejudice* (`item.play`), opens from the mini player
+(`player.mini`) and is paused; another screen minimizes it first (`player.minimize`). Its
+play/pause button is `player.pause` while playback is requested and `player.play` otherwise,
+in any language, so the helper presses it only while it's `player.pause` and never restarts
+playback that has already stopped. Settings is the Account tab's `account.settings` row on iOS and ⌘, on a
+Mac. Two things about the tab bar: on the iPhone Duo's outer display it's too short for every
+tab, so Downloads and Account are in its More tab, and it minimizes as the content scrolls
+(`tabBarMinimizeBehavior`); `open` handles both. The item's metadata is `item.metadata`.
+
+`AccessibilityAuditTests` audits each of those screens at the default text size and at AX5;
+see docs/accessibility.md, "Automated audits". The default size takes about 80 seconds on the
+simulator and AX5 about 100.
+
 ## Localized runs and screenshots
 
 `LocalizedSmokeTests` runs the same journey with launch arguments for another language:
@@ -134,4 +161,4 @@ CI runs the localized tests with the rest (about 25 seconds each on the simulato
 
 App Store screenshots use the same journey; see [screenshots.md](screenshots.md).
 
-Not covered yet (#46): HLS and podcast playback fixtures and accessibility audits (#106).
+Not covered yet (#46): HLS and podcast playback fixtures.

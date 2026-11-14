@@ -117,7 +117,7 @@
                     )
                     .aspectRatio(1 / shape.aspectRatio, contentMode: .fill)
                 }
-                .overlay { Rectangle().fill(.regularMaterial) }
+                .overlay { Rectangle().fill(.thickMaterial) }
                 .clipped()
                 .backgroundExtensionEffect()
                 .accessibilityHidden(true)

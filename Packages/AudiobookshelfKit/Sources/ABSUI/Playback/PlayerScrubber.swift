@@ -112,7 +112,7 @@ public struct PlayerScrubber: View {
             }
             .font(.caption)
             .monospacedDigit()
-            .foregroundStyle(.secondary)
+            .foregroundStyle(ABSColor.mutedForeground)
         }
         // Media playback progress isn't mirrored in right-to-left languages (Human Interface
         // Guidelines, Right to left): time runs left to right, so the track, the drag and the

@@ -13,6 +13,8 @@ struct TransportToolbarEntry: Equatable {
     let isEnabled: Bool
     /// Play/pause while buffering: a spinner instead of the symbol; it still works.
     let showsSpinner: Bool
+    /// For UI tests: ``TransportControls/playPauseIdentifier(showsPause:)`` for play/pause, else empty.
+    var accessibilityIdentifier = ""
 
     /// The buttons in order: previous chapter, jump back, play/pause, jump forward, next chapter;
     /// only play/pause without `showsSkipControls` (a locked player).
@@ -39,7 +41,8 @@ struct TransportToolbarEntry: Equatable {
             action: .playPause, symbol: showsPause ? "pause.fill" : "play.fill", caption: nil,
             accessibilityLabel: TransportControls.playPauseLabel(showsPause: showsPause),
             accessibilityValue: TransportControls.playPauseAccessibilityValue(isBuffering: isBuffering),
-            isEnabled: true, showsSpinner: isBuffering)
+            isEnabled: true, showsSpinner: isBuffering,
+            accessibilityIdentifier: TransportControls.playPauseIdentifier(showsPause: showsPause))
         guard showsSkipControls else { return [playPause] }
         return [chapter(next: false), jump(forward: false), playPause, jump(forward: true), chapter(next: true)]
     }
@@ -117,6 +120,8 @@ struct TransportToolbarEntry: Equatable {
             .disabled(!entry.isEnabled)
             .accessibilityLabel(Text(verbatim: entry.accessibilityLabel))
             .accessibilityValue(Text(verbatim: entry.accessibilityValue))
+            // For UI tests.
+            .accessibilityIdentifier(entry.accessibilityIdentifier)
             .absHaptic(haptic, trigger: taps)
         }
     }

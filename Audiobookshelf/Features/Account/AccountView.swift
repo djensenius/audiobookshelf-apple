@@ -66,6 +66,7 @@ struct AccountView: View {
                     NavigationLink(value: Route.settings) {
                         label("HeaderSettings", systemImage: "gearshape")
                     }
+                    .accessibilityIdentifier("account.settings")
                 #endif
                 NavigationLink(value: Route.logs) {
                     label("ButtonLogs", systemImage: "doc.text.magnifyingglass")
@@ -88,6 +89,9 @@ struct AccountView: View {
             }
         }
         .formStyle(.grouped)
+        // For UI tests.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("account.screen")
         .navigationTitle(Text(verbatim: L10n.string(AppTab.account.titleKey)))
         .confirmationDialog(
             Text(verbatim: L10n.string("MessageConfirmLogout")), isPresented: isConfirmingSignOut,

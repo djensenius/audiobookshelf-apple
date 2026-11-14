@@ -2,6 +2,7 @@
     import ABSAPI
     import ABSAppModel
     import ABSCore
+    import ABSDownloads
     import Foundation
     import Synchronization
 
@@ -38,16 +39,40 @@
             return configuration
         }
 
-        /// The environment for a fixture launch: an in-memory store, Keychain and settings, and no
-        /// download stack, whose sweep would otherwise check the app's real downloads against the
-        /// empty store.
+        /// The environment for a fixture launch: an in-memory store, Keychain and settings, and a
+        /// download stack of its own: its files in ``downloadsDirectory``, emptied on every fixture
+        /// launch, so it never sees the app's real downloads, and sessions and a redirect preflight
+        /// that only ``FixtureURLProtocol`` answers (``downloadSession``,
+        /// ``foregroundDownloadSession``, ``downloadPreflight``), so a transfer never reaches the network.
         @MainActor static func environment() -> AppEnvironment {
             let suite = "org.davidjensenius.Audiobookshelf.fixtures"
             let defaults = UserDefaults(suiteName: suite) ?? .standard
             defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: downloadsDirectory)
             return AppEnvironment(
                 settings: AppSettings(defaults: defaults), storeLocation: .inMemory, keychain: FixtureKeychain(),
-                sessionConfiguration: sessionConfiguration, downloadsRoot: nil, covers: coverSource(), realtime: false)
+                sessionConfiguration: sessionConfiguration, downloadsRoot: downloadsDirectory,
+                makeDownloadSession: downloadSession, makeForegroundDownloadSession: foregroundDownloadSession,
+                downloadPreflight: downloadPreflight, covers: coverSource(), realtime: false)
+        }
+
+        /// The fixture download engine's session: a non-background one, which ``FixtureURLProtocol`` can answer.
+        static let downloadSession: DownloadSessionFactory = {
+            URLSession(configuration: fixtureConfiguration(.ephemeral), delegate: $0, delegateQueue: nil)
+        }
+
+        /// The fixture download engine's session for connections with custom headers.
+        static let foregroundDownloadSession: DownloadSessionFactory = {
+            URLSession(configuration: fixtureConfiguration(.absForegroundDownloads()), delegate: $0, delegateQueue: nil)
+        }
+
+        /// The fixture download engine's redirect check, answered by ``FixtureURLProtocol``.
+        static let downloadPreflight = DownloadRedirectPreflight { fixtureConfiguration(.ephemeral) }
+
+        /// The fixture download stack's root (`Downloads/` and `ResumeData/`), in the temporary
+        /// directory.
+        static var downloadsDirectory: URL {
+            URL.temporaryDirectory.appending(path: "AudiobookshelfFixtures/Downloads", directoryHint: .isDirectory)
         }
 
         /// A fixture launch's covers: answered by ``FixtureURLProtocol``, so they never wait for

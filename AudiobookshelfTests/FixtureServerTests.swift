@@ -1,6 +1,7 @@
 import ABSAPI
 import ABSAppModel
 import ABSCore
+import ABSDownloads
 import ABSPlayback
 import AVFoundation
 import Foundation
@@ -76,6 +77,31 @@ struct FixtureServerTests {
         await model.submitAddress()
         #expect(model.failure == nil)
         #expect(model.phase == .login)
+    }
+
+    /// A fixture launch has a download stack of its own, in the temporary directory, emptied on
+    /// every launch, so Downloads shows its own content and never the app's real downloads.
+    @Test func hasItsOwnEmptyDownloadStack() throws {
+        let leftover = FixtureServer.downloadsDirectory.appending(path: "leftover")
+        try FileManager.default.createDirectory(at: leftover, withIntermediateDirectories: true)
+        let environment = FixtureServer.environment()
+        #expect(environment.downloads != nil)
+        #expect(!FileManager.default.fileExists(atPath: leftover.path))
+        #expect(FixtureServer.downloadsDirectory.path.hasPrefix(URL.temporaryDirectory.path))
+    }
+
+    /// Every part of a fixture transfer, the redirect check and both sessions, goes through
+    /// ``FixtureURLProtocol`` and never the network: the fixture host doesn't resolve.
+    @Test func downloadsNeverLeaveTheFixtureServer() async throws {
+        let request = URLRequest(url: URL(string: FixtureServer.address + "/api/items/li_pride/file/1/download")!)
+        let checked = try await FixtureServer.downloadPreflight.check(request)
+        #expect(checked.url == request.url)
+        final class Delegate: NSObject, URLSessionDelegate {}
+        for factory in [FixtureServer.downloadSession, FixtureServer.foregroundDownloadSession] {
+            let session = try #require(factory(Delegate()) as? URLSession)
+            defer { session.invalidateAndCancel() }
+            #expect(session.configuration.protocolClasses?.first == FixtureURLProtocol.self)
+        }
     }
 
     /// Fixture covers load without the network monitor and cache only in the fixture directory.

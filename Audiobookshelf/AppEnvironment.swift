@@ -73,6 +73,8 @@ final class AppEnvironment {
     ///   - downloadsRoot: Where downloads live (``AppDownloads/make(dataStack:accounts:settings:root:makeSession:progress:)``);
     ///     tests pass a temporary directory, and `nil` leaves out the download stack.
     ///   - makeDownloadSession: The download engine's session; tests pass a non-background one.
+    ///   - makeForegroundDownloadSession: The engine's session for connections with custom headers.
+    ///   - downloadPreflight: Checks each download's redirects before its task is made.
     ///   - covers: Where the cover pipeline fetches and caches covers.
     ///   - realtime: Whether sessions open the realtime socket; a fixture launch has no server for it.
     init(
@@ -81,6 +83,8 @@ final class AppEnvironment {
         sessionConfiguration: @escaping @Sendable () -> URLSessionConfiguration = { .absConnection() },
         downloadsRoot: URL? = .applicationSupportDirectory,
         makeDownloadSession: @escaping DownloadSessionFactory = DownloadEngine.backgroundSession(),
+        makeForegroundDownloadSession: DownloadSessionFactory? = DownloadEngine.foregroundSession(),
+        downloadPreflight: any DownloadRedirectPreflighting = DownloadRedirectPreflight(),
         covers: CoverSource = .app, realtime: Bool = true
     ) {
         let dataStack: DataStack?
@@ -100,6 +104,7 @@ final class AppEnvironment {
             downloads = downloadsRoot.map {
                 AppDownloads.make(
                     dataStack: stack, accounts: manager, settings: settings, root: $0, makeSession: makeDownloadSession,
+                    makeForegroundSession: makeForegroundDownloadSession, preflight: downloadPreflight,
                     progress: progress)
             }
             dataStack = stack

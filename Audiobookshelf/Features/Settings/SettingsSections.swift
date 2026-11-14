@@ -26,6 +26,7 @@ struct DisplaySettingsSection: View {
             #endif
         } header: {
             Text(verbatim: L10n.string("HeaderUserInterfaceSettings"))
+                .foregroundStyle(ABSColor.mutedForeground)
         }
     }
 }
@@ -52,6 +53,7 @@ struct PlaybackSettingsSection: View {
                 isOn: $settings.allowSeekingOnMediaControls)
         } header: {
             Text(verbatim: L10n.string("HeaderPlaybackSettings"))
+                .foregroundStyle(ABSColor.mutedForeground)
         }
     }
 }
@@ -71,11 +73,14 @@ struct DataSettingsSection: View {
                 label: \.settingsLabel, selection: $settings.streamingUsingCellular)
         } header: {
             Text(verbatim: L10n.string("HeaderDataSettings"))
+                .foregroundStyle(ABSColor.mutedForeground)
         } footer: {
             #if os(macOS)
                 Text(verbatim: L10n.string("MessageCellularSettingsHelpMac"))
+                    .foregroundStyle(ABSColor.mutedForeground)
             #else
                 Text(verbatim: L10n.string("MessageCellularSettingsHelp"))
+                    .foregroundStyle(ABSColor.mutedForeground)
             #endif
         }
     }

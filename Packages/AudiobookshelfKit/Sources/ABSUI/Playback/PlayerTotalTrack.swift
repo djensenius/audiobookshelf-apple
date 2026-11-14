@@ -32,7 +32,7 @@ public struct PlayerTotalTrack: View {
             }
             .font(.caption2)
             .monospacedDigit()
-            .foregroundStyle(.secondary)
+            .foregroundStyle(ABSColor.mutedForeground)
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
                     Capsule()

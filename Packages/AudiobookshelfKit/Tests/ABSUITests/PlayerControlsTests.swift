@@ -136,6 +136,8 @@ private final class Recorder {
     @Test func playPauseLabelFollowsTheIntent() {
         #expect(TransportControls.playPauseLabel(showsPause: true) == "Pause")
         #expect(TransportControls.playPauseLabel(showsPause: false) == "Play")
+        #expect(TransportControls.playPauseIdentifier(showsPause: true) == "player.pause")
+        #expect(TransportControls.playPauseIdentifier(showsPause: false) == "player.play")
     }
 
     @Test func bufferingPlayPauseSaysLoading() {
@@ -162,12 +164,14 @@ private final class Recorder {
         #expect(entries.map(\.caption) == [nil, "20s", nil, nil, nil])
         #expect(entries[2].showsSpinner)
         #expect(entries[2].accessibilityValue == "Loading...")
+        #expect(entries.map(\.accessibilityIdentifier) == ["", "", "player.pause", "", ""])
 
         let idle = TransportToolbarEntry.entries(
             showsPause: false, isBuffering: false, jumpBackwardSeconds: 10, jumpForwardSeconds: 120,
             hasPreviousChapter: true, hasNextChapter: false, locale: locale)
         #expect(idle.map(\.isEnabled) == [true, true, true, true, false])
         #expect(idle[2].symbol == "play.fill")
+        #expect(idle[2].accessibilityIdentifier == "player.play")
         #expect(!idle[2].showsSpinner)
         #expect(idle[2].accessibilityValue.isEmpty)
         #expect(idle[3].caption == "2m")

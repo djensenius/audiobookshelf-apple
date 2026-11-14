@@ -90,26 +90,31 @@ struct ItemDetailMetadata: View {
             case .details(let details): ItemDetailMetadataRow.rows(for: details, locale: locale)
             case .rows(let rows): rows
             }
-        if dynamicTypeSize.isAccessibilitySize {
-            VStack(alignment: .leading, spacing: ABSSpacing.medium) {
-                ForEach(rows) { row in
-                    VStack(alignment: .leading, spacing: ABSSpacing.xxSmall) {
-                        label(row)
-                        values(row)
+        Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: ABSSpacing.medium) {
+                    ForEach(rows) { row in
+                        VStack(alignment: .leading, spacing: ABSSpacing.xxSmall) {
+                            label(row)
+                            values(row)
+                        }
                     }
                 }
-            }
-        } else {
-            Grid(alignment: .topLeading, horizontalSpacing: ABSSpacing.large, verticalSpacing: ABSSpacing.small) {
-                ForEach(rows) { row in
-                    // Modifiers go on the cells: on a `GridRow` they'd make it one cell.
-                    GridRow {
-                        label(row)
-                        values(row)
+            } else {
+                Grid(alignment: .topLeading, horizontalSpacing: ABSSpacing.large, verticalSpacing: ABSSpacing.small) {
+                    ForEach(rows) { row in
+                        // Modifiers go on the cells: on a `GridRow` they'd make it one cell.
+                        GridRow {
+                            label(row)
+                            values(row)
+                        }
                     }
                 }
             }
         }
+        // For UI tests.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("item.metadata")
     }
 
     /// Hidden from VoiceOver: ``values(_:)`` speaks it with each value, since VoiceOver often
