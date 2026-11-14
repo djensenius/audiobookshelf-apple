@@ -105,7 +105,9 @@ jobs:
     name: UI tests
     runs-on: xcode-27
     # A job of its own, so its cold app builds run beside build-and-test rather than after it.
-    timeout-minutes: 45
+    # A pull request run takes 30–36 minutes; the headroom absorbs one stalled test (#627)
+    # without failing a run whose tests all passed.
+    timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       MISE_TASK_RUN_AUTO_INSTALL: "false"
