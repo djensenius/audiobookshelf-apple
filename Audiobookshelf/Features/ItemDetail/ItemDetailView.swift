@@ -39,6 +39,9 @@ struct ItemDetailView: View {
                 LoadingView()
             }
         }
+        // For UI tests.
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("item.detail")
         // With the store's online revision too: a reconnect that keeps the offline session's
         // client leaves the key unchanged, and must still retry a failed load.
         .task(id: DetailLoadTrigger(key: key, onlineRevision: store?.onlineRevision)) {

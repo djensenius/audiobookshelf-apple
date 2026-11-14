@@ -156,6 +156,7 @@ struct BrowseItemGrid<Element: Identifiable>: View {
                 ItemCard(
                     item: summary, serverID: serverID, librarySettings: libraries.current, context: context
                 ) { perform($0, summary) }
+                .accessibilityIdentifier("item.\(summary.id)")
                 .overlay(alignment: .topLeading) {
                     if let badge = badge(element) {
                         Text(verbatim: badge)

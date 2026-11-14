@@ -271,6 +271,7 @@ private struct ItemDetailHeader: View {
             }
             .font(.title2)
             .accessibilityElement(children: .combine)
+            .accessibilityIdentifier("item.title")
             if let subtitle = details.subtitle {
                 Text(verbatim: subtitle)
                     .font(.title3)

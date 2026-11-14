@@ -20,6 +20,7 @@ struct LibraryItemList: View {
                     ItemRow(
                         item: item, serverID: serverID, librarySettings: libraries.current, context: context
                     ) { perform($0, item) }
+                    .accessibilityIdentifier("item.\(item.id)")
                     .padding(.horizontal, ABSSpacing.large)
                     .padding(.vertical, ABSSpacing.small)
                     .task(id: appearanceID) { onAppear(item) }
