@@ -53,6 +53,11 @@ public final class ItemDownloadModel {
     public private(set) var isWorking = false
     /// Set the view's alert from it; the view clears it when the alert closes.
     public var prompt: Prompt?
+    /// Whether the connection's downloads continue only while the app is open
+    /// (``DownloadAccess/onlyWhileOpen``), as last read by ``observe()`` or ``download(item:)``; the
+    /// view notes it in the cellular question and, with ``notesOnlyWhileOpen``, while a download is
+    /// under way.
+    public private(set) var onlyWhileOpen = false
     /// The connection's downloaded items of this server item, as last read (by the feed, when
     /// shared).
     public var localItems: [LocalLibraryItemDTO] {
@@ -105,12 +110,19 @@ public final class ItemDownloadModel {
     /// (`userCanDownload`), and offline.
     public var isShown: Bool { canRequest || !state.canStart }
 
+    /// Whether the view notes that the download continues only while the app is open: the
+    /// connection's downloads do (``onlyWhileOpen``) and one is under way (queued, downloading,
+    /// paused or failed).
+    public var notesOnlyWhileOpen: Bool { onlyWhileOpen && state.recordID != nil }
+
     // MARK: - Loading
 
     /// Reads the connection's downloaded items, then again after every write to the store (or,
     /// without ``DownloadsServices/localItemUpdates``, every completed download), until the task
-    /// is cancelled. With a ``feed``, returns at once: the screen observes the feed.
+    /// is cancelled. With a ``feed``, returns once it has read ``onlyWhileOpen``: the screen
+    /// observes the feed.
     public func observe() async {
+        onlyWhileOpen = await access.onlyWhileOpen(connectionID)
         guard feed == nil else { return }
         if let updates = try? await services.localItemUpdates?(connectionID) {
             for await _ in updates { await reload() }
@@ -164,6 +176,8 @@ public final class ItemDownloadModel {
         isWorking = true
         defer { isWorking = false }
         pendingMetered = nil
+        // Read again, as the connection's headers may have changed since ``observe()``.
+        onlyWhileOpen = await access.onlyWhileOpen(connectionID)
         await handle(await access.requester.request(item: item, episodeID: episodeID, connectionID: connectionID), item)
     }
 
