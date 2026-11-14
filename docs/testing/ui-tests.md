@@ -143,9 +143,17 @@ The player plays *Pride and Prejudice* (`item.play`), opens from the mini player
 play/pause button is `player.pause` while playback is requested and `player.play` otherwise,
 in any language, so the helper presses it only while it's `player.pause` and never restarts
 playback that has already stopped. Settings is the Account tab's `account.settings` row on iOS and ⌘, on a
-Mac. Two things about the tab bar: on the iPhone Duo's outer display it's too short for every
-tab, so Downloads and Account are in its More tab, and it minimizes as the content scrolls
-(`tabBarMinimizeBehavior`); `open` handles both. The item's metadata is `item.metadata`.
+Mac. The tab bar minimizes as the content scrolls (`tabBarMinimizeBehavior`); `open` expands
+it. The item's metadata is `item.metadata`.
+
+`TabBarTests` checks the compact tab bar (#617): Home, Library, Downloads, Account and Search,
+with no More tab and no library section. It also chooses Series, then Library, from the
+Library root's section menu (`library.sectionPicker`) and checks the root (`series.screen`,
+`library.screen`). A menu's entries have no identifiers, so it finds them by symbol
+(`AppTab.systemImage`). Menus drop those symbols at accessibility text sizes, so the test
+runs at the default size. On the iPhone Duo's outer display the menu is in the vertical bar's
+overflow menu (`BottomOverflowBarButtonItem`), titled with the Library tab's title. A
+regular-width iPad and a Mac show the sidebar, so the tests skip there.
 
 `AccessibilityAuditTests` audits each of those screens at the default text size and at AX5;
 see docs/accessibility.md, "Automated audits". The default size takes about 80 seconds on the
