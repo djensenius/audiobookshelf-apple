@@ -49,14 +49,17 @@ A Debug build launched with `-ABSFixtures` (`Audiobookshelf/Fixtures/FixtureServ
   every fixture launch, and sends every part of a transfer (the redirect check, the download
   session and the custom-header session) through `FixtureURLProtocol`, so the Downloads tab
   starts empty (`downloads.empty`), never sees a real download and never reaches the network.
-  The fixtures don't serve audio files for download yet, so a fixture download fails (404).
+  A track's download, `GET /api/items/:id/file/:ino/download`, answers with the bundled
+  `fixture-silence.m4a` (`audio/mp4`, with its `Content-Length`), so *Pride and Prejudice*,
+  whose one track is `ino` 11, downloads. Its Download button is `item.download` until the book
+  is downloaded and `item.downloaded` after.
 
 Type the fixture address on the connect screen and sign in with any username and password.
 
 The replies are the `fixture-*` files in `Audiobookshelf/Fixtures/Resources/`: status, ping,
 login and authorize, `/api/me`, the libraries, the library with its filter data, the
 personalized shelves, one page of items, the expanded *Pride and Prejudice*
-(`fixture-item-li_pride.json`) and one cover PNG for every item. A request without a fixture is
+(`fixture-item-li_pride.json`, with one audio file and track) and one cover PNG for every item. A request without a fixture is
 a 404, logged to the `api` category as `Fixture server: no fixture for <method> <path>`, so a
 missing fixture shows up in Console or the test's log.
 
@@ -116,7 +119,8 @@ journey lives in `FixtureJourney.swift` (`signIn(launchArguments:screenshotPrefi
 Prejudice*), Player, Settings or Downloads from wherever the app is, waits for the screen's
 loaded content and returns its element (`FixtureScreen.identifier`): `home.screen`,
 `library.screen`, `item.detail`, `player.screen`, `settings.screen` or `downloads.screen`
-(loaded: its empty state, `downloads.empty`, or its list, `downloads.list`). Tabs keep their
+(loaded: its empty state, `downloads.empty`, or its list; on iOS the list takes the screen's
+identifier, so `downloads.screen` is then the collection view itself). Tabs keep their
 navigation stacks, so `open` goes back (`BackButton`) to the tab's root (`home.screen`,
 `library.screen`, `downloads.screen`, `account.screen`) before leaving it and after selecting
 a tab; an open Settings screen is reused.

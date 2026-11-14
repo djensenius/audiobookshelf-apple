@@ -144,6 +144,28 @@ struct FixtureServerTests {
         return (enumerator?.allObjects as? [URL] ?? []).filter { !$0.hasDirectoryPath }
     }
 
+    /// A fixture download of *Pride and Prejudice*'s track, at the path the download planner builds from the item,
+    /// is answered with the bundled audio, with the type and length a download checks.
+    @Test func answersATrackDownloadWithTheAudio() async throws {
+        let item = try await client.send(ItemEndpoints.item(id: SampleLibrary.prideAndPrejudice.id))
+        let file = try #require(item.book?.audioFiles?.first)
+        let path = DownloadRequests.filePath(itemID: item.id, ino: file.ino)
+        let request = try DownloadRequests.request(
+            path: path, configuration: try APIClientConfiguration(baseURL: URL(string: FixtureServer.address)!),
+            accessToken: "fixture-access-token")
+        let session = URLSession(configuration: FixtureServer.fixtureConfiguration(.ephemeral))
+        defer { session.invalidateAndCancel() }
+        let (data, response) = try await session.data(for: request)
+        let http = try #require(response as? HTTPURLResponse)
+        let audio = try #require(Bundle.main.url(forResource: "fixture-silence", withExtension: "m4a"))
+        #expect(http.statusCode == 200)
+        #expect(http.mimeType == "audio/mp4")
+        #expect(http.expectedContentLength == Int64(data.count))
+        #expect(data == (try Data(contentsOf: audio)))
+        // The planned size, which the download checks the file against.
+        #expect(file.metadata?.size == data.count)
+    }
+
     @Test func answersAMissingFixtureWithNotFound() async throws {
         await #expect(throws: APIError.notFound) {
             try await client.send(ItemEndpoints.item(id: "li_emma"))

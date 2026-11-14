@@ -48,8 +48,21 @@ It deletes its simulators when it exits, on failure or Control-C too.
 
 `ScreenshotTests` (`AudiobookshelfUITests/ScreenshotTests.swift`) signs in to the fixture server
 with `-AppleLanguages (<tag>) -AppleLocale <tag>` and attaches a screenshot of the whole main
-screen, status bar included, of Home, Library and *Pride and Prejudice*'s detail, named
-`appstore-home`, `appstore-library` and `appstore-item`. On a Mac it first makes the window full
+screen, status bar included, of each screen it opens with `open(_:in:)`
+(`AudiobookshelfUITests/FixtureScreens.swift`), named `appstore-<screen>`:
+
+| Screen | Shows |
+| --- | --- |
+| `home` | Home's shelves |
+| `library` | The Library tab |
+| `item` | *Pride and Prejudice*'s detail |
+| `player` | The full player, playing *Pride and Prejudice*, paused |
+| `settings` | Settings (Account › Settings; the Settings window on a Mac) |
+| `downloads` | Downloads, with *Pride and Prejudice* downloaded |
+
+Before Downloads it taps *Pride and Prejudice*'s Download button (`item.download`) and waits for
+the download to finish (`item.downloaded`); the fixture server answers it with the bundled
+silent audio ([ui-tests.md](ui-tests.md#the-fixture-server)). On a Mac it first makes the window full
 screen.
 
 The class is skipped unless the test runner's environment has `ABS_SCREENSHOTS=1`. The script sets
@@ -60,8 +73,6 @@ skipped without launching the app. To run it by hand:
 ```sh
 TEST_RUNNER_ABS_SCREENSHOTS=1 ABS_UI_PLATFORM=ios mise run test:ui -- -only-testing:AudiobookshelfUITests/ScreenshotTests
 ```
-
-Player, Downloads and Settings aren't captured yet (#109).
 
 The fixture library is public-domain LibriVox material. Every item has the same cover,
 `Audiobookshelf/Fixtures/Resources/fixture-cover.png`: an 8 × 8 single-colour placeholder made for

@@ -50,7 +50,9 @@ struct ItemDownloadButton: View {
     }
 
     var body: some View {
-        Group {
+        // A container rather than a `Group`: modifiers of an empty `Group` don't apply, so the task
+        // that builds the model would never run.
+        ZStack {
             if let model, model.libraryItemID == libraryItemID, model.episodeID == episodeID,
                 model.connectionID == serverID, model.feed === feed, model.isShown
             {
@@ -112,6 +114,8 @@ private struct ItemDownloadControl: View {
             .contentShape(.rect)
         }
         .itemDownloadButtonStyle(style, state: state)
+        // For UI tests: says whether the media is downloaded, in any language.
+        .accessibilityIdentifier(state.localItemID == nil ? "item.download" : "item.downloaded")
         .disabled(model.isWorking || (state.canStart && item == nil))
         .help(Text(verbatim: presentation.title))
         .accessibilityValue(Text(verbatim: presentation.value ?? ""))
