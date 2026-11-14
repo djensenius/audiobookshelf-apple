@@ -78,6 +78,11 @@ final class StubEpisodeSource: PodcastEpisodeSource {
     }
 }
 
+/// The server finishes the advancer reads as baselines, as the progress store holds them (#587).
+final class CachedServerFinishes: Sendable {
+    let finishes = Mutex<[MediaKey: Date]>([:])
+}
+
 @MainActor
 final class AdvanceQueueStore: PlaybackQueueStoring {
     var saved: [UUID: [QueueItem]] = [:]
@@ -92,6 +97,7 @@ final class AdvanceQueueStore: PlaybackQueueStoring {
 struct AdvanceHarness {
     let activity = RecordingBackgroundActivity()
     let episodes = StubEpisodeSource()
+    let cachedFinishes = CachedServerFinishes()
     let h: CoordinatorHarness
     let queue: PlaybackQueue
     let advancer: PlaybackQueueAdvancer
@@ -103,8 +109,11 @@ struct AdvanceHarness {
         activity.service = h.service
         queue = PlaybackQueue(serverConnectionID: h.connectionID, store: AdvanceQueueStore())
         let clock = h.clock
+        let cachedFinishes = cachedFinishes
         advancer = PlaybackQueueAdvancer(
-            queue: queue, episodes: podcastFallback ? episodes : nil, uptime: { clock.now.timeIntervalSince1970 })
+            queue: queue, episodes: podcastFallback ? episodes : nil,
+            serverFinishedAt: { key in cachedFinishes.finishes.withLock { $0[key] } },
+            uptime: { clock.now.timeIntervalSince1970 })
         advancer.attach(to: h.coordinator)
     }
 

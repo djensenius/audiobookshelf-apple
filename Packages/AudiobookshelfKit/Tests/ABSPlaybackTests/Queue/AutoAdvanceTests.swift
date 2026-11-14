@@ -254,6 +254,59 @@ struct AutoAdvanceTests {
         #expect(a.coordinator.mediaKey == a.key("P", episode: "e1"))
     }
 
+    /// Plays e1 again, finished on the server at `finishedAt` as the progress store also holds it,
+    /// either with e2 queued, so no listing is fetched while e1 plays, or attaching to it mid-play;
+    /// e2's listing has e1 finished at `listedFinishedAt`. Then resets e1 and returns what follows
+    /// e2 (#587).
+    private func replayWithoutListingBaseline(
+        finishedAt: Date, listedFinishedAt: Date, attach: Bool
+    ) async -> MediaKey? {
+        let e1 = a.key("P", episode: "e1")
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": finishedAt])
+        a.cachedFinishes.finishes.withLock { $0[e1] = finishedAt }
+        if !attach { a.queue.addToEnd(QueueItem(libraryItemID: "P", episodeID: "e2", title: "e2")) }
+        await a.play("P", episode: "e1")
+        if attach {
+            a.advancer.detach(from: coordinator)
+            a.advancer.attach(to: coordinator)
+            await a.advancer.waitForPreparation()
+        } else {
+            #expect(a.episodes.fetches == 0)
+        }
+        a.episodes.set(
+            "P", episodes: ["e1", "e2", "e3"], finished: ["e1"], serverFinishedAt: ["e1": listedFinishedAt])
+
+        await a.finish()
+        #expect(coordinator.mediaKey == a.key("P", episode: "e2"))
+        await a.advancer.waitForPreparation()
+        a.episodes.set("P", episodes: ["e1", "e2", "e3"])
+        a.advancer.progressDidChange(for: e1, kind: .reset)
+        await a.advancer.waitForPreparation()
+        await a.finish()
+        return coordinator.mediaKey
+    }
+
+    /// Replayed with no listing baseline (played from the queue, or attached to mid-play): its
+    /// baseline is the server finish the progress store held, so a listing after the end with
+    /// that finish confirms nothing and a late reset keeps it skipped (#587).
+    @Test(arguments: serverTimes, [false, true])
+    func cachedServerFinishIsTheBaselineWithoutAListing(finishedAt: Date, attach: Bool) async {
+        let next = await replayWithoutListingBaseline(
+            finishedAt: finishedAt, listedFinishedAt: finishedAt, attach: attach)
+
+        #expect(next == a.key("P", episode: "e3"))
+    }
+
+    /// With the cached baseline, a later server finish after the end still confirms it, so a
+    /// reset after it counts (#587).
+    @Test(arguments: serverTimes, [false, true])
+    func laterServerFinishConfirmsAnEndWithACachedBaseline(finishedAt: Date, attach: Bool) async {
+        let next = await replayWithoutListingBaseline(
+            finishedAt: finishedAt, listedFinishedAt: finishedAt.addingTimeInterval(60), attach: attach)
+
+        #expect(next == a.key("P", episode: "e1"))
+    }
+
     /// The server's finish of an episode first seen in a near-end refresh is this play's own
     /// (synced near the end), not a baseline: a listing after the end with it confirms the end, so
     /// a discard or mark-not-finished after it makes the episode eligible again (#554).

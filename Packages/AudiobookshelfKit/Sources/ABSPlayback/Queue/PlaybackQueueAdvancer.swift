@@ -40,13 +40,18 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     /// Bumped by every end, so a listing requested before one isn't evidence of its finish.
     private var endings = 0
     /// The server's finish of each episode from before its play began (in the listing held when
-    /// it was loaded, or the first one fetched after): a finish the server shows after the end
-    /// confirms that end only when it is later. Server times are only compared with server times,
-    /// so the device's clock doesn't matter.
+    /// it was loaded, the first one fetched after, or ``serverFinishedAt`` read after it loaded,
+    /// whichever is latest): a finish the server shows after the end confirms that end only when
+    /// it is later. Server times are only compared with server times, so the device's clock
+    /// doesn't matter.
     private var finishBaselines: [MediaKey: Date] = [:]
     /// The current item's baseline can still be taken: from its load until a listing gives it,
     /// a near-end refresh (whose listing may hold this play's own finish) or its end.
     private var takesBaseline = false
+    /// The current item's baseline can still be read from ``serverFinishedAt``: from its load, or
+    /// attaching to it, until a read, a near-end refresh or its end (#587).
+    private var takesCachedBaseline = false
+    private let serverFinishedAt: (@Sendable (MediaKey) async -> Date?)?
     /// When the last preparation finished, with or without a next item.
     private var preparedAt: TimeInterval = 0
     /// Near-end refreshes done since the load, a resume or a seek out of them.
@@ -68,13 +73,19 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
 
     /// - Parameters:
     ///   - episodes: Where podcast episodes come from; `nil` turns off the podcast fallback.
+    ///   - serverFinishedAt: The server's finish of an item as this device last saw or synced it,
+    ///     without local changes not acknowledged yet; read when an episode loads (or on
+    ///     attaching to one) as its baseline, so that one played from the queue, whose podcast's
+    ///     listing isn't fetched, or attached to mid-play, has one too (#587). `nil` reads none.
     ///   - uptime: Monotonic seconds, for the age of a preparation.
     public init(
         queue: PlaybackQueue, episodes: (any PodcastEpisodeSource)?,
+        serverFinishedAt: (@Sendable (MediaKey) async -> Date?)? = nil,
         uptime: @escaping @Sendable () -> TimeInterval = ProgressSyncClock.live.uptime
     ) {
         self.queue = queue
         self.episodes = episodes
+        self.serverFinishedAt = serverFinishedAt
         self.uptime = uptime
     }
 
@@ -88,6 +99,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         queue.onItemsChange = { [weak self] in self?.queueDidChange() }
         if coordinator.phase == .loaded, let key = coordinator.mediaKey {
             current = key
+            takesCachedBaseline = true
             recompute(refetchListing: true)
         }
     }
@@ -201,6 +213,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         case .loaded:
             current = coordinator?.mediaKey
             takesBaseline = true
+            takesCachedBaseline = true
             rearmOnStart = false
             // Loading inside a trigger prepares anyway.
             refreshed = nearEndTriggers(at: coordinator?.currentTime ?? 0)
@@ -218,6 +231,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
             refreshIfNearEnd(at: time)
         case .ended:
             takesBaseline = false
+            takesCachedBaseline = false
             if let current, current.episodeId != nil {
                 endedEpisodes.insert(current)
                 endings += 1
@@ -235,6 +249,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         guard !due.isEmpty else { return }
         refreshed.formUnion(due)
         takesBaseline = false
+        takesCachedBaseline = false
         // The earlier preparation stays usable until this one replaces it.
         recompute(refetchListing: true, keepPrepared: true)
     }
@@ -269,6 +284,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         listing = nil
         refreshed = []
         rearmOnStart = false
+        takesCachedBaseline = false
     }
 
     // MARK: Preparing
@@ -315,6 +331,14 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     /// Throws when the podcast's episodes can't be loaded.
     private func nextCandidate(after key: MediaKey, revision: Int) async throws -> (key: MediaKey, isQueued: Bool)? {
         guard key.serverConnectionID == queue.serverConnectionID else { return nil }
+        // Read before this play could finish the episode, even when no listing is fetched (#587).
+        if takesCachedBaseline, key == current, key.episodeId != nil, let serverFinishedAt {
+            let finishedAt = await serverFinishedAt(key)
+            // A superseded read leaves it to the preparation that superseded it.
+            guard self.revision == revision, !Task.isCancelled else { return nil }
+            takesCachedBaseline = false
+            if let finishedAt { finishBaselines[key] = max(finishBaselines[key] ?? finishedAt, finishedAt) }
+        }
         if let queued = firstQueued(after: key) { return (queued, true) }
         guard let episodeID = key.episodeId, let episodes else { return nil }
         var listing: PodcastEpisodeListing
