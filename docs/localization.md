@@ -212,6 +212,9 @@ layout for them; these rules cover what it can't decide (Human Interface Guideli
 - **Check by hand.** Run the app with `-AppleLanguages "(ar)"` and `"(he)"`, or use
   the Right-to-Left pseudolanguage in the scheme's options. `TransportControls` and
   `PlayerScrubber` have `Right to left` previews.
+- **UI tests.** `LocalizedSmokeTests` signs in and opens an item in Arabic, German and a
+  double-length right-to-left pseudolanguage, and attaches screenshots of each screen
+  ([UI tests](testing/ui-tests.md#localized-runs-and-screenshots)).
 
 ## Missing translations
 

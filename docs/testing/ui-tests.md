@@ -100,7 +100,35 @@ needs one; don't change visible strings for a test.
 (`tab.library`; every tab is `tab.<AppTab raw value>`), checks `library.screen`, opens
 *Pride and Prejudice*'s card (`item.li_pride`; library cards and rows are `item.<item ID>`) and
 checks the item screen, `item.detail`, and its loaded title, `item.title`
-(`testOpensLibraryItem`). Each test launches the app afresh, so a failure names the step.
+(`testOpensLibraryItem`). Each test launches the app afresh, so a failure names the step. The
+journey lives in `FixtureJourney.swift` (`signIn(launchArguments:screenshotPrefix:)` and
+`openLibraryItem(in:screenshotPrefix:)`), so other test classes reuse it.
 
-Not covered yet (#46): HLS and podcast playback fixtures, screenshots (#109) and accessibility
-audits (#106).
+## Localized runs and screenshots
+
+`LocalizedSmokeTests` runs the same journey with launch arguments for another language:
+
+| Test | Launch arguments | Screenshot prefix |
+| --- | --- | --- |
+| `testArabic` | `-AppleLanguages (ar) -AppleLocale ar` | `ar` |
+| `testGerman` | `-AppleLanguages (de) -AppleLocale de_DE` | `de` |
+| `testPseudoLanguage` | `-NSDoubleLocalizedStrings YES -AppleTextDirection YES -NSForceRightToLeftWritingDirection YES` | `pseudo` |
+
+Arabic is a real right-to-left language and German a long one. The pseudolanguage is Xcode's
+double-length and right-to-left pseudolanguages together: every localized string twice, in a
+mirrored layout, with English text, so a string that isn't localized stands out. The book's
+title is server data, so `item.title` is "Pride and Prejudice" in every language.
+
+Each test attaches screenshots of Home, Library and the item, named `<prefix>-home`,
+`<prefix>-library` and `<prefix>-item`, and keeps them even when it passes. To get them as PNGs:
+
+```sh
+ABS_UI_PLATFORM=ios mise run test:ui -- -only-testing:AudiobookshelfUITests/LocalizedSmokeTests -resultBundlePath /tmp/ui.xcresult
+xcrun xcresulttool export attachments --path /tmp/ui.xcresult --output-path /tmp/ui-screens
+```
+
+`manifest.json` in the output maps each exported file to its name (`suggestedHumanReadableName`).
+CI runs the localized tests with the rest (about 25 seconds each on the simulator).
+
+Not covered yet (#46): HLS and podcast playback fixtures, App Store screenshots (#109) and
+accessibility audits (#106).
