@@ -57,18 +57,21 @@ final class ScreenshotTests: XCTestCase {
     }
 
     #if os(macOS)
-        /// Makes the main window full screen, so the main display shows only the app, and fails unless it is.
-        /// ⌃⌘F toggles full screen, so it's pressed only when the window isn't already.
+        /// Makes the main window full screen on the main display, so that display shows only the app, and fails
+        /// unless it is. ⌃⌘F toggles full screen, so it's pressed only when the window isn't already.
         @MainActor
         private func enterFullScreen(_ app: XCUIApplication) {
             let window = app.windows.firstMatch
             XCTAssertTrue(window.waitForExistence(timeout: Self.fixtureTimeout), "The main window didn't appear")
-            // XCUIScreen.main is the primary display, NSScreen.screens.first; frames are in points on both.
-            guard let screen = NSScreen.screens.first?.frame.size else {
+            // XCUIScreen.main is the primary display, NSScreen.screens.first. It's at the origin both of NSScreen's
+            // coordinates and of XCUIElement's (top left of the primary display), in points on both; checking the
+            // origin as well as the size keeps a window full screen on another display of the same size out.
+            guard let size = NSScreen.screens.first?.frame.size else {
                 XCTFail("No display to capture")
                 return
             }
-            let isFullScreen = { window.frame.size == screen }
+            let screen = CGRect(origin: .zero, size: size)
+            let isFullScreen = { window.frame == screen }
             if !isFullScreen() {
                 app.typeKey("f", modifierFlags: [.command, .control])
             }
@@ -78,7 +81,8 @@ final class ScreenshotTests: XCTestCase {
             }
             XCTAssertTrue(
                 isFullScreen(),
-                "The main window is \(window.frame.size), not full screen (\(screen)); the screenshot would show the desktop"
+                "The main window is \(window.frame), not full screen on the main display (\(screen)); the screenshot "
+                    + "would show the desktop or another display's content. Move the app to the main display."
             )
         }
     #endif

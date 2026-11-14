@@ -88,7 +88,8 @@ layouts (ADR 0004), such as the cover grid kept clear of the fold; this path has
 The Mac screenshots run the same tests on macOS, signed ad hoc as `mise run test:ui` is. XCUITest on
 macOS needs Automation Mode ([ui-tests.md](ui-tests.md#run-them)); while it's disabled,
 `--device mac` fails with the command that enables it (#46). The test launches without window
-restoration, makes the main window full screen and fails unless it fills the main display. The
+restoration, makes the main window full screen and fails unless it fills the main display (a
+window full screen on another display fails too, so keep the app on the main display). The
 capture is always the whole display, so the script's size check can't tell a windowed app from a
 full-screen one; the test's check is what catches that. Use a 16:10 display: an image of another
 16:10 size, such as 3360 × 2100, is scaled to 2880 × 1800, and any other size fails the check.
