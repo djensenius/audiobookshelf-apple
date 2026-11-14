@@ -150860,6 +150860,251 @@
         }
       }
     },
+    "MessageLegacyAppInstalled" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "If the older Audiobookshelf app is still installed on this device, remove it so audiobookshelf:// links open in this app."
+          }
+        }
+      }
+    },
     "MessageLibraryFilterLoadFailed" : {
       "extractionState" : "manual",
       "localizations" : {

@@ -49,7 +49,14 @@ struct ServerAddressView: View {
                 .accessibilityIdentifier("connect.submit")
                 .disabled(model.isBusy || model.address.trimmingCharacters(in: .whitespaces).isEmpty)
             } footer: {
-                Text(L10n.attributed("MessageAudiobookshelfServerRequired"))
+                VStack(alignment: .leading, spacing: ABSSpacing.xSmall) {
+                    Text(L10n.attributed("MessageAudiobookshelfServerRequired"))
+                    #if os(iOS)
+                        // iPhone and iPad only: the legacy app, which registers the same
+                        // `audiobookshelf://` scheme (ADR 0004), was never built for the Mac.
+                        Text(verbatim: L10n.string("MessageLegacyAppInstalled"))
+                    #endif
+                }
             }
         }
         .formStyle(.grouped)
