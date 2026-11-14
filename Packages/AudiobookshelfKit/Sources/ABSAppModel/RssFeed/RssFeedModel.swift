@@ -49,9 +49,11 @@ public enum RssFeedModelError: Error, Sendable, Hashable {
 ///
 /// ``load()`` fetches the current feed and the server address. ``open()`` validates the fields
 /// first and ``close()`` needs an open feed; while either runs, both return `false`. ``apply(_:)``
-/// follows live `rss_feed_open` and `rss_feed_closed` events (``RealtimeBridge/onRssFeedChange``)
-/// for this entity. The latest change wins: a load, open or close whose request started before a
-/// live change, or before another open or close finished, doesn't overwrite the newer state.
+/// follows live `rss_feed_open` and `rss_feed_closed` events for this entity; the sheet observes
+/// them for its account through ``LibraryStore/observeRssFeedChanges(connectionKey:owner:_:)``,
+/// which ``RealtimeBridge/onRssFeedChange`` feeds. The latest change wins: a load, open or close
+/// whose request started before a live change, or before another open or close finished, doesn't
+/// overwrite the newer state.
 @MainActor
 @Observable
 public final class RssFeedModel {

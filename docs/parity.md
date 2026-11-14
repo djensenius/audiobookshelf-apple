@@ -86,7 +86,7 @@ and [#184](https://github.com/djensenius/audiobookshelf-apple/issues/184) land.
 | `latest.vue` | `LatestView` | #70 | Done | |
 | `PodcastEpisodesFeedModal` | `PodcastEpisodesFeedSheet` | #95 | Done | |
 | `ItemDetailsModal` | `ItemDetailInfoSheet` | #342 | Done | |
-| `modals/rssfeeds/*` | `RssFeedSheet` | #96, PRs #419, #463 | In progress (#96) | Open for live socket wiring and the manual admin check. |
+| `modals/rssfeeds/*` | `RssFeedSheet` | #96, #601, PRs #419, #463 | In progress (#96) | Open for the manual admin check, including live socket updates (#601). |
 
 ### Offline
 

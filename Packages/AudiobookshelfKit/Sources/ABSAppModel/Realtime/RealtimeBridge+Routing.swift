@@ -9,7 +9,8 @@ extension RealtimeBridge {
     ///
     /// - `user_updated` replaces ``AccountManager/authorization``'s user and the session's
     ///   bookmarks.
-    /// - Library changes go to ``LibraryStore/applyLibraryChange(_:connectionKey:)``.
+    /// - Library changes go to ``LibraryStore/applyLibraryChange(_:connectionKey:)``, and RSS feed
+    ///   opens and closes to ``LibraryStore/applyRssFeedChange(_:connectionKey:)``.
     /// - `playback` tells the bridge what the player has open, so echoes of this device's own
     ///   playback sync are recognized, and takes stream resets, which it applies only to its own
     ///   session (``PlaybackCoordinator/handleStreamReset(sessionID:)``).
@@ -28,6 +29,7 @@ extension RealtimeBridge {
             bookmarks()?.replaceAll(from: user)
         }
         onLibraryChange = { [weak library] in library?.applyLibraryChange($0, connectionKey: $1) }
+        onRssFeedChange = { [weak library] in library?.applyRssFeedChange($0, connectionKey: $1) }
         playbackSnapshot = { [weak playback] in playback.flatMap(Self.snapshot(of:)) }
         onStreamReset = { [weak playback] in playback?.handleStreamReset(sessionID: $0.streamId) }
         self.localProgress = localProgress

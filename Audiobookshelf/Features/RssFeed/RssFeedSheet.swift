@@ -224,9 +224,15 @@ private struct RssFeedSheetPresenter: ViewModifier {
 
 /// Opens an RSS feed with a slug, prevent indexing and the owner details, or shows the open feed's
 /// address to copy or share and closes it (legacy `RssFeedModal.vue` and `RssFeedMetadataBuilder.vue`).
+/// While it shows, it follows the feed being opened or closed elsewhere, from the signed-in account's
+/// socket (``LibraryStore/observeRssFeedChanges(connectionKey:owner:_:)``).
 struct RssFeedSheet: View {
     @State private var model: RssFeedModel
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.libraryStore) private var store
+    /// Owns the sheet's live changes, so they stop reaching the model when the sheet goes, though its
+    /// entry keeps the model.
+    @State private var liveChanges = RssFeedSheetLiveChanges()
     @State private var copied = false
     /// The feed that was just closed, shown while the sheet goes away instead of the open form.
     @State private var closedFeed: RssFeed?
@@ -281,12 +287,23 @@ struct RssFeedSheet: View {
             .toolbar { toolbar(content) }
         }
         .interactiveDismissDisabled(model.isWorking)
-        .task { await model.load() }
+        .task {
+            followLiveChanges()
+            await model.load()
+        }
         .task(id: copied) {
             guard copied else { return }
             try? await Task.sleep(for: .seconds(2))
             copied = false
         }
+    }
+
+    /// Applies the signed-in account's live opens and closes to the model, for as long as the sheet
+    /// shows; the model keeps only its own entity's.
+    private func followLiveChanges() {
+        guard let store, let key = store.connectionKey else { return }
+        let model = model
+        store.observeRssFeedChanges(connectionKey: key, owner: liveChanges) { [weak model] in model?.apply($0) }
     }
 
     @ToolbarContentBuilder
@@ -385,6 +402,9 @@ struct RssFeedSheet: View {
         AccessibilityNotification.Announcement(L10n.string("MessageFeedURLCopied")).post()
     }
 }
+
+/// Lives as long as an ``RssFeedSheet``'s state: the owner of its live changes.
+private final class RssFeedSheetLiveChanges {}
 
 /// The failure, with the server's reason under it when there is one.
 private struct RssFeedErrorSection: View {
