@@ -101,6 +101,34 @@ struct ItemDownloadStateTests {
         #expect(Self.state(items: [empty, elsewhere, otherBook]) == .none)
     }
 
+    // MARK: Downloaded mark on cards and rows
+
+    private static func isDownloaded(episodeID: String? = nil, items: [LocalLibraryItemDTO]) -> Bool {
+        ItemDownloadState.isDownloaded(
+            libraryItemID: book, episodeID: episodeID, connectionID: connection, localItems: items)
+    }
+
+    @Test func theMarkCountsOnlyThisConnectionsCompletedDownloads() {
+        let file = DownloadsListingTests.file(size: 10)
+        #expect(Self.isDownloaded(items: [DownloadsListingTests.item("Walden", files: [file])]))
+        #expect(!Self.isDownloaded(items: []))
+        // Another connection's download of the same server item, even of the same server.
+        let elsewhere = DownloadsListingTests.item(
+            "Walden", connection: DownloadsListingTests.otherConnection, files: [file])
+        #expect(!Self.isDownloaded(items: [elsewhere]))
+        // A local item without media, another item's download.
+        #expect(!Self.isDownloaded(items: [DownloadsListingTests.item("Walden")]))
+        #expect(!Self.isDownloaded(items: [DownloadsListingTests.item("Emma", files: [file])]))
+    }
+
+    @Test func theMarkOfAPodcastCountsAnyEpisodeAndOfAnEpisodeOnlyItsOwn() {
+        let podcast = DownloadsListingTests.item(
+            "Walden", mediaType: .podcast, files: [DownloadsListingTests.file(size: 10, episodeId: "ep-1")])
+        #expect(Self.isDownloaded(items: [podcast]))
+        #expect(Self.isDownloaded(episodeID: "ep-1", items: [podcast]))
+        #expect(!Self.isDownloaded(episodeID: "ep-2", items: [podcast]))
+    }
+
     @Test func aRecordWinsOverTheLocalItem() {
         let record = Self.record(.queued)
         let item = DownloadsListingTests.item("Walden", files: [DownloadsListingTests.file(size: 10)])

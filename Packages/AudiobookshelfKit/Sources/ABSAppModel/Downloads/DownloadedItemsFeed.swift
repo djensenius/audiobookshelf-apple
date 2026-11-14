@@ -55,6 +55,14 @@ public final class DownloadedItemsFeed {
         }
     }
 
+    /// Whether the book, or podcast episode, is downloaded for this feed's connection
+    /// (``ItemDownloadState/isDownloaded(libraryItemID:episodeID:connectionID:localItems:)``).
+    /// Reads ``items``, so a view calling it in its `body` redraws when they change.
+    public func isDownloaded(libraryItemID: String, episodeID: String?) -> Bool {
+        ItemDownloadState.isDownloaded(
+            libraryItemID: libraryItemID, episodeID: episodeID, connectionID: connectionID, localItems: items)
+    }
+
     /// Reads the connection's items again. A failed read keeps the last one.
     public func reload() async {
         readGeneration += 1

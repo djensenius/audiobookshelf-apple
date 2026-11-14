@@ -12,7 +12,9 @@ import SwiftUI
 /// Also available, declared in ABSUI and not redeclared here:
 /// - `imagePipeline`: the cover image pipeline (`ImagePipeline?`, `nil` while signed out);
 /// - `itemProgressReader`: the progress shown on item cards and rows (`ItemProgressReader`,
-///   `.none` while signed out).
+///   `.none` while signed out);
+/// - `itemDownloadReader`: the downloaded mark on item cards and rows (`ItemDownloadReader`, set by
+///   ``DownloadedItemsEnvironment``; `.none` while signed out or without a download stack).
 ///
 /// The scene's `Router` (its `libraryID` and `libraryKind`) is in the environment as an
 /// observable object: `@Environment(Router.self)`, set by ``MainTabView``.

@@ -23,8 +23,31 @@ public struct ItemProgressReader: Sendable {
     }
 }
 
+/// Reads whether one item is downloaded on this device, for the connection the cells show. The UI
+/// kit can't see the downloads, so the app injects a closure that reads its downloaded items of
+/// the active connection; only completed downloads count.
+///
+/// Cells call it inside their `body` with their own item, so SwiftUI redraws them when the
+/// `@Observable` downloads the closure reads change.
+public struct ItemDownloadReader: Sendable {
+    private let read: @MainActor @Sendable (_ itemID: String, _ episodeID: String?) -> Bool
+
+    public init(_ read: @escaping @MainActor @Sendable (_ itemID: String, _ episodeID: String?) -> Bool) {
+        self.read = read
+    }
+
+    /// Knows no downloads.
+    public static let none = ItemDownloadReader { _, _ in false }
+
+    @MainActor
+    public func callAsFunction(itemID: String, episodeID: String?) -> Bool {
+        read(itemID, episodeID)
+    }
+}
+
 extension EnvironmentValues {
     @Entry public var itemProgressReader: ItemProgressReader = .none
+    @Entry public var itemDownloadReader: ItemDownloadReader = .none
 }
 
 /// The words and symbols the item views share.
@@ -63,14 +86,25 @@ enum ItemPresentation {
         return explicit ?? reader(itemID: item.itemID, episodeID: item.episodeID)
     }
 
-    /// The cell's states, as its VoiceOver value: "Finished" or "Progress, 42%", then the badges
-    /// ("Explicit", "Abridged") and "Missing"; empty for none.
-    static func accessibilityValue(_ item: ItemSummary, progress: ItemProgress?, locale: Locale) -> String {
+    /// Whether a cell shows its item as downloaded, as the reader says. A collapsed series isn't:
+    /// its `itemID` is its first book, whose download isn't the series'.
+    @MainActor
+    static func isDownloaded(_ item: ItemSummary, reader: ItemDownloadReader) -> Bool {
+        guard item.kind != .series else { return false }
+        return reader(itemID: item.itemID, episodeID: item.episodeID)
+    }
+
+    /// The cell's states, as its VoiceOver value: "Finished" or "Progress, 42%", "Downloaded",
+    /// then the badges ("Explicit", "Abridged") and "Missing"; empty for none.
+    static func accessibilityValue(
+        _ item: ItemSummary, progress: ItemProgress?, isDownloaded: Bool = false, locale: Locale
+    ) -> String {
         var parts: [String] = []
         let shown = CoverView.accessibilityValue(
             progress: progress?.isInProgress == true ? progress?.fraction : nil,
             isFinished: progress?.isFinished ?? false, locale: locale)
         if !shown.isEmpty { parts.append(shown) }
+        if isDownloaded { parts.append(L10n.string("LabelDownloaded")) }
         if item.isExplicit { parts.append(L10n.string("LabelExplicit")) }
         if item.isAbridged { parts.append(L10n.string("LabelAbridged")) }
         if item.isMissing { parts.append(L10n.string("LabelMissing")) }
@@ -158,6 +192,18 @@ extension View {
     /// The pointer feedback of ABSUI's cards and rows, for app cards that sit beside them.
     public func itemHover() -> some View {
         modifier(ItemHoverModifier())
+    }
+}
+
+/// A downloaded item's mark (legacy `LazyBookCard.vue`'s `download_done` icon): a down arrow in a
+/// green circle, so its shape, not only its colour, says it. Sized by the surrounding font, so it
+/// scales with Dynamic Type. The cell speaks the state in its accessibility value.
+struct DownloadedIndicator: View {
+    var body: some View {
+        Image(systemName: "arrow.down.circle.fill")
+            .symbolRenderingMode(.palette)
+            .foregroundStyle(.white, ABSColor.success)
+            .accessibilityHidden(true)
     }
 }
 

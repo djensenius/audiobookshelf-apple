@@ -218,6 +218,40 @@ private final class FakeProgressEntry {
             value(explicit: true, abridged: false, ItemProgress(fraction: 1, isFinished: true)) == "Finished, Explicit")
     }
 
+    // MARK: Downloaded
+
+    @Test func theDefaultReaderKnowsNoDownloads() {
+        #expect(!ItemDownloadReader.none(itemID: "a", episodeID: nil))
+        #expect(!ItemPresentation.isDownloaded(frankenstein, reader: EnvironmentValues().itemDownloadReader))
+    }
+
+    @Test func aDownloadedItemIsSpokenInTheValueNotTheLabel() {
+        let locale = Locale(identifier: "en_US")
+        let book = ItemSummary(id: "li_1", itemID: "li_1", kind: .book, title: "T", subtitle: "A", isExplicit: true)
+        let episode = ItemSummary(id: "ep_1", itemID: "li_p", episodeID: "ep_1", kind: .episode, title: "E")
+        let reader = ItemDownloadReader { itemID, episodeID in
+            (itemID, episodeID) == ("li_1", nil) || (itemID, episodeID) == ("li_p", "ep_1")
+        }
+        #expect(ItemPresentation.isDownloaded(book, reader: reader))
+        #expect(ItemPresentation.isDownloaded(episode, reader: reader))
+        #expect(!ItemPresentation.isDownloaded(frankenstein, reader: reader))
+        #expect(ItemPresentation.accessibilityLabel(book) == "T, A")
+        #expect(ItemPresentation.accessibilityValue(book, progress: nil, locale: locale) == "Explicit")
+        #expect(
+            ItemPresentation.accessibilityValue(book, progress: nil, isDownloaded: true, locale: locale)
+                == "Downloaded, Explicit")
+        #expect(
+            ItemPresentation.accessibilityValue(
+                book, progress: ItemProgress(fraction: 0.45), isDownloaded: true, locale: locale)
+                == "Progress, 45%, Downloaded, Explicit")
+    }
+
+    @Test func aCollapsedSeriesIsNeverMarkedDownloaded() {
+        let series = ItemSummary(
+            id: "series-s", itemID: "li_first", seriesID: "s", kind: .series, title: "Barsoom", bookCount: 3)
+        #expect(!ItemPresentation.isDownloaded(series, reader: ItemDownloadReader { _, _ in true }))
+    }
+
     // MARK: Series, authors and shelves
 
     @Test func seriesAndAuthorCardsSpeakNameAndBookCount() {
