@@ -114,7 +114,11 @@ default text size and at AX5. Record failures as issues that reference #106.
   two lines up to that size, as the tab bar keeps its own size. At accessibility sizes it shows
   the title on up to two lines, play/pause and close; in narrow windows (iPhone Duo) a
   `ViewThatFits` drops the jumps, then the cover and author, so the title keeps about a dozen
-  characters (#616). Its button speaks the full title.
+  characters (#616). Its button speaks the full title. Since its text is capped at xLarge, a
+  long press on the title, play/pause, the jumps or close shows the Large Content Viewer, as on
+  the tab bar. At accessibility sizes, where the viewer works, the title's long press shows it
+  in place of the Up Next context menu; Up Next stays in the full player and in VoiceOver's
+  actions.
 - Previews at `.accessibility5` exist for `ItemCard` and `ItemRow`; add one for any new
   view whose layout changes with the text size.
 

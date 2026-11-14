@@ -12,7 +12,9 @@ import SwiftUI
 /// placement only play/pause stays. At accessibility text sizes the cover, author and jumps go, so
 /// the title, on up to two lines, play/pause and close keep fitting. In a narrow window, such as
 /// the iPhone Duo's, the jumps go, then the cover and author, so the title keeps a readable width
-/// (#616). On macOS it is a bar under the content.
+/// (#616). On iOS its text stops growing at ``largestTextSize``; a long press on the title or a
+/// button shows it in the Large Content Viewer, as on the tab bar. On macOS it is a bar under the
+/// content.
 struct MiniPlayerView: View {
     let model: PlayerViewModel
     let router: Router
@@ -57,10 +59,13 @@ struct MiniPlayerView: View {
 
     var body: some View {
         // The layout comes from the text size the user picked; the bar's text stops growing.
-        MiniPlayerBar(model: model, router: router, layout: layout)
-            #if os(iOS)
-                .dynamicTypeSize(...Self.largestTextSize)
-            #endif
+        MiniPlayerBar(
+            model: model, router: router, layout: layout,
+            showsUpNextMenu: !dynamicTypeSize.isAccessibilitySize
+        )
+        #if os(iOS)
+            .dynamicTypeSize(...Self.largestTextSize)
+        #endif
     }
 
     /// The line shown, in place of the author, while recovery waits for the network.
@@ -72,6 +77,10 @@ private struct MiniPlayerBar: View {
     let model: PlayerViewModel
     let router: Router
     let layout: MiniPlayerView.Layout
+    /// Whether a long press on the title shows the Up Next menu. At accessibility text sizes the
+    /// long press shows the Large Content Viewer instead (the two can't share it); Up Next stays
+    /// in the full player and in the VoiceOver actions.
+    let showsUpNextMenu: Bool
     @Environment(AppSettings.self) private var settings: AppSettings?
     @ScaledMetric(relativeTo: .body) private var coverHeight: CGFloat = 40
     /// The width the title keeps before the jumps, then the cover and author, give way to it:
@@ -79,10 +88,11 @@ private struct MiniPlayerBar: View {
     @ScaledMetric(relativeTo: .subheadline) private var readableTitleWidth: CGFloat = 110
     private var libraries = LibraryCoverSettings()
 
-    init(model: PlayerViewModel, router: Router, layout: MiniPlayerView.Layout) {
+    init(model: PlayerViewModel, router: Router, layout: MiniPlayerView.Layout, showsUpNextMenu: Bool) {
         self.model = model
         self.router = router
         self.layout = layout
+        self.showsUpNextMenu = showsUpNextMenu
     }
 
     var body: some View {
@@ -163,23 +173,17 @@ private struct MiniPlayerBar: View {
             .contentShape(.rect)
         }
         .buttonStyle(.plain)
+        // The capped text size's stand-in (HIG): the title, large, on a long press.
+        .accessibilityShowsLargeContentViewer {
+            Text(verbatim: model.title)
+        }
         .accessibilityLabel(Text(verbatim: L10n.string("LabelMiniPlayerAccessibility", model.title)))
         .accessibilityValue(
             Text(verbatim: model.isWaitingForNetwork ? L10n.string(MiniPlayerView.waitingForNetworkKey) : "")
         )
         .accessibilityHint(Text(verbatim: L10n.string("LabelMiniPlayerHint")))
         .accessibilityIdentifier("player.mini")
-        .contextMenu {
-            Button {
-                router.isQueueInspectorPresented = true
-            } label: {
-                Label {
-                    Text(verbatim: L10n.string("HeaderUpNext"))
-                } icon: {
-                    Image(systemName: "list.bullet")
-                }
-            }
-        }
+        .modifier(UpNextMenu(isEnabled: showsUpNextMenu, router: router))
         .accessibilityAction(named: Text(verbatim: L10n.string("HeaderUpNext"))) {
             router.isQueueInspectorPresented = true
         }
@@ -201,6 +205,37 @@ private struct MiniPlayerBar: View {
         }
         .buttonStyle(.borderless)
         .foregroundStyle(ABSColor.mutedForeground)
+        .accessibilityShowsLargeContentViewer {
+            Label {
+                Text(verbatim: L10n.string("LabelClosePlayer"))
+            } icon: {
+                Image(systemName: "xmark")
+            }
+        }
+    }
+}
+
+/// The mini player's context menu, with Up Next, when `isEnabled`.
+private struct UpNextMenu: ViewModifier {
+    let isEnabled: Bool
+    let router: Router
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.contextMenu {
+                Button {
+                    router.isQueueInspectorPresented = true
+                } label: {
+                    Label {
+                        Text(verbatim: L10n.string("HeaderUpNext"))
+                    } icon: {
+                        Image(systemName: "list.bullet")
+                    }
+                }
+            }
+        } else {
+            content
+        }
     }
 }
 
