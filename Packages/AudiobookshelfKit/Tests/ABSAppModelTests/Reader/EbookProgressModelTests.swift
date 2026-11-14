@@ -979,6 +979,75 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(try await row().ebookLocation == "4")
         #expect(service.server.value?.ebookLocation == "4")
     }
+
+    // MARK: - Downloads
+
+    /// The session's factory over `items`, as the participant builds it.
+    func makeFactory(_ items: [LocalLibraryItemDTO]) -> EbookProgressFactory {
+        EbookProgressFactory(
+            serverConnectionID: connection, store: store,
+            sources: EbookProgressSources(service: service, syncer: syncer), localItems: DownloadedItems(items))
+    }
+
+    /// A turn in the factory's model for `key`, saved and sent.
+    func turnAndFlush(_ factory: EbookProgressFactory) async throws {
+        let model = try #require(factory(key, .pdf, nil))
+        turn(model, to: 3)
+        await model.flush()
+    }
+
+    /// A downloaded book's row is linked to its download (#74), so pruning synced rows keeps it for
+    /// an offline reopen; it is sent as any other.
+    @Test(arguments: [LocalFileKind.ebook, .audio])
+    func aDownloadedBooksRowIsLinkedToTheDownload(kind: LocalFileKind) async throws {
+        let download = downloadedItem(on: connection, files: [kind])
+        try await turnAndFlush(makeFactory([download]))
+
+        #expect(try await row().localLibraryItemID == download.id)
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["3"])
+        #expect(try await store.pruneSynced() == 0)
+        #expect(try await store.progress(for: key) != nil)
+    }
+
+    /// Without a download of the book (no item, or an item without its files, such as a cover
+    /// only) the row isn't linked.
+    @Test(arguments: [nil, []] as [[LocalFileKind]?])
+    func aBookNotDownloadedIsNotLinked(files: [LocalFileKind]?) async throws {
+        try await turnAndFlush(makeFactory(files.map { [downloadedItem(on: connection, files: $0)] } ?? []))
+
+        #expect(try await row().localLibraryItemID == nil)
+    }
+
+    /// The same book downloaded from another connection isn't this connection's download.
+    @Test func anotherConnectionsDownloadIsNotLinked() async throws {
+        try await turnAndFlush(makeFactory([downloadedItem(on: UUID(), files: [.ebook])]))
+
+        #expect(try await row().localLibraryItemID == nil)
+    }
+}
+
+/// Downloaded items by connection and library item, as `LocalItemStore` finds them.
+private struct DownloadedItems: LocalItemReading {
+    let items: [LocalLibraryItemDTO]
+
+    init(_ items: [LocalLibraryItemDTO]) {
+        self.items = items
+    }
+
+    func item(serverConnectionID: UUID, libraryItemId: String) async throws -> LocalLibraryItemDTO? {
+        items.first { $0.serverConnectionID == serverConnectionID && $0.libraryItemId == libraryItemId }
+    }
+}
+
+/// The book `key` names, downloaded on `connectionID` with one file of each kind in `files`.
+private func downloadedItem(on connectionID: UUID, files: [LocalFileKind]) -> LocalLibraryItemDTO {
+    LocalLibraryItemDTO(
+        id: UUID(), serverConnectionID: connectionID, serverAddress: "https://abs.test", serverUserId: "u",
+        libraryItemId: key.libraryItemId, mediaType: .book, title: "Book", relativeDirectory: "book", addedAt: t0,
+        updatedAt: t0, media: LocalMediaSnapshot(metadata: .init(title: "Book")),
+        files: files.map {
+            LocalFileDTO(kind: $0, relativePath: "book/file", filename: "file", mimeType: "", size: 1, serverIno: "ino")
+        })
 }
 
 /// ``EbookResumePoint/resolve(kind:local:replaced:server:)``.

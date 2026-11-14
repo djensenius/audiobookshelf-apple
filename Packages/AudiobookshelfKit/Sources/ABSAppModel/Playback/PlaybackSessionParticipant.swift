@@ -144,6 +144,7 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     @ObservationIgnored private let makeBookmarks: @MainActor () -> BookmarkStore
     @ObservationIgnored private let progressSink: (@MainActor (PlaybackProgressUpdate, SessionContext) -> Void)?
     @ObservationIgnored private let makeScope: MakeScope
+    @ObservationIgnored private let localItems: (any LocalItemReading)?
 
     /// - Parameters:
     ///   - current: The proxy the player screens read, re-bound to each session's coordinator.
@@ -157,6 +158,8 @@ public final class PlaybackSessionParticipant: SessionParticipant {
     ///     `isOffline` reads the lifecycle's gate.
     ///   - progressSink: Hears the running scope's progress, with its session's context; the app
     ///     passes ``LibraryParticipant/applyPlaybackProgress(_:sessionID:)``.
+    ///   - localItems: The downloaded items, which each session's ``ebookProgress`` links ebook
+    ///     progress rows to (#74); the app passes its downloads' `LocalDownloadFiles/items`.
     ///   - makeScope: Builds the scope; the app passes ``PlaybackScope/make(_:makeNowPlaying:)``.
     public init(
         current: CurrentPlayback, writer: LocalProgressStore, deviceIdentifiers: any DeviceIdentifying,
@@ -165,8 +168,10 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         closeTimeout: Duration = PlaybackCoordinator.closeWaitTimeout,
         makeBookmarks: @escaping @MainActor () -> BookmarkStore = { BookmarkStore() },
         progressSink: (@MainActor (PlaybackProgressUpdate, SessionContext) -> Void)? = nil,
+        localItems: (any LocalItemReading)? = nil,
         makeScope: @escaping MakeScope
     ) {
+        self.localItems = localItems
         self.current = current
         self.writer = writer
         self.deviceIdentifiers = deviceIdentifiers
@@ -218,7 +223,8 @@ public final class PlaybackSessionParticipant: SessionParticipant {
         queue = PlaybackQueueControl(scope: scope)
         sleepTimer = scope.sleepTimer
         ebookProgress = scope.ebookProgressSources.map {
-            EbookProgressFactory(serverConnectionID: context.identity.connectionID, store: writer, sources: $0)
+            EbookProgressFactory(
+                serverConnectionID: context.identity.connectionID, store: writer, sources: $0, localItems: localItems)
         }
         let bookmarks = makeBookmarks()
         self.bookmarks = bookmarks

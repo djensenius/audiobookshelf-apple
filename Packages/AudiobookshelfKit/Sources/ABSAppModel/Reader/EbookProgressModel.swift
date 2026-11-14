@@ -77,21 +77,24 @@ public final class EbookProgressModel {
     @ObservationIgnored private let store: LocalProgressStore
     @ObservationIgnored private let service: any EbookProgressService
     @ObservationIgnored private let syncer: any ProgressDraining
-    @ObservationIgnored private let localLibraryItemID: UUID?
+    @ObservationIgnored private let localLibraryItemID: @Sendable () async -> UUID?
     @ObservationIgnored private let debounce: Duration
     @ObservationIgnored private let clock: any Clock<Duration>
     @ObservationIgnored private let now: @Sendable () -> Date
 
     /// - Parameters:
     ///   - syncer: Sends saved rows: the account's `ProgressSyncer`, which must use `store`.
-    ///   - localLibraryItemID: The downloaded item, if any, linked to the row on save.
+    ///   - localLibraryItemID: The downloaded item, if any, linked to the row on save. Read at each
+    ///     save, so a download finished while the book is open is linked, and one deleted meanwhile
+    ///     isn't linked again (`nil` keeps the row's link).
     ///   - serverProgress: Progress already known (for example from `ProgressCache`), used when
     ///     ``resume()`` can't reach the server and there is no row.
     ///   - clock: Times the debounce; tests pass a manual clock.
     ///   - now: Dates local edits, when a page turn is recorded.
     public init(
         key: MediaKey, kind: ReaderKind, store: LocalProgressStore, service: any EbookProgressService,
-        syncer: any ProgressDraining, localLibraryItemID: UUID? = nil, serverProgress: MediaProgress? = nil,
+        syncer: any ProgressDraining, localLibraryItemID: @escaping @Sendable () async -> UUID? = { nil },
+        serverProgress: MediaProgress? = nil,
         debounce: Duration = defaultDebounce, clock: any Clock<Duration> = ContinuousClock(),
         now: @escaping @Sendable () -> Date = { .now }
     ) {
@@ -115,8 +118,8 @@ public final class EbookProgressModel {
         Task {
             do {
                 try await store.recordEbookEdit(
-                    pending.edit, for: key, token: pending.token, serverProgress: seed, localLibraryItemID: itemID,
-                    now: pending.at)
+                    pending.edit, for: key, token: pending.token, serverProgress: seed,
+                    localLibraryItemID: await itemID(), now: pending.at)
             } catch {
                 logger.error("Saving ebook progress on close failed: \(Self.caseName(error), privacy: .public)")
             }
@@ -285,13 +288,16 @@ public final class EbookProgressModel {
     /// Saves the latest unsaved turn. Returns `false` when the save failed, so nothing is sent;
     /// the turn is kept for the next save, unless a newer one replaced it.
     private func save() async -> Bool {
+        guard unsaved != nil else { return true }
+        let itemID = await localLibraryItemID()
+        // Saves run one at a time, so only a newer turn replaced it meanwhile.
         guard let pending = unsaved else { return true }
         unsaved = nil
         do {
             let row = try await store.recordEbookEdit(
                 pending.edit, for: key, token: pending.token,
                 serverProgress: knownServerProgress.flatMap(Self.baseline),
-                localLibraryItemID: localLibraryItemID, now: pending.at)
+                localLibraryItemID: itemID, now: pending.at)
             // `nil`: a later turn for the key, from another reader, is saved; it stays.
             if let row {
                 syncStateRevision += 1
