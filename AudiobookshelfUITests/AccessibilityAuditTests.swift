@@ -129,7 +129,9 @@ final class AccessibilityAuditTests: XCTestCase {
                 return true
             }
         }
-        XCTFail("\(name): the metadata is still under the bottom bar after 10 steps")
+        if metadata.frame.maxY > KnownAuditIssue.bottomBarTop(in: app) {
+            XCTFail("\(name): the metadata is still under the bottom bar after 10 steps")
+        }
         return failures
     }
 
