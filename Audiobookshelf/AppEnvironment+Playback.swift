@@ -75,6 +75,8 @@ struct AppPlayback {
             progressSink: { [weak library] update, context in
                 library?.applyPlaybackProgress(update, sessionID: context.sessionID)
             },
+            // Ebook progress of a downloaded book is linked to the download, like its playback.
+            localItems: downloads?.items,
             makeScope: {
                 Self.makeScope(
                     for: $0, settings: settings, policy: policy, mediaLeases: mediaLeases, history: history,

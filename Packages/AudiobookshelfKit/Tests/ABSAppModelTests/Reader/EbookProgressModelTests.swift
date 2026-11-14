@@ -1,5 +1,6 @@
 import ABSAPI
 import ABSCore
+import ABSDownloads
 import Foundation
 import SwiftData
 import Testing
@@ -979,6 +980,146 @@ private func serverProgress(_ location: String?, progress: Double? = nil, at dat
         #expect(try await row().ebookLocation == "4")
         #expect(service.server.value?.ebookLocation == "4")
     }
+
+    // MARK: - Downloads
+
+    /// The session's factory over `items`, as the participant builds it.
+    func makeFactory(_ items: [LocalLibraryItemDTO]) -> EbookProgressFactory {
+        makeFactory(DownloadedItems(items))
+    }
+
+    func makeFactory(_ items: DownloadedItems) -> EbookProgressFactory {
+        EbookProgressFactory(
+            serverConnectionID: connection, store: store,
+            sources: EbookProgressSources(service: service, syncer: syncer), localItems: items)
+    }
+
+    /// The row once it exists with `localLibraryItemID`, polled: a released model saves later.
+    func linked(_ itemID: UUID?) async -> Bool {
+        for attempt in 0..<2_000 {
+            if let row = try? await store.progress(for: key), row.localLibraryItemID == itemID { return true }
+            if attempt < 200 { await Task.yield() } else { try? await Task.sleep(for: .milliseconds(1)) }
+        }
+        return false
+    }
+
+    /// Turns to page 3 in the factory's model, then saves it by flushing, or by releasing the
+    /// model (its `deinit` save).
+    func turnAndSave(_ factory: EbookProgressFactory, viaRelease: Bool) async throws {
+        var model: EbookProgressModel? = try #require(factory(key, .pdf, nil))
+        turn(try #require(model), to: 3)
+        if viaRelease {
+            model = nil
+        } else {
+            await model?.flush()
+        }
+    }
+
+    /// A turn in the factory's model for `key`, saved and sent.
+    func turnAndFlush(_ factory: EbookProgressFactory) async throws {
+        let model = try #require(factory(key, .pdf, nil))
+        turn(model, to: 3)
+        await model.flush()
+    }
+
+    /// A downloaded book's row is linked to its download (#74), so pruning synced rows keeps it for
+    /// an offline reopen; it is sent as any other.
+    @Test(arguments: [LocalFileKind.ebook, .audio])
+    func aDownloadedBooksRowIsLinkedToTheDownload(kind: LocalFileKind) async throws {
+        let download = downloadedItem(on: connection, files: [kind])
+        try await turnAndFlush(makeFactory([download]))
+
+        #expect(try await row().localLibraryItemID == download.id)
+        #expect(service.writes.value.map(\.update.ebookLocation) == ["3"])
+        #expect(try await store.pruneSynced() == 0)
+        #expect(try await store.progress(for: key) != nil)
+    }
+
+    /// Without a download of the book (no item, or an item without its files, such as a cover
+    /// only) the row isn't linked.
+    @Test(arguments: [nil, []] as [[LocalFileKind]?])
+    func aBookNotDownloadedIsNotLinked(files: [LocalFileKind]?) async throws {
+        try await turnAndFlush(makeFactory(files.map { [downloadedItem(on: connection, files: $0)] } ?? []))
+
+        #expect(try await row().localLibraryItemID == nil)
+    }
+
+    /// The same book downloaded from another connection isn't this connection's download.
+    @Test func anotherConnectionsDownloadIsNotLinked() async throws {
+        try await turnAndFlush(makeFactory([downloadedItem(on: UUID(), files: [.ebook])]))
+
+        #expect(try await row().localLibraryItemID == nil)
+    }
+
+    /// A download completing between a save's lookup and its write, in the download manager's
+    /// order (the item, then the link, which finds no row yet): the saved row is still linked,
+    /// so pruning keeps it. Also for a released model's save.
+    @Test(arguments: [false, true])
+    func aDownloadCompletedDuringASaveIsLinked(viaRelease: Bool) async throws {
+        let download = downloadedItem(on: connection, files: [.ebook])
+        let items = DownloadedItems([])
+        let linker = LocalProgressStoreLinker(store: store)
+        items.afterFirstLookup.value = {
+            items.items.value.append(download)
+            try? await linker.link(key: key, itemID: download.id)
+        }
+        try await turnAndSave(makeFactory(items), viaRelease: viaRelease)
+
+        #expect(await linked(download.id))
+        await syncer.drainPendingProgress()
+        #expect(try await store.pruneSynced() == 0)
+        #expect(try await row().localLibraryItemID == download.id)
+    }
+
+    /// A download deleted between a save's lookup and its write, in the download manager's order
+    /// (the item, then the detach, which finds no linked row yet): the saved row isn't left
+    /// linked to it. Also for a released model's save.
+    @Test(arguments: [false, true])
+    func aDownloadDeletedDuringASaveIsUnlinked(viaRelease: Bool) async throws {
+        let download = downloadedItem(on: connection, files: [.ebook])
+        let items = DownloadedItems([download])
+        let linker = LocalProgressStoreLinker(store: store)
+        items.afterFirstLookup.value = {
+            items.items.value = []
+            try? await linker.detach(itemID: download.id)
+        }
+        try await turnAndSave(makeFactory(items), viaRelease: viaRelease)
+
+        #expect(await linked(nil))
+        #expect(try await store.progress(localLibraryItemID: download.id).isEmpty)
+    }
+}
+
+/// Downloaded items by connection and library item, as `LocalItemStore` finds them.
+/// `afterFirstLookup` runs once, after the first lookup has read its answer and before it returns.
+final class DownloadedItems: LocalItemReading {
+    let items: Locked<[LocalLibraryItemDTO]>
+    let afterFirstLookup = Locked<(@Sendable () async -> Void)?>(nil)
+
+    init(_ items: [LocalLibraryItemDTO]) {
+        self.items = Locked(items)
+    }
+
+    func item(serverConnectionID: UUID, libraryItemId: String) async throws -> LocalLibraryItemDTO? {
+        let answer = items.value.first {
+            $0.serverConnectionID == serverConnectionID && $0.libraryItemId == libraryItemId
+        }
+        let hook = afterFirstLookup.value
+        afterFirstLookup.value = nil
+        await hook?()
+        return answer
+    }
+}
+
+/// The book `key` names, downloaded on `connectionID` with one file of each kind in `files`.
+private func downloadedItem(on connectionID: UUID, files: [LocalFileKind]) -> LocalLibraryItemDTO {
+    LocalLibraryItemDTO(
+        id: UUID(), serverConnectionID: connectionID, serverAddress: "https://abs.test", serverUserId: "u",
+        libraryItemId: key.libraryItemId, mediaType: .book, title: "Book", relativeDirectory: "book", addedAt: t0,
+        updatedAt: t0, media: LocalMediaSnapshot(metadata: .init(title: "Book")),
+        files: files.map {
+            LocalFileDTO(kind: $0, relativePath: "book/file", filename: "file", mimeType: "", size: 1, serverIno: "ino")
+        })
 }
 
 /// ``EbookResumePoint/resolve(kind:local:replaced:server:)``.
