@@ -14,11 +14,14 @@ extension RealtimeBridge {
     ///   playback sync are recognized, and takes stream resets, which it applies only to its own
     ///   session (``PlaybackCoordinator/handleStreamReset(sessionID:)``).
     /// - `localProgress` takes socket progress for media with a local row (ADR 0003).
+    /// - `remoteProgressOffer` takes another session's newer position for the paused item, to
+    ///   offer a jump to it, and newer progress that ends the offer; `nil` offers nothing.
     ///
     /// - Parameter bookmarks: The running session's bookmark store, or `nil` between sessions.
     public func route(
         library: LibraryStore, accounts: AccountManager?, bookmarks: @escaping @MainActor () -> BookmarkStore?,
-        playback: any PlayerPlaybackControlling, localProgress: LocalProgressStore?
+        playback: any PlayerPlaybackControlling, localProgress: LocalProgressStore?,
+        remoteProgressOffer: RemoteProgressOffer? = nil
     ) {
         onUserUpdated = { [weak accounts] user in
             accounts?.applyUserUpdate(user)
@@ -28,6 +31,13 @@ extension RealtimeBridge {
         playbackSnapshot = { [weak playback] in playback.flatMap(Self.snapshot(of:)) }
         onStreamReset = { [weak playback] in playback?.handleStreamReset(sessionID: $0.streamId) }
         self.localProgress = localProgress
+        if let remoteProgressOffer {
+            onRemoteProgress = { [weak remoteProgressOffer] in remoteProgressOffer?.offer($0) }
+            onRemoteProgressSuperseded = { [weak remoteProgressOffer] in remoteProgressOffer?.supersede($0) }
+        } else {
+            onRemoteProgress = nil
+            onRemoteProgressSuperseded = nil
+        }
     }
 
     /// Reconnects the socket at once when the device moves to another online path, or comes back
