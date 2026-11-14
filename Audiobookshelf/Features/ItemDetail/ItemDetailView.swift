@@ -99,6 +99,14 @@ struct ItemDetailScreen: View {
     var playlists: (any PlaylistEditingService)?
 
     var body: some View {
+        // A podcast's own screen has nothing to play: its links name an episode, which opens on top.
+        screen
+            .confirmsPlayLink(
+                for: .item(id: model.itemID), title: model.hasLoaded ? model.details?.title ?? "" : nil,
+                isPlayable: model.mediaType != .podcast && model.playButton != .unavailable)
+    }
+
+    @ViewBuilder private var screen: some View {
         if model.hasLoaded, model.mediaType == .podcast {
             // The podcast screen has its own title.
             PodcastDetailView(model: model)

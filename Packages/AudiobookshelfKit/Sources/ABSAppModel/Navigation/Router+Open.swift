@@ -84,6 +84,15 @@ extension Router {
         clearPendingPlayLink()
     }
 
+    /// ``pendingPlayLink`` for the screen showing `route`, only while that screen is the one the
+    /// link opened and tops the Library path (#577). A screen pushed on top hides it until it is
+    /// popped again; an older screen for the same item lower in the path never gets it.
+    public func pendingPlayLink(for route: Route) -> PlayLink? {
+        guard let pendingPlayLink, pendingPlayLinkPath.last == route, self[path: .library] == pendingPlayLinkPath
+        else { return nil }
+        return pendingPlayLink
+    }
+
     private static func itemRoutes(id: String, episodeID: String?) -> [Route] {
         guard let episodeID else { return [.item(id: id)] }
         return [.item(id: id), .episode(itemID: id, episodeID: episodeID)]

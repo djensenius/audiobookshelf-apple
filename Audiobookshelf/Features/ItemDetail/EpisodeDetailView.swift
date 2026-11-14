@@ -97,6 +97,9 @@ struct EpisodeDetailScreen: View {
                 .navigationBarTitleDisplayMode(.inline)
             #endif
             .episodeDetailMoreMenu(model: model, serverURL: serverURL, playlists: playlists)
+            .confirmsPlayLink(
+                for: .episode(itemID: model.itemID, episodeID: model.episodeID), title: model.episode?.title,
+                isPlayable: model.playButton != .unavailable)
     }
 
     @ViewBuilder private var content: some View {

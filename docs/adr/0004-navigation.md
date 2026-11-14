@@ -288,6 +288,7 @@ The legacy app registers the `audiobookshelf` URL scheme (`ios/App/App/Info.plis
 - `t=` is seconds (`5025`, `5025.5`) or a clock time (`1:23:45`, `83:45`), at most 10,000,000 seconds. Anything else, including negative values, is ignored and the link still opens the item.
 - `Router.open(_:)` opens item, series, author, collection and playlist links in the Library tab, pushing onto its path. `library` calls `requestLibrary(id:)`. `search` selects Search at its root and sets `pendingSearchQuery`. A `server=` that isn't the router's server only sets `pendingServerSwitch`.
 - `PlayLinkDecision` gives `.openOnly` for the item that is playing (or buffering), `.confirmResume(startTime:)` for the loaded but paused item, and `.confirmPlay(startTime:)` otherwise. A `play/{podcastID}` link without an episode has nothing to play; the item screen treats it as open-only.
+- The item or episode screen the link opened asks once it has loaded, while it tops the Library tab's path and the full player doesn't cover it (`Router.pendingPlayLink(for:)`, `PlayLinkConfirmation`; #577). Asking, or an open-only decision, clears the pending link, so Cancel leaves nothing behind. Confirm plays through the screens' `playItem`, with its streaming and cellular checks; loaded media resumes in its session from the link's time. The link waits while the scene's router isn't the active connection's, and media loaded on another connection doesn't count as playing.
 
 **Play links never start playback silently.** Any app or web page can open a URL, so `play/` links are limited:
 
@@ -341,7 +342,7 @@ IDs follow the URL rules. A present but invalid `item` or `episode` rejects the 
 - The lookup is asynchronous, so `SceneLinks` orders the links by arrival. A Handoff activity reserves its place when it arrives (`reserveArrival()`) and is kept with the gate and link epoch from that moment.
   - It is the newest link even if it turns out to open nothing, so on arrival it drops the waiting link and a confirmed switch's link, and the host drops the server switch its dialog or router asks about (`handoffArrivals`, `ServerSwitchPrompt.supersede(in:)`).
   - Its result is stale, and does nothing, if another link arrived while it resolved (the newer link wins) or the session changed (the epoch moved on). That holds for both results: a stale link isn't kept, not even for a confirmed switch's next account, and a stale `accountNotSignedIn` shows no alert.
-- A continued player activity opens its item or episode screen and sets `Router.pendingPlayLink` with the position, like a `play/` URL with `t=`. No screen shows the play-link confirmation yet, so for now it only opens the screen. Playing from the position waits for that confirmation, which URLs need too; it is never started without one.
+- A continued player activity opens its item or episode screen and sets `Router.pendingPlayLink` with the position, like a `play/` URL with `t=`. That screen asks before it plays from the position, as for the URL; it is never started without the confirmation.
 
 ### State restoration
 
