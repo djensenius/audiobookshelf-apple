@@ -74,6 +74,11 @@ public struct DownloadCredentials: Sendable {
         self.configuration = configuration
         self.accessToken = accessToken
     }
+
+    /// Whether ``DownloadEngine`` transfers this connection's files in its foreground session,
+    /// which only runs while the app is open: the connection has custom headers, which a
+    /// background session could send off the server on a redirect.
+    public var usesForegroundSession: Bool { !configuration.customHeaders.isEmpty }
 }
 
 /// Supplies credentials for download requests; implemented by the account layer, which owns
@@ -99,4 +104,13 @@ public protocol DownloadCredentialProviding: Sendable {
     /// - Throws: when the connection is signed out or the refresh fails.
     func credentials(for connectionID: UUID, replacing rejectedAccessToken: String?) async throws
         -> DownloadCredentials
+}
+
+extension DownloadCredentialProviding {
+    /// Whether the connection's downloads go through the foreground session, so they continue
+    /// only while the app is open (``DownloadCredentials/usesForegroundSession``), from its stored
+    /// credentials and without any request; `false` when it's signed out or removed.
+    public func usesForegroundSession(for connectionID: UUID) async -> Bool {
+        await currentCredentials(for: connectionID)?.usesForegroundSession ?? false
+    }
 }

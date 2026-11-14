@@ -418,6 +418,10 @@ struct ProgressSyncState: Sendable, Equatable {
             }
             return
         }
+        // A local finish made after the pending position edit (#565): the audio PATCH goes first
+        // and un-finishes the server (#53), so the finish stays pending to be sent after it. Both
+        // edit times are this device's clock, so this holds whatever the server's clock says.
+        if group == .finished, finishOutlastsPendingPosition(server) { return }
         // A real conflict. `server.lastUpdate` is row-wide, an upper bound on when the group
         // changed, so ties and unknown edit times favour the server.
         if let edited = editedAt(group), edited > server.lastUpdate { return }
@@ -447,6 +451,18 @@ struct ProgressSyncState: Sendable, Equatable {
         // Without server progress, the PATCH creates it with defaults for every unsent group.
         if unseeded ?? (serverBaseline == nil) { affected.formUnion(ProgressGroups.all.subtracting(sent)) }
         truncated.formUnion(affected.intersection(dirty))
+    }
+
+    /// Whether a dirty local finish must stay pending against `server` (#565): the server holds
+    /// the item finished too, and a dirty position edited no later than the finish (in this
+    /// device's order) is still to be sent. That audio PATCH, sent first, un-finishes the server
+    /// (#53), so settling the finish now would leave the item un-finished. A position edited after
+    /// the finish (the user played on) and a server un-finish keep the usual conflict rule.
+    private func finishOutlastsPendingPosition(_ server: ProgressBaseline) -> Bool {
+        guard isFinished, server.isFinished, dirty.contains(.audio), let finished = finishedEditedAt,
+            let audio = audioEditedAt
+        else { return false }
+        return audio <= finished
     }
 
     private mutating func markClean(_ group: ProgressGroups) {

@@ -6,6 +6,8 @@ installed xcresulttool 0.5.0 schema; real Swift Testing output remains a separat
 simulator validation gate. Included in mise lint:repo on Linux and macOS.
 """
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -36,11 +38,14 @@ OLDER = "33333333-3333-3333-3333-333333333333"
 TOO_OLD = "44444444-4444-4444-4444-444444444444"
 UNAVAILABLE = "55555555-5555-5555-5555-555555555555"
 IPAD = "66666666-6666-6666-6666-666666666666"
+CREATED = ["AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB"]
 PHONE_TYPE = "com.apple.CoreSimulator.SimDeviceType.iPhone-17"
 PAD_TYPE = "com.apple.CoreSimulator.SimDeviceType.iPad-Pro"
+BOTH_PHASES = ("build-for-testing", "test-without-building")
+BUILT = {"code": 0, "output": "** TEST BUILD SUCCEEDED **"}  # A scripted, successful build phase.
 
 FAKE_CLI = r'''
-import json, os, sys, time
+import json, os, signal, sys, time
 from pathlib import Path
 root = Path(os.environ["CASE_ROOT"])
 args = sys.argv[1:]
@@ -55,19 +60,62 @@ if tool == "xcodebuild" and args == ["-list", "-json"]:
     print((root / "listing.json").read_text())
     sys.exit(0)
 if tool == "xcodebuild":
-    result = Path(args[args.index("-resultBundlePath") + 1])
-    assert not result.exists(), "stale result bundle"
-    result.mkdir()
+    action = args[0]
+    assert action in ("build-for-testing", "test-without-building"), args
+    products = Path(args[args.index("-derivedDataPath") + 1]) / "Build/Products"
+    if action == "build-for-testing":
+        assert "-resultBundlePath" not in args, args
+        assert not products.exists(), "derived data is not fresh"
+        products.mkdir(parents=True)
+    else:
+        # Only what build-for-testing produced, in the same derived data, can be tested.
+        assert products.is_dir(), "test-without-building before build-for-testing"
+        result = Path(args[args.index("-resultBundlePath") + 1])
+        assert not result.exists(), "stale result bundle"
+        result.mkdir()
     marker = root / "xcode.pid.tmp"
     marker.write_text(str(os.getpid()))
     marker.replace(root / "xcode.pid")
-    if faults.get("hang"):
+    if faults.get("hang") == action:
+        (root / "xcode.hanging").touch()  # After the PID marker, so it's this process's.
         time.sleep(60)
+    runs = sorted(root.glob("xcode-run.*"))
+    (root / f"xcode-run.{len(runs)}").touch()
+    scripted = faults.get("xcodeRuns", [])
+    if len(runs) < len(scripted):
+        # Infrastructure errors arrive on stderr; the runner must still see them.
+        print(scripted[len(runs)]["output"], file=sys.stderr, flush=True)
+        sys.exit(scripted[len(runs)]["code"])
     print("** TEST SUCCEEDED **")  # Never sufficient evidence.
-    sys.exit(faults.get("xcode", 0))
+    sys.exit(faults.get(action, 0))
 assert tool == "xcrun"
+created = root / "created.json"
+owned = json.loads(created.read_text()) if created.exists() else []
+if args[:2] == ["simctl", "create"]:
+    assert len(args) == 5, args
+    udid = json.loads((root / "udids.json").read_text())[len(owned)]
+    # A failed create may or may not have registered the device (`createRegisters`).
+    registered = not faults.get("create") or faults.get("createRegisters", False)
+    created.write_text(json.dumps(owned + [{"name": args[2], "udid": udid, "registered": registered}]))
+    if faults.get("create"):
+        sys.exit(faults["create"])
+    print(faults.get("createOutput", udid))
+    sys.exit(0)
+if args[:2] in (["simctl", "bootstatus"], ["simctl", "shutdown"], ["simctl", "delete"]):
+    # Only ever touch a simulator this run asked simctl to create.
+    match = [item for item in owned if args[2] in (item["udid"], item["name"])]
+    assert match, args
+    assert args[3:] == (["-b"] if args[1] == "bootstatus" else []), args
+    if not match[0].get("registered", True):
+        print(f"Invalid device: {args[2]}", file=sys.stderr)
+        sys.exit(148)
+    if args[1] == "shutdown" and faults.get("cancelDuringShutdown"):
+        os.kill(os.getppid(), signal.SIGTERM)  # The runner, as a cancelled job would see it.
+    sys.exit(faults.get(args[1], 0))
 if args == ["simctl", "list", "-j", "devices", "available"]:
     kind = "devices"
+elif args == ["simctl", "list", "-j", "devices"]:
+    kind = "allDevices"
 elif args == ["simctl", "list", "-j", "runtimes"]:
     kind = "runtimes"
 elif args[:3] == ["xcresulttool", "get", "test-results"]:
@@ -121,7 +169,8 @@ class RunnerTests(unittest.TestCase):
             path.write_text(f"#!{sys.executable}\n" + FAKE_CLI)
             path.chmod(0o700)
         self.env = dict(os.environ, CASE_ROOT=str(self.root))
-        for key in ("IOS_SIMULATOR_ID", "DEVELOPER_DIR"):
+        for key in ("IOS_SIMULATOR_ID", "DEVELOPER_DIR", "CI", "ABS_EPHEMERAL_SIMULATOR",
+                    "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
             self.env.pop(key, None)
         self.env["PATH"] = str(binaries) + os.pathsep + self.env["PATH"]
         newest, older, too_old = runtime("27.2"), runtime("27.0"), runtime("26.5")
@@ -151,19 +200,27 @@ class RunnerTests(unittest.TestCase):
             "AudiobookshelfKit", "AudiobookshelfKit-Package", "AudiobookshelfWidgetKit",
         ]}}
         self.faults = {}
+        self.udids = CREATED
+        self.allDevices = {"devices": {}}
 
     def prepare(self):
-        for name in ("devices", "runtimes", "summary", "tests", "faults", "listing"):
+        for name in ("devices", "runtimes", "summary", "tests", "faults", "listing", "udids", "allDevices"):
             (self.root / f"{name}.json").write_text(json.dumps(getattr(self, name)))
 
     def calls(self):
         return [json.loads(line) for line in (self.root / "calls.jsonl").read_text().splitlines()]
 
-    def run_case(self, expected=0, prepare=True):
+    def simctl(self):
+        return [call["args"][1:] for call in self.calls() if call["args"][:1] == ["simctl"]]
+
+    def assert_no_simulator_mutation(self):
+        self.assertEqual({tuple(args[:1]) for args in self.simctl()}, {("list",)})
+
+    def run_case(self, expected=0, prepare=True, args=()):
         if prepare:
             self.prepare()
         result = subprocess.run(
-            ["/bin/bash", str(self.root / "scripts/test-kit-ios.sh")],
+            ["/bin/bash", str(self.root / "scripts/test-kit-ios.sh"), *args],
             env=self.env, cwd=self.root, capture_output=True, text=True, timeout=10,
         )
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
@@ -174,33 +231,50 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("Verified 4/4", result.stdout)
         for name in METHODS:
             self.assertIn(f"Verified Passed: ABSPlaybackTests/ShakeDetectorTests/{name}", result.stdout)
-        listing, call = [call for call in self.calls() if call["tool"] == "xcodebuild"]
+        listing, build, test = [call for call in self.calls() if call["tool"] == "xcodebuild"]
         self.assertEqual(listing["args"], ["-list", "-json"])
         self.assertEqual(listing["cwd"], str(self.package))
-        args = call["args"]
-        self.assertEqual(call["cwd"], str(self.package))
-        self.assertEqual(call["developerDir"], "/Applications/Xcode.app/Contents/Developer")
         work = next((self.root / ".build/kit-ios").iterdir())
-        self.assertEqual(args, [
-            "test", "-scheme", "AudiobookshelfKit-Package",
+        shared = [
+            "-scheme", "AudiobookshelfKit-Package",
             "-destination", f"platform=iOS Simulator,id={FIRST}", "-destination-timeout", "60",
             "-only-testing:ABSPlaybackTests/ShakeDetectorTests",
-            "-derivedDataPath", str(work / "DerivedData"), "-resultBundlePath", str(work / "Tests.xcresult"),
+            "-derivedDataPath", str(work / "DerivedData"),
+        ]
+        for call in (build, test):
+            self.assertEqual(call["cwd"], str(self.package))
+            self.assertEqual(call["developerDir"], "/Applications/Xcode.app/Contents/Developer")
+        # Build, then test what was built: same derived data, destination and filter.
+        self.assertEqual(build["args"], [
+            "build-for-testing", *shared, "-jobs", "2", "CODE_SIGNING_ALLOWED=NO",
+        ])
+        self.assertEqual(test["args"], [
+            "test-without-building", *shared, "-resultBundlePath", str(work / "Tests.xcresult"),
             "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
-            "-jobs", "2", "-test-timeouts-enabled", "YES", "-maximum-test-execution-time-allowance", "60",
+            "-test-timeouts-enabled", "YES", "-maximum-test-execution-time-allowance", "60",
             "CODE_SIGNING_ALLOWED=NO",
         ])
+        self.assertIn("Running xcodebuild build-for-testing (limit 2400 s)", result.stdout)
+        self.assertIn("Running xcodebuild test-without-building (limit 1200 s)", result.stdout)
         self.assertEqual(json.loads((work / "tests.json").read_text()), self.tests)
         self.assertEqual(json.loads((work / "summary.json").read_text()), self.summary)
         self.run_case()  # A second invocation cannot reuse a stale result.
         self.assertEqual(len(list((self.root / ".build/kit-ios").iterdir())), 2)
+        self.assert_no_simulator_mutation()
+        # Outside CI the borrowed simulator is never created, shut down or deleted.
+        self.env.update(CI="false", GITHUB_RUN_ID="1", GITHUB_RUN_ATTEMPT="1")
+        self.run_case()
+        self.env.update(CI="true", ABS_EPHEMERAL_SIMULATOR="0")
+        self.run_case()
+        self.assert_no_simulator_mutation()
 
     def test_scheme_follows_the_manifests_products(self):
         # One product: Xcode's scheme is named after it and has the test action.
         self.listing["workspace"]["schemes"] = ["AudiobookshelfKit"]
         self.run_case()
-        test = [call for call in self.calls() if call["tool"] == "xcodebuild"][-1]
-        self.assertEqual(test["args"][:3], ["test", "-scheme", "AudiobookshelfKit"])
+        build, test = [call for call in self.calls() if call["tool"] == "xcodebuild"][-2:]
+        self.assertEqual(build["args"][:3], ["build-for-testing", "-scheme", "AudiobookshelfKit"])
+        self.assertEqual(test["args"][:3], ["test-without-building", "-scheme", "AudiobookshelfKit"])
         # Neither scheme listed: fail before testing anything.
         self.listing["workspace"]["schemes"] = ["AudiobookshelfWidgetKit"]
         self.assertIn("No AudiobookshelfKit test scheme", self.run_case(expected=1).stderr)
@@ -217,9 +291,18 @@ class RunnerTests(unittest.TestCase):
         self.env.update(IOS_SIMULATOR_ID=OLDER, DEVELOPER_DIR="/Applications/Xcode_27.2.app/Contents/Developer")
         self.tests["devices"] = [{"deviceId": OLDER}]
         self.run_case()
-        call = [call for call in self.calls() if call["tool"] == "xcodebuild"][-1]
-        self.assertIn(f"platform=iOS Simulator,id={OLDER}", call["args"])
-        self.assertEqual(call["developerDir"], self.env["DEVELOPER_DIR"])
+        for call in [call for call in self.calls() if call["tool"] == "xcodebuild"][-2:]:
+            self.assertIn(f"platform=iOS Simulator,id={OLDER}", call["args"])
+            self.assertEqual(call["developerDir"], self.env["DEVELOPER_DIR"])
+        # An explicit simulator wins over CI's ephemeral one and is never deleted.
+        for flags in ({"CI": "true"}, {"ABS_EPHEMERAL_SIMULATOR": "1"}):
+            with self.subTest(flags=flags):
+                self.env.update(flags, GITHUB_RUN_ID="7", GITHUB_RUN_ATTEMPT="1")
+                self.run_case()
+        self.assert_no_simulator_mutation()
+        self.env["IOS_SIMULATOR_ID"] = "missing"
+        self.assertIn("no fallback", self.run_case(expected=1).stderr)
+        self.assert_no_simulator_mutation()
 
     def test_invalid_explicit_destinations_never_fall_back(self):
         for udid in ("", "missing", TOO_OLD, UNAVAILABLE, IPAD):
@@ -227,6 +310,314 @@ class RunnerTests(unittest.TestCase):
                 self.env["IOS_SIMULATOR_ID"] = udid
                 self.assertIn("no fallback", self.run_case(expected=1).stderr)
         self.assertTrue(all(call["tool"] != "xcodebuild" for call in self.calls()))
+
+    def ci(self, run_id="98/7 x", attempt="2"):
+        self.env.update(CI="true", GITHUB_RUN_ID=run_id, GITHUB_RUN_ATTEMPT=attempt)
+        self.tests["devices"] = [{"deviceId": CREATED[0]}]
+
+    def assert_ephemeral_lifecycle(self, attempts, *, phases=None, prefix="abs-ci-98-7-x-2-"):
+        """create, boot, [build, test], shutdown, delete per attempt, nothing else mutated.
+
+        `phases[i]` are the xcodebuild actions attempt i ran (default: both).
+        """
+        phases = [BOTH_PHASES] * attempts if phases is None else phases
+        self.assertEqual(len(phases), attempts)
+        expected, names = [], []
+        for index in range(attempts):
+            udid = CREATED[index]
+            name = json.loads((self.root / "created.json").read_text())[index]["name"]
+            self.assertRegex(name, rf"^{re.escape(prefix)}[0-9]+-{index + 1}$")
+            names.append(name)
+            expected += [
+                ["create", name, PHONE_TYPE, runtime("27.2")["identifier"]],
+                ["bootstatus", udid, "-b"],
+                ["shutdown", udid], ["delete", udid],
+            ]
+        self.assertEqual([args for args in self.simctl() if args[0] != "list"], expected)
+        self.assertEqual(len({name.rsplit("-", 1)[0] for name in names}), min(attempts, 1))
+        runs = [call["args"] for call in self.calls() if call["args"][:1] in (["build-for-testing"],
+                                                                              ["test-without-building"])]
+        self.assertEqual([(args[0], args[args.index("-destination") + 1]) for args in runs],
+                         [(phase, f"platform=iOS Simulator,id={CREATED[index]}")
+                          for index in range(attempts) for phase in phases[index]])
+        # Both phases of an attempt share its derived data; each attempt has its own.
+        derived = [args[args.index("-derivedDataPath") + 1] for args in runs]
+        self.assertEqual(len(set(derived)), len([ran for ran in phases if ran]))
+        # Each mutation precedes the next attempt: build and test, then cleanup, then a fresh device.
+        order = [call["args"][1] if call["tool"] == "xcrun" else call["args"][0] for call in self.calls()]
+        steps = ("create", "bootstatus", *BOTH_PHASES, "shutdown", "delete")
+        lifecycle = [step for step in order if step in steps]
+        self.assertEqual(lifecycle, [step for index in range(attempts) for step in steps
+                                     if step not in BOTH_PHASES or step in phases[index]])
+
+    def test_ci_creates_boots_tests_and_deletes_its_own_simulator(self):
+        self.ci()
+        result = self.run_case()
+        self.assertIn("Verified 4/4", result.stdout)
+        self.assertIn("** TEST SUCCEEDED **", result.stdout)  # Still streamed while captured.
+        self.assertIn(f"Deleted ephemeral simulator {CREATED[0]}", result.stdout)
+        self.assert_ephemeral_lifecycle(1)
+        work = next((self.root / ".build/kit-ios").iterdir())
+        destination = json.loads((work / "destination.json").read_text())
+        self.assertEqual(destination["udid"], CREATED[0])
+        self.assertRegex(destination["ephemeralName"], r"^abs-ci-98-7-x-2-[0-9]+-1$")
+
+    def test_ephemeral_opt_in_outside_ci_and_name_defaults(self):
+        self.tests["devices"] = [{"deviceId": CREATED[0]}]
+        self.env["ABS_EPHEMERAL_SIMULATOR"] = "1"
+        self.run_case()
+        self.assert_ephemeral_lifecycle(1, prefix="abs-ci-local-1-")
+
+    def test_ci_cleans_up_after_xcodebuild_or_verification_failure_without_retry(self):
+        for output in ("** TEST FAILED **", "Testing failed: ShakeDetectorTests failed"):
+            with self.subTest(output=output):
+                self.setUp()
+                self.ci()
+                self.faults = {"xcodeRuns": [BUILT, {"code": 65, "output": output}]}
+                result = self.run_case(expected=65)
+                self.assertIn("xcodebuild test-without-building phase failed (65)", result.stderr)
+                self.assert_ephemeral_lifecycle(1)
+        # A failed build skips the test phase and is reported as the build.
+        self.setUp()
+        self.ci()
+        self.faults = {"xcodeRuns": [{"code": 65, "output": "** TEST BUILD FAILED **"}]}
+        result = self.run_case(expected=65)
+        self.assertIn("xcodebuild build-for-testing phase failed (65)", result.stderr)
+        self.assertNotIn("test-without-building phase", result.stderr)
+        self.assert_ephemeral_lifecycle(1, phases=[BOTH_PHASES[:1]])
+        self.setUp()
+        self.ci()
+        self.summary["failedTests"] = 1
+        self.assertIn("summary failedTests", self.run_case(expected=1).stderr)
+        self.assert_ephemeral_lifecycle(1)
+
+    def test_ci_retries_once_on_a_fresh_simulator_for_infrastructure_failures(self):
+        for output in (
+            "DTServiceHubClient failed to bless service hub for simulator iPhone 17 (4AD2086B)",
+            "xctest (123) encountered an error (The test runner hung before establishing connection.)",
+            "Unable to boot the Simulator.",
+        ):
+            for built in ([], [BUILT]):  # In either phase.
+                with self.subTest(output=output, phase=BOTH_PHASES[len(built)]):
+                    failed = BOTH_PHASES[:len(built) + 1]
+                    self.setUp()
+                    self.ci()
+                    self.tests["devices"] = [{"deviceId": CREATED[1]}]
+                    self.faults = {"xcodeRuns": [*built, {"code": 65, "output": output}]}
+                    result = self.run_case()
+                    self.assertIn("retrying once on a fresh simulator", result.stderr)
+                    self.assertIn(output, result.stdout)
+                    self.assert_ephemeral_lifecycle(2, phases=[failed, BOTH_PHASES])
+                    self.assertEqual(len(list((self.root / ".build/kit-ios").iterdir())), 2)
+                    # Never more than one retry.
+                    self.setUp()
+                    self.ci()
+                    self.faults = {"xcodeRuns": [*built, {"code": 65, "output": output}] * 3}
+                    self.run_case(expected=65)
+                    self.assert_ephemeral_lifecycle(2, phases=[failed, failed])
+
+    def test_ci_cancellation_during_cleanup_exits_without_retrying(self):
+        for runs in ([BUILT, {"code": 65, "output": "failed to bless service hub"}],
+                     [BUILT, {"code": 65, "output": "** TEST FAILED **"}], []):
+            with self.subTest(runs=runs):
+                self.setUp()
+                self.ci()
+                self.faults = {"xcodeRuns": runs, "cancelDuringShutdown": True}
+                result = self.run_case(expected=143)
+                self.assertIn("interrupted by signal 15", result.stderr)
+                self.assertNotIn("retrying", result.stderr)
+                self.assert_ephemeral_lifecycle(1)
+
+    def test_ci_boot_or_create_failure_and_shutdown_failure(self):
+        self.ci()
+        self.faults = {"bootstatus": 149}
+        self.run_case(expected=149)
+        self.assert_ephemeral_lifecycle(1, phases=[()])
+        self.setUp()
+        self.ci()
+        self.faults = {"shutdown": 149}  # A device that never booted can't shut down.
+        self.run_case()
+        self.assert_ephemeral_lifecycle(1)
+        self.setUp()
+        self.ci()
+        # A failed create still deletes by name: quietly if simctl never registered it,
+        # and for real if it did (its UDID was lost with the output).
+        for registers in (False, True):
+            with self.subTest(createRegisters=registers):
+                self.setUp()
+                self.ci()
+                self.faults = {"create": 148, "createRegisters": registers}
+                result = self.run_case(expected=1)
+                self.assertIn("simctl create", result.stderr)
+                self.assertNotIn("couldn't delete", result.stderr)
+                self.assertEqual("Deleted ephemeral simulator" in result.stdout, registers)
+                name = json.loads((self.root / "created.json").read_text())[0]["name"]
+                self.assertEqual([args for args in self.simctl() if args[0] != "list"],
+                                 [["create", name, PHONE_TYPE, runtime("27.2")["identifier"]],
+                                  ["shutdown", name], ["delete", name]])
+        self.setUp()
+        self.ci()
+        self.faults = {"createOutput": "not a UDID"}  # Delete what was created, by name.
+        self.assertIn("malformed UDID", self.run_case(expected=1).stderr)
+        name = json.loads((self.root / "created.json").read_text())[0]["name"]
+        self.assertEqual([args for args in self.simctl() if args[0] != "list"],
+                         [["create", name, PHONE_TYPE, runtime("27.2")["identifier"]],
+                          ["shutdown", name], ["delete", name]])
+
+    def test_delete_run_simulators_reports_a_cancellation_after_finishing(self):
+        names = {CREATED[0]: "abs-ci-55-1-123-1", CREATED[1]: "abs-ci-55-1-123-2"}
+        self.allDevices = {"devices": {"r": [{"udid": udid, "name": name} for udid, name in names.items()]}}
+        (self.root / "created.json").write_text(json.dumps([{"name": names[u], "udid": u} for u in CREATED]))
+        self.env.update(GITHUB_RUN_ID="55", GITHUB_RUN_ATTEMPT="1")
+        # A real SIGTERM to the runner during the first (successful) shutdown.
+        self.faults = {"cancelDuringShutdown": True}
+        result = self.run_case(expected=143, args=["--delete-run-simulators"])
+        self.assertIn("interrupted by signal 15", result.stderr)
+        self.assertEqual([args for args in self.simctl() if args[0] != "list"],
+                         [["shutdown", CREATED[0]], ["delete", CREATED[0]],
+                          ["shutdown", CREATED[1]], ["delete", CREATED[1]]])
+        # The signal also wins over a failed delete, after every deletion is attempted.
+        module = RUNNER["delete_run_simulators"].__globals__
+        listing = json.dumps(self.allDevices)
+        for delete_fails in (False, True):
+            with self.subTest(delete_fails=delete_fails):
+                calls = []
+
+                def fake_protected(args, timeout=120):
+                    calls.append(args[2:4])
+                    if args[2] == "delete":
+                        signals = [signal.SIGTERM] if args[3] == CREATED[0] else []
+                        return (None, "boom", signals) if delete_fails else ("", None, signals)
+                    return "", None, []
+
+                with mock.patch.dict(module, protected=fake_protected,
+                                     command=mock.Mock(return_value=listing)):
+                    with self.assertRaises(RUNNER["InterruptedRunner"]) as failure:
+                        RUNNER["delete_run_simulators"]({"GITHUB_RUN_ID": "55", "GITHUB_RUN_ATTEMPT": "1"})
+                self.assertEqual(failure.exception.signum, signal.SIGTERM)
+                self.assertEqual(calls, [["shutdown", CREATED[0]], ["delete", CREATED[0]],
+                                         ["shutdown", CREATED[1]], ["delete", CREATED[1]]])
+
+    def test_create_timeout_still_deletes_by_name_without_changing_the_outcome(self):
+        module = RUNNER["with_ephemeral_simulator"].__globals__
+        selected = {"udid": FIRST, "deviceTypeIdentifier": PHONE_TYPE,
+                    "runtimeIdentifier": runtime("27.2")["identifier"]}
+        name = "abs-ci-local-1-1-1"
+        for cleanup_signal in (None, signal.SIGTERM):
+            with self.subTest(cleanup_signal=cleanup_signal):
+                calls = []
+
+                def fake_protected(args, timeout=120):
+                    calls.append(args[2:4])
+                    if args[2] == "create":
+                        return None, f"Command {args} timed out after {timeout} seconds", []
+                    if args[2] == "delete":
+                        return "", None, [cleanup_signal] if cleanup_signal else []
+                    return None, "Unable to shutdown device in current state: Shutdown", []
+
+                run = mock.Mock()
+                with mock.patch.dict(module, protected=fake_protected):
+                    expected = RUNNER["InterruptedRunner"] if cleanup_signal else ValueError
+                    with self.assertRaises(expected) as failure:
+                        RUNNER["with_ephemeral_simulator"](selected, name, run)
+                run.assert_not_called()
+                self.assertEqual(calls, [["create", name], ["shutdown", name], ["delete", name]])
+                if cleanup_signal:
+                    # A cancellation during cleanup still wins over the create failure.
+                    self.assertEqual(failure.exception.signum, cleanup_signal)
+                    self.assertIsInstance(failure.exception.__cause__, ValueError)
+                else:
+                    self.assertIn("timed out", str(failure.exception))
+
+    def run_phases(self, timeout_phase=None):
+        """run_tests on an ephemeral simulator, in process, with xcodebuild timing out in one phase."""
+        module = RUNNER["run_tests"].__globals__
+        selected = {"udid": FIRST, "deviceTypeIdentifier": PHONE_TYPE,
+                    "runtimeIdentifier": runtime("27.2")["identifier"]}
+        builds, simctl = [], []
+
+        def fake_command(args, *, capture=False, tee=False, timeout=60):
+            if args[0] == "xcodebuild":
+                builds.append((args[1], timeout, tee, args))
+                if args[1] == timeout_phase:
+                    raise subprocess.TimeoutExpired(args, timeout)
+                return None
+            if args[:2] == ["xcrun", "simctl"]:
+                simctl.append(args[2:])
+                return ""
+            return json.dumps(self.summary if args[4] == "summary" else self.tests)
+
+        def fake_protected(args, timeout=120):
+            simctl.append(args[2:4])
+            return (CREATED[0] + "\n" if args[2] == "create" else ""), None, []
+
+        self.tests["devices"] = [{"deviceId": CREATED[0]}]
+        stdout, stderr = io.StringIO(), io.StringIO()
+        failure = None
+        with mock.patch.dict(module, command=fake_command, protected=fake_protected, ROOT=self.root), \
+                mock.patch.dict(os.environ, DEVELOPER_DIR="/Applications/Xcode.app/Contents/Developer"), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                RUNNER["with_ephemeral_simulator"](selected, "abs-ci-local-1-1-1", lambda udid, name: (
+                    RUNNER["run_tests"]("AudiobookshelfKit-Package", udid, name)))
+            except subprocess.TimeoutExpired as error:
+                failure = error
+        # Whatever happened, the simulator was created, booted, then shut down and deleted.
+        self.assertEqual(simctl, [["create", "abs-ci-local-1-1-1"], ["bootstatus", CREATED[0], "-b"],
+                                  ["shutdown", CREATED[0]], ["delete", CREATED[0]]])
+        return builds, failure, stdout.getvalue(), stderr.getvalue()
+
+    def test_build_and_test_phases_share_derived_data_with_their_own_limits(self):
+        builds, failure, stdout, _ = self.run_phases()
+        self.assertIsNone(failure)
+        self.assertIn("Verified 4/4", stdout)
+        self.assertEqual([(phase, timeout, tee) for phase, timeout, tee, _ in builds],
+                         [("build-for-testing", 2400, True), ("test-without-building", 1200, True)])
+        (_, _, _, build), (_, _, _, test) = builds
+        for flag in ("-scheme", "-destination", "-derivedDataPath"):
+            self.assertEqual(build[build.index(flag) + 1], test[test.index(flag) + 1], flag)
+        self.assertEqual(build[build.index("-destination") + 1], f"platform=iOS Simulator,id={CREATED[0]}")
+        self.assertIn("-only-testing:ABSPlaybackTests/ShakeDetectorTests", build)
+        self.assertIn("-only-testing:ABSPlaybackTests/ShakeDetectorTests", test)
+
+    def test_build_timeout_skips_the_test_phase_and_names_the_build(self):
+        builds, failure, stdout, stderr = self.run_phases("build-for-testing")
+        self.assertEqual([phase for phase, *_ in builds], ["build-for-testing"])
+        self.assertEqual(failure.timeout, 2400)
+        self.assertIn("xcodebuild build-for-testing phase timed out after 2400 s", stderr)
+        self.assertNotIn("test-without-building", stdout + stderr)
+        self.assertNotIn("Verified", stdout)
+
+    def test_test_phase_timeout_names_the_test_phase(self):
+        builds, failure, stdout, stderr = self.run_phases("test-without-building")
+        self.assertEqual([phase for phase, *_ in builds], list(BOTH_PHASES))
+        self.assertEqual(failure.timeout, 1200)
+        self.assertIn("xcodebuild test-without-building phase timed out after 1200 s", stderr)
+        self.assertNotIn("build-for-testing phase", stderr)
+        self.assertNotIn("Verified", stdout)
+
+    def test_delete_run_simulators_matches_only_this_run_attempt(self):
+        names = {
+            CREATED[0]: "abs-ci-55-1-123-1", CREATED[1]: "abs-ci-55-1-123-2",
+            FIRST: "abs-ci-55-12-1-1", SECOND: "abs-ci-551-1-1-1", OLDER: "iPhone 17",
+        }
+        self.allDevices = {"devices": {"r": [{"udid": udid, "name": name} for udid, name in names.items()]}}
+        (self.root / "created.json").write_text(json.dumps([{"name": names[u], "udid": u} for u in CREATED]))
+        self.env.update(GITHUB_RUN_ID="55", GITHUB_RUN_ATTEMPT="1")
+        self.assertIn("2 simulator(s) named abs-ci-55-1-*",
+                      self.run_case(args=["--delete-run-simulators"]).stdout)
+        self.assertEqual([args for args in self.simctl() if args[0] != "list"],
+                         [["shutdown", CREATED[0]], ["delete", CREATED[0]],
+                          ["shutdown", CREATED[1]], ["delete", CREATED[1]]])
+        self.faults = {"delete": 148}
+        self.assertIn("Couldn't delete", self.run_case(expected=1, args=["--delete-run-simulators"]).stderr)
+        self.allDevices = {"devices": {}}
+        self.faults = {}
+        self.assertIn("0 simulator(s)", self.run_case(args=["--delete-run-simulators"]).stdout)
+        self.env.pop("GITHUB_RUN_ID")
+        calls = len(self.calls())
+        self.assertIn("GITHUB_RUN_ID", self.run_case(expected=1, args=["--delete-run-simulators"]).stderr)
+        self.assertEqual(len(self.calls()), calls)
 
     def test_no_compatible_destination(self):
         self.runtimes["runtimes"] = [runtime("26.5")]
@@ -293,10 +684,12 @@ class RunnerTests(unittest.TestCase):
         self.run_case(expected=1)
 
     def test_command_exit_codes_and_retained_failed_evidence(self):
-        for kind, code in (("xcode", 65), ("summary", 37), ("tests", 38), ("devices", 39), ("runtimes", 40)):
+        for kind, code in (("build-for-testing", 66), ("test-without-building", 65), ("summary", 37),
+                           ("tests", 38), ("devices", 39), ("runtimes", 40)):
             with self.subTest(kind=kind):
                 self.faults = {kind: code}
                 self.run_case(expected=code)
+        # A failed build leaves no result bundle; a failed test run or extraction keeps one.
         self.assertEqual(len(list((self.root / ".build/kit-ios").glob("run.*/Tests.xcresult"))), 3)
 
     def test_malformed_json_fails_closed(self):
@@ -537,7 +930,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
 '''
         process = subprocess.Popen(
             [sys.executable, "-c", gate, str(self.root / "bin/xcodebuild"),
-             "test", "-resultBundlePath", str(self.root / "Tests.xcresult")],
+             "build-for-testing", "-derivedDataPath", str(self.root / "DerivedData")],
             env=self.env, cwd=self.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True,
         )
@@ -563,7 +956,23 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             print(f"Publication producer reaped: owned PID {process.pid}", flush=True)
 
     def test_signal_stops_only_owned_cli_and_retains_result(self):
-        self.faults["hang"] = True
+        for phase in BOTH_PHASES:
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.faults["hang"] = phase
+                self.signal_during_xcodebuild(phase)
+                self.assert_no_simulator_mutation()
+
+    def test_ci_signal_during_xcodebuild_still_deletes_the_simulator(self):
+        for phase in BOTH_PHASES:
+            with self.subTest(phase=phase):
+                self.setUp()
+                self.ci()
+                self.faults["hang"] = phase
+                self.signal_during_xcodebuild(phase)
+                self.assert_ephemeral_lifecycle(1, phases=[BOTH_PHASES[:BOTH_PHASES.index(phase) + 1]])
+
+    def signal_during_xcodebuild(self, phase):
         self.prepare()
         process = subprocess.Popen(
             ["/bin/bash", str(self.root / "scripts/test-kit-ios.sh")],
@@ -572,18 +981,20 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         child = None
         try:
             deadline = time.monotonic() + 5
-            marker = self.root / "xcode.pid"
-            while not marker.exists() and time.monotonic() < deadline:
+            hanging = self.root / "xcode.hanging"
+            while not hanging.exists() and time.monotonic() < deadline:
                 time.sleep(0.01)
-            self.assertTrue(marker.exists(), "fake xcodebuild did not start")
-            child = int(marker.read_text())
+            self.assertTrue(hanging.exists(), "fake xcodebuild did not start")
+            child = int((self.root / "xcode.pid").read_text())
             process.send_signal(signal.SIGTERM)
             stdout, stderr = process.communicate(timeout=8)
             self.assertEqual(process.returncode, 143, stdout + stderr)
             with self.assertRaises(ProcessLookupError):
                 os.kill(child, 0)
             child = None
-            self.assertEqual(len(list((self.root / ".build/kit-ios").glob("run.*/Tests.xcresult"))), 1)
+            # Only the test phase creates the result bundle.
+            self.assertEqual(len(list((self.root / ".build/kit-ios").glob("run.*/Tests.xcresult"))),
+                             BOTH_PHASES.index(phase))
         finally:
             if process.poll() is None:
                 process.kill()

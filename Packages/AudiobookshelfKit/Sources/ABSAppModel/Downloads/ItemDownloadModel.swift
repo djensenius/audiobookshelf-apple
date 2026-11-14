@@ -23,8 +23,11 @@ import Observation
 ///   view asks before deleting.
 /// - A failed action sets ``prompt``; the view shows it and clears it.
 ///
-/// A model belongs to one server item, episode and connection: views recreate it when any of
-/// them changes.
+/// A list of rows (a podcast's episodes) shares one ``DownloadedItemsFeed`` instead: each row's
+/// model reads the feed's items, and the screen observes the feed once.
+///
+/// A model belongs to one server item, episode, connection and feed: views recreate it when any
+/// of them changes.
 @MainActor
 @Observable
 public final class ItemDownloadModel {
@@ -50,8 +53,21 @@ public final class ItemDownloadModel {
     public private(set) var isWorking = false
     /// Set the view's alert from it; the view clears it when the alert closes.
     public var prompt: Prompt?
-    /// The connection's downloaded items of this server item, as last read.
-    public private(set) var localItems: [LocalLibraryItemDTO] = []
+    /// Whether the connection's downloads continue only while the app is open
+    /// (``DownloadAccess/onlyWhileOpen``), as last read by ``observe()`` or ``download(item:)``; the
+    /// view notes it in the cellular question and, with ``notesOnlyWhileOpen``, while a download is
+    /// under way.
+    public private(set) var onlyWhileOpen = false
+    /// The connection's downloaded items of this server item, as last read (by the feed, when
+    /// shared).
+    public var localItems: [LocalLibraryItemDTO] {
+        guard let feed else { return ownItems }
+        return feed.items.filter { $0.libraryItemId == libraryItemID }
+    }
+    /// The shared feed the local items come from, or `nil` when the model reads them itself.
+    public let feed: DownloadedItemsFeed?
+    /// The local items the model read itself, without a feed.
+    private var ownItems: [LocalLibraryItemDTO] = []
 
     @ObservationIgnored private let access: DownloadAccess
     @ObservationIgnored private let services: DownloadsServices
@@ -61,13 +77,16 @@ public final class ItemDownloadModel {
     /// Tests: called after each read of the local items that applied its result.
     @ObservationIgnored var reloaded: (@MainActor () -> Void)?
 
+    /// - Parameter feed: the screen's shared local items, of the same connection; `nil` to read
+    ///   them in ``observe()``.
     public init(
         libraryItemID: String, episodeID: String? = nil, connectionID: UUID, access: DownloadAccess,
-        services: DownloadsServices
+        services: DownloadsServices, feed: DownloadedItemsFeed? = nil
     ) {
         self.libraryItemID = libraryItemID
         self.episodeID = episodeID
         self.connectionID = connectionID
+        self.feed = feed
         self.access = access
         self.services = services
     }
@@ -76,7 +95,8 @@ public final class ItemDownloadModel {
     public var state: ItemDownloadState {
         ItemDownloadState(
             libraryItemID: libraryItemID, episodeID: episodeID, connectionID: connectionID,
-            records: services.controller.records, progress: services.controller.progress, localItems: localItems)
+            records: services.controller.records, progress: services.controller.progress,
+            localItems: feed?.items ?? ownItems)
     }
 
     /// Whether a download may be requested now: the connection's session is running and its user
@@ -85,12 +105,25 @@ public final class ItemDownloadModel {
     /// deleting stay available.
     public var canRequest: Bool { access.requester.canRequest(connectionID: connectionID) }
 
+    /// Whether the view shows the button: a download can be requested, or there is one under way
+    /// or downloaded to cancel or delete. Legacy hides Download without the permission
+    /// (`userCanDownload`), and offline.
+    public var isShown: Bool { canRequest || !state.canStart }
+
+    /// Whether the view notes that the download continues only while the app is open: the
+    /// connection's downloads do (``onlyWhileOpen``) and one is under way (queued, downloading,
+    /// paused or failed).
+    public var notesOnlyWhileOpen: Bool { onlyWhileOpen && state.recordID != nil }
+
     // MARK: - Loading
 
     /// Reads the connection's downloaded items, then again after every write to the store (or,
     /// without ``DownloadsServices/localItemUpdates``, every completed download), until the task
-    /// is cancelled.
+    /// is cancelled. With a ``feed``, returns once it has read ``onlyWhileOpen``: the screen
+    /// observes the feed.
     public func observe() async {
+        onlyWhileOpen = await access.onlyWhileOpen(connectionID)
+        guard feed == nil else { return }
         if let updates = try? await services.localItemUpdates?(connectionID) {
             for await _ in updates { await reload() }
             return
@@ -103,8 +136,14 @@ public final class ItemDownloadModel {
         }
     }
 
-    /// Reads the connection's downloaded items again. A failed read keeps the last one.
+    /// Reads the connection's downloaded items again (through the ``feed``, when shared). A failed
+    /// read keeps the last one.
     public func reload() async {
+        if let feed {
+            await feed.reload()
+            reloaded?()
+            return
+        }
         readGeneration += 1
         let generation = readGeneration
         let read = services.localItems
@@ -118,7 +157,7 @@ public final class ItemDownloadModel {
         guard generation == readGeneration else { return }
         switch result {
         case .success(let items):
-            localItems = items.filter { $0.libraryItemId == libraryItemID }
+            ownItems = items.filter { $0.libraryItemId == libraryItemID }
         case .failure(let error):
             Log.downloads.error(
                 "Couldn't read the downloaded items: \(Log.redact(String(describing: error)), privacy: .public)")
@@ -137,6 +176,8 @@ public final class ItemDownloadModel {
         isWorking = true
         defer { isWorking = false }
         pendingMetered = nil
+        // Read again, as the connection's headers may have changed since ``observe()``.
+        onlyWhileOpen = await access.onlyWhileOpen(connectionID)
         await handle(await access.requester.request(item: item, episodeID: episodeID, connectionID: connectionID), item)
     }
 

@@ -139,6 +139,14 @@ final class ConnectionBannerSession {
     }
 }
 
+extension ServerActionAvailability {
+    /// What `session`'s connection allows now; everything without a session (signed out,
+    /// previews), as online.
+    @MainActor init(session: ConnectionBannerSession?) {
+        self.init(connection: session?.model.state ?? .online)
+    }
+}
+
 /// What the banner shows for a connection state; `nil` online, which hides it.
 enum ConnectionBannerPresentation {
     static func status(for state: ConnectionBannerState) -> ConnectionBannerStatus? {

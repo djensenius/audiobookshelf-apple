@@ -118,7 +118,8 @@ struct DownloadsTabModelTests {
     private func makeModel(
         path: NetworkPath = .wifi, policy: CellularPolicy = .always, control: FakeControl = FakeControl(),
         source: ItemSource = ItemSource(), followsUpdates: Bool = false, records: [DownloadRecordDTO] = [],
-        storedRecords: (@Sendable () async throws -> [DownloadRecordDTO])? = nil
+        storedRecords: (@Sendable () async throws -> [DownloadRecordDTO])? = nil,
+        onlyWhileOpen: @escaping @Sendable (UUID) async -> Bool = { _ in false }
     ) async throws -> (DownloadsTabModel, cleanUp: () -> Void) {
         let suiteName = "ABSAppModelTests.DownloadsTab.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -136,7 +137,8 @@ struct DownloadsTabModelTests {
         let model = DownloadsTabModel(
             services: DownloadsServices(
                 controller: controller, control: control, localItemUpdates: updates,
-                localItems: { try await source.read($0) }, availableCapacity: { 1_000 }))
+                localItems: { try await source.read($0) }, availableCapacity: { 1_000 },
+                onlyWhileOpen: onlyWhileOpen))
         let (reloads, report) = AsyncStream.makeStream(of: Void.self)
         model.reloaded = { report.yield() }
         let observing = Task { await model.observe(connectionID: Self.connection) }
@@ -171,6 +173,19 @@ struct DownloadsTabModelTests {
 
         #expect(await source.reads == 2)
         #expect(model.listing.books.map(\.title) == ["Emma", "Walden"])
+    }
+
+    /// The Downloads tab notes that downloads continue only while the app is open for the
+    /// connection the services report (#467), and only for it.
+    @Test func readsWhetherTheConnectionDownloadsOnlyWhileOpen() async throws {
+        let connection = Self.connection
+        let (model, cleanUp) = try await makeModel(onlyWhileOpen: { $0 == connection })
+        defer { cleanUp() }
+        #expect(model.onlyWhileOpen)
+
+        let (plain, cleanUpPlain) = try await makeModel()
+        defer { cleanUpPlain() }
+        #expect(!plain.onlyWhileOpen)
     }
 
     @Test func cancelAllCancelsEachDownloadOfTheConnectionOldestFirst() async throws {

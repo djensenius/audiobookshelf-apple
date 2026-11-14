@@ -128,6 +128,7 @@ private struct GroupDetailHeader<Kind: GroupScreenKind>: View {
     @Environment(\.serverID) private var serverID
     @Environment(\.playItem) private var playItem
     @Environment(\.currentPlayback) private var playback
+    @Environment(\.playbackQueue) private var queue
     @State private var starts = GroupPlayStarts()
     /// The key of the message for the last failed start, kept while the alert is dismissed.
     @State private var failureKey: String?
@@ -176,9 +177,13 @@ private struct GroupDetailHeader<Kind: GroupScreenKind>: View {
         let playback = playback
         guard let token = GroupPresentation.tap(playAll, starts: &starts, pause: { playback?.pause() }) else { return }
         let play = playItem
+        let queue = queue
+        let serverID = serverID
         Task {
             defer { starts.end(token) }
-            if let key = await GroupPresentation.performPlayAll(playAll, play: play) {
+            if let key = await GroupPresentation.performPlayAll(
+                playAll, play: play, serverID: serverID, queue: queue)
+            {
                 failureKey = key
                 showsFailure = true
             }

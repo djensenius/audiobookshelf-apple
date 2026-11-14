@@ -24,6 +24,9 @@ final class ScopePlayback: PlayerPlaybackControlling {
     var session: PlaybackSession? { coordinator.session }
     var restoredRecord: LastPlayedRecord? { coordinator.restoredRecord }
     var error: PlaybackCoordinatorError? { coordinator.error }
+    var startGeneration: Int { coordinator.startGeneration }
+    var playRequestCount: Int { coordinator.playRequestCount }
+    var startPlayRequest: Int? { coordinator.startPlayRequest }
     var currentTime: Double { coordinator.currentTime }
     var duration: Double { coordinator.duration }
     var rate: Double { coordinator.rate }
@@ -31,6 +34,7 @@ final class ScopePlayback: PlayerPlaybackControlling {
     var isBuffering: Bool { coordinator.isBuffering }
     var isPlaybackRequested: Bool { coordinator.isPlaybackRequested }
     var isWaitingForNetwork: Bool { coordinator.isWaitingForNetwork }
+    var isRecovering: Bool { coordinator.isRecovering }
     var timeline: PlaybackTimeline? { coordinator.timeline }
     var chapterIndex: Int? { coordinator.chapterIndex }
     var chapter: Chapter? { coordinator.chapter }

@@ -20,6 +20,19 @@ import Testing
         return host
     }
 
+    /// The engine's foreground test, which screens use to say downloads continue only while the
+    /// app is open: true with custom headers, false without or when signed out.
+    @Test func usesForegroundSessionOnlyWithCustomHeaders() async throws {
+        let baseURL = try #require(URL(string: "https://abs.example.com"))
+        let withHeaders = FakeCredentials(baseURL: baseURL, customHeaders: Self.headers)
+        let without = FakeCredentials(baseURL: baseURL)
+        #expect(await withHeaders.usesForegroundSession(for: UUID()))
+        #expect(await !without.usesForegroundSession(for: UUID()))
+        #expect(try await withHeaders.credentials(for: UUID(), replacing: nil).usesForegroundSession)
+        #expect(try await !without.credentials(for: UUID(), replacing: nil).usesForegroundSession)
+        #expect(await !SignedOutCredentials().usesForegroundSession(for: UUID()))
+    }
+
     @Test func customHeadersDownloadInTheForegroundSession() async throws {
         let harness = try await DownloadHarness(customHeaders: Self.headers) { _ in .status(200) }
         let partID = UUID()
@@ -420,5 +433,16 @@ import Testing
             harness.requests.map(\.authorization) == [
                 "Bearer token-1", "Bearer token-1", "Bearer token-2", "Bearer token-2",
             ])
+    }
+}
+
+/// A signed-out or removed connection: no stored credentials.
+private struct SignedOutCredentials: DownloadCredentialProviding {
+    func currentCredentials(for connectionID: UUID) async -> DownloadCredentials? { nil }
+
+    func credentials(for connectionID: UUID, replacing rejectedAccessToken: String?) async throws
+        -> DownloadCredentials
+    {
+        throw TestError()
     }
 }

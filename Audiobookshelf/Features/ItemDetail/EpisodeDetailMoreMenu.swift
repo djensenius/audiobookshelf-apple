@@ -18,12 +18,14 @@ extension View {
 /// offers them, through ``DetailMoreMenu``, which runs the progress actions for the episode with
 /// the book screen's titles, confirmations and failure messages and remembers a 404. Share links
 /// to the podcast in the web client, so it needs the server's address. Add to playlist opens
-/// ``AddToPlaylistSheet`` for the episode, so it needs the account's playlist writes (`playlists`).
+/// ``AddToPlaylistSheet`` for the episode, so it needs the account's playlist writes (`playlists`),
+/// and is disabled with the reason while the server can't be reached (#76).
 /// Play Next and Add to Queue (``QueueActionButtons``) follow while the episode isn't gone.
 private struct EpisodeDetailMoreMenu: ViewModifier {
     let model: EpisodeDetailModel
     let serverURL: URL?
     let playlists: (any PlaylistEditingService)?
+    @Environment(\.connectionBanner) private var connectionBanner
     @State private var addToPlaylist: AddToPlaylistModel?
 
     func body(content: Content) -> some View {
@@ -53,14 +55,19 @@ private struct EpisodeDetailMoreMenu: ViewModifier {
                 }
             }
         case .addToPlaylist:
+            let state = ItemDetailMenuPresentation.entryState(
+                for: action, availability: ServerActionAvailability(session: connectionBanner))
             Button {
-                guard let playlists, let libraryID = model.detail.item?.libraryId else { return }
+                guard ServerActionAvailability(session: connectionBanner).reasonKey(for: action) == nil,
+                    let playlists, let libraryID = model.detail.item?.libraryId
+                else { return }
                 addToPlaylist = AddToPlaylistModel(
                     entries: [PlaylistEntryKey(itemID: model.itemID, episodeID: model.episodeID)],
                     libraryID: libraryID, service: playlists)
             } label: {
-                DetailMoreMenuLabel(action: action)
+                DetailMoreMenuLabel(action: action, reasonKey: state.reasonKey)
             }
+            .detailMoreMenuEntry(state)
         case .markFinished, .markNotFinished, .discardProgress:
             // Shown by ``DetailMoreMenu``.
             EmptyView()

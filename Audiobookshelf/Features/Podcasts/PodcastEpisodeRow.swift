@@ -5,7 +5,7 @@ import SwiftUI
 
 /// One episode (legacy `EpisodeRow.vue`): when it was published, its title, subtitle and
 /// badges, which open the episode; then Play with the time left, the finished toggle and the
-/// progress bar.
+/// progress bar, and the episode's Download control.
 ///
 /// Play and the finished toggle are also in a context menu and the VoiceOver actions of the
 /// link, with Add to playlist, as ``PodcastEpisodeActions/available(for:progress:context:isGone:)`` offers them; when
@@ -27,6 +27,8 @@ struct PodcastEpisodeRow: View {
     let isUpdating: Bool
     /// Asks to remove the episode from the server; `nil` when that isn't offered.
     let remove: (() -> Void)?
+    /// The screen's shared downloaded items, for the episode's Download control; `nil` hides it.
+    let downloadedItems: DownloadedItemsFeed?
     /// Performs an action other than ``ItemActionKind/openDetails`` on the episode.
     let perform: (ItemActionKind) -> Void
     @Environment(\.locale) private var locale
@@ -68,7 +70,13 @@ struct PodcastEpisodeRow: View {
             }
             EpisodeRowControls(
                 status: model.status(for: episode), progress: progress, actions: actions.map(\.kind),
-                isStarting: isStarting, isOtherStarting: isOtherStarting, isUpdating: isUpdating, perform: perform)
+                isStarting: isStarting, isOtherStarting: isOtherStarting, isUpdating: isUpdating,
+                download: downloadedItems.map { feed in
+                    // A podcast gone from the server can't be downloaded, as it can't be played.
+                    EpisodeRowDownload(
+                        libraryItemID: model.itemID, episodeID: episode.id, episodeTitle: episode.title,
+                        item: isGone ? nil : model.detail.item, feed: feed)
+                }, perform: perform)
         }
         .padding(.vertical, ABSSpacing.medium)
     }

@@ -342,6 +342,19 @@ import Testing
         #expect(presentation.startText == "15:00")
         #expect(presentation.confirmMessage == "Start playback for \"Book\" at 9:59?")
     }
+
+    @Test func theCellularQuestionNotesDownloadsOnlyWhileOpen() throws {
+        let cellular = L10n.string("MessageConfirmDownloadUsingCellular")
+        let foreground = ItemDownloadAlert(.meteredConfirmation, onlyWhileOpen: true)
+        let message = try #require(foreground.message)
+        #expect(message.hasPrefix(cellular))
+        #expect(message.hasSuffix(DownloadsWhileAppOpenNotice.message))
+        #expect(foreground.asks)
+
+        #expect(ItemDownloadAlert(.meteredConfirmation, onlyWhileOpen: false).message == cellular)
+        // Only the question says so; failures don't.
+        #expect(ItemDownloadAlert(.startFailed, onlyWhileOpen: true).message == nil)
+    }
 }
 
 /// Serves the item, or fails, as the test scripts it; ``hold()`` keeps the next request

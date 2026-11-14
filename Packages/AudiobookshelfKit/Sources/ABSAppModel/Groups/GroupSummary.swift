@@ -87,11 +87,14 @@ public struct GroupMember: Sendable, Hashable, Identifiable {
     /// built from a book or playlist item. A port of `playableItems` in the legacy
     /// `pages/collection/_id.vue` and `pages/playlist/_id.vue`.
     public let isPlayable: Bool
+    /// The item's cover, as the play queue shows it (``QueueItem/coverPath``).
+    public let coverPath: String?
 
-    public init(target: GroupPlayTarget, summary: ItemSummary, isPlayable: Bool) {
+    public init(target: GroupPlayTarget, summary: ItemSummary, isPlayable: Bool, coverPath: String? = nil) {
         self.target = target
         self.summary = summary
         self.isPlayable = isPlayable
+        self.coverPath = coverPath
     }
 
     /// A collection's book.
@@ -125,7 +128,7 @@ public struct GroupMember: Sendable, Hashable, Identifiable {
         }
         self.init(
             target: target, summary: summary.with(isMissing: !isPresent, hasAudio: hasAudio),
-            isPlayable: isPresent && hasAudio)
+            isPlayable: isPresent && hasAudio, coverPath: item?.media?.coverPath)
     }
 
     /// The item is there and valid, and an episode entry has its episode.
