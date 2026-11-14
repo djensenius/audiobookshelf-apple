@@ -118,7 +118,8 @@ default text size and at AX5. Record failures as issues that reference #106.
   long press on the title, play/pause, the jumps or close shows the Large Content Viewer, as on
   the tab bar. At accessibility sizes, where the viewer works, the title's long press shows it
   in place of the Up Next context menu; Up Next stays in the full player and in VoiceOver's
-  actions.
+  actions. `MiniPlayerTests` (UI tests) checks the narrow layout and which of the two the long
+  press gets; XCUITest can't see the viewer's HUD, which closes when the press ends.
 - Previews at `.accessibility5` exist for `ItemCard` and `ItemRow`; add one for any new
   view whose layout changes with the text size.
 

@@ -153,6 +153,8 @@ private struct MiniPlayerBar: View {
                         .font(.subheadline.weight(.semibold))
                         // Two lines when nothing else needs the second (except inline, which is short).
                         .lineLimit(layout == .inline || showsWaiting || showsAuthor ? 1 : 2)
+                        // For UI tests, which check its width; VoiceOver hears the button.
+                        .accessibilityIdentifier("player.mini.title")
                     if showsWaiting {
                         // Recovery waits for the network (ADR 0007's "Waiting for network").
                         Text(verbatim: L10n.string(MiniPlayerView.waitingForNetworkKey))
@@ -205,6 +207,8 @@ private struct MiniPlayerBar: View {
         }
         .buttonStyle(.borderless)
         .foregroundStyle(ABSColor.mutedForeground)
+        // For UI tests.
+        .accessibilityIdentifier("player.mini.close")
         .accessibilityShowsLargeContentViewer {
             Label {
                 Text(verbatim: L10n.string("LabelClosePlayer"))
@@ -232,6 +236,8 @@ private struct UpNextMenu: ViewModifier {
                         Image(systemName: "list.bullet")
                     }
                 }
+                // For UI tests.
+                .accessibilityIdentifier("player.mini.upNext")
             }
         } else {
             content

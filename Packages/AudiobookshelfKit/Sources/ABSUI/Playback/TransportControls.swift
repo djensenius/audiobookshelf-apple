@@ -222,6 +222,8 @@ public struct TransportControls: View {
                 systemImage: Self.jumpSymbol(forward: forward, seconds: seconds))
         )
         .accessibilityLabel(Text(verbatim: Self.jumpLabel(forward: forward, seconds: seconds, locale: locale)))
+        // For UI tests.
+        .accessibilityIdentifier(forward ? "player.jumpForward" : "player.jumpBackward")
     }
 
     private func chapterButton(_ action: Action) -> some View {
