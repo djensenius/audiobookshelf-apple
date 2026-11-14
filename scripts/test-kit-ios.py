@@ -39,6 +39,10 @@ INFRASTRUCTURE_FAILURES = (
     "hung before establishing connection",
     "Unable to boot",
 )
+# Each run builds into fresh derived data, so a cold build on a busy runner needs far
+# longer than running the four tests; separate limits keep the test phase tight.
+BUILD_TIMEOUT = 2400
+TEST_TIMEOUT = 1200
 
 
 class InterruptedRunner(Exception):
@@ -323,6 +327,21 @@ def with_ephemeral_simulator(selected, name, run):
                 raise InterruptedRunner(pending[0]) from failure
 
 
+def xcodebuild_phase(action, args, *, tee, timeout):
+    """Run one xcodebuild action, naming it if it times out or fails."""
+    print(f"Running xcodebuild {action} (limit {timeout} s)", flush=True)
+    try:
+        command(["xcodebuild", action, *args], tee=tee, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print(f"error: xcodebuild {action} phase timed out after {timeout} s", file=sys.stderr, flush=True)
+        raise
+    except subprocess.CalledProcessError as error:
+        print(f"error: xcodebuild {action} phase failed ({error.returncode})", file=sys.stderr, flush=True)
+        if error.output and any(signature in error.output for signature in INFRASTRUCTURE_FAILURES):
+            raise SimulatorInfrastructureError(error) from error
+        raise
+
+
 def run_tests(scheme, udid, simulator_name=None):
     parent = ROOT / ".build/kit-ios"
     parent.mkdir(parents=True, exist_ok=True)
@@ -335,20 +354,22 @@ def run_tests(scheme, udid, simulator_name=None):
     if simulator_name is not None:
         destination["ephemeralName"] = simulator_name
     (work / "destination.json").write_text(json.dumps(destination))
-    try:
-        command([
-            "xcodebuild", "test", "-scheme", scheme,
-            "-destination", f"platform=iOS Simulator,id={udid}", "-destination-timeout", "60",
-            "-only-testing:ABSPlaybackTests/ShakeDetectorTests",
-            "-derivedDataPath", str(work / "DerivedData"), "-resultBundlePath", str(result),
-            "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
-            "-jobs", "2", "-test-timeouts-enabled", "YES", "-maximum-test-execution-time-allowance", "60",
-            "CODE_SIGNING_ALLOWED=NO",
-        ], tee=simulator_name is not None, timeout=1200)
-    except subprocess.CalledProcessError as error:
-        if error.output and any(signature in error.output for signature in INFRASTRUCTURE_FAILURES):
-            raise SimulatorInfrastructureError(error) from error
-        raise
+    shared = [
+        "-scheme", scheme,
+        "-destination", f"platform=iOS Simulator,id={udid}", "-destination-timeout", "60",
+        "-only-testing:ABSPlaybackTests/ShakeDetectorTests",
+        "-derivedDataPath", str(work / "DerivedData"),
+    ]
+    # Build first, so a slow cold build can't use up the test run's limit.
+    xcodebuild_phase("build-for-testing", [
+        *shared, "-jobs", "2", "CODE_SIGNING_ALLOWED=NO",
+    ], tee=simulator_name is not None, timeout=BUILD_TIMEOUT)
+    xcodebuild_phase("test-without-building", [
+        *shared, "-resultBundlePath", str(result),
+        "-parallel-testing-enabled", "NO", "-maximum-concurrent-test-simulator-destinations", "1",
+        "-test-timeouts-enabled", "YES", "-maximum-test-execution-time-allowance", "60",
+        "CODE_SIGNING_ALLOWED=NO",
+    ], tee=simulator_name is not None, timeout=TEST_TIMEOUT)
 
     reports = {}
     for kind in ("summary", "tests"):
