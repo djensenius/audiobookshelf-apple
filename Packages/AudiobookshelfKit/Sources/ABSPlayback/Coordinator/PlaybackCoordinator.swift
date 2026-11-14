@@ -1660,8 +1660,7 @@ public final class PlaybackCoordinator {
         }
         closeOperations.append(operation)
         guard permitsCloseTransport else {
-            operation.transport.resolve(.success(false))
-            operation.dispatched.resolve(.success(()))
+            closeLocallyOnly(operation, report: handoff?.report ?? report)
             return operation
         }
         let id = UUID()
@@ -1680,6 +1679,11 @@ public final class PlaybackCoordinator {
             // The syncer's report in flight for this session returns first, within a limit (#337).
             try? await handoff?.waitForSessionSync(timeout: Self.closeWaitTimeout, sleep: sleep)
             guard !Task.isCancelled else {
+                // An account end cancelled it before it was sent: a session on this device is
+                // still closed there, without the network (#74).
+                if let local = sessions as? any LocalPlaybackDeciding {
+                    _ = try? await local.closeLocalSession(id: sessionID, report: handoff?.report ?? report)
+                }
                 operation.transport.resolve(.success(false))
                 return
             }
@@ -1698,6 +1702,34 @@ public final class PlaybackCoordinator {
         closeTasks[id] = task
         operation.task = task
         return operation
+    }
+
+    /// The close of a session at an account end, which sends nothing (#74): a session playing a
+    /// download is still closed on this device, with its final report, so its listening time since
+    /// the last save isn't lost and it's saved inactive, for the account's next upload. Its
+    /// transport resolves once that local write ends, so ``waitForClose(timeout:)`` joins it.
+    /// Retirement deletes no saved local session (sign-out and removal included), so the write is
+    /// never wasted; a server session has nothing to do here.
+    private func closeLocallyOnly(_ operation: PlaybackCloseOperation, report: PlaybackSyncReport?) {
+        operation.dispatched.resolve(.success(()))
+        guard let local = sessions as? any LocalPlaybackDeciding else {
+            operation.transport.resolve(.success(false))
+            return
+        }
+        let sessionID = operation.sessionID
+        let handoff = operation.handoff
+        let sleep = self.sleep
+        Task {
+            // The syncer's save in flight for this session lands first, so the close is the last write.
+            try? await handoff?.waitForSessionSync(timeout: Self.closeWaitTimeout, sleep: sleep)
+            do {
+                _ = try await local.closeLocalSession(id: sessionID, report: report)
+            } catch {
+                logger.error(
+                    "Closing a local session at account end failed: \(String(describing: error), privacy: .public)")
+            }
+            operation.transport.resolve(.success(false))
+        }
     }
 
     /// Joins closes captured so far, without another callback or request. The deadline bounds

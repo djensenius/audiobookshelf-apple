@@ -255,14 +255,18 @@ public final class PlaybackScope {
             fetchFinished: { try await services.client().send(UserEndpoints.me()) })
         let uploader = LocalSessionUploader(
             serverConnectionID: configuration.connectionID, store: configuration.writer, service: services,
-            deviceIdentifiers: configuration.deviceIdentifiers)
-        // Reports while playing a download online; offline the pass fails fast and the
-        // reconnect's sync uploads them.
-        localSync?.setLocalSaveHandler { Task { await uploader.sync() } }
-        return PlaybackScope(
+            deviceIdentifiers: configuration.deviceIdentifiers, mediaLeases: configuration.mediaLeases)
+        let scope = PlaybackScope(
             coordinator: coordinator, syncer: syncer, services: services, nowPlaying: makeNowPlaying(coordinator),
             queue: queue, episodes: episodes, sleepTimer: sleepTimer, uploader: uploader,
             paths: configuration.networkPaths)
+        // Reports while playing a download online; offline the pass fails fast and the
+        // reconnect's sync uploads them. Through the scope's guarded sync, so a save that lands
+        // after retirement starts no upload with the retired account's client (#74).
+        localSync?.setLocalSaveHandler { [weak scope] in
+            Task { @MainActor in scope?.syncWithServer(isFirstSync: false) }
+        }
+        return scope
     }
 
     /// Test seam: a scope over a coordinator and a syncer already attached to it, an advancer

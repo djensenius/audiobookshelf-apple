@@ -362,15 +362,73 @@ struct LocalSessionUploaderTests {
         }
     }
 
+    // MARK: - Progress actions
+
+    /// #74: an upload waits for a progress action on its sessions' media, then reads them again,
+    /// so a session the action deleted (Discard Progress) is never sent and can't recreate the
+    /// discarded position. The negative control: without the leases, the stale session is sent.
+    @Test(arguments: [true, false])
+    @MainActor
+    func anUploadWaitsForAProgressActionAndSendsNothingItDeleted(leased: Bool) async throws {
+        let session = try await save(minute: 0)
+        let leases = MediaLeases()
+        let action = leases.acquire(session.key, for: .progressAction)
+        let entered = Gate()
+        let service = StubUploadService()
+        let uploader = uploader(service, mediaLeases: leased ? leases : nil)
+        // Read before the action deletes the session, as a save-triggered upload may.
+        await uploader.setAfterPendingRead { entered.open() }
+
+        let pass = Task { await uploader.sync() }
+        await entered.wait()
+        try await Task.sleep(for: .milliseconds(50))
+        try await store.deleteSessions(for: session.key)
+        action.release()
+
+        let report = await pass.value
+        #expect(service.batches == (leased ? [] : [[session.id]]))
+        #expect(report.results.isEmpty == leased)
+    }
+
+    /// #74: an upload holds its sessions' media through the request, so a progress action waits
+    /// for its answer before changing them.
+    @Test @MainActor func aProgressActionWaitsForAnUploadInFlight() async throws {
+        let session = try await save(minute: 0)
+        let leases = MediaLeases()
+        let sent = Gate()
+        let answer = Gate()
+        let service = StubUploadService { _, batch in
+            sent.open()
+            await answer.wait()
+            return .succeeding(batch)
+        }
+        let uploader = uploader(service, mediaLeases: leases)
+
+        let pass = Task { await uploader.sync() }
+        await sent.wait()
+        #expect(leases.isHeld(session.key, by: .closingSession))
+        let action = Task { await leases.acquire(session.key, for: .progressAction, after: .closingSession) }
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(!leases.isHeld(session.key, by: .progressAction))
+
+        answer.open()
+        #expect(await pass.value.deleted == [session.id])
+        let lease = await action.value
+        #expect(!leases.isHeld(session.key, by: .closingSession))
+        lease.release()
+    }
+
     // MARK: - Helpers
 
-    private func uploader(_ service: StubUploadService, batchSize: Int = LocalSessionUploader.defaultBatchSize)
-        -> LocalSessionUploader
-    {
+    private func uploader(
+        _ service: StubUploadService, batchSize: Int = LocalSessionUploader.defaultBatchSize,
+        mediaLeases: MediaLeases? = nil
+    ) -> LocalSessionUploader {
         let sleeps = sleeps
         return LocalSessionUploader(
             serverConnectionID: connection, store: store, service: service, deviceIdentifiers: UploaderDevice(),
-            batchSize: batchSize, now: { Self.start.addingTimeInterval(86_400) }, sleep: { sleeps.record($0) })
+            batchSize: batchSize, now: { Self.start.addingTimeInterval(86_400) }, sleep: { sleeps.record($0) },
+            mediaLeases: mediaLeases)
     }
 
     /// Saves a pending session that began `minute` minutes after ``start``; sessions upload in

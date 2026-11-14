@@ -113,6 +113,8 @@ final class FakePlaybackControl: PlayerPlaybackControlling {
 
     func stop(reason: PlaybackStopReason) {
         calls.append(.stop(reason))
+        // Like the coordinator's, stopping clears the error.
+        error = nil
         phase = .idle
         mediaKey = nil
         session = nil

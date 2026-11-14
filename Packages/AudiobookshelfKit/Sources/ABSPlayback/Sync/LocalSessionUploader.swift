@@ -68,6 +68,12 @@ public struct LocalSessionUploadReport: Sendable, Equatable {
 /// Passes never overlap, so no session is in two uploads at once: a sync during a pass waits
 /// for it, then runs one more pass, shared by every caller that arrived meanwhile. Within a
 /// pass, a session the server answered isn't sent again.
+///
+/// With ``MediaLeases``, an upload never races a progress action (#74): before each request it
+/// waits for any ``MediaLeases/Holder/progressAction`` on its sessions' media, holds them as
+/// ``MediaLeases/Holder/closingSession`` (which an action waits for), reads the sessions again,
+/// and holds the leases through the request and its settlement. A session an action deleted
+/// (Discard Progress) is then never sent, so it can't recreate the discarded position.
 public actor LocalSessionUploader {
     /// A pass stops at this many unanswered requests; it waits 2 s before the first retry,
     /// doubling each time.
@@ -87,6 +93,7 @@ public actor LocalSessionUploader {
     private let batchSize: Int
     private let now: @Sendable () -> Date
     private let sleep: @Sendable (TimeInterval) async throws -> Void
+    private let mediaLeases: MediaLeases?
 
     /// Cleared once the server answers `local-all` with 404 or 405.
     private var supportsLocalAll = true
@@ -103,7 +110,8 @@ public actor LocalSessionUploader {
         serverConnectionID: UUID, store: LocalProgressStore, service: any LocalSessionUploadService,
         deviceIdentifiers: any DeviceIdentifying, batchSize: Int = LocalSessionUploader.defaultBatchSize,
         now: @escaping @Sendable () -> Date = { .now },
-        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) }
+        sleep: @escaping @Sendable (TimeInterval) async throws -> Void = { try await Task.sleep(for: .seconds($0)) },
+        mediaLeases: MediaLeases? = nil
     ) {
         self.serverConnectionID = serverConnectionID
         self.store = store
@@ -112,6 +120,7 @@ public actor LocalSessionUploader {
         self.batchSize = max(batchSize, 1)
         self.now = now
         self.sleep = sleep
+        self.mediaLeases = mediaLeases
     }
 
     /// Uploads the connection's pending sessions, as described in ``LocalSessionUploader``.
@@ -191,11 +200,28 @@ public actor LocalSessionUploader {
             // when cancelled, so check before sending; `uploadEach` checks between its requests.
             guard !Task.isCancelled else { break }
 
-            let attempt = await upload(Array(due.prefix(batchSize)), deviceInfo: deviceInfo)
-            if !attempt.sent.isEmpty {
-                guard await settle(attempt, isFirstSync: isFirstSync, into: &report) else { break }
-                settled.formUnion(attempt.sent.keys)
+            var batch = Array(due.prefix(batchSize))
+            var leases: [MediaLease] = []
+            if let mediaLeases {
+                leases = await Self.acquire(Set(batch.map(\.key)), in: mediaLeases)
+                // An action that held the media meanwhile may have deleted or changed them.
+                let ids = Set(batch.map(\.id))
+                let fresh = try? await store.pendingSessions(for: serverConnectionID)
+                guard let fresh, !Task.isCancelled else {
+                    await Self.release(leases)
+                    break
+                }
+                batch = fresh.filter { ids.contains($0.id) && !isAcknowledged($0, isFirstSync: isFirstSync) }
+                guard !batch.isEmpty else {
+                    await Self.release(leases)
+                    continue
+                }
             }
+            let attempt = await upload(batch, deviceInfo: deviceInfo)
+            let didSettle = attempt.sent.isEmpty ? true : await settle(attempt, isFirstSync: isFirstSync, into: &report)
+            await Self.release(leases)
+            guard didSettle else { break }
+            settled.formUnion(attempt.sent.keys)
             switch attempt.stop {
             case nil:
                 continue
@@ -217,6 +243,19 @@ public actor LocalSessionUploader {
         }
         report.isComplete = false
         return report
+    }
+
+    /// Holds each of `keys` once no progress action does.
+    @MainActor
+    private static func acquire(_ keys: Set<MediaKey>, in leases: MediaLeases) async -> [MediaLease] {
+        var held: [MediaLease] = []
+        for key in keys { held.append(await leases.acquire(key, for: .closingSession, after: .progressAction)) }
+        return held
+    }
+
+    @MainActor
+    private static func release(_ leases: [MediaLease]) {
+        for lease in leases { lease.release() }
     }
 
     /// An active session the server acknowledged that hasn't changed since. One closed since is

@@ -75,8 +75,17 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
     private let fileExists: @Sendable (URL) -> Bool
     private let deviceIdentifiers: (any DeviceIdentifying)?
     private let now: @Sendable () -> Date
-    /// The sessions started and not yet closed, as they would be saved.
-    private let open = Mutex<[String: PendingLocalSessionDTO]>([:])
+    /// The sessions started and not yet closed, each as last saved, or as started until it is
+    /// (#74). The open snapshot is the session's cumulative state: its saved row is only a copy,
+    /// which an upload may delete while it plays (the first sync after login deletes active
+    /// sessions too), and the next save starts from the snapshot, never from zero.
+    private let open = Mutex<[String: OpenSession]>([:])
+
+    private struct OpenSession {
+        var session: PendingLocalSessionDTO
+        /// Whether it was saved: a close without a report then still saves it.
+        var isSaved: Bool
+    }
 
     /// - Parameters:
     ///   - fileURL: The file URL for a path relative to the downloads root, throwing for a path that
@@ -165,7 +174,7 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
             displayTitle: session.displayTitle ?? item.title, displayAuthor: session.displayAuthor,
             duration: session.duration, startTime: currentTime, startedAt: startedAt, updatedAt: startedAt,
             currentTime: currentTime)
-        open.withLock { $0[session.id] = pending }
+        open.withLock { $0[session.id] = OpenSession(session: pending, isSaved: false) }
         return session
     }
 
@@ -198,7 +207,8 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
     /// Saves session `id` for upload, inactive: `currentTime` from `report`, and its listening time
     /// added to the saved total. Without a report (the start was superseded, or its stream or load
     /// failed), a session never saved is dropped rather than uploaded unplayed, and a saved one is
-    /// only marked inactive. A session this service doesn't know is ignored.
+    /// only marked inactive, even when an upload already deleted its row. A session this service
+    /// doesn't know is ignored.
     public func closeSession(id: String, report: PlaybackSyncReport?) async throws {
         let started = open.withLock { $0[id] }
         let stored = try await progress.session(id: id)
@@ -207,11 +217,11 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
             open.withLock { _ = $0.removeValue(forKey: id) }
             return
         }
-        if report == nil, stored == nil {
+        if report == nil, stored == nil, started?.isSaved != true {
             open.withLock { _ = $0.removeValue(forKey: id) }
             return
         }
-        guard var session = stored ?? started else { return }
+        guard var session = stored ?? started?.session else { return }
         if let report {
             session.currentTime = report.currentTime
             session.timeListening += report.timeListened
@@ -232,13 +242,17 @@ public final class LocalPlaybackSessionService: PlaybackSessionService {
         let started = open.withLock { $0[id] }
         let stored = try await progress.session(id: id)
         if let stored, stored.key.serverConnectionID != serverConnectionID { return }
-        guard var session = stored ?? started else { return }
+        guard var session = stored ?? started?.session else { return }
         session.currentTime = report.currentTime
         session.timeListening += report.timeListened
         if report.duration > 0 { session.duration = report.duration }
         session.updatedAt = now()
         session.isActive = true
         try await progress.saveSession(session)
+        // The snapshot is now this save, so an upload deleting the row loses nothing; a session
+        // closed meanwhile isn't reopened.
+        let saved = session
+        open.withLock { if $0[id] != nil { $0[id] = OpenSession(session: saved, isSaved: true) } }
     }
 
     /// Nothing to refresh: local files need no token.

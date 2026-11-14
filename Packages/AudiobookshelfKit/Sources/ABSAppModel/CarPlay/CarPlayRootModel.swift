@@ -75,6 +75,9 @@ public final class CarPlayRootModel {
     private var homeIdentity: SessionIdentity?
     /// The failure of CarPlay's last play, while it may still be shown (``alert``).
     private var failedPlay: FailedPlay?
+    /// Whether the driver chose Stream instead and the stream is starting: the missing download's
+    /// alert is answered, though the player's error stays until the stream starts (#74).
+    private var isStreamingInstead = false
     /// The latest play while it's starting, which a tap on the same item joins.
     @ObservationIgnored private var pendingPlay: PendingPlay?
 
@@ -256,9 +259,22 @@ public final class CarPlayRootModel {
     /// download missing files (``PlayerErrorMessage/downloadFilesMissing``: Stream instead or
     /// Cancel), or a failure (OK alone). Only while the account's session is the play's and its error is still
     /// the player's: `nil` once it changes or clears, for example when the phone answered it.
+    /// A download missing files is also shown when no play of CarPlay's led to it, as when the
+    /// queue advanced to it (#74): playback stopped there, and only the driver can answer it.
     public var alert: PlayerErrorMessage? {
-        guard let failedPlay, isCurrent(failedPlay.origin), playback?.error == failedPlay.error else { return nil }
-        return failedPlay.message
+        if let failedPlay, isCurrent(failedPlay.origin), playback?.error == failedPlay.error {
+            return failedPlay.message
+        }
+        return missingDownload == nil ? nil : .downloadFilesMissing
+    }
+
+    /// The item whose download is missing files, while that's the player's error on the signed-in
+    /// account's bound playback (#74).
+    private var missingDownload: MediaKey? {
+        guard !isStreamingInstead, case .downloadFilesMissing(let key) = playback?.error, let identity,
+            key.serverConnectionID == identity.connectionID, playbackSession() != nil
+        else { return nil }
+        return key
     }
 
     /// Stream for ``PlayerErrorMessage/streamingNeedsConfirmation``: plays the blocked item on the
@@ -292,15 +308,22 @@ public final class CarPlayRootModel {
     /// for ``confirmStreaming()``, the choice goes to the player only if, when the task runs, the
     /// error is still the one asked about, for the item the driver tapped, in the same session,
     /// with no later operation; while the stream starts, it's that row's play.
+    /// The missing download may also be one the queue advanced to, with no play of CarPlay's
+    /// (``alert``): the choice is then for the item in the player, on the signed-in account.
     @discardableResult
     public func streamInstead() -> Task<CarPlayPlayOutcome, Never>? {
-        guard alert == .downloadFilesMissing, let failed = failedPlay, let playback, let identity else { return nil }
-        let origin = begin(identity, action: failed.origin.action)
+        guard alert == .downloadFilesMissing, let playback, let identity, let error = playback.error,
+            case .downloadFilesMissing(let key) = error, key.serverConnectionID == identity.connectionID
+        else { return nil }
+        let origin = begin(identity, action: .play(itemID: key.libraryItemId, episodeID: key.episodeId))
+        isStreamingInstead = true
         let task = Task {
-            defer { if pendingPlay?.origin.operation == origin.operation { pendingPlay = nil } }
-            guard origin.operation == operation, isCurrent(origin), isCurrent(failed.origin),
-                playback.error == failed.error, let key = Self.blockedKey(failed.error),
-                Self.isItem(key, of: failed.origin)
+            defer {
+                if pendingPlay?.origin.operation == origin.operation { pendingPlay = nil }
+                if origin.operation == operation { isStreamingInstead = false }
+            }
+            guard origin.operation == operation, isCurrent(origin), playback.error == error,
+                Self.isItem(key, of: origin)
             else { return CarPlayPlayOutcome.discarded }
             await playback.streamInsteadOfDownload()
             return finish(origin, threw: false)
@@ -310,11 +333,16 @@ public final class CarPlayRootModel {
     }
 
     /// Cancel or OK for ``alert``: a confirmation is declined, which clears the player's error;
-    /// anything else is only dismissed here.
+    /// Cancel for a missing download stops playback, as the phone's does, so the failed item isn't
+    /// retried by a later resume (#74); anything else is only dismissed here.
     public func dismissAlert() {
         guard let alert else { return }
         failedPlay = nil
-        if alert == .streamingNeedsConfirmation { playback?.declineMeteredStreaming() }
+        switch alert {
+        case .streamingNeedsConfirmation: playback?.declineMeteredStreaming()
+        case .downloadFilesMissing: playback?.stop(reason: .user)
+        default: break
+        }
     }
 
     /// Where a play or confirmation started: the row's action, the account, its playback session
@@ -344,6 +372,7 @@ public final class CarPlayRootModel {
     private func begin(_ identity: SessionIdentity, action: CarPlayRow.Action) -> Origin {
         operation += 1
         failedPlay = nil
+        isStreamingInstead = false
         let session = playbackSession()
         return Origin(
             action: action, identity: identity, session: session, hadSession: session != nil, operation: operation)
@@ -363,7 +392,8 @@ public final class CarPlayRootModel {
     /// changed: the playback may then be unbound (no error, which isn't a start) or another
     /// account's. Also discarded when the error is a streaming block or a missing download for
     /// another item, as when the phone played something else meanwhile: that block is the phone's
-    /// to answer, and Stream here would authorize an item the driver didn't tap.
+    /// to answer, and Stream here would authorize an item the driver didn't tap. (A missing
+    /// download in the player is still shown by ``alert``, for the item in the player, #74.)
     private func finish(_ origin: Origin, threw: Bool) -> CarPlayPlayOutcome {
         guard origin.operation == operation, isCurrent(origin) else { return .discarded }
         let error = playback?.error

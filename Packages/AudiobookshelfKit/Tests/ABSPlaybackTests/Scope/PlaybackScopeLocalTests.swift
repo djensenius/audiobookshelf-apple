@@ -219,6 +219,51 @@ struct PlaybackScopeLocalTests {
         #expect(t.requests.contains { $0.hasPrefix("/api/items/book/play") })
         await t.finish()
     }
+
+    // MARK: Lifecycle
+
+    /// #74: an account end sends nothing, but the download's session is still closed on this
+    /// device with its final report, saved inactive for the account's next upload, and retirement
+    /// waits for that write. The negative control (`.accountSwitch`) closes it through the
+    /// transport as before.
+    @Test(arguments: [PlaybackStopReason.expired, .signOut, .accountRemoved, .accountSwitch])
+    func anAccountEndClosesTheDownloadsSessionOnThisDevice(reason: PlaybackStopReason) async throws {
+        let t = try LocalScope()
+        await t.scope.play(itemID: "book", episodeID: nil, startTime: nil)
+        #expect(await eventually { t.scope.coordinator.isPlaying })
+        let sessionID = try #require(t.scope.coordinator.session?.id)
+        let before = t.requests
+
+        t.scope.retire(reason: reason)
+        _ = await t.scope.finishRetirement()
+
+        let saved = try #require(try await t.writer.session(id: sessionID))
+        #expect(!saved.isActive && saved.key == t.key)
+        #expect(t.requests.filter { !$0.hasPrefix("/api/session/local") } == before)
+    }
+
+    /// #74: a local save uploads through the scope's guarded sync: while the scope serves, a save
+    /// uploads the pending sessions; once it retired, a late save starts no upload with the
+    /// retired account's client.
+    @Test func aLocalSaveAfterRetirementUploadsNothing() async throws {
+        let t = try LocalScope()
+        await t.scope.play(itemID: "book", episodeID: nil, startTime: nil)
+        #expect(await eventually { t.scope.coordinator.isPlaying })
+        let sessionID = try #require(t.scope.coordinator.session?.id)
+        let sync = try #require(t.scope.syncer.service as? LocalSessionProgressSyncService)
+        let report = try #require(PlaybackSyncReport(currentTime: 30, timeListened: 20, duration: 250))
+        func uploads() -> Int { t.requests.filter { $0.hasPrefix("/api/session/local") }.count }
+
+        // Negative control: while the scope serves, a save uploads.
+        try await sync.syncSession(id: sessionID, report: report)
+        #expect(await eventually { uploads() > 0 })
+        await t.finish()
+        let uploaded = uploads()
+
+        try await sync.syncSession(id: sessionID, report: report)
+        try await Task.sleep(for: .milliseconds(300))
+        #expect(uploads() == uploaded)
+    }
 }
 
 /// Answers an item's play with a session for it, and any other request with an empty 200, on the

@@ -219,6 +219,40 @@ struct LocalPlaybackSessionServiceTests {
         #expect(saved.updatedAt == Self.start.addingTimeInterval(120))
     }
 
+    /// #74: the first sync after login uploads and deletes an active session while it plays. The
+    /// next save, and the close, with or without a report, still carry its whole listening time
+    /// under its id, never only what was listened since.
+    @Test(arguments: [false, true])
+    func savesAfterAnUploadDeletedTheRowKeepTheCumulativeSession(closesWithReport: Bool) async throws {
+        items.add(.book())
+        files.addAll(for: .book())
+        let service = service()
+        let session = try await service.startSession(itemID: "book", episodeID: nil)
+        func uploadDeletes() async throws {
+            let sent = try #require(try await store.session(id: session.id))
+            try await store.settleSessionUpload(
+                sent: [session.id: sent.updatedAt], results: [session.id: .success], isFirstSync: true)
+            #expect(try await store.session(id: session.id) == nil)
+        }
+
+        try await service.syncSession(
+            id: session.id, report: try #require(PlaybackSyncReport(currentTime: 40, timeListened: 30, duration: 250)))
+        try await uploadDeletes()
+        try await service.syncSession(
+            id: session.id, report: try #require(PlaybackSyncReport(currentTime: 70, timeListened: 25, duration: 250)))
+        let synced = try #require(try await store.session(id: session.id))
+        #expect(synced.timeListening == 55 && synced.currentTime == 70 && synced.isActive)
+        try await uploadDeletes()
+
+        try await service.closeSession(
+            id: session.id,
+            report: closesWithReport ? PlaybackSyncReport(currentTime: 80, timeListened: 10, duration: 250) : nil)
+
+        let closed = try #require(try await store.session(id: session.id))
+        #expect(closed.timeListening == (closesWithReport ? 65 : 55))
+        #expect(closed.currentTime == (closesWithReport ? 80 : 70) && !closed.isActive)
+    }
+
     /// Saved sessions of every connection share one store: another connection's with the same id
     /// is neither owned nor replaced.
     @Test func anotherConnectionsSessionIsNotOwnedOrReplaced() async throws {
