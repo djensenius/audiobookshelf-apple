@@ -177,6 +177,11 @@ description = "App Store screenshots into build/screenshots/ (--device <id>, --l
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "scripts/screenshots.sh"
 
+[tasks."fixtures:covers"]
+description = "Regenerate the fixture server's per-item covers (fixture-cover-<itemId>.png; docs/testing/ui-tests.md)"
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = "swift scripts/fixture-covers.swift Audiobookshelf/Fixtures/Resources"
+
 [tasks."test:tools"]
 description = "Run repository tool tests (Tools/StringsImport, and the release scripts in test:release)"
 depends = ["test:release"]

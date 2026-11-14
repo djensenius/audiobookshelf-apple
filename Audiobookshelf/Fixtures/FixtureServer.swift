@@ -99,7 +99,9 @@
         }
 
         /// The fixture resource that answers `method` and `path`, or `nil` for a request without one.
-        static func resource(method: String, path: String) -> (name: String, ext: String)? {
+        /// An item's cover is its own `fixture-cover-<id>.png` in `bundle` (`scripts/fixture-covers.swift`),
+        /// or the shared `fixture-cover.png` for an item without one.
+        static func resource(method: String, path: String, bundle: Bundle = .main) -> (name: String, ext: String)? {
             let parts = path.split(separator: "/").map(String.init)
             let library = "/api/libraries/\(SampleLibrary.libraryID)"
             switch (method, path) {
@@ -112,7 +114,8 @@
             case ("GET", library + "/personalized"): return ("fixture-personalized", "json")
             case ("GET", library + "/items"): return ("fixture-items", "json")
             case ("GET", _) where parts.count == 4 && parts[0...1] == ["api", "items"] && parts[3] == "cover":
-                return ("fixture-cover", "png")
+                let own = "fixture-cover-\(parts[2])"
+                return (bundle.url(forResource: own, withExtension: "png") == nil ? "fixture-cover" : own, "png")
             case ("GET", _) where parts.count == 3 && parts[0...1] == ["api", "items"]:
                 return ("fixture-item-\(parts[2])", "json")
             case ("POST", _) where parts.count == 4 && parts[0...1] == ["api", "items"] && parts[3] == "play":
@@ -132,7 +135,7 @@
             if method == "POST", path == "/logout" || isSessionReport(path) {
                 return Reply(status: 200, contentType: "application/json", body: Data(#"{}"#.utf8))
             }
-            guard let resource = resource(method: method, path: path),
+            guard let resource = resource(method: method, path: path, bundle: bundle),
                 let url = bundle.url(forResource: resource.name, withExtension: resource.ext),
                 var body = try? Data(contentsOf: url)
             else {
