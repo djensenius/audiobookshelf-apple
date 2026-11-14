@@ -21,6 +21,41 @@ struct PlayLinkPrompt: Equatable {
     var offersCurrentPosition: Bool { isResume && link.startTime != nil }
 }
 
+/// What an item or episode screen tells its play-link confirmation (#577): its title, and
+/// whether it has anything to play.
+struct PlayLinkScreen: Equatable {
+    /// The book or episode's title; `nil` while the screen is loading, and `""` once loading ended
+    /// without it (not found, a failed load, or a podcast without the linked episode).
+    let title: String?
+    let isPlayable: Bool
+
+    /// The item screen: a book with audio that isn't missing. A podcast's own screen has nothing
+    /// to play: its links name an episode, which opens on top.
+    @MainActor
+    static func item(_ model: ItemDetailModel) -> PlayLinkScreen {
+        if model.hasLoaded {
+            return PlayLinkScreen(
+                title: model.details?.title ?? "",
+                isPlayable: model.mediaType != .podcast && model.playButton != .unavailable)
+        }
+        // As ``ItemDetailScreen`` shows a failed or not-found load.
+        return PlayLinkScreen(title: model.error != nil && !model.isLoading ? "" : nil, isPlayable: false)
+    }
+
+    /// The episode screen, by the state it shows (``EpisodeDetailPresentation/screen(for:)``).
+    @MainActor
+    static func episode(_ model: EpisodeDetailModel) -> PlayLinkScreen {
+        switch EpisodeDetailPresentation.screen(for: model) {
+        case .episode:
+            PlayLinkScreen(title: model.episode?.title ?? "", isPlayable: model.playButton != .unavailable)
+        case .notFound, .failed:
+            PlayLinkScreen(title: "", isPlayable: false)
+        case .loading:
+            PlayLinkScreen(title: nil, isPlayable: false)
+        }
+    }
+}
+
 /// What a screen does with the router's pending play link, from
 /// ``PlayLinkConfirmationPresentation/resolve(link:title:isPlayable:canPlay:routerServerID:activeServerID:nowPlaying:isPlaying:locale:)``.
 enum PlayLinkResolution: Equatable {
@@ -35,13 +70,16 @@ enum PlayLinkResolution: Equatable {
 
 /// The play-link confirmation's rules, kept apart from the view so they can be tested (#577).
 enum PlayLinkConfirmationPresentation {
-    /// The pending play link for the screen showing `route`: only while the Library tab is
-    /// selected, this screen is in its stack (`owner`), it is the screen the link opened and tops
-    /// the path (``Router/pendingPlayLink(for:)``), and the full player doesn't cover it. The same
-    /// route in another tab's stack never takes it.
+    /// The pending play link for the screen showing `route`: only while the screen is visible
+    /// (between `onAppear` and `onDisappear`, as ``RefreshCommand``), the Library tab is selected,
+    /// this screen is in its stack (`owner`), it is the screen the link opened and tops the path
+    /// (``Router/pendingPlayLink(for:)``), and the full player doesn't cover it. The same route in
+    /// another tab's stack never takes it, nor does a covered copy of it lower in the Library
+    /// path, which the route alone can't tell from the one on top.
     @MainActor
-    static func link(for route: Route, in router: Router?, owner: AppTab?) -> PlayLink? {
-        guard let router, owner == .library, router.selectedTab == .library, !router.isFullPlayerPresented
+    static func link(for route: Route, in router: Router?, owner: AppTab?, isVisible: Bool) -> PlayLink? {
+        guard isVisible, let router, owner == .library, router.selectedTab == .library,
+            !router.isFullPlayerPresented
         else { return nil }
         return router.pendingPlayLink(for: route)
     }
@@ -138,20 +176,22 @@ enum PlayLinkConfirmationPresentation {
 /// the alert holds it.
 struct PlayLinkConfirmation: ViewModifier {
     let route: Route
-    /// The title, once loaded.
-    let title: String?
-    let isPlayable: Bool
+    let screen: PlayLinkScreen
     @Environment(Router.self) private var router: Router?
     @Environment(\.navigationTab) private var owner
     @Environment(\.serverID) private var serverID
     @Environment(\.currentPlayback) private var playback
     @Environment(\.playItem) private var playItem
     @Environment(\.locale) private var locale
+    /// Between `onAppear` and `onDisappear`: a covered screen in the stack never takes the link.
+    @State private var isVisible = false
     @State private var prompt: PlayLinkPrompt?
     @State private var playFailure: ItemDetailPlayFailure?
 
     func body(content: Content) -> some View {
         content
+            .onAppear { isVisible = true }
+            .onDisappear { isVisible = false }
             .onChange(of: resolution, initial: true) { _, resolution in
                 if let next = PlayLinkConfirmationPresentation.take(resolution, from: router) { prompt = next }
             }
@@ -197,11 +237,14 @@ struct PlayLinkConfirmation: ViewModifier {
 
     /// Reads the player only while a link waits for this screen, so playback doesn't re-render it.
     private var resolution: PlayLinkResolution {
-        guard let link = PlayLinkConfirmationPresentation.link(for: route, in: router, owner: owner) else {
+        guard
+            let link = PlayLinkConfirmationPresentation.link(
+                for: route, in: router, owner: owner, isVisible: isVisible)
+        else {
             return .wait
         }
         return PlayLinkConfirmationPresentation.resolve(
-            link: link, title: title, isPlayable: isPlayable, canPlay: playItem != nil,
+            link: link, title: screen.title, isPlayable: screen.isPlayable, canPlay: playItem != nil,
             routerServerID: router?.serverID, activeServerID: serverID, nowPlaying: playback?.mediaKey,
             isPlaying: playback?.isPlaybackRequested ?? false, locale: locale)
     }
@@ -218,7 +261,7 @@ struct PlayLinkConfirmation: ViewModifier {
 extension View {
     /// Asks before playing the router's pending play link on this item or episode screen
     /// (``PlayLinkConfirmation``).
-    func confirmsPlayLink(for route: Route, title: String?, isPlayable: Bool) -> some View {
-        modifier(PlayLinkConfirmation(route: route, title: title, isPlayable: isPlayable))
+    func confirmsPlayLink(for route: Route, screen: PlayLinkScreen) -> some View {
+        modifier(PlayLinkConfirmation(route: route, screen: screen))
     }
 }

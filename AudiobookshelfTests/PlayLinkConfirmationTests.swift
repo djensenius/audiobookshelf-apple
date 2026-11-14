@@ -1,4 +1,5 @@
 import ABSAppModel
+import ABSCore
 import ABSData
 import Foundation
 import Testing
@@ -26,11 +27,13 @@ import Testing
     /// What the screen for `route` resolves on `router`, signed in to `active`.
     private func resolve(
         _ route: Route, on router: Router, active: UUID? = server, nowPlaying: MediaKey? = nil,
-        isPlaying: Bool = false, isPlayable: Bool = true
+        isPlaying: Bool = false, isPlayable: Bool = true, screen: PlayLinkScreen? = nil
     ) -> PlayLinkResolution {
         PlayLinkConfirmationPresentation.resolve(
-            link: PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .library), title: "Dune",
-            isPlayable: isPlayable, canPlay: true, routerServerID: router.serverID, activeServerID: active,
+            link: PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .library, isVisible: true),
+            title: screen == nil ? "Dune" : screen?.title,
+            isPlayable: screen?.isPlayable ?? isPlayable, canPlay: true, routerServerID: router.serverID,
+            activeServerID: active,
             nowPlaying: nowPlaying, isPlaying: isPlaying, locale: Self.locale)
     }
 
@@ -153,14 +156,102 @@ import Testing
         let router = router(opening: Self.book)
         let route = Route.item(id: "li_1")
 
-        #expect(PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .home) == nil)
+        #expect(PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .home, isVisible: true) == nil)
         router.isFullPlayerPresented = true
-        #expect(PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .library) == nil)
+        #expect(PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .library, isVisible: true) == nil)
         router.isFullPlayerPresented = false
         router.selectedTab = .home
-        #expect(PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .library) == nil)
+        #expect(PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .library, isVisible: true) == nil)
         router.selectedTab = .library
-        #expect(PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .library) == Self.book)
+        #expect(
+            PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .library, isVisible: true) == Self.book
+        )
+        // Covered or gone from the screen (between `onDisappear` and `onAppear`).
+        #expect(PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .library, isVisible: false) == nil)
+    }
+
+    @Test func aCoveredCopyOfTheItemFromBeforeTheLinkNeverTakesIt() {
+        // Item A is already loaded lower in the path when a link pushes a second copy on top.
+        let router = Router(serverID: Self.server.uuidString, userID: "user-1")
+        router.selectLibrary(id: "books", kind: .book, supportedSections: AppTab.sections(for: .book))
+        let route = Route.item(id: "li_1")
+        router[path: .library] = [route, .series(id: "se_1")]
+        router.open(DeepLink(.play(Self.book)))
+        #expect(router[path: .library] == [route, .series(id: "se_1"), route])
+
+        // Both copies match the route; only the visible one on top gets the link.
+        let covered = PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .library, isVisible: false)
+        #expect(covered == nil)
+        #expect(PlayLinkConfirmationPresentation.take(.wait, from: router) == nil)
+        #expect(router.pendingPlayLink == Self.book)
+        let visible = PlayLinkConfirmationPresentation.link(for: route, in: router, owner: .library, isVisible: true)
+        #expect(visible == Self.book)
+    }
+
+    // MARK: Screen states
+
+    /// The item screen for `item` once `behavior`'s load has run.
+    private func itemModel(
+        _ item: ABSCore.LibraryItem = ItemDetailPreviewData.book, behavior: PreviewItemDetailService.Behavior
+    ) async -> ItemDetailModel {
+        let model = ItemDetailModel(
+            itemID: item.id, service: PreviewItemDetailService(item: item, behavior: behavior), cache: ProgressCache())
+        await model.load()
+        return model
+    }
+
+    @Test func itemScreenWaitsWhileLoadingAndDismissesWhenTheLoadEndsWithoutTheBook() async throws {
+        let book = ItemDetailPreviewData.book
+        let unloaded = ItemDetailModel(
+            itemID: book.id, service: PreviewItemDetailService(item: book, behavior: .succeed), cache: ProgressCache())
+        #expect(PlayLinkScreen.item(unloaded) == PlayLinkScreen(title: nil, isPlayable: false))
+
+        let model = await itemModel(behavior: .succeed)
+        let loaded = PlayLinkScreen.item(model)
+        #expect(loaded.title == model.details?.title)
+        #expect(loaded.title != nil)
+        #expect(loaded.isPlayable)
+
+        for behavior in [PreviewItemDetailService.Behavior.notFound, .fail] {
+            let screen = PlayLinkScreen.item(await itemModel(behavior: behavior))
+            #expect(screen == PlayLinkScreen(title: "", isPlayable: false))
+            let router = router(opening: Self.book)
+            let resolution = resolve(.item(id: "li_1"), on: router, screen: screen)
+            #expect(resolution == .dismiss)
+            _ = PlayLinkConfirmationPresentation.take(resolution, from: router)
+            #expect(router.pendingPlayLink == nil)
+        }
+
+        // A podcast's own screen has nothing to play.
+        #expect(!PlayLinkScreen.item(await itemModel(PodcastDetailPreviewData.podcast, behavior: .succeed)).isPlayable)
+    }
+
+    /// The episode screen for `episodeID` of the preview podcast once `behavior`'s load has run.
+    private func episodeModel(
+        _ episodeID: String, behavior: PreviewItemDetailService.Behavior = .succeed
+    ) async -> EpisodeDetailModel {
+        let detail = await itemModel(PodcastDetailPreviewData.podcast, behavior: behavior)
+        return EpisodeDetailModel(detail: detail, episodeID: episodeID, cache: ProgressCache())
+    }
+
+    @Test func episodeScreenDismissesALinkToAnEpisodeThePodcastLacks() async throws {
+        let episode = await episodeModel("pe_2")
+        let loaded = PlayLinkScreen.episode(episode)
+        #expect(loaded.title == episode.episode?.title)
+        #expect(loaded.title != nil)
+        #expect(loaded.isPlayable)
+
+        // The podcast loaded without the episode, or didn't load.
+        for model in [await episodeModel("pe_missing"), await episodeModel("pe_2", behavior: .notFound)] {
+            let screen = PlayLinkScreen.episode(model)
+            #expect(screen == PlayLinkScreen(title: "", isPlayable: false))
+            let link = PlayLink(itemID: "li_2", episodeID: model.episodeID, startTime: 90)
+            let router = router(opening: link)
+            let resolution = resolve(.episode(itemID: "li_2", episodeID: model.episodeID), on: router, screen: screen)
+            #expect(resolution == .dismiss)
+            _ = PlayLinkConfirmationPresentation.take(resolution, from: router)
+            #expect(router.pendingPlayLink == nil)
+        }
     }
 
     @Test func handoffPlayerActivityAsksLikeAPlayURL() throws {
