@@ -49,7 +49,7 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
     /// a near-end refresh (whose listing may hold this play's own finish) or its end.
     private var takesBaseline = false
     /// The current item's baseline can still be read from ``serverFinishedAt``: from its load, or
-    /// attaching to it before its last chapter and seconds, until a read, a near-end refresh or
+    /// attaching to it, before its last chapter and seconds, until a read, a near-end refresh or
     /// its end; a read returning after these is dropped (#587).
     private var takesCachedBaseline = false
     private let serverFinishedAt: (@Sendable (MediaKey) async -> Date?)?
@@ -216,10 +216,12 @@ public final class PlaybackQueueAdvancer: NextItemProvider {
         case .loaded:
             current = coordinator?.mediaKey
             takesBaseline = true
-            takesCachedBaseline = true
             rearmOnStart = false
             // Loading inside a trigger prepares anyway.
             refreshed = nearEndTriggers(at: coordinator?.currentTime ?? 0)
+            // No tick clears the cached read there, and this play's own finish may sync before it
+            // returns, as on attach (#587).
+            takesCachedBaseline = refreshed.isEmpty
             recompute(refetchListing: true)
         case .playbackStarted:
             guard rearmOnStart else { return }
