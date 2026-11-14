@@ -8,11 +8,20 @@ import Testing
 @Suite struct PlaybackCommandsTests {
     @Test func shortcutsMatchIssue() {
         #expect(PlaybackCommand.playPause.shortcut == KeyboardShortcut(.space, modifiers: []))
-        #expect(PlaybackCommand.jumpBackward.shortcut == KeyboardShortcut(.leftArrow, modifiers: .command))
-        #expect(PlaybackCommand.jumpForward.shortcut == KeyboardShortcut(.rightArrow, modifiers: .command))
+        // The arrows keep their physical direction in right-to-left languages, as the player does.
+        let fixed = KeyboardShortcut.Localization.withoutMirroring
         #expect(
-            PlaybackCommand.previousChapter.shortcut == KeyboardShortcut(.leftArrow, modifiers: [.option, .command]))
-        #expect(PlaybackCommand.nextChapter.shortcut == KeyboardShortcut(.rightArrow, modifiers: [.option, .command]))
+            PlaybackCommand.jumpBackward.shortcut
+                == KeyboardShortcut(.leftArrow, modifiers: .command, localization: fixed))
+        #expect(
+            PlaybackCommand.jumpForward.shortcut
+                == KeyboardShortcut(.rightArrow, modifiers: .command, localization: fixed))
+        #expect(
+            PlaybackCommand.previousChapter.shortcut
+                == KeyboardShortcut(.leftArrow, modifiers: [.option, .command], localization: fixed))
+        #expect(
+            PlaybackCommand.nextChapter.shortcut
+                == KeyboardShortcut(.rightArrow, modifiers: [.option, .command], localization: fixed))
         #expect(PlaybackCommand.speedUp.shortcut == KeyboardShortcut("+", modifiers: .command))
         #expect(PlaybackCommand.speedDown.shortcut == KeyboardShortcut("-", modifiers: .command))
         #expect(PlaybackCommand.addBookmark.shortcut == KeyboardShortcut("b", modifiers: .command))

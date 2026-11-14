@@ -177,13 +177,18 @@ extension PlaybackCommand {
 
     /// Space for Play/Pause, ⌘← and ⌘→ to jump and ⌘B for a bookmark, as #82 asks; ⌥⌘← and ⌥⌘→ for
     /// chapters; ⌘− and ⌘+ for speed, as in the speed sheet.
+    ///
+    /// The arrows aren't mirrored in right-to-left languages: like the player's controls, which
+    /// stay left to right, the left arrow goes back and the right arrow forward.
     var shortcut: KeyboardShortcut {
         switch self {
         case .playPause: KeyboardShortcut(.space, modifiers: [])
-        case .jumpBackward: KeyboardShortcut(.leftArrow)
-        case .jumpForward: KeyboardShortcut(.rightArrow)
-        case .previousChapter: KeyboardShortcut(.leftArrow, modifiers: [.option, .command])
-        case .nextChapter: KeyboardShortcut(.rightArrow, modifiers: [.option, .command])
+        case .jumpBackward: KeyboardShortcut(.leftArrow, localization: .withoutMirroring)
+        case .jumpForward: KeyboardShortcut(.rightArrow, localization: .withoutMirroring)
+        case .previousChapter:
+            KeyboardShortcut(.leftArrow, modifiers: [.option, .command], localization: .withoutMirroring)
+        case .nextChapter:
+            KeyboardShortcut(.rightArrow, modifiers: [.option, .command], localization: .withoutMirroring)
         case .speedUp: KeyboardShortcut("+")
         case .speedDown: KeyboardShortcut("-")
         case .addBookmark: KeyboardShortcut("b")

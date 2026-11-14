@@ -365,7 +365,8 @@ private final class ReaderPage {
             #expect(script.contains("'\(name)'"), "reader.js doesn't name '\(name)'")
         }
         for field in [
-            "startCfi", "endCfi", "progress", "href", "atStart", "atEnd", "locations", "items", "phase", "target",
+            "startCfi", "endCfi", "progress", "href", "atStart", "atEnd", "rightToLeft", "locations", "items", "phase",
+            "target",
         ] {
             #expect(script.contains(field), "reader.js doesn't use \(field)")
         }
@@ -1175,6 +1176,27 @@ private final class ReaderPage {
         let relocations = page.events.filter { $0["type"] as? String == "relocated" }
         #expect(relocations.map { $0["endCfi"] as? String } == ["e1", "e2"])
         #expect(relocations.map { $0["atEnd"] as? Bool } == [false, true])
+    }
+
+    /// A relocation says whether epub.js lays the book out right to left (its
+    /// `page-progression-direction`), so taps and arrow keys turn toward the matching edge.
+    @Test(.timeLimit(.minutes(1))) func aRelocationCarriesTheBooksPageDirection() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS()
+        try await page.open("tiny")
+
+        for (end, direction) in [("e1", "ltr"), ("e2", "rtl")] {
+            _ = try await page.evaluate(
+                """
+                (window.fakeRendition.settings.direction = '\(direction)',
+                window.fakeRendition.emit('relocated', {
+                  start: { cfi: 's', href: 'c1.xhtml' }, end: { cfi: '\(end)', percentage: 0 }
+                }))
+                """)
+        }
+
+        let relocations = page.events.filter { $0["type"] as? String == "relocated" }
+        #expect(relocations.map { $0["rightToLeft"] as? Bool } == [false, true])
     }
 
     /// Emits a relocation ending on page 1 of 2 in spine section `index`, and returns the progress

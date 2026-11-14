@@ -167,8 +167,51 @@ warning.
   placeholder is kept, with a warning.
 - Output is deterministic (sorted keys, Xcode's JSON layout), so rerunning is a no-op.
 
-There are no plurals in the legacy strings; only native keys can be plurals (see above). RTL and pseudo-locale checks are out of scope
-for now.
+There are no plurals in the legacy strings; only native keys can be plurals (see above).
+Pseudo-locale checks are out of scope for now; right-to-left rules are below.
+
+## Right-to-left
+
+Arabic (`ar`), Hebrew (`he`) and Persian (`fa`) run right to left. SwiftUI mirrors the
+layout for them; these rules cover what it can't decide (Human Interface Guidelines,
+[Right to left](https://developer.apple.com/design/human-interface-guidelines/right-to-left)).
+
+- **Edges.** Use `.leading` and `.trailing`, never `.left` and `.right`, for alignment,
+  padding, edges and transitions.
+- **Symbols.** Use the `forward` and `backward` SF Symbols for navigation and direction
+  (`chevron.forward`, `arrow.uturn.backward`, `rectangle.portrait.and.arrow.forward`):
+  the system mirrors them, and not the `left` and `right` ones. Don't add
+  `.flipsForRightToLeftLayoutDirection(true)` to an SF Symbol, which would flip a mirrored
+  one back.
+- **Media playback stays left to right.** Time doesn't flip, and the HIG says not to
+  flip media playback controls, so:
+  - `TransportControls` keeps jump back and previous chapter on the left, and
+    `PlayerScrubber`, `PlayerTotalTrack` and the mini player's progress line fill from
+    the left. Each sets `.environment(\.layoutDirection, .leftToRight)`, so a drag's x
+    maps to time the same way in every language.
+  - `gobackward`, `goforward`, `backward.end.fill` and `forward.end.fill` don't mirror,
+    so the Control Center jump-back control matches the player.
+  - The left arrow jumps back and the right arrow jumps forward (⌘← and ⌘→, with ⌥ for
+    chapters).
+  - Text inside those views is still localized. Only the layout direction is fixed.
+- **Arrow keys.** By default SwiftUI swaps a `.keyboardShortcut`'s left and right arrows
+  in right-to-left languages. Arrow-key shortcuts use `localization: .withoutMirroring`,
+  and the handler maps the physical key: the player's seek keys, and the EPUB reader's
+  page turns by the book's direction. `onKeyPress` and AppKit's `keyDown` report the
+  physical key already (the comic and PDF readers).
+- **Readers follow the book, the chrome follows the language.**
+  - EPUB: epub.js lays pages out by the book's `page-progression-direction`. Each
+    `relocated` event says whether that is right to left (`rightToLeft`). Then a tap
+    near the left edge or the left arrow goes forward, as in the comic reader. The close
+    button, the contents bar and the sheets follow the app's language.
+  - Comics: the reader's right-to-left setting orders the pages. It defaults to
+    `ComicInfo.xml`'s `<Manga>YesAndRightToLeft</Manga>` and can be changed per item. The pager is fixed left to right so an Arabic or Hebrew UI
+    doesn't reverse them a second time.
+  - PDF: PDFKit shows pages left to right. A PDF's `/Direction` viewer preference is not
+    read yet.
+- **Check by hand.** Run the app with `-AppleLanguages "(ar)"` and `"(he)"`, or use
+  the Right-to-Left pseudolanguage in the scheme's options. `TransportControls` and
+  `PlayerScrubber` have `Right to left` previews.
 
 ## Missing translations
 

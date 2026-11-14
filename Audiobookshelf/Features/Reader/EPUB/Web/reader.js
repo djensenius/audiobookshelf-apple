@@ -155,7 +155,10 @@
       progress: session && session.coarse ? sectionProgress(location.end) : Number(location.end.percentage) || 0,
       href: location.start.href || null,
       atStart: Boolean(location.atStart),
-      atEnd: Boolean(location.atEnd)
+      atEnd: Boolean(location.atEnd),
+      // The book's page-progression-direction, which epub.js lays the pages out by; the app turns
+      // pages toward the matching edge.
+      rightToLeft: Boolean(rendition && rendition.settings && rendition.settings.direction === 'rtl')
     }
     const same = function (key) {
       return lastRelocation[key] === event[key]

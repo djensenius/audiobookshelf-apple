@@ -6,8 +6,9 @@ import SwiftUI
 
 /// An EPUB in the epub.js web host (ADR 0008 §1): opens the book at the resume CFI with its cached
 /// locations and the reader settings, records each `relocated` page, and turns pages on taps at
-/// the sides (a tap in the middle shows or hides the chrome) and with the arrow keys. With the
-/// chrome, a bar at the bottom opens the book's table of contents (``EPUBContentsSheet``).
+/// the sides (a tap in the middle shows or hides the chrome) and with the arrow keys, which follow
+/// the book's page direction, not the app's language. With the chrome, a bar at the bottom opens
+/// the book's table of contents (``EPUBContentsSheet``).
 struct EPUBReaderView: View {
     let model: ReaderContainerModel
     let fileURL: URL
@@ -29,20 +30,22 @@ struct EPUBReaderView: View {
                         session.turn(.next)
                     }
                     .background {
-                        // Hidden buttons, so the arrow keys turn pages wherever focus is.
+                        // Hidden buttons, so the arrow keys turn pages wherever focus is. Not mirrored
+                        // in right-to-left languages: the handler maps the physical key by the book's
+                        // direction.
                         Group {
                             Button {
-                                session.turn(.prev)
+                                session.turn(toward: .left)
                             } label: {
                                 EmptyView()
                             }
-                            .keyboardShortcut(.leftArrow, modifiers: [])
+                            .keyboardShortcut(.leftArrow, modifiers: [], localization: .withoutMirroring)
                             Button {
-                                session.turn(.next)
+                                session.turn(toward: .right)
                             } label: {
                                 EmptyView()
                             }
-                            .keyboardShortcut(.rightArrow, modifiers: [])
+                            .keyboardShortcut(.rightArrow, modifiers: [], localization: .withoutMirroring)
                         }
                         .opacity(0)
                         .accessibilityHidden(true)
@@ -117,6 +120,8 @@ final class EPUBReaderSession {
     @ObservationIgnored private(set) var pendingDestination: EPUBBridgeCommand?
     /// Whether the next `relocated` is where the book rendered on opening rather than a turn.
     @ObservationIgnored private var awaitsOpeningLocation = true
+    /// Whether the book's pages run right to left, from its last `relocated`.
+    @ObservationIgnored private(set) var isRightToLeft = false
     @ObservationIgnored private let locationsKey: EPUBLocationsKey
     private static let bookURL = URL(string: "\(EPUBSchemeHandler.scheme)://book/book.epub")!
     private static let log = Logger(subsystem: "org.davidjensenius.Audiobookshelf", category: "EPUBReader")
@@ -145,6 +150,11 @@ final class EPUBReaderSession {
     func turn(_ command: EPUBBridgeCommand) {
         guard isOpen else { return }
         send(command)
+    }
+
+    /// Turns toward the screen's left or right edge, in the book's page direction.
+    func turn(toward edge: ComicReaderLayout.Arrow) {
+        turn(EPUBBridgeCommand.pageTurn(toward: edge, rightToLeft: isRightToLeft))
     }
 
     /// Shows a table of contents entry, closing the sheet. Chosen before the book has opened
@@ -177,6 +187,7 @@ final class EPUBReaderSession {
         case .ready:
             Task { await open() }
         case .relocated(let relocation):
+            isRightToLeft = relocation.rightToLeft
             contents.relocated(to: relocation.href)
             if awaitsOpeningLocation {
                 awaitsOpeningLocation = false
@@ -188,10 +199,8 @@ final class EPUBReaderSession {
             let key = locationsKey
             Task { await ReaderCaches.locations.store(locations, for: key) }
         case .tap(let x, _):
-            if x < 0.25 {
-                turn(.prev)
-            } else if x > 0.75 {
-                turn(.next)
+            if let command = EPUBBridgeCommand.pageTurn(forTapAt: x, rightToLeft: isRightToLeft) {
+                turn(command)
             } else {
                 model.toggleChrome()
             }
