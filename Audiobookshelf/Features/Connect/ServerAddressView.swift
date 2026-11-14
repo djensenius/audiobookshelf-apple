@@ -13,7 +13,7 @@ struct ServerAddressView: View {
         Form {
             Section {
                 // l10n-ignore: an example address, not prose.
-                TextField(text: $model.address, prompt: Text(verbatim: "https://abs.example.com")) {
+                TextField(text: address, prompt: Text(verbatim: "https://abs.example.com")) {
                     Text(verbatim: L10n.string("LabelServerAddress"))
                 }
                 .textContentType(.URL)
@@ -34,8 +34,8 @@ struct ServerAddressView: View {
                         Text(verbatim: L10n.string("HeaderCustomHeaders"))
                     }
                 }
+                .disabled(model.isBusy)
             }
-            .disabled(model.isBusy)
             if model.showsPlainHTTPWarning {
                 PlainHTTPWarningSection()
             }
@@ -62,7 +62,19 @@ struct ServerAddressView: View {
         .formStyle(.grouped)
     }
 
+    /// The address field is read-only while validating rather than `.disabled`: disabling resigns
+    /// the field and starts a keyboard hide that LoginView's focus merges into a show, which on
+    /// iOS 27 can lose a UIViewPropertyAnimator completion and leave the app never idle (#627).
+    private var address: Binding<String> {
+        Binding {
+            model.address
+        } set: { newValue in
+            model.editAddress(newValue)
+        }
+    }
+
     private func connect() {
+        guard !model.isBusy else { return }
         Task { await model.submitAddress() }
     }
 }

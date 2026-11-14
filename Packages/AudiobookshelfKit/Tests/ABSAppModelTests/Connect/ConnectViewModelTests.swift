@@ -640,6 +640,25 @@ private func connection(username: String = "david", address: String = "https://a
         #expect(model.phase == .address && model.server == nil && model.failure == nil)
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func addressEditsAreIgnoredWhileValidating() async {
+        let (gate, open) = AsyncStream<Void>.makeStream()
+        backend.validationGate = gate
+        let (model, _) = model()
+        model.editAddress("abs.example.com")
+        let task = Task { await model.submitAddress() }
+        while backend.validated.isEmpty { await Task.yield() }
+        model.editAddress("other.example.com")
+        #expect(model.address == "abs.example.com")
+
+        model.cancel()
+        open.yield()
+        await task.value
+        #expect(!model.isBusy)
+        model.editAddress("other.example.com")
+        #expect(model.address == "other.example.com")
+    }
+
     @Test(.timeLimit(.minutes(1)), arguments: [false, true])
     func queuedCancelledSignInDoesNotReachBackendOrDisturbAnotherFlow(openID: Bool) async {
         backend.status.authMethods = [.local, .openID]
