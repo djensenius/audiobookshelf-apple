@@ -56,9 +56,23 @@ Type the fixture address on the connect screen and sign in with any username and
 The replies are the `fixture-*` files in `Audiobookshelf/Fixtures/Resources/`: status, ping,
 login and authorize, `/api/me`, the libraries, the library with its filter data, the
 personalized shelves, one page of items, the expanded *Pride and Prejudice*
-(`fixture-item-li_pride.json`) and one cover PNG for every item. A request without a fixture is
+(`fixture-item-li_pride.json`) and a cover for every item. A request without a fixture is
 a 404, logged to the `api` category as `Fixture server: no fixture for <method> <path>`, so a
 missing fixture shows up in Console or the test's log.
+
+### Fixture covers
+
+`GET /api/items/:id/cover` returns the item's own `fixture-cover-<id>.png` when the bundle has
+one, and the shared 8 × 8 placeholder `fixture-cover.png` otherwise. *A Book Without a Cover*
+(`li_nocover`) has no `coverPath`, so the app never asks for its cover and shows its no-cover
+placeholder. The per-item covers are original typographic designs (title, author and a flat
+geometric motif, 600 × 600, about 25–45 KB each) drawn by `scripts/fixture-covers.swift` with
+the system fonts, so the repository holds only the PNGs. To change or add one, edit the list in
+the script and run:
+
+```sh
+mise run fixtures:covers
+```
 
 ## Playback
 

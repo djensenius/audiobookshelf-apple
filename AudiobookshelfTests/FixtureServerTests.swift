@@ -63,6 +63,32 @@ struct FixtureServerTests {
         #expect(data.starts(with: [0x89, 0x50, 0x4E, 0x47]))
     }
 
+    /// Every item with a cover has its own (`scripts/fixture-covers.swift`); any other item gets the
+    /// shared placeholder, and the item without a cover keeps none.
+    @Test func servesEachItemItsOwnCover() throws {
+        let covered = SampleLibrary.books.filter { $0.media?.coverPath != nil }.map(\.id)
+        #expect(covered.count == 7)
+        #expect(!covered.contains("li_nocover"))
+        var bodies = Set<Data>()
+        for id in covered {
+            let path = "/api/items/\(id)/cover"
+            #expect(FixtureServer.resource(method: "GET", path: path)?.name == "fixture-cover-\(id)")
+            let reply = FixtureServer.reply(method: "GET", path: path)
+            #expect(reply.status == 200)
+            #expect(reply.contentType == "image/png")
+            let url = try #require(Bundle.main.url(forResource: "fixture-cover-\(id)", withExtension: "png"))
+            #expect(reply.body == (try Data(contentsOf: url)))
+            #expect(reply.body.count < 60_000)
+            bodies.insert(reply.body)
+        }
+        #expect(bodies.count == covered.count)
+
+        let unknown = "/api/items/li_unknown/cover"
+        #expect(FixtureServer.resource(method: "GET", path: unknown)?.name == "fixture-cover")
+        let fallback = try #require(Bundle.main.url(forResource: "fixture-cover", withExtension: "png"))
+        #expect(FixtureServer.reply(method: "GET", path: unknown).body == (try Data(contentsOf: fallback)))
+    }
+
     /// Connect's first `/status` check, and the add-server flow's, go through the fixture
     /// launch's injected session rather than the real network.
     @Test(arguments: [false, true])
