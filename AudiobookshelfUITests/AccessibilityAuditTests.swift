@@ -131,9 +131,10 @@ final class AccessibilityAuditTests: XCTestCase {
     /// "User Interface Settings" header, reported with no element, was named in place every time.
     /// If the issue persists until that text would have to leave, or once the content is clear,
     /// the deferred failures stand, as they do if the app can't be snapshotted to find that text.
-    /// The bars' own text (``KnownAuditIssue/barLabels(in:)``) is ruled out too: an issue naming
-    /// it while attributing fails, and the deferred failures stand. In practice the deferred issue
-    /// hasn't come back in place.
+    /// The bars' own text and buttons (``KnownAuditIssue/barLabels(in:)``: the tab bar's, the
+    /// navigation bar's and the mini player's) are ruled out too: an issue naming one while
+    /// attributing fails, and the deferred failures stand. In practice the deferred issue hasn't
+    /// come back in place.
     ///
     /// Then it audits the content above the bar: it scrolls up by half the band at a time, audits
     /// each step, and stops once the content ends above the bar. So every row that was under the
@@ -141,9 +142,9 @@ final class AccessibilityAuditTests: XCTestCase {
     /// the band (AX5) in overlapping segments. In both, an issue with no element fails, and so
     /// does one on text, by label, that was in the band or under the bar at first (the metadata's
     /// rows included), unless it's a ``KnownAuditIssue``; other named text the scroll brings on
-    /// screen wasn't on screen for the first audit. The bars' own text isn't judged here, on
-    /// purpose: it was ruled out in place, and now it's over other content than it was then.
-    /// Each step is an activity named with what it measured.
+    /// screen wasn't on screen for the first audit. The bars' own text and buttons aren't judged
+    /// here, on purpose: they were ruled out in place, and now they're over other content than
+    /// they were then. Each step is an activity named with what it measured.
     @MainActor
     private func auditAboveBottomBar(
         _ content: (name: String, elements: [XCUIElement]), deferring deferred: [String], on screen: FixtureScreen,
@@ -588,9 +589,7 @@ struct KnownAuditIssue {
         var top = app.frame.minY
         func visit(_ node: XCUIElementSnapshot, inBar: Bool) {
             if node.elementType == .navigationBar { top = max(top, node.frame.maxY) }
-            let inBar =
-                inBar || node.elementType == .tabBar || node.elementType == .navigationBar
-                || node.identifier.hasPrefix("player.mini")
+            let inBar = inBar || startsBar(node)
             if node.elementType == .staticText {
                 let occurrence = seen[node.label, default: 0]
                 seen[node.label] = occurrence + 1
@@ -619,19 +618,25 @@ struct KnownAuditIssue {
                 \.key))
     }
 
-    /// The labels of everything in the tab bar and the mini player, the bars' own text included,
-    /// from one snapshot of each; `nil` if one can't be snapshotted.
+    /// Whether `node` is a bar whose text isn't the content's: the tab bar, the navigation bar,
+    /// or the mini player (`player.mini`) and its buttons beside it (`player.mini.close`, ...).
+    private static func startsBar(_ node: XCUIElementSnapshot) -> Bool {
+        node.elementType == .tabBar || node.elementType == .navigationBar || node.identifier.hasPrefix("player.mini")
+    }
+
+    /// The labels of everything in a bar (``startsBar(_:)``): the bars' own text and buttons, such
+    /// as the tab items and the mini player's, which ``textInView(in:)`` leaves out. From one
+    /// snapshot of the app; `nil` if it can't be snapshotted.
     @MainActor
     static func barLabels(in app: XCUIApplication) -> Set<String>? {
+        guard let snapshot = try? app.snapshot() else { return nil }
         var labels: Set<String> = []
-        func visit(_ node: XCUIElementSnapshot) {
-            if !node.label.isEmpty { labels.insert(node.label) }
-            node.children.forEach(visit)
+        func visit(_ node: XCUIElementSnapshot, inBar: Bool) {
+            let inBar = inBar || startsBar(node)
+            if inBar && !node.label.isEmpty { labels.insert(node.label) }
+            for child in node.children { visit(child, inBar: inBar) }
         }
-        for bar in [app.tabBars.firstMatch, app.buttons["player.mini"].firstMatch] where bar.exists {
-            guard let snapshot = try? bar.snapshot() else { return nil }
-            visit(snapshot)
-        }
+        visit(snapshot, inBar: false)
         return labels
     }
 
