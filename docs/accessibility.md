@@ -345,7 +345,8 @@ element, each with the reason and its issue:
   every run (#623). Its pixels measure 5.7:1 on the backdrop, and the elapsed time's beside
   it, which passes in the same font and colour, 5.6:1. This is the false positive the
   whole-book remaining time had at `.caption2` (#614), so only text on the Player that's a
-  minus and a timestamp is filtered.
+  minus and a timestamp is filtered, and only while a screenshot measures 4.5:1 or more around
+  text in its colour, as for the elapsed time (#655).
 - The Player's elapsed time, "Contrast failed" on the chapter's ("0:02") at the default text
   size on an iPhone 17, now and then: on the first run on a new simulator, while it ticks
   (#653). A screenshot taken as the issue arrives measures 5.5:1 for its pixels, in

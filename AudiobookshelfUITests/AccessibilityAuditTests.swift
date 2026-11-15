@@ -457,8 +457,12 @@ struct KnownAuditIssue {
                 // every run, though its pixels measure 5.7:1 on the backdrop (4.5:1 needed), as do
                 // the elapsed time's beside it (5.6:1), which pass in the same font and colour.
                 // Like the whole-book remaining time's at `.caption2` (#614). Only the Player's
-                // remaining times. #623
-                KnownAuditIssue(screen: .player, type: .contrast, element: isRemainingTime),
+                // remaining times, and only while a screenshot measures 4.5:1 or more around text
+                // in their colour, as for the elapsed times. #623, #655
+                KnownAuditIssue(screen: .player, type: .contrast) { element, app in
+                    guard let element, isRemainingTime(element, in: app) else { return false }
+                    return measuresReadable(element, in: app)
+                },
                 // "Contrast failed" on the chapter's elapsed time ("0:02") at the default text
                 // size on an iPhone 17, now and then: the first run on a new simulator, while it
                 // ticks. A screenshot taken as the issue arrives measures 5.5:1 for its pixels, in
@@ -469,9 +473,7 @@ struct KnownAuditIssue {
                 // #653
                 KnownAuditIssue(screen: .player, type: .contrast) { element, app in
                     guard let element, isElapsedTime(element) else { return false }
-                    let text = FixtureTheme.playerTimes(FixtureTheme(launchArguments: app.launchArguments))
-                    let ratio = MeasuredContrast.ratio(in: element.frame, of: XCUIScreen.main.screenshot(), text: text)
-                    return ratio.map { $0 >= 4.5 } ?? false
+                    return measuresReadable(element, in: app)
                 },
             ]
             // Contrast on content text under the bottom bar isn't filtered but deferred
@@ -890,6 +892,16 @@ struct KnownAuditIssue {
     private static func isRemainingTime(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
         guard let element, element.elementType == .staticText else { return false }
         return NSPredicate(format: "SELF MATCHES %@", "-[0-9]+(:[0-9]{2})+").evaluate(with: element.label)
+    }
+
+    /// Whether a screenshot taken now measures 4.5:1 or more around the player's time `element`,
+    /// in the colour the app draws the times in for the theme (`FixtureTheme.playerTimes`). No
+    /// measurement is false. #653, #655
+    @MainActor
+    private static func measuresReadable(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        let text = FixtureTheme.playerTimes(FixtureTheme(launchArguments: app.launchArguments))
+        let ratio = MeasuredContrast.ratio(in: element.frame, of: XCUIScreen.main.screenshot(), text: text)
+        return ratio.map { $0 >= 4.5 } ?? false
     }
 
     /// Whether `element` is one of the player's elapsed times: text that's a timestamp, such as
