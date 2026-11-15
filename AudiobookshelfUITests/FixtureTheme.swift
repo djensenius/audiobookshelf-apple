@@ -8,6 +8,20 @@ enum FixtureTheme: String {
 
     /// The launch arguments that set the theme.
     var launchArguments: [String] { ["-ABSTheme", rawValue] }
+
+    /// The theme `arguments` launch with, if one of these.
+    init?(launchArguments arguments: [String]) {
+        guard let index = arguments.lastIndex(of: "-ABSTheme"), index + 1 < arguments.endIndex else { return nil }
+        self.init(rawValue: arguments[index + 1])
+    }
+
+    /// The colour the mini player draws its title in: SwiftUI's primary label, white in dark.
+    var miniPlayerTitle: MeasuredContrast.RGB { .init(red: 255, green: 255, blue: 255) }
+
+    /// The colour the mini player draws its author in: mirrors `ABSColor.mutedForegroundOnGlass`
+    /// (ABSUI), the same in dark and black. If the app's colour changes and this doesn't, too few
+    /// pixels match, the measurement is `nil` and the audit issue fails, unfiltered.
+    var miniPlayerSecondaryText: MeasuredContrast.RGB { .init(red: 214, green: 218, blue: 222) }
 }
 
 extension XCTestCase {
@@ -58,53 +72,44 @@ extension XCTestCase {
 /// The contrast of a screenshot's text against the background right around it, for a contrast
 /// issue the audit reports on text whose pixels pass. #641
 enum MeasuredContrast {
-    /// ``ratio(in:of:scale:)`` for `screenshot`'s image, at its scale.
-    static func ratio(in frame: CGRect, of screenshot: XCUIScreenshot) -> Double? {
+    /// An sRGB colour, 0 to 255 a channel.
+    struct RGB: Equatable {
+        var red: UInt8, green: UInt8, blue: UInt8
+
+        /// Its relative luminance, from 0 to 1.
+        var luminance: Double {
+            0.2126 * MeasuredContrast.linear(red) + 0.7152 * MeasuredContrast.linear(green)
+                + 0.0722 * MeasuredContrast.linear(blue)
+        }
+    }
+
+    /// ``ratio(in:of:scale:text:)`` for `screenshot`'s image, at its scale.
+    static func ratio(in frame: CGRect, of screenshot: XCUIScreenshot, text: RGB) -> Double? {
         #if os(macOS)
             let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil)
         #else
             let image = screenshot.image.cgImage
         #endif
         guard let image, screenshot.image.size.width > 0 else { return nil }
-        return ratio(in: frame, of: image, scale: CGFloat(image.width) / screenshot.image.size.width)
+        return ratio(in: frame, of: image, scale: CGFloat(image.width) / screenshot.image.size.width, text: text)
     }
 
     /// The WCAG contrast ratio, from 1 to 21, of the text in `frame` (in points, `scale` pixels
     /// each) against its local background, conservatively: the 10th percentile over the text's
-    /// pixels. The text is whichever extreme of the frame's luminance (its 2nd or 98th
-    /// percentile) is on the frame's top and bottom two rows at most a quarter as often as the
-    /// other, as a label's glyphs don't reach them and its background does, however much of the
-    /// frame each covers; its pixels are those within 10% contrast of it. Each
-    /// one is compared with the median luminance of the pixels 2 to 4 pixels away that aren't
-    /// text, which skips its anti-aliased edge, so text over a lighter patch of glass is measured
-    /// against that patch, not the frame's darkest pixels. `nil`, so the issue isn't filtered,
-    /// when that can't be established: a frame too small or unreadable, neither extreme or both
-    /// on the top and bottom rows, no text distinct from the background, or too few text pixels
-    /// with a background around them.
-    static func ratio(in frame: CGRect, of image: CGImage, scale: CGFloat) -> Double? {
+    /// pixels. The text's pixels are those within 10% contrast of `text`, the colour the app draws
+    /// it in, not guessed from the image. Each is compared with the median luminance of the
+    /// non-text pixels 2 to 4 pixels away, which skips its anti-aliased edge, so text over a
+    /// lighter patch of glass is measured against that patch. `nil`, so the issue isn't
+    /// filtered, when that can't be established: a frame too small or unreadable, too few pixels
+    /// in the text's colour, or over a quarter of them with too little background around them to
+    /// measure (a patch of background in the text's colour isn't text that passes).
+    static func ratio(in frame: CGRect, of image: CGImage, scale: CGFloat, text: RGB) -> Double? {
         guard let luminance = luminances(in: frame, of: image, scale: scale) else { return nil }
         let (values, width, height) = luminance
-        let sorted = values.sorted()
-        let median = sorted[sorted.count / 2]
-        let dark = sorted[sorted.count * 2 / 100]
-        let light = sorted[min(sorted.count - 1, sorted.count * 98 / 100)]
-        // A label's glyphs don't reach its frame's top and bottom rows (line-height padding), its
-        // background does: the text is the extreme with at most a quarter as many pixels there,
-        // whatever the area each covers.
-        let borderRows = Array(0..<min(borderRowCount, height)) + Array(max(height - borderRowCount, 0)..<height)
-        let border = Set(borderRows).flatMap { row in values[(row * width)..<((row + 1) * width)] }
-        let onBorder = { (extreme: Double) in border.count { contrast($0, extreme) <= 1.1 } }
-        let (darkOnBorder, lightOnBorder) = (onBorder(dark), onBorder(light))
-        let text: Double
-        if lightOnBorder * 4 <= darkOnBorder, darkOnBorder > 0 {
-            text = light
-        } else if darkOnBorder * 4 <= lightOnBorder, lightOnBorder > 0 {
-            text = dark
-        } else {
-            return nil
-        }
-        guard contrast(text, median) >= 1.5 else { return nil }
-        let isText = values.map { contrast($0, text) <= 1.1 }
+        let textLuminance = text.luminance
+        let isText = values.map { contrast($0, textLuminance) <= 1.1 }
+        let textPixels = isText.count { $0 }
+        guard textPixels >= minimumTextPixels else { return nil }
         var ratios: [Double] = []
         var ring: [Double] = []
         for y in 0..<height {
@@ -119,23 +124,26 @@ enum MeasuredContrast {
                 }
                 guard ring.count >= minimumRingSamples else { continue }
                 ring.sort()
-                ratios.append(contrast(text, ring[ring.count / 2]))
+                ratios.append(contrast(textLuminance, ring[ring.count / 2]))
             }
         }
-        guard ratios.count >= minimumTextPixels else { return nil }
+        let unmeasurable = textPixels - ratios.count
+        guard ratios.count >= minimumTextPixels, Double(unmeasurable) <= maximumUnmeasurable * Double(textPixels)
+        else { return nil }
         ratios.sort()
         return ratios[ratios.count / 10]
     }
 
-    /// The rows at the frame's top and bottom, each, the text's polarity is read from.
-    private static let borderRowCount = 2
     /// The ring around a text pixel the background is taken from, in pixels (Chebyshev distance).
     private static let ringInner = 2
     private static let ringOuter = 4
     /// Non-text pixels a text pixel's ring needs for its background to count.
     private static let minimumRingSamples = 8
-    /// Text pixels with a background the frame needs for a measurement.
+    /// Pixels in the text's colour the frame needs, and text pixels with a background.
     private static let minimumTextPixels = 20
+    /// The fraction of the text's pixels that may have too little background to measure. The
+    /// mini player's real glyphs on the iPhone Duo have none. #641
+    private static let maximumUnmeasurable = 0.25
 
     /// The relative luminance of `image`'s pixels in `frame` (in points), row by row, with the
     /// crop's width and height; `nil` if the crop is under 8 pixels either way or unreadable.

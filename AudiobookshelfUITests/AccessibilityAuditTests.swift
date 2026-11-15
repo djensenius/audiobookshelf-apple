@@ -285,14 +285,20 @@ struct KnownAuditIssue {
             // on a 6.3-inch iPhone, whose mini player sits over the tab bar, not floating. Only the
             // mini player's text, and only while a screenshot taken now measures 4.5:1 or more
             // between the text's pixels and the background 2 to 4 pixels around them (the 10th
-            // percentile; `MeasuredContrast`), with the text told from the background by the
-            // frame's top and bottom rows, which only the background reaches. So text that really
-            // fails, as the author's 2.7:1 did, or text over a lighter patch of glass or beside a
-            // dark strip, still fails; ambiguous or unmeasurable, it fails. #641
+            // percentile; `MeasuredContrast`). The text's pixels are those in the colour the app
+            // draws it in for the theme (`FixtureTheme.miniPlayerTitle`, `.miniPlayerSecondaryText`),
+            // not guessed from the image. So text that really fails, as the author's 2.7:1 did, or
+            // text over a lighter patch of glass, still fails; without the expected colour, or
+            // with over a quarter of its pixels unmeasurable, the issue fails, unfiltered. #641
             all.append(
                 KnownAuditIssue(type: .contrast) { element, app in
-                    guard let element, isMiniPlayerText(element, in: app) else { return false }
-                    let ratio = MeasuredContrast.ratio(in: element.frame, of: XCUIScreen.main.screenshot())
+                    guard let element, isMiniPlayerText(element, in: app),
+                        let theme = FixtureTheme(launchArguments: app.launchArguments)
+                    else { return false }
+                    let text =
+                        element.identifier == "player.mini.title"
+                        ? theme.miniPlayerTitle : theme.miniPlayerSecondaryText
+                    let ratio = MeasuredContrast.ratio(in: element.frame, of: XCUIScreen.main.screenshot(), text: text)
                     return ratio.map { $0 >= 4.5 } ?? false
                 })
         #endif
