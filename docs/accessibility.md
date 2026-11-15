@@ -274,10 +274,10 @@ element, each with the reason and its issue:
   issues aren't filtered but deferred: when the audit names content text in that region (not
   the bars' own text or controls, which are judged where they are), the test audits that text
   again above the bar, as below, where an issue naming it fails. The full player covers the
-  bar, so the Player isn't deferred. Item detail's metadata labels are hidden from VoiceOver (each value speaks its label), so the
-  audit can report one under the bar with no element ("Contrast failed for
-  SwiftUI.AccessibilityNode"), as it did once in four runs for "Duration" at AX5. That is
-  deferred too: when Item detail has a contrast issue with no element while its
+  bar, so the Player isn't deferred. Item detail's metadata labels are hidden from VoiceOver
+  (each value speaks its label), so the audit can report one under the bar with no element
+  ("Contrast failed for SwiftUI.AccessibilityNode"), as it did once in four runs for "Duration"
+  at AX5. That is deferred too: when Item detail has a contrast issue with no element while its
   metadata (`item.metadata`) is under the bar, the test scrolls the content up by half the band
   between the navigation bar and the bar at a time, auditing contrast at each step, until the
   metadata and the deferred text end above the bar. So every row that was under the bar is
@@ -286,7 +286,10 @@ element, each with the reason and its issue:
   text still under the bar at a step is left to a later one, and text the scroll has taken up
   under the navigation bar, measured through its glass, was judged before it got there (on
   Settings at the default size, "Theme" and "Playback Settings" failed there every run until
-  this). Named text the scroll brings on screen isn't judged by them.
+  this). So each text a deferred issue names must be audited wholly between the bars at some
+  step, or its failure stands: text taller than half the band could otherwise go from under the
+  bottom bar to under the navigation bar in one step. Named text the scroll brings on screen
+  isn't judged by them.
   Settings at AX5 is deferred the same way (#647): on an iPhone 17 the "Playback Settings"
   header rests under the tab bar and the mini player, and in four runs of five the audit
   reported it with no element (in the fifth, by name). When Settings has a contrast issue with
@@ -294,8 +297,9 @@ element, each with the reason and its issue:
   same way, and an issue with no element or naming that text fails there. Before that, for Item
   detail and Settings alike, the test rules out the other text on screen (`BottomBarAttribution`):
   an issue with no element could be a genuine failure on it, which scrolling it off the top would
-  lose (deferred issues that all name their text skip this). At AX5 on an iPhone 17 Settings' top text is 4 points below the navigation bar, so that
-  text can't stay on screen while the deferred text clears the bar. Instead the test audits
+  lose (deferred issues that all name their text skip this). At AX5 on an iPhone 17 Settings'
+  top text is 4 points below the navigation bar, so that text can't stay on screen while the
+  deferred text clears the bar. Instead the test audits
   contrast in place, then after steps toward clear of the bar that keep that text on screen,
   until the issue goes away; a failure on the text's own background doesn't go away while it's
   in view. Text that was on screen, named in any of these audits, fails unless it's a filtered
@@ -315,8 +319,8 @@ element, each with the reason and its issue:
   finds the mini player, not the row, on top of it. Probed on an iPhone 17: there's no issue
   without the mini player; with it, the issue comes and goes as Settings scrolls "Allow position
   seeking on media notification controls" under it and away, and that row's toggle speaks the
-  text. Only filtered on Settings, with no element, while content text is under the bottom bar
-  (down to the window's bottom edge, as above).
+  text. Only filtered on Settings, with no element, while content text overlaps the tab bar or
+  the mini player.
 - The mini player's text on the iPhone Duo in the dark and black themes, "Contrast failed"
   every run (#641): the title on Downloads in both, and the author on Settings in dark. A
   screenshot taken as each issue arrives, in the element's frame, measures 16.3:1 for the title

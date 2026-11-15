@@ -89,4 +89,14 @@ final class BottomBarAttributionTests: XCTestCase {
         XCTAssertTrue(BottomBarAttribution.isUnderNavigationBar(text(88), bandTop: 133))
         XCTAssertFalse(BottomBarAttribution.isUnderNavigationBar(text(132.75), bandTop: 133))
     }
+
+    /// Text taller than half the band can go from under the bottom bar to under the navigation bar
+    /// in one half-band step (300 points here), so it's never wholly between them; a step that
+    /// lands it in the band covers it.
+    func testTallTextCanSkipTheBandInOneHalfBandStep() {
+        let text = { (minY: CGFloat) in CGRect(x: 16, y: minY, width: 300, height: 400) }
+        XCTAssertFalse(BottomBarAttribution.isWhollyInBand(text(350), band: band))
+        XCTAssertFalse(BottomBarAttribution.isWhollyInBand(text(350 - 300), band: band))
+        XCTAssertTrue(BottomBarAttribution.isWhollyInBand(text(200), band: band))
+    }
 }

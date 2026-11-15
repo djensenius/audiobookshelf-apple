@@ -81,4 +81,12 @@ enum BottomBarAttribution {
     static func isUnderNavigationBar(_ frame: CGRect, bandTop: CGFloat) -> Bool {
         frame.minY < bandTop - 0.5
     }
+
+    /// Whether text at `frame` is wholly between the bars, in `band` (the navigation bar's bottom
+    /// to the bottom bar's top): under neither, with their half-point tolerances. A deferred
+    /// issue's text must be audited so at least once. #650
+    static func isWhollyInBand(_ frame: CGRect, band: ClosedRange<CGFloat>) -> Bool {
+        !frame.isEmpty && !isUnderNavigationBar(frame, bandTop: band.lowerBound)
+            && frame.maxY <= band.upperBound + 0.5
+    }
 }
