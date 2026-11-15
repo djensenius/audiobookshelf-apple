@@ -455,8 +455,7 @@ private struct CreateBookmarkBar: View {
             }
             .frame(maxWidth: .infinity, minHeight: 44)
             .contentShape(.rect)
-            // White is 2.1:1 on the dark accent. #645
-            .foregroundStyle(ABSColor.onAccent)
+            .onAccentForeground()
         }
         .buttonStyle(.borderedProminent)
         .accessibilityIdentifier("bookmarks.create")

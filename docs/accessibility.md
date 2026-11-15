@@ -206,10 +206,13 @@ behind it):
 - The same white label on every other `.borderedProminent` button (#645): Series' Continue
   Series, a collection's or playlist's Play All, a podcast's Next Episode, an episode's play, the
   episode feed's download, Bookmarks' Create Bookmark, the readers' "Read in browser" and
-  `ErrorStateView`'s Retry. They now use `ABSColor.onAccent` too: Create Bookmark measures 7.5:1
-  in dark. With white they fail the dark pass: Create Bookmark (and its time) on Bookmarks,
-  Continue Series (and the book's title in it) on Series. Groups, Podcasts, episodes and the
-  readers have no fixtures, so the audits don't open them.
+  `ErrorStateView`'s Retry. They, and Play, now use `ABSColor.onAccent` through
+  `onAccentForeground()`, only while enabled: a disabled `.borderedProminent` button keeps the
+  style's dimmed label on its grey fill, which an explicit colour would override (white on light
+  grey in light). Create Bookmark measures 7.5:1 in dark. With white they fail the dark pass:
+  Create Bookmark (and its time) on Bookmarks, Continue Series (and the book's title in it) on
+  Series. Groups, Podcasts, episodes and the readers have no fixtures, so the audits don't open
+  them.
 - The mini player's author ("Jane Austen") on its glass: in dark the glass takes a lighter tint
   from the rows under it, `rgb(87, 88, 88)` over Settings, where `mutedForeground` is 2.7:1
   ("Contrast failed"); in black, 3.2:1 on Settings and 4.0:1 on Downloads ("nearly passed").

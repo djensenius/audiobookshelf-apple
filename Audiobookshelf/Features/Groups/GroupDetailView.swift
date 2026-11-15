@@ -154,8 +154,7 @@ private struct GroupDetailHeader<Kind: GroupScreenKind>: View {
                         Image(systemName: playAll.systemImage)
                     }
                     .frame(maxWidth: .infinity, minHeight: 44)
-                    // White is 2.1:1 on the dark accent. #645
-                    .foregroundStyle(ABSColor.onAccent)
+                    .onAccentForeground()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!playAll.isEnabled)

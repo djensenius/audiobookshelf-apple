@@ -312,8 +312,7 @@ private struct ItemDetailActions: View {
                     Image(systemName: play.systemImage)
                 }
                 .frame(maxWidth: .infinity)
-                // White is 2.1:1 on the dark accent. #641
-                .foregroundStyle(ABSColor.onAccent)
+                .onAccentForeground()
             }
             .buttonStyle(.borderedProminent)
             .disabled(!play.isEnabled)

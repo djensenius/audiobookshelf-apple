@@ -58,8 +58,7 @@ public struct ErrorStateView: View {
                     Text(verbatim: L10n.string("ButtonRetry"))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(.rect)
-                        // White is 2.1:1 on the dark accent. #645
-                        .foregroundStyle(ABSColor.onAccent)
+                        .onAccentForeground()
                 }
                 .buttonStyle(.borderedProminent)
                 // For UI tests.

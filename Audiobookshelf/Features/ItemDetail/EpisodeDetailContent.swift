@@ -152,8 +152,7 @@ struct EpisodeDetailContent: View {
                 }
             }
             .frame(maxWidth: .infinity)
-            // White is 2.1:1 on the dark accent. #645
-            .foregroundStyle(ABSColor.onAccent)
+            .onAccentForeground()
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)

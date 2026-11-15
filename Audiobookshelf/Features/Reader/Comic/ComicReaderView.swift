@@ -391,8 +391,7 @@ private struct ComicUnsupportedView: View {
             if let webURL {
                 Link(destination: webURL) {
                     Text(verbatim: L10n.string("ButtonReadInBrowser"))
-                        // White is 2.1:1 on the dark accent. #645
-                        .foregroundStyle(ABSColor.onAccent)
+                        .onAccentForeground()
                 }
                 .buttonStyle(.borderedProminent)
             }

@@ -172,8 +172,7 @@ private struct SeriesDetailHeader: View {
                         Image(systemName: "book")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    // White is 2.1:1 on the dark accent. #645
-                    .foregroundStyle(ABSColor.onAccent)
+                    .onAccentForeground()
                 }
                 .buttonStyle(.borderedProminent)
                 .accessibilityIdentifier("series.continue")
