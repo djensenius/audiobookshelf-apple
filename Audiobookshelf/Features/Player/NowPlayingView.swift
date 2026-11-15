@@ -134,6 +134,10 @@ struct NowPlayingView: View {
             .frame(maxWidth: .infinity)
         }
         .scrollBounceBehavior(.basedOnSize)
+        // Taller than the screen (large text on a phone), the column opens scrolled to its end,
+        // so the controls show and the artwork's top scrolls away. At AX5 on a 6.3-inch iPhone,
+        // play/pause was off screen (#623).
+        .defaultScrollAnchor(.bottom, for: .initialOffset)
     }
 
     /// ``PlayerActionsBar`` in the bottom toolbar, without chapters, the queue and bookmarks while the
