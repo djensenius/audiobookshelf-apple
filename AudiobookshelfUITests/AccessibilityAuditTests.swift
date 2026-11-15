@@ -130,15 +130,17 @@ final class AccessibilityAuditTests: XCTestCase {
     /// background doesn't go away while it's in view: at AX5 on an iPhone 17 a low-contrast
     /// "User Interface Settings" header, reported with no element, was named in place every time.
     /// If the issue persists until that text would have to leave, or once the content is clear,
-    /// the deferred failures stand. In practice the deferred issue hasn't come back in place.
+    /// the deferred failures stand, as they do if the app can't be snapshotted to find that text.
+    /// In practice the deferred issue hasn't come back in place.
     ///
     /// Then it audits the content above the bar: it scrolls up by half the band at a time, audits
     /// each step, and stops once the content ends above the bar. So every row that was under the
     /// bar (rows are shorter than half the band) is audited fully in the band, a block taller than
     /// the band (AX5) in overlapping segments. In both, an issue with no element fails, and so
-    /// does one on text, by label, that was in the band or under the bar at first, unless it's a
-    /// ``KnownAuditIssue``; other named text the scroll brings on screen wasn't on screen for the
-    /// first audit. Each step is an activity named with what it measured.
+    /// does one on text, by label, that was in the band or under the bar at first (the metadata's
+    /// rows included), unless it's a ``KnownAuditIssue``; other named text the scroll brings on
+    /// screen wasn't on screen for the first audit. Each step is an activity named with what it
+    /// measured.
     @MainActor
     private func auditAboveBottomBar(
         _ content: (name: String, elements: [XCUIElement]), deferring deferred: [String], on screen: FixtureScreen,
@@ -149,8 +151,11 @@ final class AccessibilityAuditTests: XCTestCase {
             XCTFail("\(name): an issue was deferred, but no \(content.name) is under the bottom bar")
             return deferred
         }
-        let view = KnownAuditIssue.textInView(in: app)
-        let labels = Set(view.map(\.label) + content.elements.filter { $0.elementType == .staticText }.map(\.label))
+        // The content's labels include its texts', as Item detail's metadata is their container.
+        guard let view = KnownAuditIssue.textInView(in: app),
+            let contentLabels = KnownAuditIssue.textLabels(of: content.elements)
+        else { return deferred.map { "\($0) (kept: couldn't snapshot the view to attribute it)" } }
+        let labels = Set(view.map(\.label)).union(contentLabels)
         let bottom = { content.elements.map(\.frame.maxY).max() ?? 0 }
         let x = Self.dragX(for: first, in: app, margin: margin)
         var failures: [String] = []
@@ -205,6 +210,7 @@ final class AccessibilityAuditTests: XCTestCase {
                 named: "\(name): attributing the deferred contrast, step \(step): dragged \(distance) points; the "
                     + "\(content.name) \(under) then \(underAfter) points under the bar; headroom \(before.headroom) "
                     + "then \(after.headroom); \(view.count) texts in view, all still in view: \(after.visible); "
+                    + "\(labels.count) labels judged; "
                     + "\(found.unnamed) issues with no element, \(found.named) named: \(outcome)"
             ) { _ in }
         }
@@ -598,13 +604,30 @@ struct KnownAuditIssue {
     }
 
     /// The content's text on screen in the band between the navigation bar and the bottom bar:
-    /// the view ``BottomBarAttribution`` keeps on screen.
+    /// the view ``BottomBarAttribution`` keeps on screen. `nil` if the app can't be snapshotted,
+    /// so that isn't taken for a view with no text.
     @MainActor
-    static func textInView(in app: XCUIApplication) -> Set<ViewText> {
-        guard let (texts, band) = snapshotTexts(in: app) else { return [] }
+    static func textInView(in app: XCUIApplication) -> Set<ViewText>? {
+        guard let (texts, band) = snapshotTexts(in: app) else { return nil }
         return Set(
             texts.filter { !$0.inBar && !$0.label.isEmpty && !$0.frame.isEmpty && isInside($0.frame, band) }.map(
                 \.key))
+    }
+
+    /// The labels of `elements` that are texts and of the texts they contain, from one snapshot
+    /// of each; `nil` if one can't be snapshotted.
+    @MainActor
+    static func textLabels(of elements: [XCUIElement]) -> Set<String>? {
+        var labels: Set<String> = []
+        func visit(_ node: XCUIElementSnapshot) {
+            if node.elementType == .staticText && !node.label.isEmpty { labels.insert(node.label) }
+            node.children.forEach(visit)
+        }
+        for element in elements {
+            guard let snapshot = try? element.snapshot() else { return nil }
+            visit(snapshot)
+        }
+        return labels
     }
 
     /// Whether every text in `view` is still in the band, and how far the content can scroll up
