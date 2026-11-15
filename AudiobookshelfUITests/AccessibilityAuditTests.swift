@@ -154,9 +154,11 @@ final class AccessibilityAuditTests: XCTestCase {
         let bottom = { content.elements.map(\.frame.maxY).max() ?? 0 }
         let x = Self.dragX(for: first, in: app, margin: margin)
         var failures: [String] = []
-        // Audits contrast: counts issues with no element, and adds them and the named ones on
-        // `labels` to `failures`, returning how many of each.
-        func auditContrast(_ step: String) throws -> (unnamed: Int, named: Int) {
+        // Audits contrast: counts issues with no element and the named ones on `labels`, adding the
+        // named ones to `failures`, and the ones with no element too if `keepUnnamed`. While
+        // attributing they aren't kept: they're the deferred issue persisting, which `deferred`
+        // already holds if it isn't attributed.
+        func auditContrast(_ step: String, keepUnnamed: Bool) throws -> (unnamed: Int, named: Int) {
             var counts = (unnamed: 0, named: 0)
             try app.performAccessibilityAudit(for: .contrast) { issue in
                 if KnownAuditIssue.all.contains(where: { $0.matches(issue, on: screen, in: app) }) { return true }
@@ -165,6 +167,7 @@ final class AccessibilityAuditTests: XCTestCase {
                     counts.named += 1
                 } else {
                     counts.unnamed += 1
+                    guard keepUnnamed else { return true }
                 }
                 failures.append("\(name), \(step): \(Self.failure(issue))")
                 return true
@@ -190,7 +193,7 @@ final class AccessibilityAuditTests: XCTestCase {
             let under = bottom() - KnownAuditIssue.bottomBarTop(in: app)
             let distance = step == 0 ? 0 : min(max(under, 0) + 4, max(before.headroom - 4, 16))
             if distance > 0 { drag(distance) }
-            let found = try auditContrast("attributing the deferred contrast, step \(step)")
+            let found = try auditContrast("attributing the deferred contrast, step \(step)", keepUnnamed: false)
             let after = KnownAuditIssue.state(of: view, in: app)
             let underAfter = bottom() - KnownAuditIssue.bottomBarTop(in: app)
             let moved = step == 0 || under - underAfter >= 1
@@ -236,7 +239,7 @@ final class AccessibilityAuditTests: XCTestCase {
             drag(band / 2)
             XCTAssertLessThanOrEqual(
                 start - first.frame.minY, band / 2 + 2, "\(name): step \(step) scrolled more than half the band")
-            let found = try auditContrast("\(content.name) above the bottom bar, step \(step)")
+            let found = try auditContrast("\(content.name) above the bottom bar, step \(step)", keepUnnamed: true)
             XCTContext.runActivity(
                 named:
                     "\(name): \(content.name) above the bottom bar, step \(step): scrolled \(start - first.frame.minY) "
