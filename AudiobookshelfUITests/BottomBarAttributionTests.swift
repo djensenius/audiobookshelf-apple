@@ -40,4 +40,24 @@ final class BottomBarAttributionTests: XCTestCase {
             XCTAssertEqual(BottomBarAttribution.outcome(after: step, canScrollFurther: true), .failed)
         }
     }
+
+    private let band: ClosedRange<CGFloat> = 100...700
+
+    /// Text that started inside the band stays in view while inside it, and leaves it under the
+    /// navigation bar.
+    func testTextInsideTheBandMustStayInside() {
+        let text = { (minY: CGFloat) in CGRect(x: 0, y: minY, width: 100, height: 40) }
+        XCTAssertTrue(BottomBarAttribution.isStillInView(text(104), firstMinY: 300, band: band))
+        XCTAssertEqual(BottomBarAttribution.headroom(text(104), firstMinY: 300, band: band), 4)
+        XCTAssertFalse(BottomBarAttribution.isStillInView(text(90), firstMinY: 300, band: band))
+    }
+
+    /// Text that started partly under the navigation bar is in view where it was, with no
+    /// headroom, and not once it scrolls further under it.
+    func testTextPartlyUnderTheNavigationBarCantScrollFurtherOut() {
+        let text = { (minY: CGFloat) in CGRect(x: 0, y: minY, width: 100, height: 40) }
+        XCTAssertTrue(BottomBarAttribution.isStillInView(text(80), firstMinY: 80, band: band))
+        XCTAssertEqual(BottomBarAttribution.headroom(text(80), firstMinY: 80, band: band), 0)
+        XCTAssertFalse(BottomBarAttribution.isStillInView(text(64), firstMinY: 80, band: band))
+    }
 }

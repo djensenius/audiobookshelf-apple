@@ -123,7 +123,8 @@ final class AccessibilityAuditTests: XCTestCase {
     /// Item detail's metadata, or Settings' text) was under the bottom bar, and returns what fails.
     ///
     /// First it rules out the text on screen in the band between the navigation bar and the
-    /// bottom bar (``KnownAuditIssue/textInView(in:)``, ``BottomBarAttribution``). That text can't
+    /// bottom bar (``KnownAuditIssue/textInView(in:)``, ``BottomBarAttribution``), text partly
+    /// under the navigation bar included, which can't scroll further out. That text can't
     /// be on screen with the content clear of the bar when the content is at its top, as Settings
     /// opens, so it audits contrast in place (step 0), then after steps toward clear of the bar
     /// that keep that text in the band, until the issue goes away. A failure on that text's own
@@ -160,7 +161,7 @@ final class AccessibilityAuditTests: XCTestCase {
             let contentLabels = KnownAuditIssue.textLabels(of: content.elements),
             let barLabels = KnownAuditIssue.barLabels(in: app)
         else { return deferred.map { "\($0) (kept: couldn't snapshot the view to attribute it)" } }
-        let labels = Set(view.map(\.label)).union(contentLabels)
+        let labels = Set(view.keys.map(\.label)).union(contentLabels)
         let bottom = { content.elements.map(\.frame.maxY).max() ?? 0 }
         let x = Self.dragX(for: first, in: app, margin: margin)
         var failures: [String] = []
@@ -607,15 +608,18 @@ struct KnownAuditIssue {
         return (texts, top...max(top, bottomBarTop(in: app)))
     }
 
-    /// The content's text on screen in the band between the navigation bar and the bottom bar:
-    /// the view ``BottomBarAttribution`` keeps on screen. `nil` if the app can't be snapshotted,
-    /// so that isn't taken for a view with no text.
+    /// The content's text on screen in the band between the navigation bar and the bottom bar,
+    /// with each one's top: the view ``BottomBarAttribution`` keeps on screen. Text partly under
+    /// the navigation bar is part of it too, as it's partly on screen. `nil` if the app can't be
+    /// snapshotted, so that isn't taken for a view with no text.
     @MainActor
-    static func textInView(in app: XCUIApplication) -> Set<ViewText>? {
+    static func textInView(in app: XCUIApplication) -> [ViewText: CGFloat]? {
         guard let (texts, band) = snapshotTexts(in: app) else { return nil }
-        return Set(
-            texts.filter { !$0.inBar && !$0.label.isEmpty && !$0.frame.isEmpty && isInside($0.frame, band) }.map(
-                \.key))
+        let inView = texts.filter {
+            !$0.inBar && !$0.label.isEmpty && !$0.frame.isEmpty && $0.frame.maxY > band.lowerBound + 0.5
+                && $0.frame.maxY <= band.upperBound + 0.5
+        }
+        return Dictionary(inView.map { ($0.key, $0.frame.minY) }, uniquingKeysWith: { a, _ in a })
     }
 
     /// Whether `node` is a bar whose text isn't the content's: the tab bar, the navigation bar,
@@ -656,21 +660,21 @@ struct KnownAuditIssue {
         return labels
     }
 
-    /// Whether every text in `view` is still in the band, and how far the content can scroll up
-    /// before one leaves it under the navigation bar (the band's height without `view`).
+    /// Whether every text in `view` (its first tops) is still in view
+    /// (``BottomBarAttribution/isStillInView(_:firstMinY:band:)``), and how far the content can
+    /// scroll up before one isn't (the band's height without `view`).
     @MainActor
-    static func state(of view: Set<ViewText>, in app: XCUIApplication) -> (visible: Bool, headroom: CGFloat) {
+    static func state(of view: [ViewText: CGFloat], in app: XCUIApplication) -> (visible: Bool, headroom: CGFloat) {
         guard let (texts, band) = snapshotTexts(in: app) else { return (false, 0) }
         let frames = Dictionary(texts.filter { !$0.inBar }.map { ($0.key, $0.frame) }, uniquingKeysWith: { a, _ in a })
-        let inView = view.compactMap { frames[$0] }
-        let visible = inView.count == view.count && inView.allSatisfy { isInside($0, band) }
-        let headroom = inView.map { $0.minY - band.lowerBound }.min() ?? (band.upperBound - band.lowerBound)
+        let inView = view.compactMap { key, firstMinY in frames[key].map { ($0, firstMinY) } }
+        let visible =
+            inView.count == view.count
+            && inView.allSatisfy { BottomBarAttribution.isStillInView($0, firstMinY: $1, band: band) }
+        let headroom =
+            inView.map { BottomBarAttribution.headroom($0, firstMinY: $1, band: band) }.min()
+            ?? (band.upperBound - band.lowerBound)
         return (visible, headroom)
-    }
-
-    /// Whether `frame` is within `band` vertically, to half a point.
-    private static func isInside(_ frame: CGRect, _ band: ClosedRange<CGFloat>) -> Bool {
-        frame.minY >= band.lowerBound - 0.5 && frame.maxY <= band.upperBound + 0.5
     }
 
     /// Whether `element` is text of the mini player (`player.mini`): its title, or other text the

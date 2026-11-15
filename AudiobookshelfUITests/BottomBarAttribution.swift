@@ -1,3 +1,5 @@
+import CoreGraphics
+
 /// Whether a contrast issue with no element, deferred because content was under the bottom bar
 /// (`KnownAuditIssue.isUnnamedContrastUnderBottomBar`), could be the other text on screen: the
 /// test audits contrast in place, then after small steps toward clear of the bar while every text
@@ -13,8 +15,8 @@ enum BottomBarAttribution {
         var unnamedIssues: Int
         /// Contrast issues, not filtered, on text that was on screen at first or under the bar.
         var namedFailures: Int
-        /// Whether every text that was on screen above the bar at first still is, below the
-        /// navigation bar and above the bottom bar.
+        /// Whether every text that was on screen above the bar at first still is
+        /// (``isStillInView(_:firstMinY:band:)``).
         var originalViewVisible: Bool
     }
 
@@ -47,5 +49,19 @@ enum BottomBarAttribution {
         if !step.originalViewVisible { return .notAttributed(.viewLeft) }
         if step.unnamedIssues == 0 { return .attributed }
         return canScrollFurther ? .undecided : .notAttributed(.persisted)
+    }
+
+    /// Whether text that was in view with its top at `firstMinY` still is, now at `frame`, with
+    /// `band` the space between the navigation bar and the bottom bar: it's not under the bottom
+    /// bar, and its top is no higher than the band's top, or than it was if it started partly
+    /// under the navigation bar, so partly visible text can't scroll further out of view.
+    static func isStillInView(_ frame: CGRect, firstMinY: CGFloat, band: ClosedRange<CGFloat>) -> Bool {
+        frame.minY >= min(band.lowerBound, firstMinY) - 0.5 && frame.maxY <= band.upperBound + 0.5
+    }
+
+    /// How far the text at `frame` can scroll up and stay in view (``isStillInView(_:firstMinY:band:)``):
+    /// none for text that started partly under the navigation bar and hasn't moved.
+    static func headroom(_ frame: CGRect, firstMinY: CGFloat, band: ClosedRange<CGFloat>) -> CGFloat {
+        frame.minY - min(band.lowerBound, firstMinY)
     }
 }
