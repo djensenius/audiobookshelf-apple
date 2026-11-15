@@ -302,8 +302,18 @@ struct KnownAuditIssue {
         on screen: FixtureScreen, in app: XCUIApplication
     ) -> (name: String, elements: [XCUIElement]) {
         if screen == .item { return ("metadata", [app.descendants(matching: .any)["item.metadata"].firstMatch]) }
-        let texts = textUnderBottomBar(in: app).map {
-            app.staticTexts.matching(NSPredicate(format: "label == %@", $0)).firstMatch
+        let bars = bottomBars(in: app).map(\.frame)
+        let texts = textUnderBottomBar(in: app).map { text in
+            let element = app.staticTexts.matching(NSPredicate(format: "label == %@", text.label))
+                .element(boundBy: text.occurrence)
+            // The occurrence must be the text the snapshot found under the bar, or the re-audit
+            // would scroll for, and judge, some other text.
+            if !bars.contains(where: element.frame.intersects) {
+                XCTFail(
+                    "Text '\(text.label)' (occurrence \(text.occurrence)) was under the bottom bar in the "
+                        + "snapshot, but resolves to \(element.frame), clear of the bars \(bars)")
+            }
+            return element
         }
         return ("deferred text", texts)
     }
@@ -366,20 +376,29 @@ struct KnownAuditIssue {
             }
     }
 
-    /// The labels of content text, not the tab bar's or the mini player's own, whose frame
-    /// overlaps either bar. One snapshot of the app, so it's quick however many rows the screen has.
+    /// Content text, not the tab bar's or the mini player's own, whose frame overlaps either bar:
+    /// each one's label and its occurrence among the app's texts with that label, in the order of
+    /// `app.staticTexts` (depth first, counting the bars' texts too), since Settings repeats values
+    /// such as "10 seconds". One snapshot of the app, so it's quick however many rows the screen has.
     @MainActor
-    private static func textUnderBottomBar(in app: XCUIApplication) -> [String] {
+    private static func textUnderBottomBar(in app: XCUIApplication) -> [(label: String, occurrence: Int)] {
         let bars = bottomBars(in: app).map(\.frame)
         guard !bars.isEmpty, let snapshot = try? app.snapshot() else { return [] }
-        func labels(_ node: XCUIElementSnapshot) -> [String] {
-            if node.elementType == .tabBar || node.identifier.hasPrefix("player.mini") { return [] }
-            if node.elementType == .staticText && !node.label.isEmpty && bars.contains(where: node.frame.intersects) {
-                return [node.label]
+        var seen: [String: Int] = [:]
+        var found: [(label: String, occurrence: Int)] = []
+        func visit(_ node: XCUIElementSnapshot, inBar: Bool) {
+            let inBar = inBar || node.elementType == .tabBar || node.identifier.hasPrefix("player.mini")
+            if node.elementType == .staticText {
+                let occurrence = seen[node.label, default: 0]
+                seen[node.label] = occurrence + 1
+                if !inBar && !node.label.isEmpty && bars.contains(where: node.frame.intersects) {
+                    found.append((node.label, occurrence))
+                }
             }
-            return node.children.flatMap(labels)
+            for child in node.children { visit(child, inBar: inBar) }
         }
-        return labels(snapshot)
+        visit(snapshot, inBar: false)
+        return found
     }
 
     /// The tab bar, if it's along the bottom edge, and the mini player, where they exist. A tab bar
