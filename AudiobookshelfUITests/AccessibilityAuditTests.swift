@@ -638,10 +638,20 @@ struct KnownAuditIssue {
     }
 
     /// Whether `node` is a bar whose text isn't the content's: the tab bar, the navigation bar,
-    /// or the mini player (`player.mini`) and its buttons beside it (`player.mini.close`, ...).
+    /// or the mini player (`player.mini`) and its controls beside it (`player.mini.close`, ...,
+    /// and the transport controls, ``miniPlayerTransport``).
     private static func startsBar(_ node: XCUIElementSnapshot) -> Bool {
         node.elementType == .tabBar || node.elementType == .navigationBar || node.identifier.hasPrefix("player.mini")
+            || miniPlayerTransport.contains(node.identifier)
     }
+
+    /// The mini player's transport controls (`TransportControls`). The full player's controls
+    /// share these identifiers, but it isn't open on the screens whose bars this is for: Settings
+    /// and Item detail. Listed rather than `player.` as a prefix, which would take in the full
+    /// player's other elements too.
+    private static let miniPlayerTransport: Set<String> = [
+        "player.play", "player.pause", "player.jumpBackward", "player.jumpForward",
+    ]
 
     /// The labels of everything in a bar (``startsBar(_:)``): the bars' own text and buttons, such
     /// as the tab items and the mini player's, which ``textInView(in:)`` leaves out. From one
