@@ -262,6 +262,16 @@ element, each with the reason and its issue:
   seeking on media notification controls" under it and away, and that row's toggle speaks the
   text. Only filtered on Settings, with no element, while content text overlaps the tab bar or
   the mini player.
+- The mini player's text on the iPhone Duo in the dark and black themes, "Contrast failed"
+  every run (#641): the title on Downloads in both, and the author on Settings in dark. A
+  screenshot taken as each issue arrives, in the element's frame, measures 16.3:1 for the title
+  (white on the glass's `rgb(32, 32, 32)`) and 5.9:1 for the author (`rgb(214, 218, 222)` on
+  `rgb(78, 79, 79)`). The frames match the text, and the issues stay after waiting for the
+  screen to be pixel-still for a second, so it isn't the glass mid-transition. They don't
+  happen on an iPhone 17, where the mini player sits above the tab bar instead of floating at
+  the bottom. Filtered only for the mini player's text, and only while a screenshot taken then
+  measures 4.5:1 or more in the element's frame (between the 5th and 95th percentile
+  luminance), so text that really fails, as the author did at 2.7:1, still fails.
 - The Player's remaining times, "Contrast failed" on the chapter's ("-0:26") on an iPhone 17
   every run (#623). Its pixels measure 5.7:1 on the backdrop, and the elapsed time's beside
   it, which passes in the same font and colour, 5.6:1. This is the false positive the

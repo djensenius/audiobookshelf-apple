@@ -277,6 +277,20 @@ struct KnownAuditIssue {
                 KnownAuditIssue(
                     screen: .settings, type: .elementDetection, description: "Potentially inaccessible text"
                 ) { element, app in element == nil && hasTextUnderBottomBar(in: app) })
+            // "Contrast failed" on the mini player's text on the iPhone Duo in the dark and black
+            // themes, every run: the title on Downloads and the author on Settings (dark). A
+            // screenshot taken as each issue arrives measures 16.3:1 (white on the glass's
+            // rgb(32,32,32)) and 5.9:1 (rgb(214,218,222) on rgb(78,79,79)), the frames match the
+            // text, and the issues stay after waiting for the screen to be still for a second. Not
+            // on a 6.3-inch iPhone, whose mini player sits over the tab bar, not floating. Only the
+            // mini player's text, and only while the screenshot taken now measures 4.5:1 or more
+            // in its frame, so text that really fails, as the author's 2.7:1 did, still fails. #641
+            all.append(
+                KnownAuditIssue(type: .contrast) { element, app in
+                    guard let element, isMiniPlayerText(element, in: app) else { return false }
+                    let ratio = MeasuredContrast.ratio(in: element.frame, of: XCUIScreen.main.screenshot())
+                    return ratio.map { $0 >= 4.5 } ?? false
+                })
         #endif
         return all
     }()
@@ -356,6 +370,18 @@ struct KnownAuditIssue {
             return node.children.contains(where: underBar)
         }
         return underBar(snapshot)
+    }
+
+    /// Whether `element` is text of the mini player (`player.mini`): its title, or other text the
+    /// mini player contains.
+    @MainActor
+    private static func isMiniPlayerText(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        guard element.elementType == .staticText, !element.label.isEmpty else { return false }
+        if element.identifier.hasPrefix("player.mini") { return true }
+        let mini = app.buttons["player.mini"].firstMatch
+        return mini.exists && mini.frame.contains(element.frame)
+            && mini.descendants(matching: .staticText).matching(NSPredicate(format: "label == %@", element.label))
+                .firstMatch.exists
     }
 
     /// The tab bar and the mini player, where they exist.

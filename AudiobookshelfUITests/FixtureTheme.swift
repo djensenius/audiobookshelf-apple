@@ -54,3 +54,46 @@ extension XCTestCase {
         return Double(dark) / Double(side * side)
     }
 }
+
+/// The contrast of a screenshot's pixels, for a contrast issue the audit reports on text whose
+/// pixels pass. #641
+enum MeasuredContrast {
+    /// The WCAG contrast ratio, from 1 to 21, between the 5th and 95th percentile relative
+    /// luminance of `screenshot`'s pixels in `frame` (in points): the background and the text's
+    /// strokes. `nil` if the frame is empty or the screenshot can't be read.
+    static func ratio(in frame: CGRect, of screenshot: XCUIScreenshot) -> Double? {
+        #if os(macOS)
+            let image = screenshot.image.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        #else
+            let image = screenshot.image.cgImage
+        #endif
+        guard let image, screenshot.image.size.width > 0 else { return nil }
+        let scale = CGFloat(image.width) / screenshot.image.size.width
+        let pixelFrame = CGRect(
+            x: frame.minX * scale, y: frame.minY * scale, width: frame.width * scale, height: frame.height * scale
+        ).integral.intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        guard !pixelFrame.isEmpty, let crop = image.cropping(to: pixelFrame),
+            let space = CGColorSpace(name: CGColorSpace.sRGB),
+            let context = CGContext(
+                data: nil, width: crop.width, height: crop.height, bitsPerComponent: 8, bytesPerRow: crop.width * 4,
+                space: space, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return nil }
+        context.draw(crop, in: CGRect(x: 0, y: 0, width: crop.width, height: crop.height))
+        guard let data = context.data else { return nil }
+        let count = crop.width * crop.height
+        let pixels = data.bindMemory(to: UInt8.self, capacity: count * 4)
+        let luminances = (0..<count).map { pixel in
+            0.2126 * linear(pixels[pixel * 4]) + 0.7152 * linear(pixels[pixel * 4 + 1])
+                + 0.0722 * linear(pixels[pixel * 4 + 2])
+        }.sorted()
+        let dark = luminances[count * 5 / 100]
+        let light = luminances[min(count - 1, count * 95 / 100)]
+        return (light + 0.05) / (dark + 0.05)
+    }
+
+    /// An sRGB channel's linear value, from 0 to 1.
+    private static func linear(_ channel: UInt8) -> Double {
+        let value = Double(channel) / 255
+        return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4)
+    }
+}
