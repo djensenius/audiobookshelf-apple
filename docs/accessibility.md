@@ -253,6 +253,15 @@ element, each with the reason and its issue:
   filtered: only "partially unsupported", only on Library and only for text in an `item.<id>`
   card. Home audits the same card unfiltered, and its shelf has no columns to change, so a card
   font that really doesn't scale still fails there.
+- Library at AX5: "Dynamic Type font sizes are partially unsupported" on the section menu's
+  title ("Library", in `library.sectionPicker`) in the navigation bar, every run on an iPhone 17
+  (#647). It isn't the large title or the tab: the navigation bar caps its items' text, which is
+  20 points tall at the default size and 25 at AX5, beside the large title's 72. The menu shows
+  the Large Content Viewer instead (`accessibilityShowsLargeContentViewer`), as Apple's bar items
+  do. The iPhone Duo's vertical bar shows only the menu's symbol, so it doesn't happen there.
+  Only "partially unsupported", only for text in the menu inside a navigation bar is filtered:
+  with a fixed `.font(.system(size: 17))` the audit reports "Dynamic Type font sizes are
+  unsupported", which still fails.
 - Contrast on text that has scrolled under the bottom bar, on every screen but the Player
   (#623). On iOS the tab bar floats over the content, with the mini player above it, so a
   screen at rest has rows under the bar's glass, and the audit measures them through it. On an
@@ -269,6 +278,29 @@ element, each with the reason and its issue:
   metadata ends above the bar. So every row that was under the bar is audited in full view
   (metadata taller than the band, as at AX5, in overlapping segments), and any issue with no
   element in those audits fails. Named text the scroll brings on screen isn't judged by them.
+  Settings at AX5 is deferred the same way (#647): on an iPhone 17 the "Playback Settings"
+  header rests under the tab bar and the mini player, and in four runs of five the audit
+  reported it with no element (in the fifth, by name). When Settings has a contrast issue with
+  no element while content text overlaps the bar, the test scrolls that text above the bar the
+  same way, and an issue with no element or naming that text fails there. Before that, for Item
+  detail and Settings alike, the test rules out the other text on screen (`BottomBarAttribution`):
+  an issue with no element could be a genuine failure on it, which scrolling it off the top would
+  lose. At AX5 on an iPhone 17 Settings' top text is 4 points below the navigation bar, so that
+  text can't stay on screen while the deferred text clears the bar. Instead the test audits
+  contrast in place, then after steps toward clear of the bar that keep that text on screen,
+  until the issue goes away; a failure on the text's own background doesn't go away while it's
+  in view. Text that was on screen, named in any of these audits, fails unless it's a filtered
+  issue. If the issue persists until that text would have to leave, or once the deferred content
+  is clear of the bar, the original failure stands. With "User Interface Settings" (Settings'
+  top header) at `Color(white: 0.85)`, the audit reported it with no element in two runs of
+  three, the test deferred it, and the audit in place named it, so all three runs failed; before
+  this check, three runs of three passed. In practice the deferred issue hasn't come back in
+  place: not in five deferrals on Settings, nor one on Item detail, on an iPhone 17. A bottom
+  bar is the mini player, and the tab bar only when it runs along the window's bottom edge
+  (wider than tall, reaching the bottom): on the iPhone Duo's outer display the tab bar is a
+  vertical pill at the side, from y 0, and the mini player floats at the bottom, so the band
+  ends at the mini player's top (#648). If the band is ever too small to scroll in, the test
+  fails saying so.
 - Settings in the dark theme: "Potentially inaccessible text" with no element, while a row's
   text is under the mini player (#641). The dark glass shows the text through, and the audit
   finds the mini player, not the row, on top of it. Probed on an iPhone 17: there's no issue
