@@ -166,6 +166,13 @@ runs at the default size. On the iPhone Duo's outer display the menu is in the v
 overflow menu (`BottomOverflowBarButtonItem`), titled with the Library tab's title. A
 regular-width iPad and a Mac show the sidebar, so the tests skip there.
 
+`TabBarTests.testSeriesSectionOpensBarsoom` follows the series journey (#639) the same way:
+Library, then Series from the section menu, then the *Barsoom* card (`series.ser_barsoom`, a
+series card's identifier is `series.<id>`). It waits for the series' three books
+(`item.li_barsoom_1` to `_3`, served by `fixture-items-series-ser_barsoom.json`), checks each
+card's label starts with its title, and checks the cards are in sequence order: *A Princess of
+Mars*, *The Gods of Mars*, *The Warlord of Mars*.
+
 `AccessibilityAuditTests` audits each of those screens at the default text size and at AX5;
 see docs/accessibility.md, "Automated audits". The default size takes about 80 seconds on the
 simulator and AX5 about 100.
