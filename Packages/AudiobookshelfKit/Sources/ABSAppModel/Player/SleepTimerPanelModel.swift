@@ -39,10 +39,13 @@ public final class SleepTimerPanelModel {
 
     public let timer: SleepTimer
     private let player: PlayerViewModel
+    private let now: @Sendable () -> Date
 
-    public init(timer: SleepTimer, player: PlayerViewModel) {
+    /// - Parameter now: The wall-clock time a cancel suppresses the automatic timer from; tests pass a fixed time.
+    public init(timer: SleepTimer, player: PlayerViewModel, now: @escaping @Sendable () -> Date = { .now }) {
         self.timer = timer
         self.player = player
+        self.now = now
     }
 
     public var state: State {
@@ -94,7 +97,7 @@ public final class SleepTimerPanelModel {
 
     /// Cancels the running timer, or ends the grace period of one that expired.
     public func cancel() {
-        timer.cancel()
+        timer.cancel(at: now())
     }
 
     /// What a cancel confirmation opened now is about; `nil` when no timer runs or can restart.
@@ -106,8 +109,9 @@ public final class SleepTimerPanelModel {
     /// (another window may have started one while the confirmation was open). For the automatic timer, once it has
     /// ended, it still keeps it off until its window ends, as the confirmation said it would.
     public func confirmCancel(_ request: CancelRequest) {
-        guard !timer.cancel(identity: request.identity), request.isAutomatic else { return }
-        timer.suppressAutomaticTimer()
+        let date = now()
+        guard !timer.cancel(identity: request.identity, at: date), request.isAutomatic else { return }
+        timer.suppressAutomaticTimer(at: date)
     }
 
     /// Whether Restart is offered in the ``State/restartable(isAutomatic:)`` state: not once the grace period is

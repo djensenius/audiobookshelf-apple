@@ -9,7 +9,8 @@ import Testing
 
 /// A panel over a player and a sleep timer that share one fake playback, with settings in a fresh
 /// suite. The timer's clock only moves when a test advances it, and its own ticks are 10 seconds
-/// apart, so tests tick it themselves.
+/// apart, so tests tick it themselves. The panel's wall clock is fixed at `now`, so cancelling suppresses the
+/// automatic timer for the window the tests' `playbackWillStart(at:)` dates fall in, whatever the real time.
 @MainActor
 private final class Harness {
     let defaults: UserDefaults
@@ -19,12 +20,13 @@ private final class Harness {
     let timer: SleepTimer
     let panel: SleepTimerPanelModel
 
-    init(options: SleepTimerOptions = SleepTimerOptions(fadesOut: false)) throws {
+    init(options: SleepTimerOptions = SleepTimerOptions(fadesOut: false), now: Date = noon) throws {
         defaults = try #require(UserDefaults(suiteName: suiteName))
         timer = SleepTimer(
             control: playback, options: options, clock: clock, calendar: .utc, tickInterval: .seconds(10))
         panel = SleepTimerPanelModel(
-            timer: timer, player: PlayerViewModel(playback: playback, settings: AppSettings(defaults: defaults)))
+            timer: timer, player: PlayerViewModel(playback: playback, settings: AppSettings(defaults: defaults)),
+            now: { now })
     }
 
     isolated deinit {
@@ -184,6 +186,27 @@ private final class Flag: Sendable {
         // Cancelled, the automatic timer stays off for the rest of its window.
         _ = harness.timer.playbackWillStart(at: noon.addingTimeInterval(60))
         #expect(harness.panel.state == .idle)
+    }
+
+    /// Cancelling suppresses the automatic timer for the window containing the panel's clock, not the real time
+    /// (#643): at 23:59:30 in a 22:00–06:00 window, until 06:00 the next morning and no longer.
+    @Test func cancelSuppressesForTheWindowOfThePanelsClock() throws {
+        let lateNight = noon.addingTimeInterval(12 * 3_600 - 30)  // 2023-11-14 23:59:30 UTC.
+        let window = try AutoSleepPolicy(
+            start: #require(.init(hour: 22, minute: 0)), end: #require(.init(hour: 6, minute: 0)),
+            mode: .duration(60))
+        let harness = try Harness(options: SleepTimerOptions(fadesOut: false, autoSleep: window), now: lateNight)
+        harness.load()
+        _ = harness.timer.playbackWillStart(at: lateNight)
+        #expect(harness.panel.state == .running(isAutomatic: true, isEndOfChapter: false))
+
+        harness.panel.cancel()
+        _ = harness.timer.playbackWillStart(at: lateNight.addingTimeInterval(1_800))
+        #expect(harness.panel.state == .idle, "Suppressed until the window ends at 06:00")
+        _ = harness.timer.playbackWillStart(at: lateNight.addingTimeInterval(22.5 * 3_600))  // 2023-11-15 22:29:30.
+        #expect(
+            harness.panel.state == .running(isAutomatic: true, isEndOfChapter: false),
+            "The next night's window starts it again")
     }
 
     @Test func cancellingExpiredAutomaticTimerSuppressesIt() throws {
