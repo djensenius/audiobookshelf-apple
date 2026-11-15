@@ -154,6 +154,7 @@ private struct GroupDetailHeader<Kind: GroupScreenKind>: View {
                         Image(systemName: playAll.systemImage)
                     }
                     .frame(maxWidth: .infinity, minHeight: 44)
+                    .onAccentForeground()
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(!playAll.isEnabled)

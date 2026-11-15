@@ -80,30 +80,4 @@ final class TabBarTests: XCTestCase {
             throw XCTSkip("A Mac shows the sidebar")
         #endif
     }
-
-    /// Chooses the entry with `symbol` (its `AppTab.systemImage`; `books.vertical` is the grid)
-    /// from the Library root's section menu (`library.sectionPicker`). SwiftUI gives a menu's
-    /// entries no identifiers, so they're found by symbol, which isn't localized. A crowded
-    /// vertical bar (the Duo's outer display) moves the menu into its overflow menu, titled with
-    /// the section shown: on the grid, the Library tab's title.
-    @MainActor
-    private func chooseSection(symbol: String, in app: XCUIApplication) {
-        var picker = app.buttons["library.sectionPicker"].firstMatch
-        if !picker.waitForExistence(timeout: 3) {
-            let overflow = app.buttons["BottomOverflowBarButtonItem"].firstMatch
-            XCTAssertTrue(overflow.exists, "The Library root has no section menu, and its bar has no overflow menu")
-            overflow.press()
-            let title = app.buttons["tab.library"].firstMatch.label
-            picker = app.collectionViews.buttons.matching(NSPredicate(format: "label == %@", title)).firstMatch
-            XCTAssertTrue(
-                picker.waitForExistence(timeout: Self.fixtureTimeout), "The overflow menu has no section menu")
-        }
-        picker.press()
-        let entries = app.collectionViews.buttons.containing(.image, identifier: symbol)
-        XCTAssertTrue(
-            entries.firstMatch.waitForExistence(timeout: Self.fixtureTimeout),
-            "The section menu has no \(symbol) entry")
-        // A submenu opened from the overflow menu starts with its own title row.
-        entries.element(boundBy: entries.count - 1).press()
-    }
 }

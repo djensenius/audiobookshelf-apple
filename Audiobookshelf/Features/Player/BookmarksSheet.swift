@@ -29,6 +29,8 @@ struct BookmarksSlot: View {
                 }
             }
             .disabled(!presentation.isEnabled)
+            // For UI tests.
+            .accessibilityIdentifier("player.bookmarks")
         }
     }
 }
@@ -453,8 +455,10 @@ private struct CreateBookmarkBar: View {
             }
             .frame(maxWidth: .infinity, minHeight: 44)
             .contentShape(.rect)
+            .onAccentForeground()
         }
         .buttonStyle(.borderedProminent)
+        .accessibilityIdentifier("bookmarks.create")
         .disabled(!bookmarks.canCreate)
         .padding(.vertical, ABSSpacing.small)
         .padding(.horizontal, ABSSpacing.medium)
