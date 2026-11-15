@@ -237,11 +237,25 @@ element, each with the reason and its issue:
   header rests under the tab bar and the mini player, and in four runs of five the audit
   reported it with no element (in the fifth, by name). When Settings has a contrast issue with
   no element while content text overlaps the bar, the test scrolls that text above the bar the
-  same way, and an issue with no element or naming that text fails there. A bottom bar is the
-  mini player, and the tab bar only when it runs along the window's bottom edge (wider than
-  tall, reaching the bottom): on the iPhone Duo's outer display the tab bar is a vertical pill
-  at the side, from y 0, and the mini player floats at the bottom, so the band ends at the mini
-  player's top (#648). If the band is ever too small to scroll in, the test fails saying so.
+  same way, and an issue with no element or naming that text fails there. Before that, for Item
+  detail and Settings alike, the test rules out the other text on screen (`BottomBarAttribution`):
+  an issue with no element could be a genuine failure on it, which scrolling it off the top would
+  lose. At AX5 on an iPhone 17 Settings' top text is 4 points below the navigation bar, so that
+  text can't stay on screen while the deferred text clears the bar. Instead the test audits
+  contrast in place, then after steps toward clear of the bar that keep that text on screen,
+  until the issue goes away; a failure on the text's own background doesn't go away while it's
+  in view. Text that was on screen, named in any of these audits, fails unless it's a filtered
+  issue. If the issue persists until that text would have to leave, or once the deferred content
+  is clear of the bar, the original failure stands. With "User Interface Settings" (Settings'
+  top header) at `Color(white: 0.85)`, the audit reported it with no element in two runs of
+  three, the test deferred it, and the audit in place named it, so all three runs failed; before
+  this check, three runs of three passed. In practice the deferred issue hasn't come back in
+  place: not in five deferrals on Settings, nor one on Item detail, on an iPhone 17. A bottom
+  bar is the mini player, and the tab bar only when it runs along the window's bottom edge
+  (wider than tall, reaching the bottom): on the iPhone Duo's outer display the tab bar is a
+  vertical pill at the side, from y 0, and the mini player floats at the bottom, so the band
+  ends at the mini player's top (#648). If the band is ever too small to scroll in, the test
+  fails saying so.
 - The Player's remaining times, "Contrast failed" on the chapter's ("-0:26") on an iPhone 17
   every run (#623). Its pixels measure 5.7:1 on the backdrop, and the elapsed time's beside
   it, which passes in the same font and colour, 5.6:1. This is the false positive the
