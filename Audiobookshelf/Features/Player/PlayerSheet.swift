@@ -60,6 +60,8 @@ private struct PlayerSheetStyle: ViewModifier {
                         Button(action: onDone) {
                             Text(verbatim: L10n.string("ButtonDone"))
                         }
+                        // For UI tests.
+                        .accessibilityIdentifier("player.sheet.done")
                     }
                 }
         }

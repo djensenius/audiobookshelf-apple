@@ -4,7 +4,8 @@ import XCTest
 /// Item detail, Player, Settings, Downloads) with the fixture data, at the default text size and
 /// at AX5, and in the dark and black themes (docs/accessibility.md, "Automated audits"). Each test
 /// walks every screen in one launch, so an issue names its screen, and a screen's issues don't hide
-/// the next screen's.
+/// the next screen's. The dark and black themes also walk the screens with accent-filled buttons
+/// (`FixtureScreen.accentButtonScreens`, #645).
 final class AccessibilityAuditTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -60,7 +61,7 @@ final class AccessibilityAuditTests: XCTestCase {
     ) {
         let app = signIn(launchArguments: launchArguments + (theme?.launchArguments ?? []))
         let condition = theme.map { "\(textSize), \($0.rawValue) theme" } ?? textSize
-        for screen in FixtureScreen.allCases {
+        for screen in FixtureScreen.audited(inDarkTheme: theme != nil) {
             open(screen, in: app)
             if let theme { assertAppearance(of: screen, theme, in: app) }
             audit(screen, for: types, in: app, textSize: condition)
@@ -399,7 +400,7 @@ struct KnownAuditIssue {
             // the system's bar over a scroll view at rest, not the text's own colours, which pass
             // above the bar. Only text whose frame overlaps the bar, and not the bar's own, on the
             // screens with the bar: the full player covers it. #623
-            all += [FixtureScreen.home, .library, .item, .settings, .downloads].map {
+            all += [FixtureScreen.home, .library, .item, .settings, .downloads, .series].map {
                 KnownAuditIssue(screen: $0, type: .contrast, element: isUnderBottomBar)
             }
             // "Potentially inaccessible text" with no element on Settings in the dark theme, while
@@ -435,6 +436,20 @@ struct KnownAuditIssue {
                         element.identifier == "player.mini.title"
                         ? theme.miniPlayerTitle : theme.miniPlayerSecondaryText
                     let ratio = MeasuredContrast.ratio(in: element.frame, of: XCUIScreen.main.screenshot(), text: text)
+                    return ratio.map { $0 >= 4.5 } ?? false
+                })
+            // "Contrast failed" on the bookmarks sheet's Done (`player.sheet.done`) in the dark
+            // theme, every run on a 6.3-inch iPhone: the system's glass button in the sheet's
+            // navigation bar, whose white label measures 12.2:1 on the glass's rgb(49, 55, 47). Only
+            // that button on Bookmarks, and only while a screenshot measures 4.5:1 or more around
+            // its white text, as for the mini player's. #645
+            all.append(
+                KnownAuditIssue(screen: .bookmarks, type: .contrast) { element, app in
+                    guard let element, element.identifier == "player.sheet.done",
+                        FixtureTheme(launchArguments: app.launchArguments) != nil
+                    else { return false }
+                    let white = MeasuredContrast.RGB(red: 255, green: 255, blue: 255)
+                    let ratio = MeasuredContrast.ratio(in: element.frame, of: XCUIScreen.main.screenshot(), text: white)
                     return ratio.map { $0 >= 4.5 } ?? false
                 })
         #endif

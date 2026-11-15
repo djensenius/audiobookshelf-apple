@@ -58,8 +58,11 @@ public struct ErrorStateView: View {
                     Text(verbatim: L10n.string("ButtonRetry"))
                         .frame(minWidth: 44, minHeight: 44)
                         .contentShape(.rect)
+                        .onAccentForeground()
                 }
                 .buttonStyle(.borderedProminent)
+                // For UI tests.
+                .accessibilityIdentifier("state.retry")
             }
         }
     }

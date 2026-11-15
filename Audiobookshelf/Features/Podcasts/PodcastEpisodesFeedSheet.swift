@@ -119,6 +119,7 @@ struct PodcastEpisodesFeedSheet: View {
                 )
             }
             .frame(maxWidth: .infinity, minHeight: 44)
+            .onAccentForeground()
         }
         .buttonStyle(.borderedProminent)
         .disabled(!model.canDownload)

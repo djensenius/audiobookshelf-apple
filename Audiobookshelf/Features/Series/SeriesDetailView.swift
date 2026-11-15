@@ -172,8 +172,10 @@ private struct SeriesDetailHeader: View {
                         Image(systemName: "book")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .onAccentForeground()
                 }
                 .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("series.continue")
                 .accessibilityLabel(Text(verbatim: SeriesPresentation.continueAccessibilityLabel(for: continueBook)))
                 .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
             }

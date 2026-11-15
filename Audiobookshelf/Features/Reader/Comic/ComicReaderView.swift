@@ -391,6 +391,7 @@ private struct ComicUnsupportedView: View {
             if let webURL {
                 Link(destination: webURL) {
                     Text(verbatim: L10n.string("ButtonReadInBrowser"))
+                        .onAccentForeground()
                 }
                 .buttonStyle(.borderedProminent)
             }

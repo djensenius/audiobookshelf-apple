@@ -111,6 +111,26 @@ extension View {
     public func absBackground() -> some View {
         background(ABSColor.background, ignoresSafeAreaEdges: .all)
     }
+
+    /// Draws a `.borderedProminent` button's label in ``ABSColor/onAccent`` while the button is
+    /// enabled, since white is 2.1:1 on the dark accent (#641, #645). Apply it inside the label.
+    /// While disabled (`isEnabled`, which `.disabled` passes down to the label) it leaves the
+    /// style's own dimmed label on its grey fill, which an explicit colour would override.
+    public func onAccentForeground() -> some View {
+        modifier(OnAccentForeground())
+    }
+}
+
+private struct OnAccentForeground: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.foregroundStyle(ABSColor.onAccent)
+        } else {
+            content
+        }
+    }
 }
 
 extension Color {

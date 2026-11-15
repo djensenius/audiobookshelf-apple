@@ -349,6 +349,7 @@ private struct ReaderUnsupportedView: View {
             if let serverURL {
                 Link(destination: ItemDetailModel.webURL(serverURL: serverURL, itemID: model.request.itemID)) {
                     Text(verbatim: L10n.string("ButtonReadInBrowser"))
+                        .onAccentForeground()
                 }
                 .buttonStyle(.borderedProminent)
             }

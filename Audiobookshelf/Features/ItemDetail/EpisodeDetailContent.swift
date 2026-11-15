@@ -152,6 +152,7 @@ struct EpisodeDetailContent: View {
                 }
             }
             .frame(maxWidth: .infinity)
+            .onAccentForeground()
         }
         .buttonStyle(.borderedProminent)
         .controlSize(.large)
