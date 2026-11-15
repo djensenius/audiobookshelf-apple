@@ -154,6 +154,12 @@ identifier, so `downloads.screen` is then the collection view itself). Tabs keep
 navigation stacks, so `open` goes back (`BackButton`) to the tab's root (`home.screen`,
 `library.screen`, `downloads.screen`, `account.screen`) before leaving it and after selecting
 a tab; an open Settings screen is reused.
+On iOS it also opens Missing item (*Emma*, which has no item fixture: `item.detail` with its
+error state's Retry, `state.retry`), Bookmarks (the player's `player.bookmarks`, or the entry
+with its symbol in a vertical bar's overflow menu; `bookmarks.create`, with the sheet dragged
+to its large detent and closed with `player.sheet.done`) and Series (Barsoom, `series.ser_barsoom`,
+from the Library's section menu or sidebar; `series.continue`). The dark audits walk these
+(`FixtureScreen.accentButtonScreens`, #645).
 The player plays *Pride and Prejudice* (`item.play`), opens from the mini player
 (`player.mini`) and is paused; another screen minimizes it first (`player.minimize`). Its
 play/pause button is `player.pause` while playback is requested and `player.play` otherwise,

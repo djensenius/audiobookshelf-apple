@@ -172,8 +172,11 @@ private struct SeriesDetailHeader: View {
                         Image(systemName: "book")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    // White is 2.1:1 on the dark accent. #645
+                    .foregroundStyle(ABSColor.onAccent)
                 }
                 .buttonStyle(.borderedProminent)
+                .accessibilityIdentifier("series.continue")
                 .accessibilityLabel(Text(verbatim: SeriesPresentation.continueAccessibilityLabel(for: continueBook)))
                 .accessibilityHint(Text(verbatim: L10n.string("SharedOpenDetailsHint")))
             }

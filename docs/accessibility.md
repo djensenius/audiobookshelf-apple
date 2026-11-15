@@ -170,7 +170,11 @@ launch each:
 - `testScreensAtAccessibilitySize`, at AX5 (`-UIPreferredContentSizeCategoryName
   UICTContentSizeCategoryAccessibilityXXXL`), with every audit type;
 - `testScreensInDarkTheme` and `testScreensInBlackTheme`, `testScreens` again in the dark and
-  black themes (#641).
+  black themes (#641). On iOS they also walk the screens with an accent-filled
+  (`.borderedProminent`) button the fixtures reach (#645, `FixtureScreen.accentButtonScreens`):
+  Missing item (Emma, which has no item fixture, so Item detail shows its error state and Retry),
+  Bookmarks (the player's bookmarks sheet and its Create Bookmark, at the large detent) and
+  Series (Barsoom, with Continue Series).
 
 A newly created simulator, as on CI, ignores `XCUIDevice.shared.appearance` and `simctl ui
 appearance dark` until it's rebooted, so the dark passes don't switch the simulator. They launch
@@ -199,6 +203,13 @@ behind it):
 - Item detail's Play button: white on the dark accent (`#4FC3CC`), 2.1:1, "Contrast failed" in
   dark and black. The `.borderedProminent` label now uses `ABSColor.onAccent`, white on the light
   accent (4.9:1, unchanged) and `rgb(35, 35, 35)` on the dark one, 7.5:1.
+- The same white label on every other `.borderedProminent` button (#645): Series' Continue
+  Series, a collection's or playlist's Play All, a podcast's Next Episode, an episode's play, the
+  episode feed's download, Bookmarks' Create Bookmark, the readers' "Read in browser" and
+  `ErrorStateView`'s Retry. They now use `ABSColor.onAccent` too: Create Bookmark measures 7.5:1
+  in dark. With white they fail the dark pass: Create Bookmark (and its time) on Bookmarks,
+  Continue Series (and the book's title in it) on Series. Groups, Podcasts, episodes and the
+  readers have no fixtures, so the audits don't open them.
 - The mini player's author ("Jane Austen") on its glass: in dark the glass takes a lighter tint
   from the rows under it, `rgb(87, 88, 88)` over Settings, where `mutedForeground` is 2.7:1
   ("Contrast failed"); in black, 3.2:1 on Settings and 4.0:1 on Downloads ("nearly passed").
@@ -286,6 +297,14 @@ element, each with the reason and its issue:
   it, which passes in the same font and colour, 5.6:1. This is the false positive the
   whole-book remaining time had at `.caption2` (#614), so only text on the Player that's a
   minus and a timestamp is filtered.
+- Bookmarks' Done (`player.sheet.done`) in the dark theme, "Contrast failed" every run on an
+  iPhone 17 (#645): the system's glass button in the sheet's navigation bar. Its white label
+  measures 12.2:1 on the glass's `rgb(49, 55, 47)`. At the sheet's medium detent, glass over the
+  player, the audit also failed "No Bookmarks" (12.6:1) and Done (8.5:1), so the walk drags the
+  sheet to its large detent first. Filtered only for that button, and only while a screenshot
+  measures white text at 4.5:1 or more there (`MeasuredContrast`), as for the mini player. Series
+  is in the bottom-bar filter above: its third card's author rests under the mini player and the
+  tab bar on an iPhone 17.
 
 Two findings that used to be filtered are fixed instead. The Player's whole-book remaining time
 failed contrast at `.caption2` (11 points), though its pixels measure as the elapsed time's do,
@@ -306,7 +325,8 @@ Voice Control names and Reduce Motion helpers in `AccessibilityTests`.
   completes.
 - Series and author cards have no context menu, so they have no custom actions to mirror.
 - The automated audits' known issues above, and the screens they don't open yet (sheets,
-  search, series, authors, collections, playlists, stats and CarPlay).
+  search, series, authors, collections, playlists, stats and CarPlay; the dark passes open
+  Bookmarks and a series, #645).
 
 ### Decisions
 

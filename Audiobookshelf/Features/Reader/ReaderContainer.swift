@@ -349,6 +349,8 @@ private struct ReaderUnsupportedView: View {
             if let serverURL {
                 Link(destination: ItemDetailModel.webURL(serverURL: serverURL, itemID: model.request.itemID)) {
                     Text(verbatim: L10n.string("ButtonReadInBrowser"))
+                        // White is 2.1:1 on the dark accent. #645
+                        .foregroundStyle(ABSColor.onAccent)
                 }
                 .buttonStyle(.borderedProminent)
             }
