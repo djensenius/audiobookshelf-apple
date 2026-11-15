@@ -283,8 +283,10 @@ struct KnownAuditIssue {
             // rgb(32,32,32)) and 5.9:1 (rgb(214,218,222) on rgb(78,79,79)), the frames match the
             // text, and the issues stay after waiting for the screen to be still for a second. Not
             // on a 6.3-inch iPhone, whose mini player sits over the tab bar, not floating. Only the
-            // mini player's text, and only while the screenshot taken now measures 4.5:1 or more
-            // in its frame, so text that really fails, as the author's 2.7:1 did, still fails. #641
+            // mini player's text, and only while a screenshot taken now measures 4.5:1 or more
+            // between the text's pixels and the background 2 to 4 pixels around them (the 10th
+            // percentile; `MeasuredContrast`), so text that really fails, as the author's 2.7:1
+            // did, or text over a lighter patch of glass, still fails; unmeasurable, it fails. #641
             all.append(
                 KnownAuditIssue(type: .contrast) { element, app in
                     guard let element, isMiniPlayerText(element, in: app) else { return false }
