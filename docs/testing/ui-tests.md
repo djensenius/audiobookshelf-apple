@@ -56,6 +56,11 @@ A Debug build launched with `-ABSFixtures` (`Audiobookshelf/Fixtures/FixtureServ
 
 Type the fixture address on the connect screen and sign in with any username and password.
 
+Add `-ABSTheme <theme>` (`system`, `light`, `dark` or `black`, `AppTheme`'s raw values) to set
+the fixture launch's theme setting, as the dark accessibility audits do (`FixtureTheme`). A newly
+created simulator ignores `XCUIDevice.shared.appearance` and `simctl ui appearance` until it's
+rebooted, so this is how a test sees dark mode. Only fixture launches read it.
+
 The replies are the `fixture-*` files in `Audiobookshelf/Fixtures/Resources/`: status, ping,
 login and authorize, `/api/me`, the libraries, the library with its filter data, the
 personalized shelves, one page of items, one page of series (*Barsoom*, with its three books),

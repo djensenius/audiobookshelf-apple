@@ -318,6 +318,18 @@ struct FixtureServerTests {
         let hasOverride = configuration.trackURLOverride != nil
         #expect(!hasOverride)
     }
+
+    /// `-ABSTheme <theme>` picks a fixture launch's theme (#641); anything else leaves it alone.
+    @Test func readsTheThemeArgument() {
+        let argument = FixtureServer.themeArgument
+        #expect(FixtureServer.theme(arguments: [FixtureServer.launchArgument, argument, "dark"]) == .dark)
+        #expect(FixtureServer.theme(arguments: [argument, "black"]) == .black)
+        #expect(FixtureServer.theme(arguments: [argument, "sepia"]) == nil)
+        #expect(FixtureServer.theme(arguments: [argument]) == nil)
+        #expect(FixtureServer.theme(arguments: [FixtureServer.launchArgument]) == nil)
+        // The test host has no theme argument, so its fixture settings keep the default.
+        #expect(FixtureServer.environment().settings.theme == AppSettings.Default.theme)
+    }
 }
 
 /// A fixed device identifier for fixture sessions.

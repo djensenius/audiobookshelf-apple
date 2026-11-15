@@ -73,13 +73,29 @@ import Testing
         }
     }
 
+    /// ``ABSColor/onAccent`` on the app's `AccentColor` asset (light `#0E7C86`, dark `#4FC3CC`),
+    /// as on a prominent button, and ``ABSColor/mutedForegroundOnGlass`` on the mini player's glass
+    /// over Settings, measured on the iPhone 17 simulator: `rgb(87, 88, 88)` in dark, where the
+    /// glass is lightest, and `rgb(241, 243, 245)` in light. #641
+    @Test(arguments: [AppTheme.light, .dark, .black])
+    func accentAndGlassTextMeetContrastMinimum(_ theme: AppTheme) {
+        let scheme = theme.colorScheme ?? .light
+        let accent = scheme == .dark ? rgb(79, 195, 204) : rgb(14, 124, 134)
+        let onAccent = contrast(resolved(ABSColor.onAccent, scheme: scheme, theme: theme), accent)
+        #expect(onAccent >= 4.5, "onAccent on the accent: \(onAccent)")
+        let glass = scheme == .dark ? rgb(87, 88, 88) : rgb(241, 243, 245)
+        let onGlass = contrast(resolved(ABSColor.mutedForegroundOnGlass, scheme: scheme, theme: theme), glass)
+        #expect(onGlass >= 4.5, "mutedForegroundOnGlass on glass: \(onGlass)")
+    }
+
     @Test func blackThemeResolvesLegacyBlackPalette() {
         let black = Color.black.resolve(in: EnvironmentValues())
         #expect(resolved(ABSColor.background, scheme: .dark, theme: .black) == black)
         #expect(resolved(ABSColor.surface, scheme: .dark, theme: .black) == black)
         #expect(resolved(ABSColor.secondarySurface, scheme: .dark, theme: .black) == black)
         #expect(resolved(ABSColor.border, scheme: .dark, theme: .black) == rgb(55, 62, 65))
-        #expect(resolved(ABSColor.mutedForeground, scheme: .dark, theme: .black) == rgb(120, 126, 132))
+        // Dark's, not legacy's 120, 126, 132 (3.5:1 on the full player's backdrop). #641
+        #expect(resolved(ABSColor.mutedForeground, scheme: .dark, theme: .black) == rgb(156, 161, 167))
         #expect(resolved(ABSColor.background, scheme: .dark, theme: .dark) == rgb(56, 56, 56))
     }
 

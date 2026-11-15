@@ -22,6 +22,19 @@
 
         static var isEnabled: Bool { ProcessInfo.processInfo.arguments.contains(launchArgument) }
 
+        /// Followed by an ``AppTheme`` raw value (`-ABSTheme dark`), sets a fixture launch's theme,
+        /// so UI tests audit dark and black without switching the simulator's appearance, which a
+        /// newly created simulator ignores until it's rebooted (#641).
+        static let themeArgument = "-ABSTheme"
+
+        /// The theme `arguments` ask for with ``themeArgument``, or `nil` for none or an unknown one.
+        static func theme(arguments: [String]) -> AppTheme? {
+            guard let index = arguments.firstIndex(of: themeArgument), index + 1 < arguments.endIndex else {
+                return nil
+            }
+            return AppTheme(rawValue: arguments[index + 1])
+        }
+
         /// The session ID in `fixture-play-*.json`, which each reply replaces: every `/play` opens a
         /// new session, as on a real server, and `GET /api/session/:id` answers with the ID asked for.
         static let sessionPlaceholder = "fixture-session-id"
@@ -44,13 +57,16 @@
         /// launch, so it never sees the app's real downloads, and sessions and a redirect preflight
         /// that only ``FixtureURLProtocol`` answers (``downloadSession``,
         /// ``foregroundDownloadSession``, ``downloadPreflight``), so a transfer never reaches the network.
+        /// The settings take ``themeArgument``'s theme, if the launch has one.
         @MainActor static func environment() -> AppEnvironment {
             let suite = "org.davidjensenius.Audiobookshelf.fixtures"
             let defaults = UserDefaults(suiteName: suite) ?? .standard
             defaults.removePersistentDomain(forName: suite)
             try? FileManager.default.removeItem(at: downloadsDirectory)
+            let settings = AppSettings(defaults: defaults)
+            if let theme = theme(arguments: ProcessInfo.processInfo.arguments) { settings.theme = theme }
             return AppEnvironment(
-                settings: AppSettings(defaults: defaults), storeLocation: .inMemory, keychain: FixtureKeychain(),
+                settings: settings, storeLocation: .inMemory, keychain: FixtureKeychain(),
                 sessionConfiguration: sessionConfiguration, downloadsRoot: downloadsDirectory,
                 makeDownloadSession: downloadSession, makeForegroundDownloadSession: foregroundDownloadSession,
                 downloadPreflight: downloadPreflight, covers: coverSource(), realtime: false)

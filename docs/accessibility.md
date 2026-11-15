@@ -168,7 +168,19 @@ launch each:
   text. At this size those two predict larger sizes, and report text that does scale and
   doesn't clip (a `Form` row's label, the player's times);
 - `testScreensAtAccessibilitySize`, at AX5 (`-UIPreferredContentSizeCategoryName
-  UICTContentSizeCategoryAccessibilityXXXL`), with every audit type.
+  UICTContentSizeCategoryAccessibilityXXXL`), with every audit type;
+- `testScreensInDarkTheme` and `testScreensInBlackTheme`, `testScreens` again in the dark and
+  black themes (#641).
+
+A newly created simulator, as on CI, ignores `XCUIDevice.shared.appearance` and `simctl ui
+appearance dark` until it's rebooted, so the dark passes don't switch the simulator. They launch
+with `-ABSTheme dark` or `-ABSTheme black` (docs/testing/ui-tests.md), which sets the fixture
+launch's theme setting; the theme applies `preferredColorScheme` at each scene's root, and the
+full player and sheets follow it. Before each audit the test checks the screen really is dark
+(`assertAppearance`: over half the screenshot's pixels under half brightness; light screens
+are mostly white), so a pass can't quietly audit light mode. The black theme gets its own pass
+because its backgrounds are true black and its muted text and borders have their own values. The
+three passes at the default size take about 70–80 seconds each on an iPhone 17.
 
 The player is paused before its audit, so its times hold still. Downloads is audited in its
 empty state: fixture launches have their own empty download stack. CI runs them on iOS with the
@@ -179,8 +191,27 @@ them on screen. `ItemDetailSectionsAuditTests` (iOS) scrolls them clear of the t
 (`item.chapters`, `item.tracks`) and audits contrast there, failing only for issues on the
 headers. Their counts took the disclosure group's accent tint, 2.7:1 on the `ABSColor.border`
 capsule in light and 3.7:1 in dark; they now use `ABSColor.foreground`, 8.3:1 and 6.5:1
-(#638). The test audits the simulator's appearance, light on CI, and doesn't switch to dark:
-a newly created simulator ignores appearance changes until it's rebooted.
+(#638). `testSectionHeadersContrastInDarkTheme` audits them again in the dark theme.
+
+The first dark passes (#641) found, measured from iPhone 17 screenshots (text against the pixels
+behind it):
+
+- Item detail's Play button: white on the dark accent (`#4FC3CC`), 2.1:1, "Contrast failed" in
+  dark and black. The `.borderedProminent` label now uses `ABSColor.onAccent`, white on the light
+  accent (4.9:1, unchanged) and `rgb(35, 35, 35)` on the dark one, 7.5:1.
+- The mini player's author ("Jane Austen") on its glass: in dark the glass takes a lighter tint
+  from the rows under it, `rgb(87, 88, 88)` over Settings, where `mutedForeground` is 2.7:1
+  ("Contrast failed"); in black, 3.2:1 on Settings and 4.0:1 on Downloads ("nearly passed").
+  The mini player's secondary text and Close button now use `ABSColor.mutedForegroundOnGlass`:
+  5.1:1 on that dark glass and 9.4:1 on the black theme's; light is unchanged, 5.5:1.
+- The Player in the black theme: "Chapter 1", the author and the elapsed times in
+  `mutedForeground`'s black value, legacy's `rgb(120, 126, 132)`, are 3.5–3.6:1 on the player's
+  backdrop, which is tinted by the cover (`rgb(47, 40, 38)`), not black ("nearly passed"). The
+  black theme now uses dark's `rgb(156, 161, 167)`: 5.6:1 there and 8.1:1 on black.
+- Item detail's navigation title ("Pride and Prejudice"), flagged "nearly passed" in a manual
+  dark audit during #638, isn't reported at rest: it measures 11.7:1 in dark and 21:1 in black.
+  It's the system's title, drawn in the label colour, so content scrolled under it is the only
+  thing that can lower it.
 
 Known issues are filtered in `KnownAuditIssue.all`, by screen, audit type, description and
 element, each with the reason and its issue:
@@ -224,6 +255,32 @@ element, each with the reason and its issue:
   metadata ends above the bar. So every row that was under the bar is audited in full view
   (metadata taller than the band, as at AX5, in overlapping segments), and any issue with no
   element in those audits fails. Named text the scroll brings on screen isn't judged by them.
+- Settings in the dark theme: "Potentially inaccessible text" with no element, while a row's
+  text is under the mini player (#641). The dark glass shows the text through, and the audit
+  finds the mini player, not the row, on top of it. Probed on an iPhone 17: there's no issue
+  without the mini player; with it, the issue comes and goes as Settings scrolls "Allow position
+  seeking on media notification controls" under it and away, and that row's toggle speaks the
+  text. Only filtered on Settings, with no element, while content text overlaps the tab bar or
+  the mini player.
+- The mini player's text on the iPhone Duo in the dark and black themes, "Contrast failed"
+  every run (#641): the title on Downloads in both, and the author on Settings in dark. A
+  screenshot taken as each issue arrives, in the element's frame, measures 16.3:1 for the title
+  (white on the glass's `rgb(32, 32, 32)`) and 5.9:1 for the author (`rgb(214, 218, 222)` on
+  `rgb(78, 79, 79)`). The frames match the text, and the issues stay after waiting for the
+  screen to be pixel-still for a second, so it isn't the glass mid-transition. They don't
+  happen on an iPhone 17, where the mini player sits above the tab bar instead of floating at
+  the bottom. Filtered only for the mini player's text, and only while a screenshot taken then
+  measures 4.5:1 or more locally (`MeasuredContrast`). The text's pixels are the ones in the
+  colour the app draws it in for the theme, not guessed from the image: white for the title
+  (SwiftUI's primary label) and `ABSColor.mutedForegroundOnGlass` for the author, mirrored in
+  `FixtureTheme`. That colour only picks the pixels out: each is measured in the colour it's
+  actually drawn in, against the median of the non-text pixels 2–4 pixels around it, past the
+  anti-aliased edge, taking the 10th percentile. So text that really fails, as the
+  author did at 2.7:1, or that crosses a lighter patch of glass, still fails. The issue isn't
+  filtered when fewer than 20 pixels are in the expected colour (as when the app's colour
+  changes and the test's doesn't), or when over a quarter of them have too little background
+  around them to measure, as a patch of background in the text's colour would; the real
+  glyphs have none.
 - The Player's remaining times, "Contrast failed" on the chapter's ("-0:26") on an iPhone 17
   every run (#623). Its pixels measure 5.7:1 on the backdrop, and the elapsed time's beside
   it, which passes in the same font and colour, 5.6:1. This is the false positive the

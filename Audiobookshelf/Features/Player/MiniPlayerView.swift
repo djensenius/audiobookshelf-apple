@@ -159,12 +159,12 @@ private struct MiniPlayerBar: View {
                         // Recovery waits for the network (ADR 0007's "Waiting for network").
                         Text(verbatim: L10n.string(MiniPlayerView.waitingForNetworkKey))
                             .font(.caption)
-                            .foregroundStyle(ABSColor.mutedForeground)
+                            .foregroundStyle(ABSColor.mutedForegroundOnGlass)
                             .lineLimit(1)
                     } else if showsAuthor {
                         Text(verbatim: model.author)
                             .font(.caption)
-                            .foregroundStyle(ABSColor.mutedForeground)
+                            .foregroundStyle(ABSColor.mutedForegroundOnGlass)
                             .lineLimit(1)
                     }
                 }
@@ -206,7 +206,7 @@ private struct MiniPlayerBar: View {
             .labelStyle(.iconOnly)
         }
         .buttonStyle(.borderless)
-        .foregroundStyle(ABSColor.mutedForeground)
+        .foregroundStyle(ABSColor.mutedForegroundOnGlass)
         // For UI tests.
         .accessibilityIdentifier("player.mini.close")
         .accessibilityShowsLargeContentViewer {
