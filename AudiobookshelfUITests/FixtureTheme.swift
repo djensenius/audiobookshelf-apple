@@ -22,6 +22,13 @@ enum FixtureTheme: String {
     /// (ABSUI), the same in dark and black. If the app's colour changes and this doesn't, too few
     /// pixels match, the measurement is `nil` and the audit issue fails, unfiltered.
     var miniPlayerSecondaryText: MeasuredContrast.RGB { .init(red: 214, green: 218, blue: 222) }
+
+    /// The colour the Player draws its elapsed and remaining times in for `theme` (`nil`: the light
+    /// appearance a new simulator has): mirrors `ABSColor.mutedForeground` (ABSUI). If the app's
+    /// colour changes and this doesn't, the measurement is `nil` and the audit issue fails. #653
+    static func playerTimes(_ theme: FixtureTheme?) -> MeasuredContrast.RGB {
+        theme == nil ? .init(red: 91, green: 99, blue: 108) : .init(red: 156, green: 161, blue: 167)
+    }
 }
 
 extension XCTestCase {
