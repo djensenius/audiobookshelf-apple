@@ -459,6 +459,20 @@ struct KnownAuditIssue {
                 // Like the whole-book remaining time's at `.caption2` (#614). Only the Player's
                 // remaining times. #623
                 KnownAuditIssue(screen: .player, type: .contrast, element: isRemainingTime),
+                // "Contrast failed" on the chapter's elapsed time ("0:02") at the default text
+                // size on an iPhone 17, now and then: the first run on a new simulator, while it
+                // ticks. A screenshot taken as the issue arrives measures 5.5:1 for its pixels, in
+                // `ABSColor.mutedForeground` (rgb(91, 99, 108)), on the backdrop's rgb(247, 244,
+                // 242), and the frame matches the text; the remaining time beside it measures the
+                // same. Only the Player's elapsed times, and only while a screenshot measures 4.5:1
+                // or more around text in that colour (`MeasuredContrast`), as for the mini player.
+                // #653
+                KnownAuditIssue(screen: .player, type: .contrast) { element, app in
+                    guard let element, isElapsedTime(element) else { return false }
+                    let text = FixtureTheme.playerTimes(FixtureTheme(launchArguments: app.launchArguments))
+                    let ratio = MeasuredContrast.ratio(in: element.frame, of: XCUIScreen.main.screenshot(), text: text)
+                    return ratio.map { $0 >= 4.5 } ?? false
+                },
             ]
             // Contrast on content text under the bottom bar isn't filtered but deferred
             // (`namedContrastUnderBottomBar`, #650), and audited again above the bar.
@@ -876,5 +890,13 @@ struct KnownAuditIssue {
     private static func isRemainingTime(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
         guard let element, element.elementType == .staticText else { return false }
         return NSPredicate(format: "SELF MATCHES %@", "-[0-9]+(:[0-9]{2})+").evaluate(with: element.label)
+    }
+
+    /// Whether `element` is one of the player's elapsed times: text that's a timestamp, such as
+    /// "0:02" or "1:02:03".
+    @MainActor
+    private static func isElapsedTime(_ element: XCUIElement) -> Bool {
+        guard element.elementType == .staticText else { return false }
+        return NSPredicate(format: "SELF MATCHES %@", "[0-9]+(:[0-9]{2})+").evaluate(with: element.label)
     }
 }

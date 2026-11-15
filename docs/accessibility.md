@@ -346,6 +346,14 @@ element, each with the reason and its issue:
   it, which passes in the same font and colour, 5.6:1. This is the false positive the
   whole-book remaining time had at `.caption2` (#614), so only text on the Player that's a
   minus and a timestamp is filtered.
+- The Player's elapsed time, "Contrast failed" on the chapter's ("0:02") at the default text
+  size on an iPhone 17, now and then: on the first run on a new simulator, while it ticks
+  (#653). A screenshot taken as the issue arrives measures 5.5:1 for its pixels, in
+  `ABSColor.mutedForeground` (`rgb(91, 99, 108)`), on the backdrop's `rgb(247, 244, 242)`, and
+  the frame matches the text; the remaining time beside it measures the same. Filtered only for
+  text on the Player that's a timestamp, and only while a screenshot measures 4.5:1 or more
+  around text in that colour (`MeasuredContrast`, the colour mirrored in `FixtureTheme`), as for
+  the mini player.
 - Bookmarks' Done (`player.sheet.done`) in the dark theme, "Contrast failed" every run on an
   iPhone 17 (#645): the system's glass button in the sheet's navigation bar. Its white label
   measures 12.2:1 on the glass's `rgb(49, 55, 47)`. At the sheet's medium detent, glass over the
