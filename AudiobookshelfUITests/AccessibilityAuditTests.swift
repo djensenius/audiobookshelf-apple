@@ -159,7 +159,7 @@ final class AccessibilityAuditTests: XCTestCase {
     /// screen wasn't on screen for the first audit. The bars' own text and buttons aren't judged
     /// here, on purpose: they were ruled out in place, and now they're over other content than
     /// they were then. In every audit here, as in the first, an issue naming content text that's
-    /// under the bar at the time (``KnownAuditIssue/isContentTextUnderBottomBar(_:in:)``) is
+    /// under the bar at the time (``KnownAuditIssue/contentTextUnderBottomBar(_:in:)``) is
     /// deferred again, not judged: a later step audits it above the bar. In these steps neither is
     /// text the scroll has taken up under the navigation bar
     /// (``BottomBarAttribution/isUnderNavigationBar(_:bandTop:)``), measured through that bar's
@@ -169,7 +169,8 @@ final class AccessibilityAuditTests: XCTestCase {
     /// So each text a deferred issue names must be audited at least once wholly between the bars
     /// (``BottomBarAttribution/isWhollyInBand(_:band:)``), at any step: text taller than half the
     /// band could go from under the bottom bar to under the navigation bar in one step. If it never
-    /// is, its deferred failure stands.
+    /// is, its deferred failure stands. So does that of an issue deferred again here, in any audit,
+    /// that names content text under the bar: the same holds for its text from then on.
     @MainActor
     private func auditAboveBottomBar(
         _ content: (name: String, elements: [XCUIElement]), deferring deferred: [String],
@@ -190,26 +191,29 @@ final class AccessibilityAuditTests: XCTestCase {
         let bottom = { content.elements.map(\.frame.maxY).max() ?? 0 }
         let x = Self.dragX(for: first, in: app, margin: margin)
         var failures: [String] = []
-        // The named deferrals whose text has been wholly between the bars at an audited step.
+        // The named deferrals, from the first audit and from the audits here, and those whose text
+        // has been wholly between the bars at an audited step.
+        var pending = namedDeferrals
         var covered = Set<Int>()
         func markCovered() {
-            guard !namedDeferrals.isEmpty, let (texts, band) = KnownAuditIssue.snapshotTexts(in: app) else { return }
-            for (index, deferral) in namedDeferrals.enumerated() where !covered.contains(index) {
+            guard !pending.isEmpty, let (texts, band) = KnownAuditIssue.snapshotTexts(in: app) else { return }
+            for (index, deferral) in pending.enumerated() where !covered.contains(index) {
                 let text = texts.first { $0.label == deferral.label && $0.occurrence == deferral.occurrence }
                 if let text, BottomBarAttribution.isWhollyInBand(text.frame, band: band) { covered.insert(index) }
             }
         }
         // The failures of the named deferrals never covered, for the paths that return without `deferred`.
         func uncovered() -> [String] {
-            namedDeferrals.indices.filter { !covered.contains($0) }.map {
-                "\(namedDeferrals[$0].failure) (kept: never wholly between the bars at an audited step)"
+            pending.indices.filter { !covered.contains($0) }.map {
+                "\(pending[$0].failure) (kept: never wholly between the bars at an audited step)"
             }
         }
         // Audits contrast: counts issues with no element and the named ones on `labels` (and on
         // `barLabels` while attributing), adding the named ones to `failures`, and the ones with no
         // element too once attributed. While attributing they aren't kept: they're the deferred
         // issue persisting, which `deferred` already holds if it isn't attributed. Named content
-        // text under the bottom bar now is deferred again, not counted; once attributed, so is
+        // text under the bottom bar now is deferred again, not counted, and added to `pending` (once
+        // per text, with its first failure) to be audited between the bars; once attributed, so is
         // text scrolled up under the navigation bar, judged where it was in the first audit or in
         // the band at an earlier step.
         let navigationBar = app.navigationBars.firstMatch
@@ -218,9 +222,17 @@ final class AccessibilityAuditTests: XCTestCase {
             try app.performAccessibilityAudit(for: .contrast) { issue in
                 if KnownAuditIssue.all.contains(where: { $0.matches(issue, on: screen, in: app) }) { return true }
                 if let element = issue.element {
-                    guard labels.contains(element.label) || attributing && barLabels.contains(element.label),
-                        !KnownAuditIssue.isContentTextUnderBottomBar(element, in: app)
+                    guard labels.contains(element.label) || attributing && barLabels.contains(element.label)
                     else { return true }
+                    if let text = KnownAuditIssue.contentTextUnderBottomBar(element, in: app) {
+                        if !pending.contains(where: { $0.label == text.label && $0.occurrence == text.occurrence }) {
+                            pending.append(
+                                .init(
+                                    label: text.label, occurrence: text.occurrence,
+                                    failure: "\(name), \(step): \(Self.failure(issue))"))
+                        }
+                        return true
+                    }
                     let bandTop = navigationBar.exists ? navigationBar.frame.maxY : app.frame.minY
                     if !attributing && BottomBarAttribution.isUnderNavigationBar(element.frame, bandTop: bandTop) {
                         return true

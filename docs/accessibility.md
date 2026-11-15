@@ -288,7 +288,8 @@ element, each with the reason and its issue:
   Settings at the default size, "Theme" and "Playback Settings" failed there every run until
   this). So each text a deferred issue names must be audited wholly between the bars at some
   step, or its failure stands: text taller than half the band could otherwise go from under the
-  bottom bar to under the navigation bar in one step. Named text the scroll brings on screen
+  bottom bar to under the navigation bar in one step. The same holds for text a re-audit names
+  while it's still under the bar, from that step on. Named text the scroll brings on screen
   isn't judged by them.
   Settings at AX5 is deferred the same way (#647): on an iPhone 17 the "Playback Settings"
   header rests under the tab bar and the mini player, and in four runs of five the audit
