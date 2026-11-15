@@ -131,7 +131,9 @@ final class AccessibilityAuditTests: XCTestCase {
     /// "User Interface Settings" header, reported with no element, was named in place every time.
     /// If the issue persists until that text would have to leave, or once the content is clear,
     /// the deferred failures stand, as they do if the app can't be snapshotted to find that text.
-    /// In practice the deferred issue hasn't come back in place.
+    /// The bars' own text (``KnownAuditIssue/barLabels(in:)``) is ruled out too: an issue naming
+    /// it while attributing fails, and the deferred failures stand. In practice the deferred issue
+    /// hasn't come back in place.
     ///
     /// Then it audits the content above the bar: it scrolls up by half the band at a time, audits
     /// each step, and stops once the content ends above the bar. So every row that was under the
@@ -139,8 +141,9 @@ final class AccessibilityAuditTests: XCTestCase {
     /// the band (AX5) in overlapping segments. In both, an issue with no element fails, and so
     /// does one on text, by label, that was in the band or under the bar at first (the metadata's
     /// rows included), unless it's a ``KnownAuditIssue``; other named text the scroll brings on
-    /// screen wasn't on screen for the first audit. Each step is an activity named with what it
-    /// measured.
+    /// screen wasn't on screen for the first audit. The bars' own text isn't judged here, on
+    /// purpose: it was ruled out in place, and now it's over other content than it was then.
+    /// Each step is an activity named with what it measured.
     @MainActor
     private func auditAboveBottomBar(
         _ content: (name: String, elements: [XCUIElement]), deferring deferred: [String], on screen: FixtureScreen,
@@ -153,26 +156,28 @@ final class AccessibilityAuditTests: XCTestCase {
         }
         // The content's labels include its texts', as Item detail's metadata is their container.
         guard let view = KnownAuditIssue.textInView(in: app),
-            let contentLabels = KnownAuditIssue.textLabels(of: content.elements)
+            let contentLabels = KnownAuditIssue.textLabels(of: content.elements),
+            let barLabels = KnownAuditIssue.barLabels(in: app)
         else { return deferred.map { "\($0) (kept: couldn't snapshot the view to attribute it)" } }
         let labels = Set(view.map(\.label)).union(contentLabels)
         let bottom = { content.elements.map(\.frame.maxY).max() ?? 0 }
         let x = Self.dragX(for: first, in: app, margin: margin)
         var failures: [String] = []
-        // Audits contrast: counts issues with no element and the named ones on `labels`, adding the
-        // named ones to `failures`, and the ones with no element too if `keepUnnamed`. While
-        // attributing they aren't kept: they're the deferred issue persisting, which `deferred`
-        // already holds if it isn't attributed.
-        func auditContrast(_ step: String, keepUnnamed: Bool) throws -> (unnamed: Int, named: Int) {
+        // Audits contrast: counts issues with no element and the named ones on `labels` (and on
+        // `barLabels` while attributing), adding the named ones to `failures`, and the ones with no
+        // element too once attributed. While attributing they aren't kept: they're the deferred
+        // issue persisting, which `deferred` already holds if it isn't attributed.
+        func auditContrast(_ step: String, attributing: Bool) throws -> (unnamed: Int, named: Int) {
             var counts = (unnamed: 0, named: 0)
             try app.performAccessibilityAudit(for: .contrast) { issue in
                 if KnownAuditIssue.all.contains(where: { $0.matches(issue, on: screen, in: app) }) { return true }
                 if let element = issue.element {
-                    guard labels.contains(element.label) else { return true }
+                    guard labels.contains(element.label) || attributing && barLabels.contains(element.label)
+                    else { return true }
                     counts.named += 1
                 } else {
                     counts.unnamed += 1
-                    guard keepUnnamed else { return true }
+                    guard !attributing else { return true }
                 }
                 failures.append("\(name), \(step): \(Self.failure(issue))")
                 return true
@@ -198,7 +203,7 @@ final class AccessibilityAuditTests: XCTestCase {
             let under = bottom() - KnownAuditIssue.bottomBarTop(in: app)
             let distance = step == 0 ? 0 : min(max(under, 0) + 4, max(before.headroom - 4, 16))
             if distance > 0 { drag(distance) }
-            let found = try auditContrast("attributing the deferred contrast, step \(step)", keepUnnamed: false)
+            let found = try auditContrast("attributing the deferred contrast, step \(step)", attributing: true)
             let after = KnownAuditIssue.state(of: view, in: app)
             let underAfter = bottom() - KnownAuditIssue.bottomBarTop(in: app)
             let moved = step == 0 || under - underAfter >= 1
@@ -210,7 +215,7 @@ final class AccessibilityAuditTests: XCTestCase {
                 named: "\(name): attributing the deferred contrast, step \(step): dragged \(distance) points; the "
                     + "\(content.name) \(under) then \(underAfter) points under the bar; headroom \(before.headroom) "
                     + "then \(after.headroom); \(view.count) texts in view, all still in view: \(after.visible); "
-                    + "\(labels.count) labels judged; "
+                    + "\(labels.count) labels judged and \(barLabels.count) of the bars; "
                     + "\(found.unnamed) issues with no element, \(found.named) named: \(outcome)"
             ) { _ in }
         }
@@ -245,7 +250,7 @@ final class AccessibilityAuditTests: XCTestCase {
             drag(band / 2)
             XCTAssertLessThanOrEqual(
                 start - first.frame.minY, band / 2 + 2, "\(name): step \(step) scrolled more than half the band")
-            let found = try auditContrast("\(content.name) above the bottom bar, step \(step)", keepUnnamed: true)
+            let found = try auditContrast("\(content.name) above the bottom bar, step \(step)", attributing: false)
             XCTContext.runActivity(
                 named:
                     "\(name): \(content.name) above the bottom bar, step \(step): scrolled \(start - first.frame.minY) "
@@ -612,6 +617,22 @@ struct KnownAuditIssue {
         return Set(
             texts.filter { !$0.inBar && !$0.label.isEmpty && !$0.frame.isEmpty && isInside($0.frame, band) }.map(
                 \.key))
+    }
+
+    /// The labels of everything in the tab bar and the mini player, the bars' own text included,
+    /// from one snapshot of each; `nil` if one can't be snapshotted.
+    @MainActor
+    static func barLabels(in app: XCUIApplication) -> Set<String>? {
+        var labels: Set<String> = []
+        func visit(_ node: XCUIElementSnapshot) {
+            if !node.label.isEmpty { labels.insert(node.label) }
+            node.children.forEach(visit)
+        }
+        for bar in [app.tabBars.firstMatch, app.buttons["player.mini"].firstMatch] where bar.exists {
+            guard let snapshot = try? bar.snapshot() else { return nil }
+            visit(snapshot)
+        }
+        return labels
     }
 
     /// The labels of `elements` that are texts and of the texts they contain, from one snapshot
