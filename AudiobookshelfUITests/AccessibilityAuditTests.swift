@@ -45,7 +45,7 @@ final class AccessibilityAuditTests: XCTestCase {
     /// Audits what's on screen and fails once for every issue that isn't a ``KnownAuditIssue``,
     /// naming the screen, the text size, the audit type, the element and the issue. An issue
     /// ``KnownAuditIssue/isUnnamedContrastUnderBottomBar(_:on:in:)`` defers is checked by
-    /// ``auditMetadataAboveBottomBar(in:named:)``.
+    /// ``auditAboveBottomBar(_:in:named:)``.
     @MainActor
     private func audit(
         _ screen: FixtureScreen, for types: XCUIAccessibilityAuditType, in app: XCUIApplication, textSize: String
@@ -64,7 +64,9 @@ final class AccessibilityAuditTests: XCTestCase {
                 return true
             }
             if deferred {
-                failures += try auditMetadataAboveBottomBar(in: app, named: "\(screen.name) (\(textSize))")
+                failures += try auditAboveBottomBar(
+                    KnownAuditIssue.contentUnderBottomBar(on: screen, in: app), in: app,
+                    named: "\(screen.name) (\(textSize))")
             }
         } catch {
             XCTFail("\(screen.name) (\(textSize)): the accessibility audit failed to run: \(error)")
@@ -90,30 +92,43 @@ final class AccessibilityAuditTests: XCTestCase {
         return "\(auditTypeName(issue.auditType)) on \(elementName(issue.element)): \(description)"
     }
 
-    /// Audits contrast on Item detail's metadata (`item.metadata`) above the bottom bar, after an
-    /// issue was deferred while it was under the bar. Scrolls the content up by half the band
-    /// between the navigation bar and the bar at a time, audits each step, and stops once the
-    /// metadata ends above the bar. So every row that was under the bar (rows are shorter than half
-    /// the band) is audited fully in the band, a block taller than the band (AX5) in overlapping
-    /// segments; text scrolled off the top was audited in the band on the way. Only an issue with no
-    /// element fails: named text the scroll brings on screen wasn't on screen for the first audit,
-    /// so it isn't what was deferred.
+    /// Audits contrast on the content that was under the bottom bar (``KnownAuditIssue/contentUnderBottomBar(on:in:)``:
+    /// Item detail's metadata, or Settings' text) above the bar, after an issue was deferred while
+    /// it was under the bar. Scrolls the content up by half the band between the navigation bar and
+    /// the bar at a time, audits each step, and stops once the content ends above the bar. So every
+    /// row that was under the bar (rows are shorter than half the band) is audited fully in the
+    /// band, a block taller than the band (AX5) in overlapping segments; text scrolled off the top
+    /// was audited in the band on the way. Only an issue with no element, or on Settings' deferred
+    /// text, fails: other named text the scroll brings on screen wasn't on screen for the first
+    /// audit, so it isn't what was deferred.
     @MainActor
-    private func auditMetadataAboveBottomBar(in app: XCUIApplication, named name: String) throws -> [String] {
-        let metadata = app.descendants(matching: .any)["item.metadata"].firstMatch
+    private func auditAboveBottomBar(
+        _ content: (name: String, elements: [XCUIElement]), in app: XCUIApplication, named name: String
+    ) throws -> [String] {
         let navigationBar = app.navigationBars.firstMatch
         let margin: CGFloat = 44
         var failures: [String] = []
+        guard let first = content.elements.first else {
+            XCTFail("\(name): an issue was deferred, but no \(content.name) is under the bottom bar")
+            return failures
+        }
+        let bottom = { content.elements.map(\.frame.maxY).max() ?? 0 }
+        // Settings' deferred text is text, so an issue naming it fails too.
+        let labels = Set(content.elements.filter { $0.elementType == .staticText }.map(\.label))
         for step in 1...10 {
             let barTop = KnownAuditIssue.bottomBarTop(in: app)
-            if metadata.frame.maxY <= barTop { return failures }
+            if bottom() <= barTop { return failures }
             let top = navigationBar.exists ? navigationBar.frame.maxY : app.frame.minY
             let band = barTop - top
+            // An empty band means no bar along the bottom edge was found (#648), so the drag below
+            // would go nowhere.
             guard band > 2 * margin else {
-                XCTFail("\(name): no room between the navigation bar (\(top)) and the bottom bar (\(barTop))")
+                XCTFail(
+                    "\(name): no room to audit the \(content.name) above the bottom bar: the band between the "
+                        + "navigation bar (\(top)) and the bottom bar (\(barTop)) is \(band) points")
                 return failures
             }
-            let start = metadata.frame.minY
+            let start = first.frame.minY
             let origin = app.coordinate(withNormalizedOffset: .zero)
             let x = app.frame.maxX - margin / 2
             // Held at the end, so the scroll view doesn't coast past the drag.
@@ -121,16 +136,17 @@ final class AccessibilityAuditTests: XCTestCase {
                 forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(dx: x, dy: barTop - margin / 2 - band / 2)),
                 withVelocity: .slow, thenHoldForDuration: 0.3)
             XCTAssertLessThanOrEqual(
-                start - metadata.frame.minY, band / 2 + 2, "\(name): step \(step) scrolled more than half the band")
+                start - first.frame.minY, band / 2 + 2, "\(name): step \(step) scrolled more than half the band")
             try app.performAccessibilityAudit(for: .contrast) { issue in
-                if issue.element == nil {
-                    failures.append("\(name), metadata above the bottom bar, step \(step): \(Self.failure(issue))")
+                if issue.element.map({ labels.contains($0.label) }) ?? true {
+                    failures.append(
+                        "\(name), \(content.name) above the bottom bar, step \(step): \(Self.failure(issue))")
                 }
                 return true
             }
         }
-        if metadata.frame.maxY > KnownAuditIssue.bottomBarTop(in: app) {
-            XCTFail("\(name): the metadata is still under the bottom bar after 10 steps")
+        if bottom() > KnownAuditIssue.bottomBarTop(in: app) {
+            XCTFail("\(name): the \(content.name) is still under the bottom bar after 10 steps")
         }
         return failures
     }
@@ -225,6 +241,17 @@ struct KnownAuditIssue {
                 KnownAuditIssue(
                     screen: .library, type: .dynamicType, description: "partially unsupported",
                     element: isCardText),
+                // "Dynamic Type font sizes are partially unsupported" on the Library section menu's
+                // title ("Library") in a horizontal navigation bar at AX5, every run on a 6.3-inch
+                // iPhone. The bar caps its items' text: it's 20 points tall at the default size and
+                // 25 at AX5, beside the 72-point large title, which scales. The menu shows the Large
+                // Content Viewer instead, as Apple's bar items do. Not on the iPhone Duo, whose
+                // vertical bar shows the menu's symbol only. Only "partially" (a fixed font size is
+                // "unsupported", and fails), only text in the menu (`library.sectionPicker`) in a
+                // navigation bar. #647
+                KnownAuditIssue(
+                    screen: .library, type: .dynamicType, description: "partially unsupported",
+                    element: isSectionMenuText),
                 // "Contrast failed" on the chapter's remaining time ("-0:26") on a 6.3-inch iPhone,
                 // every run, though its pixels measure 5.7:1 on the backdrop (4.5:1 needed), as do
                 // the elapsed time's beside it (5.6:1), which pass in the same font and colour.
@@ -251,15 +278,38 @@ struct KnownAuditIssue {
     /// AX5 run in four on a 6.3-inch iPhone: the labels are hidden from VoiceOver (each value speaks
     /// its label, as in #613), so the audit can't name one. Deferred, not filtered: the test audits
     /// contrast again with the metadata above the bar, where an issue with no element fails. #623
+    ///
+    /// The same on Settings while its text is under the bar, as the "Playback Settings" header was
+    /// at AX5 on a 6.3-inch iPhone (#647): in four runs of five the audit reports it with no
+    /// element, in the fifth by name. The test audits again with that text above the bar, where an
+    /// issue with no element or naming it fails.
     @MainActor
     static func isUnnamedContrastUnderBottomBar(
         _ issue: XCUIAccessibilityAuditIssue, on screen: FixtureScreen, in app: XCUIApplication
     ) -> Bool {
-        screen == .item && issue.auditType == .contrast && issue.element == nil && metadataOverlapsBottomBar(in: app)
+        guard issue.auditType == .contrast, issue.element == nil else { return false }
+        switch screen {
+        case .item: return metadataOverlapsBottomBar(in: app)
+        case .settings: return !textUnderBottomBar(in: app).isEmpty
+        default: return false
+        }
     }
 
-    /// The top of the tab bar or the mini player, whichever is higher; the app's bottom without
-    /// either.
+    /// What ``isUnnamedContrastUnderBottomBar(_:on:in:)`` deferred `screen`'s issue for, with a
+    /// name for failures: Item detail's metadata, or Settings' text under the bottom bar.
+    @MainActor
+    static func contentUnderBottomBar(
+        on screen: FixtureScreen, in app: XCUIApplication
+    ) -> (name: String, elements: [XCUIElement]) {
+        if screen == .item { return ("metadata", [app.descendants(matching: .any)["item.metadata"].firstMatch]) }
+        let texts = textUnderBottomBar(in: app).map {
+            app.staticTexts.matching(NSPredicate(format: "label == %@", $0)).firstMatch
+        }
+        return ("deferred text", texts)
+    }
+
+    /// The top of the tab bar along the bottom edge or the mini player, whichever is higher; the
+    /// app's bottom without either.
     @MainActor
     static func bottomBarTop(in app: XCUIApplication) -> CGFloat {
         bottomBars(in: app).map(\.frame.minY).min() ?? app.frame.maxY
@@ -270,6 +320,15 @@ struct KnownAuditIssue {
     static func metadataOverlapsBottomBar(in app: XCUIApplication) -> Bool {
         let metadata = app.descendants(matching: .any)["item.metadata"].firstMatch
         return metadata.exists && bottomBars(in: app).contains { $0.frame.intersects(metadata.frame) }
+    }
+
+    /// Whether `element` is text in the Library section menu (`library.sectionPicker`) in a
+    /// navigation bar.
+    @MainActor
+    private static func isSectionMenuText(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
+        guard let element, element.elementType == .staticText else { return false }
+        let menu = app.navigationBars.descendants(matching: .any)["library.sectionPicker"].firstMatch
+        return menu.exists && menu.frame.contains(element.frame)
     }
 
     /// Whether `element` is text in an item card (`item.<id>`), which the card speaks in full, not
@@ -307,10 +366,35 @@ struct KnownAuditIssue {
             }
     }
 
-    /// The tab bar and the mini player, where they exist.
+    /// The labels of content text, not the tab bar's or the mini player's own, whose frame
+    /// overlaps either bar. One snapshot of the app, so it's quick however many rows the screen has.
+    @MainActor
+    private static func textUnderBottomBar(in app: XCUIApplication) -> [String] {
+        let bars = bottomBars(in: app).map(\.frame)
+        guard !bars.isEmpty, let snapshot = try? app.snapshot() else { return [] }
+        func labels(_ node: XCUIElementSnapshot) -> [String] {
+            if node.elementType == .tabBar || node.identifier.hasPrefix("player.mini") { return [] }
+            if node.elementType == .staticText && !node.label.isEmpty && bars.contains(where: node.frame.intersects) {
+                return [node.label]
+            }
+            return node.children.flatMap(labels)
+        }
+        return labels(snapshot)
+    }
+
+    /// The tab bar, if it's along the bottom edge, and the mini player, where they exist. A tab bar
+    /// that's a vertical pill at the side, as on the iPhone Duo's outer display, isn't a bottom bar:
+    /// its frame starts at the top, and the mini player floats at the bottom instead. #648
     @MainActor
     private static func bottomBars(in app: XCUIApplication) -> [XCUIElement] {
-        [app.tabBars.firstMatch, app.buttons["player.mini"].firstMatch].filter(\.exists)
+        let tabBar = app.tabBars.firstMatch
+        let mini = app.buttons["player.mini"].firstMatch
+        var bars = mini.exists ? [mini] : []
+        if tabBar.exists {
+            let frame = tabBar.frame
+            if frame.width > frame.height && frame.maxY >= app.frame.maxY - 4 { bars.append(tabBar) }
+        }
+        return bars
     }
 
     /// Whether `element` is one of the player's remaining times: text that's a minus and a

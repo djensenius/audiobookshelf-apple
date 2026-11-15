@@ -208,6 +208,15 @@ element, each with the reason and its issue:
   filtered: only "partially unsupported", only on Library and only for text in an `item.<id>`
   card. Home audits the same card unfiltered, and its shelf has no columns to change, so a card
   font that really doesn't scale still fails there.
+- Library at AX5: "Dynamic Type font sizes are partially unsupported" on the section menu's
+  title ("Library", in `library.sectionPicker`) in the navigation bar, every run on an iPhone 17
+  (#647). It isn't the large title or the tab: the navigation bar caps its items' text, which is
+  20 points tall at the default size and 25 at AX5, beside the large title's 72. The menu shows
+  the Large Content Viewer instead (`accessibilityShowsLargeContentViewer`), as Apple's bar items
+  do. The iPhone Duo's vertical bar shows only the menu's symbol, so it doesn't happen there.
+  Only "partially unsupported", only for text in the menu inside a navigation bar is filtered:
+  with a fixed `.font(.system(size: 17))` the audit reports "Dynamic Type font sizes are
+  unsupported", which still fails.
 - Contrast on text that has scrolled under the bottom bar, on every screen but the Player
   (#623). On iOS the tab bar floats over the content, with the mini player above it, so a
   screen at rest has rows under the bar's glass, and the audit measures them through it. On an
@@ -224,6 +233,15 @@ element, each with the reason and its issue:
   metadata ends above the bar. So every row that was under the bar is audited in full view
   (metadata taller than the band, as at AX5, in overlapping segments), and any issue with no
   element in those audits fails. Named text the scroll brings on screen isn't judged by them.
+  Settings at AX5 is deferred the same way (#647): on an iPhone 17 the "Playback Settings"
+  header rests under the tab bar and the mini player, and in four runs of five the audit
+  reported it with no element (in the fifth, by name). When Settings has a contrast issue with
+  no element while content text overlaps the bar, the test scrolls that text above the bar the
+  same way, and an issue with no element or naming that text fails there. A bottom bar is the
+  mini player, and the tab bar only when it runs along the window's bottom edge (wider than
+  tall, reaching the bottom): on the iPhone Duo's outer display the tab bar is a vertical pill
+  at the side, from y 0, and the mini player floats at the bottom, so the band ends at the mini
+  player's top (#648). If the band is ever too small to scroll in, the test fails saying so.
 - The Player's remaining times, "Contrast failed" on the chapter's ("-0:26") on an iPhone 17
   every run (#623). Its pixels measure 5.7:1 on the backdrop, and the elapsed time's beside
   it, which passes in the same font and colour, 5.6:1. This is the false positive the
