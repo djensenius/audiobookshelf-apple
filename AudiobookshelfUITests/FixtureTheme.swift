@@ -72,13 +72,15 @@ enum MeasuredContrast {
     /// The WCAG contrast ratio, from 1 to 21, of the text in `frame` (in points, `scale` pixels
     /// each) against its local background, conservatively: the 10th percentile over the text's
     /// pixels. The text is whichever extreme of the frame's luminance (its 2nd or 98th
-    /// percentile) fewer pixels are near, as text covers less of its frame than its background;
-    /// its pixels are those within 10% contrast of it. Each
+    /// percentile) is on the frame's top and bottom two rows at most a quarter as often as the
+    /// other, as a label's glyphs don't reach them and its background does, however much of the
+    /// frame each covers; its pixels are those within 10% contrast of it. Each
     /// one is compared with the median luminance of the pixels 2 to 4 pixels away that aren't
     /// text, which skips its anti-aliased edge, so text over a lighter patch of glass is measured
     /// against that patch, not the frame's darkest pixels. `nil`, so the issue isn't filtered,
-    /// when that can't be established: a frame too small or unreadable, no text distinct from the
-    /// background, or too few text pixels with a background around them.
+    /// when that can't be established: a frame too small or unreadable, neither extreme or both
+    /// on the top and bottom rows, no text distinct from the background, or too few text pixels
+    /// with a background around them.
     static func ratio(in frame: CGRect, of image: CGImage, scale: CGFloat) -> Double? {
         guard let luminance = luminances(in: frame, of: image, scale: scale) else { return nil }
         let (values, width, height) = luminance
@@ -86,9 +88,21 @@ enum MeasuredContrast {
         let median = sorted[sorted.count / 2]
         let dark = sorted[sorted.count * 2 / 100]
         let light = sorted[min(sorted.count - 1, sorted.count * 98 / 100)]
-        // Text covers less of its frame than its background: the extreme fewer pixels are near.
-        let share = { (extreme: Double) in values.count { contrast($0, extreme) <= 1.1 } }
-        let text = share(light) <= share(dark) ? light : dark
+        // A label's glyphs don't reach its frame's top and bottom rows (line-height padding), its
+        // background does: the text is the extreme with at most a quarter as many pixels there,
+        // whatever the area each covers.
+        let borderRows = Array(0..<min(borderRowCount, height)) + Array(max(height - borderRowCount, 0)..<height)
+        let border = Set(borderRows).flatMap { row in values[(row * width)..<((row + 1) * width)] }
+        let onBorder = { (extreme: Double) in border.count { contrast($0, extreme) <= 1.1 } }
+        let (darkOnBorder, lightOnBorder) = (onBorder(dark), onBorder(light))
+        let text: Double
+        if lightOnBorder * 4 <= darkOnBorder, darkOnBorder > 0 {
+            text = light
+        } else if darkOnBorder * 4 <= lightOnBorder, lightOnBorder > 0 {
+            text = dark
+        } else {
+            return nil
+        }
         guard contrast(text, median) >= 1.5 else { return nil }
         let isText = values.map { contrast($0, text) <= 1.1 }
         var ratios: [Double] = []
@@ -113,6 +127,8 @@ enum MeasuredContrast {
         return ratios[ratios.count / 10]
     }
 
+    /// The rows at the frame's top and bottom, each, the text's polarity is read from.
+    private static let borderRowCount = 2
     /// The ring around a text pixel the background is taken from, in pixels (Chebyshev distance).
     private static let ringInner = 2
     private static let ringOuter = 4

@@ -270,11 +270,14 @@ element, each with the reason and its issue:
   screen to be pixel-still for a second, so it isn't the glass mid-transition. They don't
   happen on an iPhone 17, where the mini player sits above the tab bar instead of floating at
   the bottom. Filtered only for the mini player's text, and only while a screenshot taken then
-  measures 4.5:1 or more locally (`MeasuredContrast`): each of the text's pixels in the
-  element's frame against the median of the non-text pixels 2–4 pixels around it, past the
-  anti-aliased edge, taking the 10th percentile. So text that really fails, as the author did
-  at 2.7:1, or that crosses a lighter patch of glass, still fails, and an issue whose text or
-  background can't be found isn't filtered.
+  measures 4.5:1 or more locally (`MeasuredContrast`). The text is the darkest or lightest
+  extreme of the element's frame that is on its top and bottom two rows at most a quarter as
+  often as the other: a label's glyphs don't reach those rows, and its background does, however
+  much of the frame each covers. Each of the text's pixels is measured against the median of
+  the non-text pixels 2–4 pixels around it, past the anti-aliased edge, taking the 10th
+  percentile. So text that really fails, as the author did at 2.7:1, or that crosses a lighter
+  patch of glass, still fails, and an issue whose text or background can't be told apart
+  isn't filtered.
 - The Player's remaining times, "Contrast failed" on the chapter's ("-0:26") on an iPhone 17
   every run (#623). Its pixels measure 5.7:1 on the backdrop, and the elapsed time's beside
   it, which passes in the same font and colour, 5.6:1. This is the false positive the

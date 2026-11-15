@@ -42,12 +42,35 @@ final class MeasuredContrastTests: XCTestCase {
         XCTAssertNil(MeasuredContrast.ratio(in: CGRect(x: 10, y: 10, width: 2, height: 2), of: text, scale: 3))
     }
 
+    /// Text over mid-grey glass with a narrow dark strip down its left edge: the strip's dark
+    /// pixels are fewer than the text's, but they reach the top and bottom rows and the text
+    /// doesn't, so the text is still the light extreme, and over the grey it's 2.4:1.
+    func testTextOverUnevenBackgroundIsFoundByTheFrameEdges() throws {
+        let image = try XCTUnwrap(
+            Self.image(
+                text: Self.glassText, backgrounds: [(140, 140, 140)],
+                patch: (CGRect(x: 0, y: 0, width: 15, height: Self.size.height), (32, 32, 32))))
+        let ratio = try XCTUnwrap(MeasuredContrast.ratio(in: Self.frame, of: image, scale: 1))
+        XCTAssertEqual(ratio, 2.4, accuracy: 0.1)
+        XCTAssertLessThan(ratio, 4.5)
+    }
+
+    /// Neither extreme on the top and bottom rows (text over a dark band, inside a mid-grey
+    /// frame): which is the text is ambiguous, so it's not measured.
+    func testNoExtremeOnTheFrameEdgesIsNotMeasured() throws {
+        let image = try XCTUnwrap(
+            Self.image(
+                text: Self.glassText, backgrounds: [(100, 100, 100)],
+                patch: (CGRect(x: 0, y: 10, width: Self.size.width, height: 40), (32, 32, 32))))
+        XCTAssertNil(MeasuredContrast.ratio(in: Self.frame, of: image, scale: 1))
+    }
+
     private static let size = (width: 300, height: 60)
     private static let frame = CGRect(x: 0, y: 0, width: size.width, height: size.height)
 
-    /// The backgrounds side by side, left to right, under vertical text strokes, rows 10 to 50,
-    /// three pixels wide every 15 (about 13% of the image), or none.
-    private static func image(text: RGB?, backgrounds: [RGB]) -> CGImage? {
+    /// The backgrounds side by side, left to right, then `patch` over them, under vertical text
+    /// strokes, rows 10 to 50, three pixels wide every 15 (about 13% of the image), or none.
+    private static func image(text: RGB?, backgrounds: [RGB], patch: (CGRect, RGB)? = nil) -> CGImage? {
         guard let space = CGColorSpace(name: CGColorSpace.sRGB),
             let context = CGContext(
                 data: nil, width: size.width, height: size.height, bitsPerComponent: 8,
@@ -57,6 +80,10 @@ final class MeasuredContrastTests: XCTestCase {
         for (index, background) in backgrounds.enumerated() {
             context.setFillColor(color(background))
             context.fill(CGRect(x: index * part, y: 0, width: part, height: size.height))
+        }
+        if let (rect, color) = patch {
+            context.setFillColor(Self.color(color))
+            context.fill(rect)
         }
         if let text {
             context.setFillColor(color(text))

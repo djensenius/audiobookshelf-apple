@@ -285,8 +285,10 @@ struct KnownAuditIssue {
             // on a 6.3-inch iPhone, whose mini player sits over the tab bar, not floating. Only the
             // mini player's text, and only while a screenshot taken now measures 4.5:1 or more
             // between the text's pixels and the background 2 to 4 pixels around them (the 10th
-            // percentile; `MeasuredContrast`), so text that really fails, as the author's 2.7:1
-            // did, or text over a lighter patch of glass, still fails; unmeasurable, it fails. #641
+            // percentile; `MeasuredContrast`), with the text told from the background by the
+            // frame's top and bottom rows, which only the background reaches. So text that really
+            // fails, as the author's 2.7:1 did, or text over a lighter patch of glass or beside a
+            // dark strip, still fails; ambiguous or unmeasurable, it fails. #641
             all.append(
                 KnownAuditIssue(type: .contrast) { element, app in
                     guard let element, isMiniPlayerText(element, in: app) else { return false }
