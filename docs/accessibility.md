@@ -262,31 +262,45 @@ element, each with the reason and its issue:
   Only "partially unsupported", only for text in the menu inside a navigation bar is filtered:
   with a fixed `.font(.system(size: 17))` the audit reports "Dynamic Type font sizes are
   unsupported", which still fails.
-- Contrast on text that has scrolled under the bottom bar, on every screen but the Player
-  (#623). On iOS the tab bar floats over the content, with the mini player above it, so a
+- Contrast on content text under the bottom bar, on every screen but the Player (#623, #650).
+  On iOS the tab bar floats over the content, with the mini player above it, so a
   screen at rest has rows under the bar's glass, and the audit measures them through it. On an
   iPhone 17 (6.3-inch, iOS 27.2) that's Item detail's "Size" (y 818–836 of 874, under a tab
   bar from y 791), "Duration" at AX5 and Settings' last two rows; the same rows pass above the
-  bar. Only text whose frame overlaps the tab bar or the mini player (`player.mini`), and not
-  the bar's own text, is filtered. The full player covers the bar, so the Player isn't. Item
-  detail's metadata labels are hidden from VoiceOver (each value speaks its label), so the
-  audit can report one under the bar with no element ("Contrast failed for
-  SwiftUI.AccessibilityNode"), as it did once in four runs for "Duration" at AX5. That isn't
-  filtered but deferred: when Item detail has a contrast issue with no element while its
-  metadata (`item.metadata`) overlaps the bar, the test scrolls the content up by half the band
+  bar. "Under the bottom bar" is the whole region from the bar's top down to the window's
+  bottom edge, not only the bars' frames: on the iPhone Duo the mini player floats with a gap
+  below it, and Settings' "Allow position seeking on media notification controls", cut off by
+  the bottom edge there, failed about 2 runs in 19 in the dark and black themes (#650). These
+  issues aren't filtered but deferred: when the audit names content text in that region (not
+  the bars' own text or controls, which are judged where they are), the test audits that text
+  again above the bar, as below, where an issue naming it fails. The full player covers the
+  bar, so the Player isn't deferred. Item detail's metadata labels are hidden from VoiceOver
+  (each value speaks its label), so the audit can report one under the bar with no element
+  ("Contrast failed for SwiftUI.AccessibilityNode"), as it did once in four runs for "Duration"
+  at AX5. That is deferred too: when Item detail has a contrast issue with no element while its
+  metadata (`item.metadata`) is under the bar, the test scrolls the content up by half the band
   between the navigation bar and the bar at a time, auditing contrast at each step, until the
-  metadata ends above the bar. So every row that was under the bar is audited in full view
-  (metadata taller than the band, as at AX5, in overlapping segments), and any issue with no
-  element in those audits fails. Named text the scroll brings on screen isn't judged by them.
+  metadata and the deferred text end above the bar. So every row that was under the bar is
+  audited in full view (metadata taller than the band, as at AX5, in overlapping segments), and
+  any issue with no element in those audits fails, as does one naming text that was on screen;
+  text still under the bar at a step is left to a later one, and text the scroll has taken up
+  under the navigation bar, measured through its glass, was judged before it got there (on
+  Settings at the default size, "Theme" and "Playback Settings" failed there every run until
+  this). So each text a deferred issue names must be audited wholly between the bars at some
+  step, or its failure stands: text taller than half the band could otherwise go from under the
+  bottom bar to under the navigation bar in one step. The same holds for text a re-audit names
+  while it's still under the bar, from that step on. Named text the scroll brings on screen
+  isn't judged by them.
   Settings at AX5 is deferred the same way (#647): on an iPhone 17 the "Playback Settings"
   header rests under the tab bar and the mini player, and in four runs of five the audit
   reported it with no element (in the fifth, by name). When Settings has a contrast issue with
-  no element while content text overlaps the bar, the test scrolls that text above the bar the
+  no element while content text is under the bar, the test scrolls that text above the bar the
   same way, and an issue with no element or naming that text fails there. Before that, for Item
   detail and Settings alike, the test rules out the other text on screen (`BottomBarAttribution`):
   an issue with no element could be a genuine failure on it, which scrolling it off the top would
-  lose. At AX5 on an iPhone 17 Settings' top text is 4 points below the navigation bar, so that
-  text can't stay on screen while the deferred text clears the bar. Instead the test audits
+  lose (deferred issues that all name their text skip this). At AX5 on an iPhone 17 Settings'
+  top text is 4 points below the navigation bar, so that text can't stay on screen while the
+  deferred text clears the bar. Instead the test audits
   contrast in place, then after steps toward clear of the bar that keep that text on screen,
   until the issue goes away; a failure on the text's own background doesn't go away while it's
   in view. Text that was on screen, named in any of these audits, fails unless it's a filtered

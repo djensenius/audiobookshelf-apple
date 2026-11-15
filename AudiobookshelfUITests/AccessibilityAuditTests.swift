@@ -70,14 +70,17 @@ final class AccessibilityAuditTests: XCTestCase {
 
     /// Audits what's on screen and fails once for every issue that isn't a ``KnownAuditIssue``,
     /// naming the screen, the text size, the audit type, the element and the issue. An issue
-    /// ``KnownAuditIssue/isUnnamedContrastUnderBottomBar(_:on:in:)`` defers is checked by
-    /// ``auditAboveBottomBar(_:deferring:on:in:named:)``.
+    /// ``KnownAuditIssue/isUnnamedContrastUnderBottomBar(_:on:in:)`` or
+    /// ``KnownAuditIssue/namedContrastUnderBottomBar(_:on:in:)`` defers is checked by
+    /// ``auditAboveBottomBar(_:deferring:namedDeferrals:hasUnnamed:on:in:named:)``.
     @MainActor
     private func audit(
         _ screen: FixtureScreen, for types: XCUIAccessibilityAuditType, in app: XCUIApplication, textSize: String
     ) {
         var failures: [String] = []
         var deferred: [String] = []
+        var named: [KnownAuditIssue.NamedDeferral] = []
+        var hasUnnamed = false
         let name = "\(screen.name) (\(textSize))"
         do {
             try app.performAccessibilityAudit(for: types) { issue in
@@ -85,6 +88,11 @@ final class AccessibilityAuditTests: XCTestCase {
                 // Reported below, with the screen's name.
                 if KnownAuditIssue.isUnnamedContrastUnderBottomBar(issue, on: screen, in: app) {
                     deferred.append("\(name): \(Self.failure(issue))")
+                    hasUnnamed = true
+                } else if let text = KnownAuditIssue.namedContrastUnderBottomBar(issue, on: screen, in: app) {
+                    let failure = "\(name): \(Self.failure(issue))"
+                    deferred.append(failure)
+                    named.append(.init(label: text.label, occurrence: text.occurrence, failure: failure))
                 } else {
                     failures.append("\(name): \(Self.failure(issue))")
                 }
@@ -92,8 +100,8 @@ final class AccessibilityAuditTests: XCTestCase {
             }
             if !deferred.isEmpty {
                 failures += try auditAboveBottomBar(
-                    KnownAuditIssue.contentUnderBottomBar(on: screen, in: app), deferring: deferred, on: screen,
-                    in: app, named: name)
+                    KnownAuditIssue.contentUnderBottomBar(on: screen, in: app), deferring: deferred,
+                    namedDeferrals: named, hasUnnamed: hasUnnamed, on: screen, in: app, named: name)
             }
         } catch {
             XCTFail("\(screen.name) (\(textSize)): the accessibility audit failed to run: \(error)")
@@ -119,13 +127,16 @@ final class AccessibilityAuditTests: XCTestCase {
         return "\(auditTypeName(issue.auditType)) on \(elementName(issue.element)): \(description)"
     }
 
-    /// Checks the contrast issues with no element that ``KnownAuditIssue/isUnnamedContrastUnderBottomBar(_:on:in:)``
-    /// deferred (`deferred`, their failures) while the `content` (``KnownAuditIssue/contentUnderBottomBar(on:in:)``:
-    /// Item detail's metadata, or Settings' text) was under the bottom bar, and returns what fails.
+    /// Checks the contrast issues that ``KnownAuditIssue/isUnnamedContrastUnderBottomBar(_:on:in:)``
+    /// and ``KnownAuditIssue/namedContrastUnderBottomBar(_:on:in:)`` deferred (`deferred`, their
+    /// failures) while the `content` (``KnownAuditIssue/contentUnderBottomBar(on:in:)``: the content
+    /// text under the bottom bar, and Item detail's metadata) was under the bottom bar, and returns
+    /// what fails. `namedDeferrals` are the deferred issues that name their text, and `hasUnnamed` is
+    /// whether one had no element.
     ///
-    /// First it rules out the text on screen in the band between the navigation bar and the
-    /// bottom bar (``KnownAuditIssue/textInView(in:)``, ``BottomBarAttribution``), text partly
-    /// under the navigation bar included, which can't scroll further out. That text can't
+    /// For an issue with no element, it first rules out the text on screen in the band between the
+    /// navigation bar and the bottom bar (``KnownAuditIssue/textInView(in:)``, ``BottomBarAttribution``),
+    /// text partly under the navigation bar included, which can't scroll further out. That text can't
     /// be on screen with the content clear of the bar when the content is at its top, as Settings
     /// opens, so it audits contrast in place (step 0), then after steps toward clear of the bar
     /// that keep that text in the band, until the issue goes away. A failure on that text's own
@@ -136,7 +147,8 @@ final class AccessibilityAuditTests: XCTestCase {
     /// The bars' own text and buttons (``KnownAuditIssue/barLabels(in:)``: the tab bar's, the
     /// navigation bar's and the mini player's) are ruled out too: an issue naming one while
     /// attributing fails, and the deferred failures stand. In practice the deferred issue hasn't
-    /// come back in place.
+    /// come back in place. Issues that all name their text have nothing to rule out, so they skip
+    /// this.
     ///
     /// Then it audits the content above the bar: it scrolls up by half the band at a time, audits
     /// each step, and stops once the content ends above the bar. So every row that was under the
@@ -146,10 +158,23 @@ final class AccessibilityAuditTests: XCTestCase {
     /// rows included), unless it's a ``KnownAuditIssue``; other named text the scroll brings on
     /// screen wasn't on screen for the first audit. The bars' own text and buttons aren't judged
     /// here, on purpose: they were ruled out in place, and now they're over other content than
-    /// they were then. Each step is an activity named with what it measured.
+    /// they were then. In every audit here, as in the first, an issue naming content text that's
+    /// under the bar at the time (``KnownAuditIssue/contentTextUnderBottomBar(_:in:)``) is
+    /// deferred again, not judged: a later step audits it above the bar. In these steps neither is
+    /// text the scroll has taken up under the navigation bar
+    /// (``BottomBarAttribution/isUnderNavigationBar(_:bandTop:)``), measured through that bar's
+    /// glass: the first audit judged it where it was, or an earlier step in the band. Each step is
+    /// an activity named with what it measured.
+    ///
+    /// So each text a deferred issue names must be audited at least once wholly between the bars
+    /// (``BottomBarAttribution/isWhollyInBand(_:band:)``), at any step: text taller than half the
+    /// band could go from under the bottom bar to under the navigation bar in one step. If it never
+    /// is, its deferred failure stands. So does that of an issue deferred again here, in any audit,
+    /// that names content text under the bar: the same holds for its text from then on.
     @MainActor
     private func auditAboveBottomBar(
-        _ content: (name: String, elements: [XCUIElement]), deferring deferred: [String], on screen: FixtureScreen,
+        _ content: (name: String, elements: [XCUIElement]), deferring deferred: [String],
+        namedDeferrals: [KnownAuditIssue.NamedDeferral], hasUnnamed: Bool, on screen: FixtureScreen,
         in app: XCUIApplication, named name: String
     ) throws -> [String] {
         let margin: CGFloat = 44
@@ -166,10 +191,32 @@ final class AccessibilityAuditTests: XCTestCase {
         let bottom = { content.elements.map(\.frame.maxY).max() ?? 0 }
         let x = Self.dragX(for: first, in: app, margin: margin)
         var failures: [String] = []
+        // The named deferrals, from the first audit and from the audits here, and those whose text
+        // has been wholly between the bars at an audited step.
+        var pending = namedDeferrals
+        var covered = Set<Int>()
+        func markCovered() {
+            guard !pending.isEmpty, let (texts, band) = KnownAuditIssue.snapshotTexts(in: app) else { return }
+            for (index, deferral) in pending.enumerated() where !covered.contains(index) {
+                let text = texts.first { $0.label == deferral.label && $0.occurrence == deferral.occurrence }
+                if let text, BottomBarAttribution.isWhollyInBand(text.frame, band: band) { covered.insert(index) }
+            }
+        }
+        // The failures of the named deferrals never covered, for the paths that return without `deferred`.
+        func uncovered() -> [String] {
+            pending.indices.filter { !covered.contains($0) }.map {
+                "\(pending[$0].failure) (kept: never wholly between the bars at an audited step)"
+            }
+        }
         // Audits contrast: counts issues with no element and the named ones on `labels` (and on
         // `barLabels` while attributing), adding the named ones to `failures`, and the ones with no
         // element too once attributed. While attributing they aren't kept: they're the deferred
-        // issue persisting, which `deferred` already holds if it isn't attributed.
+        // issue persisting, which `deferred` already holds if it isn't attributed. Named content
+        // text under the bottom bar now is deferred again, not counted, and added to `pending` (once
+        // per text, with its first failure) to be audited between the bars; once attributed, so is
+        // text scrolled up under the navigation bar, judged where it was in the first audit or in
+        // the band at an earlier step.
+        let navigationBar = app.navigationBars.firstMatch
         func auditContrast(_ step: String, attributing: Bool) throws -> (unnamed: Int, named: Int) {
             var counts = (unnamed: 0, named: 0)
             try app.performAccessibilityAudit(for: .contrast) { issue in
@@ -177,6 +224,19 @@ final class AccessibilityAuditTests: XCTestCase {
                 if let element = issue.element {
                     guard labels.contains(element.label) || attributing && barLabels.contains(element.label)
                     else { return true }
+                    if let text = KnownAuditIssue.contentTextUnderBottomBar(element, in: app) {
+                        if !pending.contains(where: { $0.label == text.label && $0.occurrence == text.occurrence }) {
+                            pending.append(
+                                .init(
+                                    label: text.label, occurrence: text.occurrence,
+                                    failure: "\(name), \(step): \(Self.failure(issue))"))
+                        }
+                        return true
+                    }
+                    let bandTop = navigationBar.exists ? navigationBar.frame.maxY : app.frame.minY
+                    if !attributing && BottomBarAttribution.isUnderNavigationBar(element.frame, bandTop: bandTop) {
+                        return true
+                    }
                     counts.named += 1
                 } else {
                     counts.unnamed += 1
@@ -185,6 +245,7 @@ final class AccessibilityAuditTests: XCTestCase {
                 failures.append("\(name), \(step): \(Self.failure(issue))")
                 return true
             }
+            markCovered()
             return counts
         }
         // Scrolls the content up by `distance`, held at the end so it doesn't coast past the drag.
@@ -200,6 +261,13 @@ final class AccessibilityAuditTests: XCTestCase {
         // points, as far as the headroom over the text in view allows: the headroom stays the
         // same while a large title collapses, so it's measured again after each step.
         var outcome = BottomBarAttribution.Outcome.undecided
+        if !hasUnnamed {
+            outcome = .attributed
+            XCTContext.runActivity(
+                named: "\(name): every deferred contrast issue names its text: not attributing; the "
+                    + "\(content.name) \(bottom() - KnownAuditIssue.bottomBarTop(in: app)) points under the bar"
+            ) { _ in }
+        }
         let steps = 8
         for step in 0...steps where outcome == .undecided {
             let before = KnownAuditIssue.state(of: view, in: app)
@@ -235,10 +303,9 @@ final class AccessibilityAuditTests: XCTestCase {
                 }
         }
 
-        let navigationBar = app.navigationBars.firstMatch
         for step in 1...10 {
             let barTop = KnownAuditIssue.bottomBarTop(in: app)
-            if bottom() <= barTop { return failures }
+            if bottom() <= barTop { return failures + uncovered() }
             let top = navigationBar.exists ? navigationBar.frame.maxY : app.frame.minY
             let band = barTop - top
             // An empty band means no bar along the bottom edge was found (#648), so the drag below
@@ -247,7 +314,7 @@ final class AccessibilityAuditTests: XCTestCase {
                 XCTFail(
                     "\(name): no room to audit the \(content.name) above the bottom bar: the band between the "
                         + "navigation bar (\(top)) and the bottom bar (\(barTop)) is \(band) points")
-                return failures
+                return failures + uncovered()
             }
             let start = first.frame.minY
             drag(band / 2)
@@ -263,10 +330,10 @@ final class AccessibilityAuditTests: XCTestCase {
         if bottom() > KnownAuditIssue.bottomBarTop(in: app) {
             XCTFail("\(name): the \(content.name) is still under the bottom bar after 10 steps")
         }
-        return failures
+        return failures + uncovered()
     }
 
-    /// Where ``auditAboveBottomBar(_:deferring:on:in:named:)`` drags: `margin / 2` in from the right edge of the
+    /// Where ``auditAboveBottomBar(_:deferring:namedDeferrals:hasUnnamed:on:in:named:)`` drags: `margin / 2` in from the right edge of the
     /// scroll view holding `element` (Settings' form, Item detail's scroll view), and clear of a
     /// side tab bar (``KnownAuditIssue/contentMaxX(in:)``), so the drag scrolls the content, not the
     /// bar. The app's right edge, clear of a side bar, without a scroll view under `element`.
@@ -393,26 +460,20 @@ struct KnownAuditIssue {
                 // remaining times. #623
                 KnownAuditIssue(screen: .player, type: .contrast, element: isRemainingTime),
             ]
-            // Contrast on text that has scrolled under the bottom bar: the tab bar, which floats over
-            // the content, and the mini player above it (`tabViewBottomAccessory`). The audit
-            // measures the text through the bar's glass, as on a 6.3-inch iPhone with Item detail's
-            // "Size" (y 818 to 836 of 874, under a tab bar from y 791) and Settings' last rows. It's
-            // the system's bar over a scroll view at rest, not the text's own colours, which pass
-            // above the bar. Only text whose frame overlaps the bar, and not the bar's own, on the
-            // screens with the bar: the full player covers it. #623
-            all += [FixtureScreen.home, .library, .item, .settings, .downloads, .series].map {
-                KnownAuditIssue(screen: $0, type: .contrast, element: isUnderBottomBar)
-            }
+            // Contrast on content text under the bottom bar isn't filtered but deferred
+            // (`namedContrastUnderBottomBar`, #650), and audited again above the bar.
+
             // "Potentially inaccessible text" with no element on Settings in the dark theme, while
             // a row's text is under the mini player: the dark glass shows the text through, and
             // the audit finds the mini player, not the row, on top of it. Probed on a 6.3-inch
             // iPhone: none without the mini player; with it, the issue comes and goes with "Allow
             // position seeking on media notification controls" under it, as Settings scrolls; the
-            // row's toggle speaks that text. Only while content text is under the bar. #641
+            // row's toggle speaks that text. Only while content text overlaps the tab bar or the mini
+            // player, not merely in the region below them (as in the iPhone Duo's gap). #641
             all.append(
                 KnownAuditIssue(
                     screen: .settings, type: .elementDetection, description: "Potentially inaccessible text"
-                ) { element, app in element == nil && !textUnderBottomBar(in: app).isEmpty })
+                ) { element, app in element == nil && !textUnderBottomBar(in: app, overlappingBars: true).isEmpty })
             // "Contrast failed" on the mini player's text on the iPhone Duo in the dark and black
             // themes, every run: the title on Downloads and the author on Settings (dark). A
             // screenshot taken as each issue arrives measures 16.3:1 (white on the glass's
@@ -481,25 +542,78 @@ struct KnownAuditIssue {
         }
     }
 
-    /// What ``isUnnamedContrastUnderBottomBar(_:on:in:)`` deferred `screen`'s issue for, with a
-    /// name for failures: Item detail's metadata, or Settings' text under the bottom bar.
+    /// Whether `issue` is contrast on content text under the bottom bar (``isContentTextUnderBottomBar(_:in:)``)
+    /// on a screen with the bar. The tab bar floats over the content, with the mini player above it
+    /// (`tabViewBottomAccessory`), so a screen at rest has text under the bar's glass, and the audit
+    /// measures it through the glass, as on a 6.3-inch iPhone with Item detail's "Size" (y 818 to
+    /// 836 of 874, under a tab bar from y 791) and Settings' last rows (#623), or text cut off by
+    /// the window's bottom edge below the iPhone Duo's floating mini player, as Settings' "Allow
+    /// position seeking on media notification controls" in the dark and black themes. Deferred, not
+    /// filtered: the test audits contrast again with the text above the bar, where an issue naming
+    /// it fails. Not the bars' own text or controls, which are judged where they are, nor on the
+    /// Player, whose full player covers the bar. The text it names, by label and occurrence among
+    /// the app's texts with that label, or `nil` if it isn't deferred. #650
+    @MainActor
+    static func namedContrastUnderBottomBar(
+        _ issue: XCUIAccessibilityAuditIssue, on screen: FixtureScreen, in app: XCUIApplication
+    ) -> (label: String, occurrence: Int)? {
+        guard issue.auditType == .contrast, let element = issue.element,
+            [FixtureScreen.home, .library, .item, .settings, .downloads, .series].contains(screen)
+        else { return nil }
+        return contentTextUnderBottomBar(element, in: app)
+    }
+
+    /// A contrast issue ``namedContrastUnderBottomBar(_:on:in:)`` deferred: its text, by label and
+    /// occurrence among the app's texts with that label, and its failure.
+    struct NamedDeferral {
+        var label: String
+        var occurrence: Int
+        var failure: String
+    }
+
+    /// Whether `element` is content text under the bottom bar (``contentTextUnderBottomBar(_:in:)``).
+    @MainActor
+    static func isContentTextUnderBottomBar(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
+        contentTextUnderBottomBar(element, in: app) != nil
+    }
+
+    /// The text of ``textUnderBottomBar(in:overlappingBars:)`` that `element` is, by label and
+    /// frame, so not the bars' own text, nor text elsewhere with the same label; `nil` if none.
+    @MainActor
+    static func contentTextUnderBottomBar(
+        _ element: XCUIElement, in app: XCUIApplication
+    ) -> (label: String, occurrence: Int)? {
+        guard element.elementType == .staticText, !element.label.isEmpty else { return nil }
+        let frame = element.frame
+        return textUnderBottomBar(in: app).first {
+            $0.label == element.label && $0.frame.insetBy(dx: -0.5, dy: -0.5).contains(frame)
+                && frame.insetBy(dx: -0.5, dy: -0.5).contains($0.frame)
+        }
+        .map { ($0.label, $0.occurrence) }
+    }
+
+    /// What ``isUnnamedContrastUnderBottomBar(_:on:in:)`` and ``namedContrastUnderBottomBar(_:on:in:)``
+    /// deferred `screen`'s issues for, with a name for failures: the content text under the bottom
+    /// bar, after Item detail's metadata if it's under the bar too.
     @MainActor
     static func contentUnderBottomBar(
         on screen: FixtureScreen, in app: XCUIApplication
     ) -> (name: String, elements: [XCUIElement]) {
-        if screen == .item { return ("metadata", [app.descendants(matching: .any)["item.metadata"].firstMatch]) }
-        let bars = bottomBars(in: app).map(\.frame)
+        let region = bottomBarRegion(in: app)
         let texts = textUnderBottomBar(in: app).map { text in
             let element = app.staticTexts.matching(NSPredicate(format: "label == %@", text.label))
                 .element(boundBy: text.occurrence)
             // The occurrence must be the text the snapshot found under the bar, or the re-audit
             // would scroll for, and judge, some other text.
-            if !bars.contains(where: element.frame.intersects) {
+            if !BottomBarAttribution.isUnderBottomBar(element.frame, region: region) {
                 XCTFail(
                     "Text '\(text.label)' (occurrence \(text.occurrence)) was under the bottom bar in the "
-                        + "snapshot, but resolves to \(element.frame), clear of the bars \(bars)")
+                        + "snapshot, but resolves to \(element.frame), clear of the region under it \(region)")
             }
             return element
+        }
+        if screen == .item && metadataOverlapsBottomBar(in: app) {
+            return ("metadata", [app.descendants(matching: .any)["item.metadata"].firstMatch] + texts)
         }
         return ("deferred text", texts)
     }
@@ -511,11 +625,22 @@ struct KnownAuditIssue {
         bottomBars(in: app).map(\.frame.minY).min() ?? app.frame.maxY
     }
 
-    /// Whether Item detail's metadata (`item.metadata`) overlaps the tab bar or the mini player.
+    /// The region under the bottom bar: the app's width, from ``bottomBarTop(in:)`` down to the
+    /// window's bottom edge (``BottomBarAttribution/isUnderBottomBar(_:region:)``); empty without
+    /// a bottom bar. #650
+    @MainActor
+    static func bottomBarRegion(in app: XCUIApplication) -> CGRect {
+        let frame = app.frame
+        let top = min(bottomBarTop(in: app), frame.maxY)
+        return CGRect(x: frame.minX, y: top, width: frame.width, height: frame.maxY - top)
+    }
+
+    /// Whether Item detail's metadata (`item.metadata`) is under the bottom bar, in part.
     @MainActor
     static func metadataOverlapsBottomBar(in app: XCUIApplication) -> Bool {
         let metadata = app.descendants(matching: .any)["item.metadata"].firstMatch
-        return metadata.exists && bottomBars(in: app).contains { $0.frame.intersects(metadata.frame) }
+        return metadata.exists
+            && BottomBarAttribution.isUnderBottomBar(metadata.frame, region: bottomBarRegion(in: app))
     }
 
     /// Whether `element` is text in the Library section menu (`library.sectionPicker`) in a
@@ -549,29 +674,27 @@ struct KnownAuditIssue {
         return app.descendants(matching: .any).matching(container).firstMatch.exists
     }
 
-    /// Whether `element` is text in the content under the bottom bar: its frame overlaps the tab
-    /// bar's or the mini player's (`player.mini`), and it isn't text of either.
+    /// Content text, not the bars' or the navigation bar's own, under the bottom bar
+    /// (``bottomBarRegion(in:)``, down to the window's bottom edge): each one's label, its
+    /// occurrence among the app's texts with that label, in the order of `app.staticTexts` (depth
+    /// first, counting the bars' texts too), since Settings repeats values such as "10 seconds",
+    /// and its frame. One snapshot of the app, so it's quick however many rows the screen has.
+    /// With `overlappingBars`, only text whose frame overlaps a bar's (``bottomBars(in:)``), not
+    /// text in the region below them, such as the gap under the iPhone Duo's floating mini player.
     @MainActor
-    private static func isUnderBottomBar(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
-        guard let element, element.elementType == .staticText, !element.label.isEmpty else { return false }
-        let bars = bottomBars(in: app)
-        let ownText = NSPredicate(format: "label CONTAINS %@", element.label)
-        return bars.contains { $0.frame.intersects(element.frame) }
-            && !bars.contains {
-                $0.label.contains(element.label) || $0.descendants(matching: .any).matching(ownText).firstMatch.exists
-            }
-    }
-
-    /// Content text, not the bars' or the navigation bar's own, whose frame overlaps either bar:
-    /// each one's label and its occurrence among the app's texts with that label, in the order of
-    /// `app.staticTexts` (depth first, counting the bars' texts too), since Settings repeats values
-    /// such as "10 seconds". One snapshot of the app, so it's quick however many rows the screen has.
-    @MainActor
-    private static func textUnderBottomBar(in app: XCUIApplication) -> [(label: String, occurrence: Int)] {
-        let bars = bottomBars(in: app).map(\.frame)
-        guard !bars.isEmpty, let texts = snapshotTexts(in: app)?.texts else { return [] }
-        return texts.filter { !$0.inBar && !$0.label.isEmpty && bars.contains(where: $0.frame.intersects) }
-            .map { ($0.label, $0.occurrence) }
+    private static func textUnderBottomBar(
+        in app: XCUIApplication, overlappingBars: Bool = false
+    ) -> [(label: String, occurrence: Int, frame: CGRect)] {
+        let region = bottomBarRegion(in: app)
+        let bars = overlappingBars ? bottomBars(in: app).map(\.frame) : []
+        guard region.height > 0, let texts = snapshotTexts(in: app)?.texts else { return [] }
+        return texts.filter {
+            !$0.inBar && !$0.label.isEmpty
+                && (overlappingBars
+                    ? bars.contains(where: $0.frame.intersects)
+                    : BottomBarAttribution.isUnderBottomBar($0.frame, region: region))
+        }
+        .map { ($0.label, $0.occurrence, $0.frame) }
     }
 
     /// A text in one snapshot of the app.
@@ -597,7 +720,7 @@ struct KnownAuditIssue {
     /// Every text in one snapshot of the app, depth first, and the band between the navigation
     /// bar (or the app's top) and the bottom bar.
     @MainActor
-    private static func snapshotTexts(in app: XCUIApplication) -> (texts: [SnapshotText], band: ClosedRange<CGFloat>)? {
+    static func snapshotTexts(in app: XCUIApplication) -> (texts: [SnapshotText], band: ClosedRange<CGFloat>)? {
         guard let snapshot = try? app.snapshot() else { return nil }
         var seen: [String: Int] = [:]
         var seenInContent: [String: Int] = [:]

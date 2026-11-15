@@ -64,4 +64,29 @@ enum BottomBarAttribution {
     static func headroom(_ frame: CGRect, firstMinY: CGFloat, band: ClosedRange<CGFloat>) -> CGFloat {
         frame.minY - min(band.lowerBound, firstMinY)
     }
+
+    /// Whether text at `frame` is under the bottom bar: on screen in `region`, from the bottom
+    /// bar's top down to the window's bottom edge, which takes in the bars, the gap below a
+    /// floating mini player (the iPhone Duo's) and the home indicator's edge. More than half a
+    /// point into it, so text is either under the bar or still in view (``isStillInView(_:firstMinY:band:)``).
+    /// An empty region, without a bottom bar, has nothing under it. #650
+    static func isUnderBottomBar(_ frame: CGRect, region: CGRect) -> Bool {
+        region.height > 0 && !frame.isEmpty && frame.maxY > region.minY + 0.5 && frame.minY < region.maxY
+            && frame.maxX > region.minX && frame.minX < region.maxX
+    }
+
+    /// Whether text at `frame` has scrolled up under the navigation bar, whose bottom is
+    /// `bandTop`, in part: the audit measures it through that bar's glass, as it does text under
+    /// the bottom bar. #650
+    static func isUnderNavigationBar(_ frame: CGRect, bandTop: CGFloat) -> Bool {
+        frame.minY < bandTop - 0.5
+    }
+
+    /// Whether text at `frame` is wholly between the bars, in `band` (the navigation bar's bottom
+    /// to the bottom bar's top): under neither, with their half-point tolerances. A deferred
+    /// issue's text must be audited so at least once. #650
+    static func isWhollyInBand(_ frame: CGRect, band: ClosedRange<CGFloat>) -> Bool {
+        !frame.isEmpty && !isUnderNavigationBar(frame, bandTop: band.lowerBound)
+            && frame.maxY <= band.upperBound + 0.5
+    }
 }
