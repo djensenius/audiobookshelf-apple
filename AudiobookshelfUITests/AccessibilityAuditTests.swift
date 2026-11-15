@@ -115,6 +115,7 @@ final class AccessibilityAuditTests: XCTestCase {
         let bottom = { content.elements.map(\.frame.maxY).max() ?? 0 }
         // Settings' deferred text is text, so an issue naming it fails too.
         let labels = Set(content.elements.filter { $0.elementType == .staticText }.map(\.label))
+        let x = Self.dragX(for: first, in: app, margin: margin)
         for step in 1...10 {
             let barTop = KnownAuditIssue.bottomBarTop(in: app)
             if bottom() <= barTop { return failures }
@@ -130,7 +131,6 @@ final class AccessibilityAuditTests: XCTestCase {
             }
             let start = first.frame.minY
             let origin = app.coordinate(withNormalizedOffset: .zero)
-            let x = app.frame.maxX - margin / 2
             // Held at the end, so the scroll view doesn't coast past the drag.
             origin.withOffset(CGVector(dx: x, dy: barTop - margin / 2)).press(
                 forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(dx: x, dy: barTop - margin / 2 - band / 2)),
@@ -149,6 +149,25 @@ final class AccessibilityAuditTests: XCTestCase {
             XCTFail("\(name): the \(content.name) is still under the bottom bar after 10 steps")
         }
         return failures
+    }
+
+    /// Where ``auditAboveBottomBar(_:in:named:)`` drags: `margin / 2` in from the right edge of the
+    /// scroll view holding `element` (Settings' form, Item detail's scroll view), and clear of a
+    /// side tab bar (``KnownAuditIssue/contentMaxX(in:)``), so the drag scrolls the content, not the
+    /// bar. The app's right edge, clear of a side bar, without a scroll view under `element`.
+    @MainActor
+    private static func dragX(for element: XCUIElement, in app: XCUIApplication, margin: CGFloat) -> CGFloat {
+        var maxX = KnownAuditIssue.contentMaxX(in: app)
+        var minX = app.frame.minX
+        let frame = element.frame
+        let point = CGPoint(x: frame.midX, y: frame.midY)
+        // The widest scroll view under the element: the screen's own, not one nested in its content.
+        let scrollers = [app.collectionViews, app.scrollViews, app.tables].flatMap(\.allElementsBoundByIndex)
+        if let scroller = scrollers.map(\.frame).filter({ $0.contains(point) }).max(by: { $0.width < $1.width }) {
+            maxX = min(maxX, scroller.maxX)
+            minX = scroller.minX
+        }
+        return max(minX + margin / 2, maxX - margin / 2)
     }
 
     private static func elementName(_ element: XCUIElement?) -> String {
@@ -411,9 +430,27 @@ struct KnownAuditIssue {
         var bars = mini.exists ? [mini] : []
         if tabBar.exists {
             let frame = tabBar.frame
-            if frame.width > frame.height && frame.maxY >= app.frame.maxY - 4 { bars.append(tabBar) }
+            if !isSideBar(frame) && frame.maxY >= app.frame.maxY - 4 { bars.append(tabBar) }
         }
         return bars
+    }
+
+    /// The right edge of the content no side bar covers: the left edge of a tab bar that's a
+    /// vertical pill on the right, as on the iPhone Duo's outer display (x 397 of 466), or the
+    /// app's right edge. #648
+    @MainActor
+    static func contentMaxX(in app: XCUIApplication) -> CGFloat {
+        let tabBar = app.tabBars.firstMatch
+        guard tabBar.exists else { return app.frame.maxX }
+        let frame = tabBar.frame
+        guard isSideBar(frame), frame.minX > app.frame.midX else { return app.frame.maxX }
+        return min(app.frame.maxX, frame.minX)
+    }
+
+    /// Whether a tab bar's `frame` is a vertical pill at the side (taller than wide), not a bar
+    /// along the bottom edge.
+    private static func isSideBar(_ frame: CGRect) -> Bool {
+        frame.height > frame.width
     }
 
     /// Whether `element` is one of the player's remaining times: text that's a minus and a
