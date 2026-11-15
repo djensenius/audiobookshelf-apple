@@ -25,9 +25,22 @@ public enum ABSColor {
         light: .rgb(37, 37, 37), dark: .rgb(230, 237, 243), black: .rgb(230, 237, 243)
     )
     /// Secondary text (legacy `fg-muted`). Light and dark are a little darker and lighter
-    /// than legacy so the text meets the WCAG 4.5:1 minimum on every surface above.
+    /// than legacy so the text meets the WCAG 4.5:1 minimum on every surface above. Black uses
+    /// dark's, not legacy's `rgb(120, 126, 132)`, which is 3.5:1 on the full player's backdrop. #641
     public static let mutedForeground = ABSThemedColor(
-        light: .rgb(91, 99, 108), dark: .rgb(156, 161, 167), black: .rgb(120, 126, 132)
+        light: .rgb(91, 99, 108), dark: .rgb(156, 161, 167), black: .rgb(156, 161, 167)
+    )
+    /// Secondary text on Liquid Glass, such as the mini player's author: in dark mode the glass
+    /// takes a lighter tint from the content under it, where ``mutedForeground`` measures 2.7:1;
+    /// this is 5.1:1 there. #641
+    public static let mutedForegroundOnGlass = ABSThemedColor(
+        light: .rgb(91, 99, 108), dark: .rgb(214, 218, 222), black: .rgb(214, 218, 222)
+    )
+    /// Text and icons on an ``accent`` fill, such as a prominent button's label: white on the
+    /// light accent (4.9:1), and dark on the dark accent, `rgb(79, 195, 204)`, where white is
+    /// 2.1:1 (7.5:1). #641
+    public static let onAccent = ABSThemedColor(
+        light: .rgb(255, 255, 255), dark: .rgb(35, 35, 35), black: .rgb(35, 35, 35)
     )
     /// Separators and outlines (legacy `border`).
     public static let border = ABSThemedColor(

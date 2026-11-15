@@ -16,8 +16,21 @@ final class ItemDetailSectionsAuditTests: XCTestCase {
         /// header. Issues elsewhere on screen are `AccessibilityAuditTests`'.
         @MainActor
         func testSectionHeadersContrast() {
-            let app = signIn()
+            auditHeaders()
+        }
+
+        /// The same in the dark theme (`-ABSTheme dark`). #641
+        @MainActor
+        func testSectionHeadersContrastInDarkTheme() {
+            auditHeaders(theme: .dark)
+        }
+
+        @MainActor
+        private func auditHeaders(theme: FixtureTheme? = nil) {
+            let app = signIn(launchArguments: theme?.launchArguments ?? [])
             let detail = open(.item, in: app)
+            if let theme { assertAppearance(of: .item, theme, in: app) }
+            let condition = theme.map { " (\($0.rawValue) theme)" } ?? ""
             let headers = Self.headerIdentifiers.map { detail.descendants(matching: .any)[$0].firstMatch }
             scrollIntoView(headers, of: detail, in: app)
             let frames = headers.map(\.frame)
@@ -26,16 +39,17 @@ final class ItemDetailSectionsAuditTests: XCTestCase {
                 try app.performAccessibilityAudit(for: .contrast) { issue in
                     if let element = issue.element, frames.contains(where: { $0.intersects(element.frame) }) {
                         failures.append(
-                            "Item detail's sections: contrast on '\(element.label)': \(issue.compactDescription)")
+                            "Item detail's sections\(condition): contrast on '\(element.label)': \(issue.compactDescription)"
+                        )
                     }
                     return true
                 }
             } catch {
-                XCTFail("Item detail's sections: the accessibility audit failed to run: \(error)")
+                XCTFail("Item detail's sections\(condition): the accessibility audit failed to run: \(error)")
             }
             guard !failures.isEmpty else { return }
             let screenshot = XCTAttachment(screenshot: app.screenshot())
-            screenshot.name = "audit-item-sections"
+            screenshot.name = "audit-item-sections\(theme.map { "-\($0.rawValue)" } ?? "")"
             screenshot.lifetime = .keepAlways
             add(screenshot)
             continueAfterFailure = true

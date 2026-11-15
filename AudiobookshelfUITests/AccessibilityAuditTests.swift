@@ -2,8 +2,9 @@ import XCTest
 
 /// Runs `XCUIApplication.performAccessibilityAudit()` on each `FixtureScreen` (Home, Library,
 /// Item detail, Player, Settings, Downloads) with the fixture data, at the default text size and
-/// at AX5 (docs/accessibility.md, "Automated audits"). Each test walks every screen in one launch,
-/// so an issue names its screen, and a screen's issues don't hide the next screen's.
+/// at AX5, and in the dark and black themes (docs/accessibility.md, "Automated audits"). Each test
+/// walks every screen in one launch, so an issue names its screen, and a screen's issues don't hide
+/// the next screen's.
 final class AccessibilityAuditTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -15,10 +16,29 @@ final class AccessibilityAuditTests: XCTestCase {
     /// audits the largest size itself.
     @MainActor
     func testScreens() {
+        auditScreens(types: Self.defaultSizeTypes)
+    }
+
+    /// The default text size's audits in the dark theme (`-ABSTheme dark`), which a newly created
+    /// simulator can't be switched to without a reboot. #641
+    @MainActor
+    func testScreensInDarkTheme() {
+        auditScreens(types: Self.defaultSizeTypes, theme: .dark)
+    }
+
+    /// The default text size's audits in the black theme: true black backgrounds and its own muted
+    /// text and borders (`ABSColor`). #641
+    @MainActor
+    func testScreensInBlackTheme() {
+        auditScreens(types: Self.defaultSizeTypes, theme: .black)
+    }
+
+    /// Every audit type but the two that predict larger sizes, on iOS (see ``testScreens()``).
+    private static var defaultSizeTypes: XCUIAccessibilityAuditType {
         #if os(iOS)
-            auditScreens(types: XCUIAccessibilityAuditType.all.subtracting([.dynamicType, .textClipped]))
+            XCUIAccessibilityAuditType.all.subtracting([.dynamicType, .textClipped])
         #else
-            auditScreens(types: .all)
+            .all
         #endif
     }
 
@@ -31,14 +51,19 @@ final class AccessibilityAuditTests: XCTestCase {
             textSize: "AX5")
     }
 
+    /// Walks every screen in one launch with `launchArguments` and `theme`'s, checking the theme
+    /// shows (``assertAppearance(of:_:in:)``) before each audit.
     @MainActor
     private func auditScreens(
-        types: XCUIAccessibilityAuditType, launchArguments: [String] = [], textSize: String = "default text size"
+        types: XCUIAccessibilityAuditType, launchArguments: [String] = [], textSize: String = "default text size",
+        theme: FixtureTheme? = nil
     ) {
-        let app = signIn(launchArguments: launchArguments)
+        let app = signIn(launchArguments: launchArguments + (theme?.launchArguments ?? []))
+        let condition = theme.map { "\(textSize), \($0.rawValue) theme" } ?? textSize
         for screen in FixtureScreen.allCases {
             open(screen, in: app)
-            audit(screen, for: types, in: app, textSize: textSize)
+            if let theme { assertAppearance(of: screen, theme, in: app) }
+            audit(screen, for: types, in: app, textSize: condition)
         }
     }
 
@@ -242,6 +267,16 @@ struct KnownAuditIssue {
             all += [FixtureScreen.home, .library, .item, .settings, .downloads].map {
                 KnownAuditIssue(screen: $0, type: .contrast, element: isUnderBottomBar)
             }
+            // "Potentially inaccessible text" with no element on Settings in the dark theme, while
+            // a row's text is under the mini player: the dark glass shows the text through, and
+            // the audit finds the mini player, not the row, on top of it. Probed on a 6.3-inch
+            // iPhone: none without the mini player; with it, the issue comes and goes with "Allow
+            // position seeking on media notification controls" under it, as Settings scrolls; the
+            // row's toggle speaks that text. Only while content text is under the bar. #641
+            all.append(
+                KnownAuditIssue(
+                    screen: .settings, type: .elementDetection, description: "Potentially inaccessible text"
+                ) { element, app in element == nil && hasTextUnderBottomBar(in: app) })
         #endif
         return all
     }()
@@ -305,6 +340,22 @@ struct KnownAuditIssue {
             && !bars.contains {
                 $0.label.contains(element.label) || $0.descendants(matching: .any).matching(ownText).firstMatch.exists
             }
+    }
+
+    /// Whether any content text, not the tab bar's or the mini player's own, overlaps either bar.
+    /// One snapshot of the app, so it's quick however many rows the screen has.
+    @MainActor
+    private static func hasTextUnderBottomBar(in app: XCUIApplication) -> Bool {
+        let bars = bottomBars(in: app).map(\.frame)
+        guard !bars.isEmpty, let snapshot = try? app.snapshot() else { return false }
+        func underBar(_ node: XCUIElementSnapshot) -> Bool {
+            if node.elementType == .tabBar || node.identifier.hasPrefix("player.mini") { return false }
+            if node.elementType == .staticText && !node.label.isEmpty && bars.contains(where: node.frame.intersects) {
+                return true
+            }
+            return node.children.contains(where: underBar)
+        }
+        return underBar(snapshot)
     }
 
     /// The tab bar and the mini player, where they exist.
