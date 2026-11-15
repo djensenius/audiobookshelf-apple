@@ -287,9 +287,10 @@ struct KnownAuditIssue {
             // between the text's pixels and the background 2 to 4 pixels around them (the 10th
             // percentile; `MeasuredContrast`). The text's pixels are those in the colour the app
             // draws it in for the theme (`FixtureTheme.miniPlayerTitle`, `.miniPlayerSecondaryText`),
-            // not guessed from the image. So text that really fails, as the author's 2.7:1 did, or
-            // text over a lighter patch of glass, still fails; without the expected colour, or
-            // with over a quarter of its pixels unmeasurable, the issue fails, unfiltered. #641
+            // not guessed from the image, and measured in the colour they're actually drawn in.
+            // So text that really fails, as the author's 2.7:1 did, or text over a lighter patch
+            // of glass, still fails; without the expected colour, or with over a quarter of its
+            // pixels unmeasurable, the issue fails, unfiltered. #641
             all.append(
                 KnownAuditIssue(type: .contrast) { element, app in
                     guard let element, isMiniPlayerText(element, in: app),

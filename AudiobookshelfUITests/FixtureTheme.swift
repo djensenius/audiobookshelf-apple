@@ -97,12 +97,13 @@ enum MeasuredContrast {
     /// The WCAG contrast ratio, from 1 to 21, of the text in `frame` (in points, `scale` pixels
     /// each) against its local background, conservatively: the 10th percentile over the text's
     /// pixels. The text's pixels are those within 10% contrast of `text`, the colour the app draws
-    /// it in, not guessed from the image. Each is compared with the median luminance of the
-    /// non-text pixels 2 to 4 pixels away, which skips its anti-aliased edge, so text over a
-    /// lighter patch of glass is measured against that patch. `nil`, so the issue isn't
-    /// filtered, when that can't be established: a frame too small or unreadable, too few pixels
-    /// in the text's colour, or over a quarter of them with too little background around them to
-    /// measure (a patch of background in the text's colour isn't text that passes).
+    /// it in, not guessed from the image; that colour only picks them out. Each pixel's own
+    /// luminance, as drawn, is compared with the median luminance of the non-text pixels 2 to 4
+    /// pixels away, which skips its anti-aliased edge, so text over a lighter patch of glass is
+    /// measured against that patch. `nil`, so the issue isn't filtered, when that can't be
+    /// established: a frame too small or unreadable, too few pixels in the text's colour, or over
+    /// a quarter of them with too little background around them to measure (a patch of
+    /// background in the text's colour isn't text that passes).
     static func ratio(in frame: CGRect, of image: CGImage, scale: CGFloat, text: RGB) -> Double? {
         guard let luminance = luminances(in: frame, of: image, scale: scale) else { return nil }
         let (values, width, height) = luminance
@@ -124,7 +125,7 @@ enum MeasuredContrast {
                 }
                 guard ring.count >= minimumRingSamples else { continue }
                 ring.sort()
-                ratios.append(contrast(textLuminance, ring[ring.count / 2]))
+                ratios.append(contrast(values[y * width + x], ring[ring.count / 2]))
             }
         }
         let unmeasurable = textPixels - ratios.count

@@ -85,6 +85,15 @@ final class MeasuredContrastTests: XCTestCase {
         XCTAssertNil(MeasuredContrast.ratio(in: Self.frame, of: image, scale: 1, text: Self.white))
     }
 
+    /// (j) Text drawn a little darker than expected, still within the 10% that picks it out: it's
+    /// measured as drawn, 4.2:1, not as the expected colour would be (4.54:1), so it fails.
+    func testTextIsMeasuredInTheColourItsDrawnIn() throws {
+        let image = try XCTUnwrap(
+            Self.image(text: RGB(red: 206, green: 210, blue: 214), backgrounds: [.grey(95)]))
+        let ratio = try XCTUnwrap(MeasuredContrast.ratio(in: Self.frame, of: image, scale: 1, text: Self.glassText))
+        XCTAssertEqual(ratio, 4.2, accuracy: 0.05)
+    }
+
     private static let size = (width: 300, height: 60)
     private static let frame = CGRect(x: 0, y: 0, width: size.width, height: size.height)
 

@@ -273,8 +273,9 @@ element, each with the reason and its issue:
   measures 4.5:1 or more locally (`MeasuredContrast`). The text's pixels are the ones in the
   colour the app draws it in for the theme, not guessed from the image: white for the title
   (SwiftUI's primary label) and `ABSColor.mutedForegroundOnGlass` for the author, mirrored in
-  `FixtureTheme`. Each is measured against the median of the non-text pixels 2–4 pixels around
-  it, past the anti-aliased edge, taking the 10th percentile. So text that really fails, as the
+  `FixtureTheme`. That colour only picks the pixels out: each is measured in the colour it's
+  actually drawn in, against the median of the non-text pixels 2–4 pixels around it, past the
+  anti-aliased edge, taking the 10th percentile. So text that really fails, as the
   author did at 2.7:1, or that crosses a lighter patch of glass, still fails. The issue isn't
   filtered when fewer than 20 pixels are in the expected colour (as when the app's colour
   changes and the test's doesn't), or when over a quarter of them have too little background
