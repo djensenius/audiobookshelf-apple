@@ -63,6 +63,7 @@ chapters Opening, Middle and Ending). Podcasts: *Synthetic Cast* with one 20 s M
 | `CollectionWriteContractTests` | Five collection writes; ordered two-book lifecycle and empty reads; permissions, atomic invalid create, no-ops/errors, version differences and failure teardown |
 | `PlaylistWriteContractTests` | Five owner-only writes; book/episode lifecycles, strict raw membership checks, ownership/access denials, atomic invalid add, safe characterization and exact-ID failure teardown |
 | `PlaybackSessionContractTests` | Start, sync and close; resume; same-device takeover; track URLs and ranges; downloads; local session upload |
+| `CustomHeaderDownloadContractTests` | [Below](#custom-header-downloads-467): a connection with custom headers downloads both seeded books end to end through `DownloadManager` and `DownloadEngine`'s foreground session, behind a gate that refuses requests without the headers; files equal a direct GET |
 | `ListeningSessionContractTests` | An episode's stored sessions after a close, kept off the book's page; unknown item and unknown episode 404s |
 | `ProgressContractTests` | Each progress group, `lastUpdate`, finished and auto-finish, ebook progress, batch update, delete |
 | `LocalProgressContractTests` | `LocalProgressStore` sending to the server and settling on what it holds |
@@ -225,6 +226,44 @@ Not covered:
   access; the response shape is pinned only by the `podcast-feed.json` fixture.
 - **`GET /api/search/podcast`.** The server asks the iTunes directory, so it needs internet
   access and its results change; the shape is pinned only by `podcast-directory-search.json`.
+
+## Custom-header downloads (#467)
+
+`CustomHeaderDownloadContractTests` connects through `HeaderGateProxy`, a loopback reverse proxy
+in the test target that stands in for an access gate such as Cloudflare Access. It answers 403 to
+any request without the connection's two `CF-Access-Client-*` headers. It sends the rest to the
+server with their request line and headers as received, except that it replaces `Connection`,
+`Keep-Alive` and `Proxy-Connection` with `Connection: close`, so each request gets its own upstream
+connection and is recorded. Replies come back unchanged. The gate forwards no request bodies: a
+request with one gets a 501, and an unreachable server gives a 502. The test validates the gate's
+address with `ServerValidator`, and the connection's `APIClient` feeds
+`AccountDownloadCredentials`, the app's adapter. The production `DownloadManager` and
+`DownloadEngine` then download *The Synthetic Tale* (two parts) and *Single File Tale* with the
+production foreground session factory and redirect check. The background session is a stand-in,
+which keeps the test deterministic: every test process (another worktree's, say) shares the
+production session's fixed identifier, and background sessions aren't reliable in a command-line
+test host. The stand-in must get no task.
+
+The test checks that:
+
+- every transfer task is a foreground one (its `taskDescription`), covering every part of the
+  record;
+- every request through the gate carried the headers, and each download request carried the bearer
+  token and no query token;
+- every file is on disk at the server's size and equals a direct GET;
+- a `Range` request through the gate returns the right 206 slice.
+
+It removes its temporary download directory and invalidates its sessions. Downloads leave nothing
+on the server.
+
+These parts aren't covered here:
+
+- A foreground transfer paused on suspension and resumed with `Range`. Unit tests cover it:
+  `DownloadEngineForegroundTests` for the pause and resume, and
+  `DownloadForegroundResumeIntegrationTests` for the redirect guard on a real resume.
+- Redirects off the server. Unit tests cover them.
+- The app's `AccountManager` and `DownloadsController` wiring, and the "only while open" notes.
+  Check these by hand, against a server behind a real gate.
 
 ## Add a contract
 
