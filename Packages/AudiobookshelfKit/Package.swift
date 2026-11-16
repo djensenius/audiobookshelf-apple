@@ -62,7 +62,7 @@ let package = Package(
         // They are skipped unless ABS_TEST_SERVER_URL is set.
         .testTarget(
             name: "ABSServerContractTests",
-            dependencies: ["ABSCore", "ABSAPI", "ABSData", "ABSDownloads", "ABSAppModel"]
+            dependencies: ["ABSCore", "ABSAPI", "ABSRealtime", "ABSData", "ABSDownloads", "ABSAppModel"]
         ),
 
         // Shared SwiftUI components and design system.
