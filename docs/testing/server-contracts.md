@@ -229,14 +229,18 @@ Not covered:
 
 `CustomHeaderDownloadContractTests` connects through `HeaderGateProxy`, a loopback reverse proxy
 in the test target that stands in for an access gate such as Cloudflare Access. It answers 403 to
-any request without the connection's two `CF-Access-Client-*` headers and forwards the rest to the
-server byte for byte, one request per upstream connection, recording each one. The test validates
-the gate's address with `ServerValidator`, and the connection's `APIClient` feeds
+any request without the connection's two `CF-Access-Client-*` headers. It sends the rest to the
+server with their request line and headers as received, except that it replaces `Connection`,
+`Keep-Alive` and `Proxy-Connection` with `Connection: close`, so each request gets its own upstream
+connection and is recorded. Replies come back unchanged. The gate forwards no request bodies: a
+request with one gets a 501, and an unreachable server gives a 502. The test validates the gate's
+address with `ServerValidator`, and the connection's `APIClient` feeds
 `AccountDownloadCredentials`, the app's adapter. The production `DownloadManager` and
 `DownloadEngine` then download *The Synthetic Tale* (two parts) and *Single File Tale* with the
 production foreground session factory and redirect check. The background session is a stand-in,
-because the production one has a fixed identifier that an installed app may hold. It must get no
-task.
+which keeps the test deterministic: every test process (another worktree's, say) shares the
+production session's fixed identifier, and background sessions aren't reliable in a command-line
+test host. The stand-in must get no task.
 
 The test checks that:
 

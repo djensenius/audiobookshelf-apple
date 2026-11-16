@@ -73,6 +73,7 @@ struct CustomHeaderDownloadContractTests {
 
             // Every task was a foreground one, one per part; the background session made none.
             let tasks = sessions.tasks
+            #expect(!partIDs.isEmpty)
             #expect(tasks.allSatisfy { $0.inForegroundSession && $0.task.isForeground })
             #expect(Set(tasks.compactMap { $0.task.partID }) == partIDs)
             #expect(sessions.foregroundSessions == 1)
@@ -183,9 +184,11 @@ private final class MemoryResumeDataKeys: ResumeDataKeyStore {
 }
 
 /// Makes the engine's sessions and records the tasks it creates in them. The foreground session is
-/// the production one. The background session is a stand-in: the production one has a fixed
-/// identifier an installed app may hold. It makes an ephemeral session with the engine's delegate
-/// only if a task is asked of it, which a custom-header connection must never do.
+/// the production one. The background session is a stand-in, which keeps the test deterministic:
+/// the production one's fixed identifier is shared by every test process (another worktree's,
+/// say), and background sessions aren't reliable in a command-line test host. It makes an
+/// ephemeral session with the engine's delegate only if a task is asked of it, which a
+/// custom-header connection must never do.
 private final class SessionRecorder: Sendable {
     struct RecordedTask: Sendable {
         let task: URLSessionDownloadTask
