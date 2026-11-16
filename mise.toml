@@ -11,7 +11,7 @@ depends = ["lint:repo", "lint:swift"]
 
 [tasks."lint:repo"]
 description = "Lint shell scripts and workflows (no Xcode needed)"
-depends = ["lint:shell", "lint:actions", "lint:nowplaying", "test:kit:ios:runner", "test:upstream:areas"]
+depends = ["lint:shell", "lint:actions", "lint:nowplaying", "test:kit:ios:runner", "test:ui:retry", "test:upstream:areas"]
 
 [tasks."test:upstream:areas"]
 description = "Test upstream-sync path mapping"
@@ -153,13 +153,27 @@ description = "Run the UI tests against the fixture server on macOS (ABS_UI_PLAT
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 # The app launches with -ABSFixtures, so no server is needed (docs/testing/ui-tests.md). macOS
 # signs ad hoc as test:app does; iOS resolves a simulator as test:ios does.
+# A caller's -only-testing replaces -only-testing:AudiobookshelfUITests rather than relying on
+# how xcodebuild combines them. ABS_UI_ACTION=test-without-building reuses the last build
+# (scripts/ui-test-ci.sh).
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-common=(-project Audiobookshelf.xcodeproj -scheme Audiobookshelf -derivedDataPath .build/DerivedData -only-testing:AudiobookshelfUITests)
+only=-only-testing:AudiobookshelfUITests
+for arg in "$@"; do
+  case "$arg" in
+    -only-testing | -only-testing:*) only= ;;
+  esac
+done
+action="${ABS_UI_ACTION:-test}"
+if [[ "$action" != test && "$action" != test-without-building ]]; then
+  echo "error: ABS_UI_ACTION must be test or test-without-building" >&2
+  exit 1
+fi
+common=(-project Audiobookshelf.xcodeproj -scheme Audiobookshelf -derivedDataPath .build/DerivedData ${only:+"$only"})
 case "${ABS_UI_PLATFORM:-macos}" in
   macos)
-    xcodebuild test "${common[@]}" -destination 'platform=macOS' CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= ABS_MACOS_ENTITLEMENTS=Audiobookshelf/Audiobookshelf-AdHoc.entitlements ABS_WIDGETS_MACOS_ENTITLEMENTS=AudiobookshelfWidgets/AudiobookshelfWidgets-AdHoc.entitlements "$@"
+    xcodebuild "$action" "${common[@]}" -destination 'platform=macOS' CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= ABS_MACOS_ENTITLEMENTS=Audiobookshelf/Audiobookshelf-AdHoc.entitlements ABS_WIDGETS_MACOS_ENTITLEMENTS=AudiobookshelfWidgets/AudiobookshelfWidgets-AdHoc.entitlements "$@"
     ;;
   ios)
     udid="${IOS_SIMULATOR_ID:-$(xcrun simctl list devices available | grep -E '^ +iPhone Duo [(]' | tail -n 1 | grep -oE '[0-9A-F-]{36}' || true)}"
@@ -167,7 +181,7 @@ case "${ABS_UI_PLATFORM:-macos}" in
       echo "error: no available iPhone Duo simulator; create one in Xcode or set IOS_SIMULATOR_ID" >&2
       exit 1
     fi
-    xcodebuild test "${common[@]}" -destination "platform=iOS Simulator,id=$udid" CODE_SIGNING_ALLOWED=NO "$@"
+    xcodebuild "$action" "${common[@]}" -destination "platform=iOS Simulator,id=$udid" CODE_SIGNING_ALLOWED=NO "$@"
     ;;
   *)
     echo "error: ABS_UI_PLATFORM must be macos or ios" >&2
@@ -175,6 +189,10 @@ case "${ABS_UI_PLATFORM:-macos}" in
     ;;
 esac
 """
+
+[tasks."test:ui:retry"]
+description = "Fake-CLI regressions for CI's UI-test retry (scripts/ui-test-ci.sh) and test:ui's arguments (no Xcode or simulator)"
+run = "python3 scripts/ui-test-ci-tests.py"
 
 [tasks.screenshots]
 description = "App Store screenshots into build/screenshots/ (--device <id>, --locale <tag>; docs/testing/screenshots.md)"

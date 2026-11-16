@@ -105,10 +105,11 @@ jobs:
     name: UI tests
     runs-on: xcode-27
     # A job of its own, so its cold app builds run beside build-and-test rather than after it.
-    # Recent runs take 36–53 minutes (median 46). The headroom absorbs one stalled test (#627),
-    # which the UI-test step stops after 600 s and retries, at a cost of about 12 minutes (#661),
-    # so one stall fits even the slowest run seen. A passing run doesn't take longer.
-    timeout-minutes: 70
+    # Recent passing runs take 36–58 minutes (median 47). One stalled test (#627) adds about 13:
+    # the UI-test step stops it after 10 (#661), then needs about 3 to restart the runner, list the
+    # tests and run it again alone (#666). 75 fits that in even the slowest run seen (58 + 13);
+    # 70 didn't. A passing run doesn't take longer.
+    timeout-minutes: 75
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       MISE_TASK_RUN_AUTO_INSTALL: "false"
@@ -138,23 +139,23 @@ jobs:
           echo "IOS_SIMULATOR_ID=$udid" >> "$GITHUB_ENV"
           xcrun simctl bootstatus "$udid" -b
 
-      # On a shared runner a launch can still time out, so a failed test runs once more; one that
-      # fails twice fails the step. Local runs of test:ui don't retry.
-      # A test still running after 600 s (10 minutes) fails, so a hang is retried in time (#661):
-      # the slowest passing test seen took 371 s (the slowest usually takes under 250); a hung audit
-      # took 1,521 s (#660). Retrying a timed-out test needs -test-repetition-relaunch-enabled. Runs
-      # take 36–53 minutes (median 46); one hang adds 10, plus ~2 to stop it and relaunch the runner
-      # twice: about 65 of the job's 70.
+      # scripts/ui-test-ci.sh runs test:ui. On a shared runner a launch can still time out, so a
+      # failed test runs once more in the same test runner. A test still running after 600 s
+      # (10 minutes) fails, so a hang ends in time (#661): the slowest passing test seen took 371 s
+      # (the slowest usually takes under 250); a hung audit took 1,521 s (#660). XCTest stops it by
+      # ending the runner, which that retry can't repeat; -test-repetition-relaunch-enabled could,
+      # but it reran the whole suite after one flaky failure (#666). So if one to three tests
+      # failed and nothing else did, the script runs only those once more, without building, and
+      # that run decides. Anything else fails the step. Local runs of test:ui don't retry.
       - name: UI tests on the iPhone Duo simulator
         env:
           ABS_UI_PLATFORM: ios
-        run: |
-          mise run test:ui -- -retry-tests-on-failure -test-iterations 2 -test-repetition-relaunch-enabled YES \
-            -test-timeouts-enabled YES -default-test-execution-time-allowance 600 -maximum-test-execution-time-allowance 600
+        run: scripts/ui-test-ci.sh
 
       # XCUITest on macOS needs Automation Mode, which only an administrator on the runner can
       # enable (docs/testing/ui-tests.md). Until then, warn rather than pass silently. Once it runs,
-      # give it the iPhone step's time limit and retry flags, and revisit timeout-minutes (#661).
+      # run it with scripts/ui-test-ci.sh, as the iPhone step does, and revisit timeout-minutes
+      # (#661, #666).
       - name: UI tests on macOS
         if: ${{ !cancelled() }}
         run: |
