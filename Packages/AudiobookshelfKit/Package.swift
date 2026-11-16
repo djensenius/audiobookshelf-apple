@@ -60,7 +60,7 @@ let package = Package(
 
         // Opt-in contract tests against a real Audiobookshelf server (`mise run test:server`).
         // They are skipped unless ABS_TEST_SERVER_URL is set.
-        .testTarget(name: "ABSServerContractTests", dependencies: ["ABSCore", "ABSAPI", "ABSData"]),
+        .testTarget(name: "ABSServerContractTests", dependencies: ["ABSCore", "ABSAPI", "ABSRealtime", "ABSData"]),
 
         // Shared SwiftUI components and design system.
         .target(name: "ABSUI", dependencies: ["ABSCore"], resources: [.process("Resources")]),
