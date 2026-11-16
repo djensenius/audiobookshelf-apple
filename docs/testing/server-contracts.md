@@ -16,7 +16,7 @@ ABS_SERVER_VERSION=2.37.2 mise run test:server    # another release
 mise run server:run                               # keep a seeded server for manual use
 scripts/test-server.sh test --filter ProgressContractTests   # swift test arguments replace the default filter
 scripts/test-server.sh test --search-contract                # only isolated owned search, not ordinary suites
-ABS_STREAMING_CONTRACT=1 scripts/test-server.sh test --filter StreamingFormatContractTests   # only the streaming formats
+scripts/test-server.sh test --filter StreamingFormatContractTests   # only the streaming formats
 ```
 
 You need Docker (OrbStack or Docker Desktop), `ffmpeg` (`brew install ffmpeg`) and Xcode. A run
@@ -27,17 +27,20 @@ takes about 20 seconds once the server image is pulled and the package is built.
 | `ABS_SERVER_VERSION` | Release to run. Default `2.26.0`. |
 | `ABS_SERVER_BACKEND` | `docker` (default), or `node`: a source checkout run with Node 20, for machines without Docker. Run it as `ABS_SERVER_BACKEND=node mise exec node@20 -- scripts/test-server.sh test`. |
 | `ABS_SERVER_TIMEOUT` | Seconds to wait for startup and for the first scan. Default `120`. |
-| `ABS_STREAMING_CONTRACT` | `1` adds the [streaming format](#streaming-formats) library to a focused run or `server:run`, and enables `StreamingFormatContractTests`. A full run sets it for its last pass only. |
+| `ABS_STREAMING_CONTRACT` | `1` adds the [streaming format](#streaming-formats) library to a focused run or `server:run`, and enables `StreamingFormatContractTests`. A full run sets it for its last pass only, and a focused run whose arguments name that suite sets it. |
 
 The script generates the media in a temporary directory with a random root password, starts
 `ghcr.io/advplyr/audiobookshelf:<version>` on a free port of 127.0.0.1, creates the root user
 (`POST /init`) and the two libraries, scans, waits for the items, exports `ABS_TEST_SERVER_URL`,
 `ABS_TEST_USERNAME`, `ABS_TEST_PASSWORD` and `ABS_TEST_SERVER_VERSION`, and runs
-two sequential Swift test processes: `--filter ABSServerContractTests --skip SearchContractTests`,
-then an explicitly owned `--filter SearchContractTests` pass. Either failure fails the harness.
-A full run then adds the streaming format library and runs `--filter StreamingFormatContractTests`
-last ([below](#streaming-formats)).
-Focused Swift arguments retain their existing behavior and do not add another pass.
+sequential Swift test processes: an ordinary
+`--filter ABSServerContractTests --skip SearchContractTests` pass, a podcast write pass
+([below](#podcast-creation-and-feed-lookup)), an explicitly owned `--filter SearchContractTests`
+pass, and, after adding the streaming format library, a `--filter StreamingFormatContractTests`
+pass ([below](#streaming-formats)). Any failure fails the harness and skips the passes after it.
+Focused Swift arguments don't add passes. If they name `StreamingFormatContractTests`, the
+harness adds the streaming format library and sets `ABS_STREAMING_CONTRACT=1` for them; with
+the variable set for other suites, it warns that the third library changes library counts.
 The server runs with `RATE_LIMIT_AUTH_MAX=0`: its
 default of 40 sign-ins and refreshes per 10 minutes would end the suite with 429 responses.
 `server:run` stops after the scan, prints the URL, user name and password to the terminal and
@@ -95,7 +98,7 @@ The suite asserts these per version. Other versions check only what holds for al
 | `DELETE /api/me/progress/:id` twice | 200 | 404 |
 | MP3 duration of a 30 s file | about 30.1 s (encoder padding) | 30 s |
 | `relPath` of a podcast from `POST /api/podcasts` | the whole path without its leading `/` (it strips `folder.fullPath`, which the model lacks) | relative to the folder |
-| HLS playlist segment URIs | `output-N.ts?token=…`: the user's legacy token, which has no expiry and signs in to the API | `output-N.ts` |
+| HLS playlist segment URIs | `output-N.ts?token=…`, as in every release before 2.29.0 (#662): the user's legacy token, which has no expiry and signs in to the API | `output-N.ts` |
 
 Behaviour that holds on both, and that fixtures did not capture:
 
@@ -238,14 +241,15 @@ Not covered:
 [ADR 0007](../adr/0007-streaming.md#validation) (#48). Each test starts a session with the app's
 `APIPlaybackSessionService`, so the body is the production `PlaybackDeviceInfo.startRequest`
 (the host's `SupportedAudioMIMETypes.current()`, which never offers `audio/ogg`), resolves it
-with `TrackURLResolver`, fetches every URL with no cookies or `Authorization`, and closes the
-session on success and failure, then checks that its URLs are a 404.
+with `TrackURLResolver`, and fetches every URL with no cookies or `Authorization`. It closes the
+session whether the checks pass or fail; after a clean close it also checks that the session's
+URLs are a 404.
 
 The Opus and FLAC books are in a third library, and ordinary suites and owned search pin
 exactly two. So `scripts/test-server.sh test` creates that library after the owned search pass
 and runs this suite last with `ABS_STREAMING_CONTRACT=1`; anywhere else it is skipped. To run it
-alone, set the variable and pass `--filter StreamingFormatContractTests`. To play the formats by
-hand, run `ABS_STREAMING_CONTRACT=1 mise run server:run`.
+alone, pass `--filter StreamingFormatContractTests`, which sets the variable. To play the
+formats by hand, run `ABS_STREAMING_CONTRACT=1 mise run server:run`.
 
 Observed on 2.26.0 and 2.37.2 (node backend), the same on both except the segment URIs:
 
@@ -259,7 +263,8 @@ Observed on 2.26.0 and 2.37.2 (node backend), the same on both except the segmen
 
 The segment can be missing for a moment after `/play` answers, because `ffmpeg` writes it then,
 so the suite polls it for up to 30 s. On 2.26.0 every segment URI also carries `?token=` with
-the user's legacy token (see [Differences between versions](#differences-between-versions)): it
+the user's legacy token, as in every release before 2.29.0 (upstream `2cc6e56b` removed it; see
+[Differences between versions](#differences-between-versions) and #662): it
 has no `exp` claim, and the suite checks that it signs in to `GET /api/me`. The server doesn't
 need it to serve the segment.
 

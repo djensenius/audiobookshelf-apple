@@ -36,9 +36,17 @@ extension ContractServer {
     }
 }
 
+/// One session for the suite's raw requests, which never stores or sends cookies.
+private let cookielessSession: URLSession = {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.httpCookieAcceptPolicy = .never
+    configuration.httpShouldSetCookies = false
+    return URLSession(configuration: configuration)
+}()
+
 /// A request without the user's cookies or token, like the player's `AVURLAsset` for a session URL.
 private func fetch(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-    let (data, response) = try await URLSession(configuration: .ephemeral).data(for: request)
+    let (data, response) = try await cookielessSession.data(for: request)
     return (data, try #require(response as? HTTPURLResponse))
 }
 

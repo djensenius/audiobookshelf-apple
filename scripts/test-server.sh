@@ -9,7 +9,8 @@
 #                     Docker (run as: mise exec node@20 -- scripts/test-server.sh)
 # ABS_SERVER_TIMEOUT  seconds to wait for startup and for the first scan (default 120)
 # ABS_STREAMING_CONTRACT=1  also seed the Opus and FLAC books in a third library for a focused
-#                     run or `serve` (a full run always adds it, last, for its streaming format pass)
+#                     run or `serve` (automatic when the arguments name StreamingFormatContractTests;
+#                     a full run always adds it, last, for its streaming format pass)
 #
 # Everything lives in one temporary directory with a random root password; the trap verifies
 # server shutdown before deleting data, retaining it and failing if containment is uncertain.
@@ -125,8 +126,11 @@ if [[ "$mode" == test ]]; then
     shift
   fi
 fi
-# The streaming format library is a third library, which ordinary suites don't expect.
-if ((!search_only)) && [[ "${ABS_STREAMING_CONTRACT:-}" == 1 ]]; then streaming_contract=1; fi
+# The streaming format library is a third library, which ordinary suites don't expect. A focused run
+# that names its suite gets it without ABS_STREAMING_CONTRACT=1.
+if ((!search_only)) && [[ "${ABS_STREAMING_CONTRACT:-}" == 1 || "$*" == *StreamingFormatContractTests* ]]; then
+  streaming_contract=1
+fi
 
 expected_revision=
 expected_digest=
@@ -381,7 +385,11 @@ seed_server() {
 # Adds the "Streaming formats" library (make_streaming_media). Ordinary suites and owned search
 # expect exactly the two seeded libraries, so a full run adds it after them.
 seed_streaming_library() {
-  local library
+  local reply library
+  # Sign in again rather than trust the seeding token to outlive the passes above.
+  reply=$(api POST /login "$(printf '{"username":"%s","password":"%s"}' "$username" "$password")") ||
+    die "could not log in as $username: $reply"
+  token=$(json_get user.accessToken "$reply") || die "the login response had no access token"
   library=$(create_library "Streaming formats" "$streaming_folder" book audiobookshelf)
   wait_for_items "$library" 2 "streaming format"
 }
@@ -440,7 +448,12 @@ if ((search_contract)); then
       --filter StreamingFormatContractTests
   fi
 else
-  if ((streaming_contract)); then seed_streaming_library; fi
+  if ((streaming_contract)); then
+    [[ "$*" == *StreamingFormatContractTests* ]] ||
+      log "Warning: the streaming format library is a third library; suites that count libraries may fail"
+    seed_streaming_library
+    export ABS_STREAMING_CONTRACT=1
+  fi
   log "Running the selected contract tests (owned search disabled)"
   swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm "$@"
 fi

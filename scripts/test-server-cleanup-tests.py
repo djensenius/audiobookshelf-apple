@@ -308,45 +308,83 @@ search_token=search0123456789abcdef; search_root=/search-fixtures; search_proven
 search_only=0
 unset ABS_SEARCH_CONTRACT_MODE ABS_PODCAST_WRITE_CONTRACT ABS_STREAMING_CONTRACT
 log() { printf '%s\n' "$*"; }
-seed_streaming_library() { printf 'STUB seed streaming library\n'; }
+seed_streaming_library() { printf 'STUB seed streaming library\n'; return "$seed"; }
 swift() {
   printf 'STUB swift mode=%s streaming=%s podcast=%s args=%s\n' "${ABS_SEARCH_CONTRACT_MODE:-off}" \
     "${ABS_STREAMING_CONTRACT:-off}" "${ABS_PODCAST_WRITE_CONTRACT:-off}" "$*"
-  if [[ ${ABS_SEARCH_CONTRACT_MODE:-off} == 1 ]]; then return "$second"; else return "$first"; fi
+  if [[ ${ABS_SEARCH_CONTRACT_MODE:-off} == 1 ]]; then return "$second"; fi
+  if [[ ${ABS_STREAMING_CONTRACT:-off} == 1 ]]; then return "$third"; fi
+  return "$first"
 }
 '''
-        cases = [(1, 37, 0, 37, 0), (1, 0, 41, 41, 1), (1, 0, 0, 0, 1), (0, 0, 0, 0, 0), (0, 43, 0, 43, 0),
-                 (0, 0, 0, 0, 1)]
-        for full, first, second, expected, streaming in cases:
-            with self.subTest(full=full, first=first, second=second, streaming=streaming):
+        library, streaming_suite = "LibraryContractTests/libraries", "StreamingFormatContractTests"
+        # A full run (search_contract=1) always has the streaming pass. Exit codes: first for the
+        # ordinary/podcast/focused passes, second for owned search, third for the streaming pass,
+        # seed for seed_streaming_library.
+        cases = [  # full, streaming, first, second, third, seed, expected, focused filter
+            (1, 1, 37, 0, 0, 0, 37, None), (1, 1, 0, 41, 0, 0, 41, None), (1, 1, 0, 0, 47, 0, 47, None),
+            (1, 1, 0, 0, 0, 53, 53, None), (1, 1, 0, 0, 0, 0, 0, None),
+            (0, 0, 0, 0, 0, 0, 0, library), (0, 0, 43, 0, 0, 0, 43, library), (0, 1, 0, 0, 0, 0, 0, library),
+            (0, 1, 0, 0, 47, 0, 47, streaming_suite), (0, 1, 0, 0, 0, 53, 53, streaming_suite),
+        ]
+        for full, streaming, first, second, third, seed, expected, focused in cases:
+            with self.subTest(full=full, streaming=streaming, first=first, second=second, third=third, seed=seed,
+                              focused=focused):
                 result = subprocess.run(
                     ["/bin/bash", "-c", prefix +
-                     f"\nsearch_contract={full}; streaming_contract={streaming}; first={first}; second={second}\n"
-                     + RUNNER, str(HARNESS), "--filter", "LibraryContractTests/libraries"],
+                     f"\nsearch_contract={full}; streaming_contract={streaming}; first={first}; second={second}"
+                     f"; third={third}; seed={seed}\n" + RUNNER, str(HARNESS)]
+                    + (["--filter", focused] if focused else []),
                     capture_output=True, text=True, timeout=3
                 )
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                passes = 3 + (1 if streaming and not second else 0) if full and not first else 1
+                if full:
+                    passes = 1 if first else 3 if second or seed else 4
+                else:
+                    passes = 0 if streaming and seed else 1
                 self.assertEqual(result.stdout.count("STUB swift"), passes)
                 # Only the podcast write pass sees ABS_PODCAST_WRITE_CONTRACT=1 (#465).
                 self.assertEqual(result.stdout.count("podcast=1"), 1 if full and not first else 0)
                 if full and not first:
                     self.assertIn("podcast=1 args=test --package-path Packages/AudiobookshelfKit "
                                   "--scratch-path .build/swiftpm --filter PodcastCreationContractTests", result.stdout)
-                # The third library exists only for the last pass, which alone sees
-                # ABS_STREAMING_CONTRACT=1 and no owned-search permission.
+                # The third library exists only for the streaming pass, which alone sees
+                # ABS_STREAMING_CONTRACT=1 and no owned-search permission; a failed seed skips it.
                 seeded = streaming and not (full and (first or second))
                 self.assertEqual(result.stdout.count("STUB seed streaming library"), 1 if seeded else 0)
-                if full and streaming and not first and not second:
+                self.assertEqual(result.stdout.count("streaming=1"), 1 if seeded and not seed else 0)
+                if full and passes == 4:
                     lines = [line for line in result.stdout.splitlines() if line.startswith("STUB")]
                     self.assertEqual(lines[-2], "STUB seed streaming library")
                     self.assertEqual(lines[-1], "STUB swift mode=off streaming=1 podcast=off args=test --package-path "
                                      "Packages/AudiobookshelfKit --scratch-path .build/swiftpm "
                                      "--filter StreamingFormatContractTests")
-                    self.assertEqual(result.stdout.count("streaming=1"), 1)
-                if not full:
-                    self.assertIn("--filter LibraryContractTests/libraries", result.stdout)
+                if not full and passes:
+                    self.assertIn(f"--filter {focused}", result.stdout)
                     self.assertNotIn("Owned search pass", result.stdout)
+                # A focused run that seeds the third library for other suites says so.
+                warned = streaming and not full and focused != streaming_suite
+                self.assertEqual("Warning: the streaming format library" in result.stdout, warned, result.stdout)
+
+    def test_streaming_contract_selection(self):
+        parsing = SOURCE[SOURCE.index("mode=${1:-test}"):SOURCE.index("\nexpected_revision=")]
+        prefix = ('set -euo pipefail\nsearch_contract=0; search_only=0; streaming_contract=0\n'
+                  'die() { printf "die %s\\n" "$*"; exit 1; }\n')
+        cases = [  # arguments, ABS_STREAMING_CONTRACT, search_contract, streaming_contract
+            ([], "", 1, 1), (["--search-contract"], "1", 1, 0),
+            (["--filter", "LibraryContractTests"], "", 0, 0), (["--filter", "LibraryContractTests"], "1", 0, 1),
+            (["--filter", "StreamingFormatContractTests/opus"], "", 0, 1), (["serve"], "1", 0, 1),
+        ]
+        for arguments, variable, search, streaming in cases:
+            with self.subTest(arguments=arguments, variable=variable):
+                mode = arguments if arguments[:1] == ["serve"] else ["test"] + arguments
+                result = subprocess.run(
+                    ["/bin/bash", "-c", prefix + parsing + 'printf "%s %s\\n" "$search_contract" "$streaming_contract"',
+                     str(HARNESS)] + mode,
+                    env=dict(os.environ, ABS_STREAMING_CONTRACT=variable), capture_output=True, text=True, timeout=3
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout, f"{search} {streaming}\n")
 
 
 if __name__ == "__main__":
