@@ -105,8 +105,9 @@ jobs:
     name: UI tests
     runs-on: xcode-27
     # A job of its own, so its cold app builds run beside build-and-test rather than after it.
-    # A pull request run takes 30–36 minutes; the headroom absorbs one stalled test (#627)
-    # without failing a run whose tests all passed.
+    # Recent pull request runs take 36–53 minutes (median 46). The headroom absorbs one stalled
+    # test (#627), which the UI-test step stops after 600 s and retries, at a cost of about 11
+    # minutes (#661), so one stall fits a median run.
     timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
