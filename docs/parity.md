@@ -1,13 +1,15 @@
 # Parity checklist
 
-This is a draft. It maps every row of the
+This checklist maps every row of the
 [legacy feature inventory](research/legacy-feature-inventory.md) to its native
 replacement, the issue or PR that tracks it, or a decision to drop it. It was
 written for [#111](https://github.com/djensenius/audiobookshelf-apple/issues/111)
 (PR #506) and is updated as issues close.
 
-The statuses were taken from GitHub and the code at main `17ca60dc`
-(2026-11-14). They will go stale. Update a row when its issue closes.
+Statuses were checked against GitHub and the code at main `83ea364f`
+(2026-11-16). Open issues that are only waiting on device, server or maintainer
+acceptance use **Needs acceptance**; that does not mean feature-complete or
+release-approved.
 
 ## Status legend
 
@@ -17,8 +19,9 @@ code behind it.
 | Status | Meaning |
 | --- | --- |
 | Done | The issue is closed and the feature is reachable in the app. |
-| In progress (#N) | Some code is merged or a PR is open, but the feature is incomplete or not wired into the app. |
+| In progress (#N) | The user-facing feature is incomplete or not wired into the app. |
 | Not started (#N) | An open issue tracks it and the user-facing part has no code yet. |
+| Needs acceptance (#N) | The feature is implemented and reachable, but its issue remains open for device, server or maintainer acceptance. |
 | Dropped | Not carried over, for the stated reason. |
 | Needs check | The status could not be confirmed from the code and issues. |
 
@@ -39,7 +42,7 @@ Now Playing runtime check on devices is still open under #44.
 | Personalised shelves, continue listening | `HomeView`, `HomeShelvesView` | #62, PRs #295, #313 | Done | |
 | Local (downloaded) shelves | `DownloadedShelfModel` (ABSAppModel), `HomeView` | #76, PRs #455, #509, #546, #549, #588, #595 | Done | Home shows the downloaded shelves and the disconnected state. Manual checks are in #210. |
 | Disconnected messaging | `ConnectionBannerModel`, `ServerActionAvailability` (ABSAppModel), `ConnectionBannerHost`, `ConnectionIndicatorToolbar` | #76, PRs #455, #509, #588, #595 | Done | The banner, the toolbar indicator (#595, part of #59) and offline gating of server-only menu actions are in the app. Manual checks are in #210. |
-| `BookshelfNavBar`, `BookshelfToolbar` | `MainTabView`, `LibraryPickerHeader`, `LibraryToolbar` | #44 | In progress (#44) | #183 and #184 are closed; the shell issue stays open for its manual checks. |
+| `BookshelfNavBar`, `BookshelfToolbar` | `MainTabView`, `LibraryPickerHeader`, `LibraryToolbar` | #44 | Needs acceptance (#44) | The shell is wired; device, windowing, deep-link and Now Playing checks remain in #210. |
 
 ### Library and discovery
 
@@ -59,10 +62,10 @@ Now Playing runtime check on devices is still open under #44.
 
 | Legacy | Native | Tracking | Status | Notes |
 | --- | --- | --- | --- | --- |
-| Metadata, description, fullscreen cover | `ItemDetailView`, `ItemDetailContent` | #66 | In progress (#66) | Open for the manual Play check. |
+| Metadata, description, fullscreen cover | `ItemDetailView`, `ItemDetailContent` | #66 | Needs acceptance (#66) | The issue remains open for the manual Play check. |
 | Play | `ItemDetailContent` | #183 | Done | #183 supplies `playItem`. Play links ask before playing (#577, PR #591). |
-| Read | `ReaderContainer` | #101, PRs #474, #596 | In progress (#101) | The Read button opens the reader; unsupported formats offer Open In. |
-| Download | `ItemDownloadButton` | #75, PRs #576, #582, #602 | In progress (#75) | Books and podcast episodes download from their detail and episode rows. Cards and list rows mark downloaded items (PR #602, part of #106). |
+| Read | `ReaderContainer` | #101, PRs #474, #596 | Needs acceptance (#101) | The Read button opens the reader; unsupported formats offer Open In. |
+| Download | `ItemDownloadButton` | #75, PRs #576, #582, #602 | Needs acceptance (#75) | Books and podcast episodes download from their detail and episode rows. Cards and list rows mark downloaded items (PR #602, part of #106); manual checks remain in #210. |
 | `ChaptersTable`, `TracksTable`, `tables/ebook/*` | `ItemDetailTables` | #67, #341 | Done | |
 | More menu | `ItemDetailMoreMenu`, ABSUI `ItemActionMenu` | #67, #342, #397 | Done | |
 | `item/_id/_episode/index.vue` | `EpisodeDetailView` | #69 | Done | |
@@ -88,16 +91,16 @@ Now Playing runtime check on devices is still open under #44.
 | `latest.vue` | `LatestView` | #70 | Done | |
 | `PodcastEpisodesFeedModal` | `PodcastEpisodesFeedSheet` | #95 | Done | |
 | `ItemDetailsModal` | `ItemDetailInfoSheet` | #342 | Done | |
-| `modals/rssfeeds/*` | `RssFeedSheet` | #96, PRs #419, #463, #503, #605 | In progress (#96) | The sheet and its entry points are in the app. Live opens and closes reach an open sheet (#601, PR #605); the manual admin check is still open. |
+| `modals/rssfeeds/*` | `RssFeedSheet` | #96, PRs #419, #463, #503, #605 | Needs acceptance (#96) | The sheet and its entry points are in the app. Live opens and closes reach an open sheet (#601, PR #605); the manual admin check is still open. |
 
 ### Offline
 
 | Legacy | Native | Tracking | Status | Notes |
 | --- | --- | --- | --- | --- |
-| `downloads.vue` | `DownloadsView` | #75, PR #501 | In progress (#75) | |
-| `downloading.vue` | `DownloadQueueView` | #75, PR #501 | In progress (#75) | |
-| `localMedia/item/_id.vue` | `LocalItemView`, `LocalItemDetailView` | #75, PR #531 | In progress (#75) | |
-| `modals/downloads/DownloadItem.vue` | `DownloadQueueRow` | #75, PR #501 | In progress (#75) | |
+| `downloads.vue` | `DownloadsView` | #75, PR #501 | Needs acceptance (#75) | |
+| `downloading.vue` | `DownloadQueueView` | #75, PR #501 | Needs acceptance (#75) | |
+| `localMedia/item/_id.vue` | `LocalItemView`, `LocalItemDetailView` | #75, PR #531 | Needs acceptance (#75) | |
+| `modals/downloads/DownloadItem.vue` | `DownloadQueueRow` | #75, PR #501 | Needs acceptance (#75) | |
 | `localMedia/folders/*`, `SelectLocalFolderModal` | — | — | Dropped | Android-only: legacy hides it on iOS (`v-if="!isIos"`). Downloads use an app-managed folder ([#188](https://github.com/djensenius/audiobookshelf-apple/issues/188)); recorded in #75. |
 | `LibrariesModal` | `LibraryPickerHeader` | #44 | Done | |
 
@@ -142,12 +145,12 @@ open or the app doesn't wire it in yet.
 | Sleep timer: auto-sleep window, rewind, shake to reset and sensitivity, reset feedback, almost-done chime, fade-out | `SleepTimer` | #55, #147, #183, #600, PR #604 | Done | Each account's playback scope creates a timer (#600, PR #604). Manual checks are in #210. |
 | Media-control seeking | `NowPlayingController` | #183 | Done | |
 | Lock Screen, remote commands, Now Playing | `NowPlayingController`, `NowPlayingBridge` | #54, #183 | Done | #54 and #183 are closed. The runtime check on devices is part of #44. |
-| Queue, next episode | `PlaybackQueue` | #60, #156 | In progress (#60) | The auto-advance core and queue composition (PR #445) are merged, and so are the queue sheet, the queue inspector and "Play next" / "Add to queue" (#156, still open). Background-safe auto-advance is wired (#160, PR #554; #587, PR #590). The iPhone Duo player's Up Next pane shows the queue (#84). |
+| Queue, next episode | `PlaybackQueue` | #60, #156 | Done | Both tracking issues are closed. Auto-advance, queue controls, background-safe behavior and the Duo Up Next pane are implemented; manual playback checks remain in #210. |
 | Haptics | ABSUI `Haptics` | #147 | Done | The player's transport controls use the Haptic feedback setting. The sleep timer's reset vibration has its own toggle, "Disable vibrate on reset" (`disableSleepTimerResetFeedback`). |
 | Cast and routes | ABSUI `RoutePicker` (AirPlay) | #183 | Done | Cast was never confirmed in legacy; AirPlay only. |
 | Close player | `MiniPlayerView`, `PlayerSlot` | #183 | Done | |
 | Total track, scale elapsed time by speed, lock player | `PlayerOptionsMenu` | #505, PR #526 | Done | Listed under Gaps found in the first draft. |
-| `Appbar`, `SideDrawer` | `MainTabView` | #44 | In progress (#44) | |
+| `Appbar`, `SideDrawer` | `MainTabView` | #44 | Needs acceptance (#44) | The shell is wired; device, windowing, deep-link and Now Playing checks remain in #210. |
 | `Order`, `Filter` modals | `LibrarySortMenu`, `LibraryFilterSheet` | #63 | Done | |
 | `Dialog` modal | System alerts | — | Done | |
 | `ItemMoreMenu`, `ItemDetails` modals | `ItemDetailMoreMenu`, `ItemDetailInfoSheet` | #67, #342 | Done | |
@@ -171,7 +174,7 @@ The settings mapping is in [Settings](settings.md); this table records status.
 | Playback: jump amounts, auto-rewind, MP3 index seeking, media-control seeking | `SettingsView` | #91 | Done | |
 | Sleep timer settings | `SleepTimerSettingsSection` | #91, #600, PR #604 | Done | Each account's timer uses the saved settings (#600, PR #604). |
 | Data: cellular download and stream policy | `SettingsView` | #91 | Done | |
-| Android Auto | — | #79, #80, #81 | Dropped | Replaced by a CarPlay design ([Settings](settings.md)). The CarPlay scene shows the Continue, Library, Latest and Downloads tabs (PRs #544, #567, #606) and the Now Playing buttons, including the sleep timer (PRs #564, #604). #80 is closed, with manual checks in #210. #79 and #81 are open, and the CarPlay entitlement isn't granted yet. |
+| Android Auto | — | #79, #80, #81 | Dropped | Replaced by CarPlay ([Settings](settings.md)). Continue, Library, Latest and Downloads tabs (#80), the scene (#79), and Now Playing buttons (#81) are implemented. The scene and controls still need Apple's CarPlay entitlement (#77) and device checks in #210. |
 
 ## Offline native references
 
@@ -188,16 +191,16 @@ The settings mapping is in [Settings](settings.md); this table records status.
 | `ApiClient` | ABSAPI `APIClient` | #29 | Done | |
 | `SecureStorage` | `KeychainStore` | #154 | Done | |
 | `ServerConnectionConfig` | `ServerConnectionRecord` | #38 | Done | |
-| `AppDelegate`, `MyViewController` | `AudiobookshelfApp`, `AppEnvironment` | #44 | In progress (#44) | Offline launch is #76. |
+| `AppDelegate`, `MyViewController` | `AudiobookshelfApp`, `AppEnvironment` | #44 | Needs acceptance (#44) | Offline launch is #76; remaining shell checks are in #210. |
 
 ## Readers
 
 | Legacy | Native | Tracking | Status | Notes |
 | --- | --- | --- | --- | --- |
-| `Reader.vue` | `ReaderContainer` | #101, PRs #474, #596 | In progress (#101) | Reachable from Read; other formats offer Open In. |
-| `EpubReader.vue` | `EPUBWebView` | #104, PRs #456, #457, #458, #475, #548, #583, #597 | In progress (#104) | Reachable from Read, with a table of contents, a gap over the Duo hinge and keep screen awake. |
-| `PdfReader.vue` | `PDFReaderView` | #102, PRs #452, #510 | In progress (#102) | Reachable from Read. |
-| `ComicReader.vue` (CBZ) | `ComicArchive`, `ComicReaderView` | #105, PRs #447, #477, #547 | In progress (#105) | Reachable from Read. |
+| `Reader.vue` | `ReaderContainer` | #101, PRs #474, #596 | Needs acceptance (#101) | Reachable from Read; other formats offer Open In. |
+| `EpubReader.vue` | `EPUBWebView` | #104, PRs #456, #457, #458, #475, #548, #583, #597 | Needs acceptance (#104) | Reachable from Read, with a table of contents, a gap over the Duo hinge and keep screen awake. |
+| `PdfReader.vue` | `PDFReaderView` | #102, PRs #452, #510 | Needs acceptance (#102) | Reachable from Read. |
+| `ComicReader.vue` (CBZ) | `ComicArchive`, `ComicReaderView` | #105, PRs #447, #477, #547 | Needs acceptance (#105) | Reachable from Read. |
 | `ComicReader.vue` (CBR) | — | — | Dropped | [ADR 0008](adr/0008-readers.md), decision 4. |
 | `MobiReader.vue` | — | — | Dropped | [ADR 0008](adr/0008-readers.md), decision 5. |
 
@@ -206,15 +209,24 @@ The settings mapping is in [Settings](settings.md); this table records status.
 | Legacy | Native | Tracking | Status | Notes |
 | --- | --- | --- | --- | --- |
 | `strings/*.json` (42 locales) | String Catalog | #22 | Done | See [Localization](localization.md). |
-| Validation | `mise run strings:check` | #107, PRs #416, #446 | In progress (#107) | |
+| Validation | `mise run strings:check` | #107, PRs #416, #446 | Done | Automated validation and per-app language support are implemented; manual RTL and locale checks remain in #210. |
 | `languageCode` setting | — | — | Dropped | Replaced by the system per-app language. |
 
 The inventory's "Suggested work packages" section lists packages of work, not
 features, so it has no rows here.
 
-## Gaps found
+## Tracked gaps and acceptance
 
-None at this snapshot. The first draft listed three player menu options from
+This status update does not replace the manual platform-by-platform parity
+sign-off below. Known tracked work that is not shipped or fully accepted includes:
+
+- Live Activities for sleep timer and downloads (#90), still awaiting an owner
+  decision; this is a proposed native feature, not a legacy parity item.
+- Positive podcast-language filter acceptance (#263), blocked on server behavior
+  and an explicit compatibility decision; this is a server-contract gap, not an
+  implemented app feature.
+
+The first draft listed three player menu options from
 `components/app/AudioPlayer.vue` with no native code and no issue: total track
 (`useTotalTrack`), scale elapsed time by speed (`scaleElapsedTimeBySpeed`) and
 lock player (`lockUi`). They were tracked as #505 and are now in the Player
