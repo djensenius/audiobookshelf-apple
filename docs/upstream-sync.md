@@ -98,8 +98,8 @@ marker) are ignored. Consequences:
 
    | Upstream path | Swift app area |
    | --- | --- |
-   | `ios/App/Shared/player/`, `AbsAudioPlayer` (including `plugins/capacitor/AbsAudioPlayer.js`) and matching player pages/components/store | Playback (`ABSPlayback`, Now Playing, CarPlay) |
-   | `AbsDownloader` (including `plugins/capacitor/AbsDownloader.js`), `ios/App/Shared/models/download/` and matching download pages/components/store | Downloads and offline UI (`ABSDownloads`) |
+   | `ios/App/Shared/player/`, `AbsAudioPlayer` (including `plugins/capacitor/AbsAudioPlayer.js`), `components/app/AudioPlayer.vue`, `components/app/AudioPlayerContainer.vue` and matching player pages/components/store | Playback (`ABSPlayback`, Now Playing, CarPlay) |
+   | `AbsDownloader` (including `plugins/capacitor/AbsDownloader.js`), `components/modals/downloads/`, `components/widgets/DownloadProgressIndicator.vue`, `ios/App/Shared/models/download/` and matching download pages/components/store | Downloads and offline UI (`ABSDownloads`) |
    | `ApiClient`, server models, `plugins/axios.js`, `plugins/nativeHttp.js`, `plugins/server.js`, auth/connect plugins and middleware | API, authentication and realtime (`ABSAPI`, `ABSRealtime`) |
    | `ios/App/Shared/util/Database.swift`, `ios/App/Shared/models/local/` | Local persistence and progress sync (`ABSData`, `ABSPlayback`) |
    | Matching settings pages/components/store | Settings and accounts (`ABSAppModel`, `ABSUI`) |
@@ -110,9 +110,10 @@ marker) are ignored. Consequences:
 
    The workflow puts recognizable player, download, API/auth, persistence and
    settings paths into separate changed-area groups. This includes the live
-   Capacitor player and downloader wrappers and the current networking plugins.
-   Broad or ambiguous legacy paths stay grouped as feature UI and state; inspect
-   the file and commit before choosing the native feature. Local code lives in
+   Capacitor player and downloader wrappers, the player container and the
+   downloads modal, plus the current networking plugins. Broad or ambiguous
+   legacy paths stay grouped as feature UI and state; inspect the file and commit
+   before choosing the native feature. Local code lives in
    [`AGENTS.md`](../AGENTS.md)'s module map.
 4. Open one porting PR per issue-sized change, reference the upstream commit or PR
    (for example `Ports advplyr/audiobookshelf-app#2002`), and link the PR in the
