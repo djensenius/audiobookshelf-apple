@@ -8,6 +8,8 @@
 # ABS_SERVER_BACKEND  docker (default), or node: the source release on Node 20, for runners without
 #                     Docker (run as: mise exec node@20 -- scripts/test-server.sh)
 # ABS_SERVER_TIMEOUT  seconds to wait for startup and for the first scan (default 120)
+# ABS_STREAMING_CONTRACT=1  also seed the Opus and FLAC books in a third library for a focused
+#                     run or `serve` (a full run always adds it, last, for its streaming format pass)
 #
 # Everything lives in one temporary directory with a random root password; the trap verifies
 # server shutdown before deleting data, retaining it and failing if containment is uncertain.
@@ -32,6 +34,8 @@ server_log=
 base_url=
 books_folder=
 podcasts_folder=
+streaming_folder=
+streaming_contract=0
 password=
 token=
 search_contract=0
@@ -110,7 +114,10 @@ case "$mode" in
     ;;
 esac
 if [[ "$mode" == test ]]; then
-  if (($# == 0)); then search_contract=1; fi
+  if (($# == 0)); then
+    search_contract=1
+    streaming_contract=1
+  fi
   if [[ "${1:-}" == --search-contract ]]; then
     (($# == 1)) || die "--search-contract runs only the owned search suite; do not combine it with Swift arguments"
     search_contract=1
@@ -118,6 +125,8 @@ if [[ "$mode" == test ]]; then
     shift
   fi
 fi
+# The streaming format library is a third library, which ordinary suites don't expect.
+if ((!search_only)) && [[ "${ABS_STREAMING_CONTRACT:-}" == 1 ]]; then streaming_contract=1; fi
 
 expected_revision=
 expected_digest=
@@ -193,6 +202,17 @@ make_media() {
     -map 0:a -map_metadata 1 -map_chapters 1 -ac 1 -c:a aac -b:a 16k -f ipod "$single/Single File Tale.m4b"
 }
 
+# An Opus book and a FLAC book for the streaming format pass (ADR 0007's results matrix). They
+# get their own library so the seeded Books library keeps two items.
+make_streaming_media() {
+  local root="$work/streaming-fixtures/Format Fixture"
+  mkdir -p "$root/Opus Tale" "$root/Flac Tale"
+  tone "$root/Opus Tale/Opus Tale.opus" 294 30 -c:a libopus -b:a 16k -metadata title="Opus Tale" \
+    -metadata artist="Format Fixture" -metadata album="Opus Tale"
+  tone "$root/Flac Tale/Flac Tale.flac" 349 30 -c:a flac -metadata title="Flac Tale" \
+    -metadata artist="Format Fixture" -metadata album="Flac Tale"
+}
+
 make_search_media() {
   search_token="search$(openssl rand -hex 8)"
   local mp3=(-c:a libmp3lame -b:a 16k) number
@@ -239,6 +259,10 @@ start_docker() {
     search_provenance="{\"backend\":\"docker\",\"digests\":$digests,\"labels\":$labels,\"revision\":\"$revision\"}"
     mounts+=(--volume "$work/search-fixtures:/search-fixtures:rw")
     search_root=/search-fixtures
+  fi
+  if ((streaming_contract)); then
+    mounts+=(--volume "$work/streaming-fixtures:/streaming-fixtures")
+    streaming_folder=/streaming-fixtures
   fi
   container_name="abs-contract-$(openssl rand -hex 4)"
   container_requested=1
@@ -291,6 +315,7 @@ start_node() {
   base_url="http://127.0.0.1:$port"
   books_folder="$work/audiobooks"
   podcasts_folder="$work/podcasts"
+  streaming_folder="$work/streaming-fixtures"
   server_log="$work/server.log"
   log "Starting Audiobookshelf v$version on port $port"
   (
@@ -353,6 +378,14 @@ seed_server() {
   wait_for_items "$podcasts" 1 podcast
 }
 
+# Adds the "Streaming formats" library (make_streaming_media). Ordinary suites and owned search
+# expect exactly the two seeded libraries, so a full run adds it after them.
+seed_streaming_library() {
+  local library
+  library=$(create_library "Streaming formats" "$streaming_folder" book audiobookshelf)
+  wait_for_items "$library" 2 "streaming format"
+}
+
 work=$(mktemp -d "${TMPDIR:-/tmp}/abs-contract.XXXXXX")
 # The real path: a symlinked one (/var on macOS) confuses the server's scanner.
 work=$(cd "$work" && pwd -P)
@@ -360,6 +393,7 @@ mkdir -p "$work/config" "$work/metadata"
 password=$(openssl rand -hex 16)
 log "Generating synthetic audio"
 make_media
+if ((streaming_contract)); then make_streaming_media; fi
 if ((search_contract)); then make_search_media; fi
 if [[ "$backend" == docker ]]; then start_docker; else start_node; fi
 wait_for_ping
@@ -372,6 +406,7 @@ log "Seeding Audiobookshelf $version at $base_url"
 seed_server
 
 if [[ "$mode" == serve ]]; then
+  if ((streaming_contract)); then seed_streaming_library; fi
   printf 'Audiobookshelf %s is running.\n  URL:      %s\n  Username: %s\n  Password: %s\nPress Ctrl-C to stop it and delete its data.\n' \
     "$version" "$base_url" "$username" "$password"
   while :; do sleep 1; done
@@ -382,8 +417,8 @@ export ABS_TEST_SERVER_VERSION="$version"
 if ((search_contract)); then
   if ((!search_only)); then
     log "Ordinary pass: --filter ABSServerContractTests --skip SearchContractTests"
-    ABS_PODCAST_WRITE_CONTRACT='' swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
-      --filter ABSServerContractTests --skip SearchContractTests
+    ABS_PODCAST_WRITE_CONTRACT='' ABS_STREAMING_CONTRACT='' swift test --package-path Packages/AudiobookshelfKit \
+      --scratch-path .build/swiftpm --filter ABSServerContractTests --skip SearchContractTests
     # Creating podcasts changes the seeded podcast library that ordinary suites count, so it runs alone.
     log "Podcast write pass: --filter PodcastCreationContractTests"
     ABS_PODCAST_WRITE_CONTRACT=1 swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
@@ -395,7 +430,17 @@ if ((search_contract)); then
   export ABS_SEARCH_TOKEN="$search_token" ABS_SEARCH_PROVENANCE="$search_provenance"
   log "Owned search pass: --filter SearchContractTests"
   swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm --filter SearchContractTests
+  if ((streaming_contract)); then
+    # Last: the third library would break the library counts the passes above pin.
+    unset ABS_SEARCH_CONTRACT_MODE ABS_SEARCH_OWNERSHIP ABS_SEARCH_OWNED_URL ABS_SEARCH_BOOKS \
+      ABS_SEARCH_PODCASTS ABS_SEARCH_TOKEN ABS_SEARCH_PROVENANCE
+    seed_streaming_library
+    log "Streaming format pass: --filter StreamingFormatContractTests"
+    ABS_STREAMING_CONTRACT=1 swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm \
+      --filter StreamingFormatContractTests
+  fi
 else
+  if ((streaming_contract)); then seed_streaming_library; fi
   log "Running the selected contract tests (owned search disabled)"
   swift test --package-path Packages/AudiobookshelfKit --scratch-path .build/swiftpm "$@"
 fi

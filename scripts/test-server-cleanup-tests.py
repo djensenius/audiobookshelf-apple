@@ -306,29 +306,44 @@ set -euo pipefail
 base_url=http://127.0.0.1:1; username=root; password=synthetic; version=2.26.0
 search_token=search0123456789abcdef; search_root=/search-fixtures; search_provenance=synthetic
 search_only=0
-unset ABS_SEARCH_CONTRACT_MODE ABS_PODCAST_WRITE_CONTRACT
+unset ABS_SEARCH_CONTRACT_MODE ABS_PODCAST_WRITE_CONTRACT ABS_STREAMING_CONTRACT
 log() { printf '%s\n' "$*"; }
+seed_streaming_library() { printf 'STUB seed streaming library\n'; }
 swift() {
-  printf 'STUB swift mode=%s podcast=%s args=%s\n' "${ABS_SEARCH_CONTRACT_MODE:-off}" \
-    "${ABS_PODCAST_WRITE_CONTRACT:-off}" "$*"
+  printf 'STUB swift mode=%s streaming=%s podcast=%s args=%s\n' "${ABS_SEARCH_CONTRACT_MODE:-off}" \
+    "${ABS_STREAMING_CONTRACT:-off}" "${ABS_PODCAST_WRITE_CONTRACT:-off}" "$*"
   if [[ ${ABS_SEARCH_CONTRACT_MODE:-off} == 1 ]]; then return "$second"; else return "$first"; fi
 }
 '''
-        for full, first, second, expected in [(1, 37, 0, 37), (1, 0, 41, 41), (0, 0, 0, 0), (0, 43, 0, 43)]:
-            with self.subTest(full=full, first=first, second=second):
+        cases = [(1, 37, 0, 37, 0), (1, 0, 41, 41, 1), (1, 0, 0, 0, 1), (0, 0, 0, 0, 0), (0, 43, 0, 43, 0),
+                 (0, 0, 0, 0, 1)]
+        for full, first, second, expected, streaming in cases:
+            with self.subTest(full=full, first=first, second=second, streaming=streaming):
                 result = subprocess.run(
                     ["/bin/bash", "-c", prefix +
-                     f"\nsearch_contract={full}; first={first}; second={second}\n" + RUNNER,
-                     str(HARNESS), "--filter", "LibraryContractTests/libraries"],
+                     f"\nsearch_contract={full}; streaming_contract={streaming}; first={first}; second={second}\n"
+                     + RUNNER, str(HARNESS), "--filter", "LibraryContractTests/libraries"],
                     capture_output=True, text=True, timeout=3
                 )
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
-                self.assertEqual(result.stdout.count("STUB swift"), 3 if full and not first else 1)
+                passes = 3 + (1 if streaming and not second else 0) if full and not first else 1
+                self.assertEqual(result.stdout.count("STUB swift"), passes)
                 # Only the podcast write pass sees ABS_PODCAST_WRITE_CONTRACT=1 (#465).
                 self.assertEqual(result.stdout.count("podcast=1"), 1 if full and not first else 0)
                 if full and not first:
                     self.assertIn("podcast=1 args=test --package-path Packages/AudiobookshelfKit "
                                   "--scratch-path .build/swiftpm --filter PodcastCreationContractTests", result.stdout)
+                # The third library exists only for the last pass, which alone sees
+                # ABS_STREAMING_CONTRACT=1 and no owned-search permission.
+                seeded = streaming and not (full and (first or second))
+                self.assertEqual(result.stdout.count("STUB seed streaming library"), 1 if seeded else 0)
+                if full and streaming and not first and not second:
+                    lines = [line for line in result.stdout.splitlines() if line.startswith("STUB")]
+                    self.assertEqual(lines[-2], "STUB seed streaming library")
+                    self.assertEqual(lines[-1], "STUB swift mode=off streaming=1 podcast=off args=test --package-path "
+                                     "Packages/AudiobookshelfKit --scratch-path .build/swiftpm "
+                                     "--filter StreamingFormatContractTests")
+                    self.assertEqual(result.stdout.count("streaming=1"), 1)
                 if not full:
                     self.assertIn("--filter LibraryContractTests/libraries", result.stdout)
                     self.assertNotIn("Owned search pass", result.stdout)

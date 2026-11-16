@@ -16,6 +16,7 @@ ABS_SERVER_VERSION=2.37.2 mise run test:server    # another release
 mise run server:run                               # keep a seeded server for manual use
 scripts/test-server.sh test --filter ProgressContractTests   # swift test arguments replace the default filter
 scripts/test-server.sh test --search-contract                # only isolated owned search, not ordinary suites
+ABS_STREAMING_CONTRACT=1 scripts/test-server.sh test --filter StreamingFormatContractTests   # only the streaming formats
 ```
 
 You need Docker (OrbStack or Docker Desktop), `ffmpeg` (`brew install ffmpeg`) and Xcode. A run
@@ -26,6 +27,7 @@ takes about 20 seconds once the server image is pulled and the package is built.
 | `ABS_SERVER_VERSION` | Release to run. Default `2.26.0`. |
 | `ABS_SERVER_BACKEND` | `docker` (default), or `node`: a source checkout run with Node 20, for machines without Docker. Run it as `ABS_SERVER_BACKEND=node mise exec node@20 -- scripts/test-server.sh test`. |
 | `ABS_SERVER_TIMEOUT` | Seconds to wait for startup and for the first scan. Default `120`. |
+| `ABS_STREAMING_CONTRACT` | `1` adds the [streaming format](#streaming-formats) library to a focused run or `server:run`, and enables `StreamingFormatContractTests`. A full run sets it for its last pass only. |
 
 The script generates the media in a temporary directory with a random root password, starts
 `ghcr.io/advplyr/audiobookshelf:<version>` on a free port of 127.0.0.1, creates the root user
@@ -33,6 +35,8 @@ The script generates the media in a temporary directory with a random root passw
 `ABS_TEST_USERNAME`, `ABS_TEST_PASSWORD` and `ABS_TEST_SERVER_VERSION`, and runs
 two sequential Swift test processes: `--filter ABSServerContractTests --skip SearchContractTests`,
 then an explicitly owned `--filter SearchContractTests` pass. Either failure fails the harness.
+A full run then adds the streaming format library and runs `--filter StreamingFormatContractTests`
+last ([below](#streaming-formats)).
 Focused Swift arguments retain their existing behavior and do not add another pass.
 The server runs with `RATE_LIMIT_AUTH_MAX=0`: its
 default of 40 sign-ins and refreshes per 10 minutes would end the suite with 429 responses.
@@ -49,6 +53,8 @@ progress and sessions, so use a scratch server.
 Generated sine tones only; nothing is recorded or copyrighted. Books: *The Synthetic Tale* by Ada
 Fixture (two MP3 files of 30 s and 20 s with ID3 tags) and *Single File Tale* (one 40 s M4B with
 chapters Opening, Middle and Ending). Podcasts: *Synthetic Cast* with one 20 s MP3 episode.
+For the streaming format pass only, a third book library, *Streaming formats*: *Opus Tale* (one
+30 s `.opus` file) and *Flac Tale* (one 30 s `.flac` file) by Format Fixture.
 
 ## Contracts
 
@@ -62,6 +68,7 @@ chapters Opening, Middle and Ending). Podcasts: *Synthetic Cast* with one 20 s M
 | `CollectionWriteContractTests` | Five collection writes; ordered two-book lifecycle and empty reads; permissions, atomic invalid create, no-ops/errors, version differences and failure teardown |
 | `PlaylistWriteContractTests` | Five owner-only writes; book/episode lifecycles, strict raw membership checks, ownership/access denials, atomic invalid add, safe characterization and exact-ID failure teardown |
 | `PlaybackSessionContractTests` | Start, sync and close; resume; same-device takeover; track URLs and ranges; downloads; local session upload |
+| `StreamingFormatContractTests` | Its own pass ([below](#streaming-formats)): the server half of ADR 0007's results matrix for the app's play request, for M4B, multi-file MP3, FLAC (direct play, Content-Type, 206 ranges) and Opus and a forced M4B transcode (HLS playlist and first segment without credentials) |
 | `ListeningSessionContractTests` | An episode's stored sessions after a close, kept off the book's page; unknown item and unknown episode 404s |
 | `ProgressContractTests` | Each progress group, `lastUpdate`, finished and auto-finish, ebook progress, batch update, delete |
 | `LocalProgressContractTests` | `LocalProgressStore` sending to the server and settling on what it holds |
@@ -88,6 +95,7 @@ The suite asserts these per version. Other versions check only what holds for al
 | `DELETE /api/me/progress/:id` twice | 200 | 404 |
 | MP3 duration of a 30 s file | about 30.1 s (encoder padding) | 30 s |
 | `relPath` of a podcast from `POST /api/podcasts` | the whole path without its leading `/` (it strips `folder.fullPath`, which the model lacks) | relative to the folder |
+| HLS playlist segment URIs | `output-N.ts?token=…`: the user's legacy token, which has no expiry and signs in to the API | `output-N.ts` |
 
 Behaviour that holds on both, and that fixtures did not capture:
 
@@ -223,6 +231,40 @@ Not covered:
   access; the response shape is pinned only by the `podcast-feed.json` fixture.
 - **`GET /api/search/podcast`.** The server asks the iTunes directory, so it needs internet
   access and its results change; the shape is pinned only by `podcast-directory-search.json`.
+
+## Streaming formats
+
+`StreamingFormatContractTests` pins the server half of the results matrix in
+[ADR 0007](../adr/0007-streaming.md#validation) (#48). Each test starts a session with the app's
+`APIPlaybackSessionService`, so the body is the production `PlaybackDeviceInfo.startRequest`
+(the host's `SupportedAudioMIMETypes.current()`, which never offers `audio/ogg`), resolves it
+with `TrackURLResolver`, fetches every URL with no cookies or `Authorization`, and closes the
+session on success and failure, then checks that its URLs are a 404.
+
+The Opus and FLAC books are in a third library, and ordinary suites and owned search pin
+exactly two. So `scripts/test-server.sh test` creates that library after the owned search pass
+and runs this suite last with `ABS_STREAMING_CONTRACT=1`; anywhere else it is skipped. To run it
+alone, set the variable and pass `--filter StreamingFormatContractTests`. To play the formats by
+hand, run `ABS_STREAMING_CONTRACT=1 mise run server:run`.
+
+Observed on 2.26.0 and 2.37.2 (node backend), the same on both except the segment URIs:
+
+| Book | Play method | Tracks | Served as | Ranges / HLS |
+| --- | --- | --- | --- | --- |
+| *Single File Tale* (M4B) | direct play (0) | 1 | `audio/mp4` | `bytes=1000-1999` is a 206 with `Content-Range: bytes 1000-1999/<size>` |
+| *The Synthetic Tale* (two MP3s) | direct play (0) | 2, indexes 1 and 2, offsets 0 and 30 s | `audio/mpeg` | 206 on each track |
+| *Flac Tale* (FLAC) | direct play (0) | 1 | `audio/flac` | 206 |
+| *Opus Tale* (`.opus`, `audio/ogg`) | transcode (2) | 1, `/hls/<id>/output.m3u8` | playlist `application/vnd.apple.mpegurl`, segments `video/mp2t` | VOD playlist covering the book; `output-0.ts` (MPEG-TS) loads without the playlist's token |
+| *Single File Tale* with `forceTranscode` | transcode (2) | 1, `/hls/<id>/output.m3u8` | as above | as above |
+
+The segment can be missing for a moment after `/play` answers, because `ffmpeg` writes it then,
+so the suite polls it for up to 30 s. On 2.26.0 every segment URI also carries `?token=` with
+the user's legacy token (see [Differences between versions](#differences-between-versions)): it
+has no `exp` claim, and the suite checks that it signs in to `GET /api/me`. The server doesn't
+need it to serve the segment.
+
+Not covered: playback itself (start, seeks, the track boundary, resume), the custom-header
+proxy row, X-Accel and server restarts. Those stay manual device checks (#49).
 
 ## Add a contract
 

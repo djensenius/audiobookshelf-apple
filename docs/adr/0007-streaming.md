@@ -443,6 +443,8 @@ Cons:
 | ≥ 2.28.0 (test on 2.37.2) | as above | as above | as above | as above |
 | Any ≥ 2.26.0 behind a custom-header proxy | Direct play via resource loader | Direct play via resource loader | Error (needs transcode) | Direct play via resource loader |
 
+**Server side observed.** `StreamingFormatContractTests` ([server contracts](../testing/server-contracts.md#streaming-formats)) checks the server's half of this matrix against real 2.26.0 and 2.37.2 servers, using the app's play request: the play method, track order, `Content-Type` and `206` ranges for direct play, and for Opus and a forced m4b transcode, a playlist and first segment fetched without `Authorization`. The results match this matrix. One thing differs from "relative segment URIs `output-N.ts`" above: 2.26.0's playlist adds `?token=` with the user's legacy, non-expiring token to every segment URI, and 2.37.2's doesn't. The device checks and the proxy row are still manual (#49). This doesn't change decision 1, which stays provisional.
+
 **Additional checks in #49,** on one supported server:
 - `forceTranscode: true` on an m4b returns `playMethod 2`, and `/hls/…/output.m3u8` plays without any `Authorization` header.
 - `forceDirectPlay: true` on a `.wma` returns `playMethod 0`, and `AVPlayer` fails. This confirms the app must never send `forceDirectPlay: true` blindly.
