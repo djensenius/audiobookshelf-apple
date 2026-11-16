@@ -128,6 +128,8 @@ private func expectDirectPlay(
         let (part, partial) = try await fetch(ranged)
         #expect(partial.statusCode == 206)
         #expect(partial.value(forHTTPHeaderField: "Content-Range") == "bytes 1000-1999/\(size)")
+        // A short or error body fails here rather than trapping in the slice and skipping the close.
+        try #require(body.count >= 2000, "full body of track \(index) is \(body.count) bytes")
         #expect(part == body.subdata(in: 1000..<2000))
     }
 }

@@ -27,7 +27,7 @@ takes about 20 seconds once the server image is pulled and the package is built.
 | `ABS_SERVER_VERSION` | Release to run. Default `2.26.0`. |
 | `ABS_SERVER_BACKEND` | `docker` (default), or `node`: a source checkout run with Node 20, for machines without Docker. Run it as `ABS_SERVER_BACKEND=node mise exec node@20 -- scripts/test-server.sh test`. |
 | `ABS_SERVER_TIMEOUT` | Seconds to wait for startup and for the first scan. Default `120`. |
-| `ABS_STREAMING_CONTRACT` | `1` adds the [streaming format](#streaming-formats) library to a focused run or `server:run`, and enables `StreamingFormatContractTests`. A full run sets it for its last pass only, and a focused run whose arguments name that suite sets it. |
+| `ABS_STREAMING_CONTRACT` | `1` adds the [streaming format](#streaming-formats) library to a focused run or `server:run`, and enables `StreamingFormatContractTests`. A full run sets it for its last pass only, and a focused run whose `--filter` names that suite sets it. |
 
 The script generates the media in a temporary directory with a random root password, starts
 `ghcr.io/advplyr/audiobookshelf:<version>` on a free port of 127.0.0.1, creates the root user
@@ -38,9 +38,10 @@ sequential Swift test processes: an ordinary
 ([below](#podcast-creation-and-feed-lookup)), an explicitly owned `--filter SearchContractTests`
 pass, and, after adding the streaming format library, a `--filter StreamingFormatContractTests`
 pass ([below](#streaming-formats)). Any failure fails the harness and skips the passes after it.
-Focused Swift arguments don't add passes. If they name `StreamingFormatContractTests`, the
-harness adds the streaming format library and sets `ABS_STREAMING_CONTRACT=1` for them; with
-the variable set for other suites, it warns that the third library changes library counts.
+Focused Swift arguments don't add passes. If a `--filter` names `StreamingFormatContractTests`
+(`--skip` doesn't count), the harness adds the streaming format library and sets
+`ABS_STREAMING_CONTRACT=1` for them; with the variable set and no such filter, it warns that the
+third library changes library counts.
 The server runs with `RATE_LIMIT_AUTH_MAX=0`: its
 default of 40 sign-ins and refreshes per 10 minutes would end the suite with 429 responses.
 `server:run` stops after the scan, prints the URL, user name and password to the terminal and

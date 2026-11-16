@@ -317,24 +317,28 @@ swift() {
   return "$first"
 }
 '''
-        library, streaming_suite = "LibraryContractTests/libraries", "StreamingFormatContractTests"
+        # The real argument parsing runs first, so the warning sees the harness's own --filter result.
+        parsing = SOURCE[SOURCE.index("mode=${1:-test}"):SOURCE.index("\nexpected_revision=")]
+        none, library = [], ["--filter", "LibraryContractTests/libraries"]
+        streaming_suite = ["--filter", "StreamingFormatContractTests"]
+        skipped = ["--filter", "ABSServerContractTests", "--skip", "StreamingFormatContractTests"]
         # A full run (search_contract=1) always has the streaming pass. Exit codes: first for the
         # ordinary/podcast/focused passes, second for owned search, third for the streaming pass,
         # seed for seed_streaming_library.
-        cases = [  # full, streaming, first, second, third, seed, expected, focused filter
-            (1, 1, 37, 0, 0, 0, 37, None), (1, 1, 0, 41, 0, 0, 41, None), (1, 1, 0, 0, 47, 0, 47, None),
-            (1, 1, 0, 0, 0, 53, 53, None), (1, 1, 0, 0, 0, 0, 0, None),
+        cases = [  # full, streaming, first, second, third, seed, expected, focused arguments
+            (1, 1, 37, 0, 0, 0, 37, none), (1, 1, 0, 41, 0, 0, 41, none), (1, 1, 0, 0, 47, 0, 47, none),
+            (1, 1, 0, 0, 0, 53, 53, none), (1, 1, 0, 0, 0, 0, 0, none),
             (0, 0, 0, 0, 0, 0, 0, library), (0, 0, 43, 0, 0, 0, 43, library), (0, 1, 0, 0, 0, 0, 0, library),
             (0, 1, 0, 0, 47, 0, 47, streaming_suite), (0, 1, 0, 0, 0, 53, 53, streaming_suite),
+            (0, 0, 0, 0, 0, 0, 0, skipped), (0, 1, 0, 0, 0, 0, 0, skipped),
         ]
         for full, streaming, first, second, third, seed, expected, focused in cases:
             with self.subTest(full=full, streaming=streaming, first=first, second=second, third=third, seed=seed,
                               focused=focused):
                 result = subprocess.run(
-                    ["/bin/bash", "-c", prefix +
+                    ["/bin/bash", "-c", prefix + "streaming_filtered=0\n" + parsing +
                      f"\nsearch_contract={full}; streaming_contract={streaming}; first={first}; second={second}"
-                     f"; third={third}; seed={seed}\n" + RUNNER, str(HARNESS)]
-                    + (["--filter", focused] if focused else []),
+                     f"; third={third}; seed={seed}\n" + RUNNER, str(HARNESS), "test"] + focused,
                     capture_output=True, text=True, timeout=3
                 )
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
@@ -360,31 +364,39 @@ swift() {
                                      "Packages/AudiobookshelfKit --scratch-path .build/swiftpm "
                                      "--filter StreamingFormatContractTests")
                 if not full and passes:
-                    self.assertIn(f"--filter {focused}", result.stdout)
+                    self.assertIn(" ".join(focused), result.stdout)
                     self.assertNotIn("Owned search pass", result.stdout)
-                # A focused run that seeds the third library for other suites says so.
+                # A focused run that seeds the third library without a --filter for its suite says so.
                 warned = streaming and not full and focused != streaming_suite
                 self.assertEqual("Warning: the streaming format library" in result.stdout, warned, result.stdout)
 
     def test_streaming_contract_selection(self):
         parsing = SOURCE[SOURCE.index("mode=${1:-test}"):SOURCE.index("\nexpected_revision=")]
-        prefix = ('set -euo pipefail\nsearch_contract=0; search_only=0; streaming_contract=0\n'
+        prefix = ('set -euo pipefail\nsearch_contract=0; search_only=0; streaming_contract=0; streaming_filtered=0\n'
                   'die() { printf "die %s\\n" "$*"; exit 1; }\n')
-        cases = [  # arguments, ABS_STREAMING_CONTRACT, search_contract, streaming_contract
-            ([], "", 1, 1), (["--search-contract"], "1", 1, 0),
-            (["--filter", "LibraryContractTests"], "", 0, 0), (["--filter", "LibraryContractTests"], "1", 0, 1),
-            (["--filter", "StreamingFormatContractTests/opus"], "", 0, 1), (["serve"], "1", 0, 1),
+        suite, skip = "StreamingFormatContractTests", ["--skip", "StreamingFormatContractTests"]
+        cases = [  # arguments, ABS_STREAMING_CONTRACT, search_contract, streaming_contract, streaming_filtered
+            ([], "", 1, 1, 0), (["--search-contract"], "1", 1, 0, 0),
+            (["--filter", "LibraryContractTests"], "", 0, 0, 0), (["--filter", "LibraryContractTests"], "1", 0, 1, 0),
+            (["--filter", f"{suite}/opus"], "", 0, 1, 1), (["serve"], "1", 0, 1, 0),
+            ([f"--filter={suite}"], "", 0, 1, 1),
+            (["--filter", "LibraryContractTests", "--filter", suite], "", 0, 1, 1),
+            # Only positive filters count: skipping the suite never seeds its library.
+            (["--filter", "ABSServerContractTests"] + skip, "", 0, 0, 0),
+            (["--filter", "ABSServerContractTests"] + skip, "1", 0, 1, 0),
+            ([f"--skip={suite}"], "", 0, 0, 0), (skip + ["--filter", "LibraryContractTests"], "", 0, 0, 0),
         ]
-        for arguments, variable, search, streaming in cases:
+        for arguments, variable, search, streaming, filtered in cases:
             with self.subTest(arguments=arguments, variable=variable):
                 mode = arguments if arguments[:1] == ["serve"] else ["test"] + arguments
                 result = subprocess.run(
-                    ["/bin/bash", "-c", prefix + parsing + 'printf "%s %s\\n" "$search_contract" "$streaming_contract"',
+                    ["/bin/bash", "-c", prefix + parsing +
+                     'printf "%s %s %s\\n" "$search_contract" "$streaming_contract" "$streaming_filtered"',
                      str(HARNESS)] + mode,
                     env=dict(os.environ, ABS_STREAMING_CONTRACT=variable), capture_output=True, text=True, timeout=3
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual(result.stdout, f"{search} {streaming}\n")
+                self.assertEqual(result.stdout, f"{search} {streaming} {filtered}\n")
 
 
 if __name__ == "__main__":

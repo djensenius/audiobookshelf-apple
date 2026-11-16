@@ -9,7 +9,7 @@
 #                     Docker (run as: mise exec node@20 -- scripts/test-server.sh)
 # ABS_SERVER_TIMEOUT  seconds to wait for startup and for the first scan (default 120)
 # ABS_STREAMING_CONTRACT=1  also seed the Opus and FLAC books in a third library for a focused
-#                     run or `serve` (automatic when the arguments name StreamingFormatContractTests;
+#                     run or `serve` (automatic when a --filter names StreamingFormatContractTests;
 #                     a full run always adds it, last, for its streaming format pass)
 #
 # Everything lives in one temporary directory with a random root password; the trap verifies
@@ -37,6 +37,7 @@ books_folder=
 podcasts_folder=
 streaming_folder=
 streaming_contract=0
+streaming_filtered=0
 password=
 token=
 search_contract=0
@@ -127,8 +128,17 @@ if [[ "$mode" == test ]]; then
   fi
 fi
 # The streaming format library is a third library, which ordinary suites don't expect. A focused run
-# that names its suite gets it without ABS_STREAMING_CONTRACT=1.
-if ((!search_only)) && [[ "${ABS_STREAMING_CONTRACT:-}" == 1 || "$*" == *StreamingFormatContractTests* ]]; then
+# whose positive --filter names its suite gets it without ABS_STREAMING_CONTRACT=1; --skip values
+# and other arguments don't count.
+previous=
+for argument in "$@"; do
+  if [[ "$previous" == --filter && "$argument" == *StreamingFormatContractTests* ]] ||
+    [[ "$argument" == --filter=*StreamingFormatContractTests* ]]; then
+    streaming_filtered=1
+  fi
+  previous=$argument
+done
+if ((!search_only)) && [[ "$streaming_filtered" == 1 || "${ABS_STREAMING_CONTRACT:-}" == 1 ]]; then
   streaming_contract=1
 fi
 
@@ -449,7 +459,7 @@ if ((search_contract)); then
   fi
 else
   if ((streaming_contract)); then
-    [[ "$*" == *StreamingFormatContractTests* ]] ||
+    ((streaming_filtered)) ||
       log "Warning: the streaming format library is a third library; suites that count libraries may fail"
     seed_streaming_library
     export ABS_STREAMING_CONTRACT=1
