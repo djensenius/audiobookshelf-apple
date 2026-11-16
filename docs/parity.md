@@ -150,7 +150,7 @@ open or the app doesn't wire it in yet.
 | Cast and routes | ABSUI `RoutePicker` (AirPlay) | #183 | Done | Cast was never confirmed in legacy; AirPlay only. |
 | Close player | `MiniPlayerView`, `PlayerSlot` | #183 | Done | |
 | Total track, scale elapsed time by speed, lock player | `PlayerOptionsMenu` | #505, PR #526 | Done | Listed under Gaps found in the first draft. |
-| `Appbar`, `SideDrawer` | `MainTabView` | #44 | In progress (#44) | |
+| `Appbar`, `SideDrawer` | `MainTabView` | #44 | Needs acceptance (#44) | The shell is wired; device, windowing, deep-link and Now Playing checks remain in #210. |
 | `Order`, `Filter` modals | `LibrarySortMenu`, `LibraryFilterSheet` | #63 | Done | |
 | `Dialog` modal | System alerts | — | Done | |
 | `ItemMoreMenu`, `ItemDetails` modals | `ItemDetailMoreMenu`, `ItemDetailInfoSheet` | #67, #342 | Done | |
