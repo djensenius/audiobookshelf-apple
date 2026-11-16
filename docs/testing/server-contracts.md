@@ -66,6 +66,7 @@ For the streaming format pass only, a third book library, *Streaming formats*: *
 | --- | --- |
 | `AuthContractTests` | Status, ping and validation; password login and its JWT pair; `/api/authorize`; a wrong password |
 | `TokenRefreshContractTests` | Refresh and rotation, the old refresh token, concurrent refreshes, refresh before expiry, logout |
+| `RealtimeContractTests` | Production Socket.IO authentication; progress delivery to the owning user only; RSS feed open/close broadcasts and payloads |
 | `LibraryContractTests` | Libraries, minified and expanded books and podcasts, chapters, audio files, tracks, shelves, search, authors, series |
 | `RecentEpisodesContractTests` | Read-only normal/empty pages and book-library 404; strict raw counts, identities, podcast and audio expansions |
 | `SearchContractTests` | Separately gated owned libraries; all seven search groups plus genres, strict nested media, limits/errors, exact-ID cascade and failure cleanup |
@@ -79,8 +80,9 @@ For the streaming format pass only, a third book library, *Streaming formats*: *
 | `BookmarkContractTests` | Create at whole and fractional times, rename on an existing time, update, delete by `pathTime`, a second delete (404), `GET /api/me` across items with raw counts, empty title (400) |
 | `PodcastCreationContractTests` | Its own pass ([below](#podcast-creation-and-feed-lookup)): `POST /api/podcasts` returns the expanded item at the requested path; the same path again (400 `Podcast already exists`), an unknown folder (404), a non-admin (403 `Forbidden`, also for feed lookup); `POST /api/podcasts/feed` with an invalid URL (400 with a message) and a loopback feed (404) |
 
-Not covered yet: listening stats, Socket.IO events
-(`ABSRealtime`) and OpenID sign-in (see [oidc.md](oidc.md) for the manual check).
+Not covered yet: listening stats and OpenID sign-in (see [oidc.md](oidc.md) for
+the manual check). `RealtimeContractTests` exercises server event delivery; the
+separate `ABSRealtimeTests` still cover protocol edge cases against a fake transport.
 
 See [owned search contracts](search-contracts.md) for the explicit mode, fail-closed ownership,
 Docker/node provenance, disjoint media, capture format and reproduction commands. Default full
