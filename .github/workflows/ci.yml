@@ -105,10 +105,10 @@ jobs:
     name: UI tests
     runs-on: xcode-27
     # A job of its own, so its cold app builds run beside build-and-test rather than after it.
-    # Recent pull request runs take 36–53 minutes (median 46). The headroom absorbs one stalled
-    # test (#627), which the UI-test step stops after 600 s and retries, at a cost of about 11
-    # minutes (#661), so one stall fits a median run.
-    timeout-minutes: 60
+    # Recent runs take 36–53 minutes (median 46). The headroom absorbs one stalled test (#627),
+    # which the UI-test step stops after 600 s and retries, at a cost of about 12 minutes (#661),
+    # so one stall fits even the slowest run seen. A passing run doesn't take longer.
+    timeout-minutes: 70
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       MISE_TASK_RUN_AUTO_INSTALL: "false"
@@ -141,9 +141,10 @@ jobs:
       # On a shared runner a launch can still time out, so a failed test runs once more; one that
       # fails twice fails the step. Local runs of test:ui don't retry.
       # A test still running after 600 s (10 minutes) fails, so a hang is retried in time (#661):
-      # the slowest passing test seen took 371 s (most take under 250); a hung audit took 1,521 s
-      # (#660). Retrying a timed-out test needs -test-repetition-relaunch-enabled. Runs take 36–53
-      # minutes (median 46); one hang adds 10, plus ~1 to stop it and relaunch: about 57 of 60.
+      # the slowest passing test seen took 371 s (the slowest usually takes under 250); a hung audit
+      # took 1,521 s (#660). Retrying a timed-out test needs -test-repetition-relaunch-enabled. Runs
+      # take 36–53 minutes (median 46); one hang adds 10, plus ~2 to stop it and relaunch the runner
+      # twice: about 65 of the job's 70.
       - name: UI tests on the iPhone Duo simulator
         env:
           ABS_UI_PLATFORM: ios
@@ -152,7 +153,8 @@ jobs:
             -test-timeouts-enabled YES -default-test-execution-time-allowance 600 -maximum-test-execution-time-allowance 600
 
       # XCUITest on macOS needs Automation Mode, which only an administrator on the runner can
-      # enable (docs/testing/ui-tests.md). Until then, warn rather than pass silently.
+      # enable (docs/testing/ui-tests.md). Until then, warn rather than pass silently. Once it runs,
+      # give it the iPhone step's time limit and retry flags, and revisit timeout-minutes (#661).
       - name: UI tests on macOS
         if: ${{ !cancelled() }}
         run: |

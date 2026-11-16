@@ -36,11 +36,11 @@ above) before CI covers macOS.
 On the simulator, CI also fails a test that runs for more than 10 minutes
 (`-test-timeouts-enabled YES`, with `-default-test-execution-time-allowance` and
 `-maximum-test-execution-time-allowance` both 600 seconds), so a hung test is retried within the
-job's 60 minutes: on #660 an accessibility audit hung for 25 minutes and the job ran out of time
-(#661). The slowest passing test, an audit, has taken up to 371 seconds on a slow runner, and most
-take under 250. Recent runs took 36 to 53 minutes (median 46); one hang adds the 10 minutes and
-about 1 more to stop the test and relaunch the runner, so a median run with a hang ends by minute
-57 or so. XCTest stops a timed-out test by ending the test runner, and `-retry-tests-on-failure`
+job's 70 minutes: on #660 an accessibility audit hung for 25 minutes and the job ran out of time
+(#661). The slowest passing test, an audit, has taken up to 371 seconds on a slow runner (it ran
+first and paid for the cold app launch); in most runs the slowest takes under 250. Recent runs
+took 36 to 53 minutes (median 46); one hang adds the 10 minutes and about 2 more to stop the test
+and relaunch the runner, so even the slowest run seen with a hang ends by minute 65 or so. XCTest stops a timed-out test by ending the test runner, and `-retry-tests-on-failure`
 retries it only with `-test-repetition-relaunch-enabled YES`, which runs each retry in a new
 runner; without it the run moves on and the timed-out test fails. To try the limits locally, pass
 the same flags after `--`.
@@ -197,8 +197,8 @@ card's label starts with its title, and checks the cards are in sequence order: 
 Mars*, *The Gods of Mars*, *The Warlord of Mars*.
 
 `AccessibilityAuditTests` audits each of those screens at the default text size and at AX5;
-see docs/accessibility.md, "Automated audits". The default size takes about 80 seconds on the
-simulator and AX5 about 100.
+see docs/accessibility.md, "Automated audits". Locally the default size takes about 80 seconds on
+the simulator and AX5 about 100; on CI's runners each audit has taken 110 to 371 seconds.
 
 What the audits find depends on the screen's size, so they're verified on two simulators: the
 iPhone Duo, which CI runs, and an iPhone 17 (iOS 27.2), a normal-width iPhone, which CI
