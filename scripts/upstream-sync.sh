@@ -28,6 +28,9 @@ MAX_BODY_CHARS=60000
 DOCS_PATH="docs/upstream-sync.md"
 REPO_RE='^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$'
 SHA_RE='^[0-9a-f]{40}$'
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/upstream-sync-areas.sh
+source "$SCRIPT_DIR/upstream-sync-areas.sh"
 
 die() {
   echo "::error::$*" >&2
@@ -249,29 +252,7 @@ fi
 
 # --- Changed files, grouped by area -----------------------------------------
 
-AREA_TITLES=(
-  ""
-  "Native iOS (Swift) — port logic to the Swift app"
-  "App UI & state (Vue) — port behavior to SwiftUI"
-  "Localization — re-import strings"
-  "Android-only — usually not applicable"
-  "Build & tooling — usually not applicable"
-  "Other"
-)
-area_counts=(0 0 0 0 0 0 0)
-
-classify() {
-  case "$1" in
-    ios/*) area=1 ;;
-    pages/* | components/* | layouts/* | store/* | plugins/* | mixins/* | utils/* | objects/* | \
-      middleware/* | assets/* | static/*) area=2 ;;
-    strings/*) area=3 ;;
-    android/*) area=4 ;;
-    .github/* | fastlane/* | package.json | package-lock.json | capacitor.config.json | ionic.config.json | \
-      nuxt.config.js | tailwind.config.js) area=5 ;;
-    *) area=6 ;;
-  esac
-}
+area_counts=(0 0 0 0 0 0 0 0 0 0 0)
 
 # Wrap a path or status in a Markdown code span (backticks become quotes and
 # control characters such as newlines become "?", so paths cannot inject Markdown).
@@ -304,7 +285,7 @@ done <"$tmp/diff"
 {
   echo "| Area | Files |"
   echo "| --- | ---: |"
-  for area in 1 2 3 4 5 6; do
+  for area in 1 2 3 4 5 6 7 8 9 10; do
     if ((area_counts[area] > 0)); then
       echo "| ${AREA_TITLES[area]} | ${area_counts[area]} |"
     fi
@@ -316,7 +297,7 @@ done <"$tmp/diff"
     echo "_No file changes._"
   fi
   shown=0
-  for area in 1 2 3 4 5 6; do
+  for area in 1 2 3 4 5 6 7 8 9 10; do
     ((area_counts[area] > 0)) || continue
     ((shown < MAX_FILES)) || break
     echo "#### ${AREA_TITLES[area]} (${area_counts[area]})"
@@ -383,6 +364,9 @@ append_section() {
   echo "### Triage checklist"
   echo
   echo "- [ ] Triage each change: port / not applicable / already covered"
+  if ((area_counts[7] > 0)); then
+    echo "- [ ] Run \`mise run strings\` and \`mise run strings:check\` for the changed translations"
+  fi
   echo "- [ ] Link porting PRs here"
   echo "- [ ] Close when triaged and ported"
   echo

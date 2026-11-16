@@ -98,19 +98,21 @@ marker) are ignored. Consequences:
 
    | Upstream path | Swift app area |
    | --- | --- |
-   | `ios/App/Shared/player/`, `ios/App/App/plugins/AbsAudioPlayer.swift` | Playback (AVFoundation, Now Playing, CarPlay) |
-   | `ios/App/App/plugins/AbsDownloader.swift`, `ios/App/Shared/models/download/` | Downloads (background `URLSession`) |
-   | `ios/App/Shared/util/ApiClient.swift`, `ios/App/Shared/models/server/` | Server API client and models |
-   | `ios/App/Shared/util/Database.swift`, `ios/App/Shared/models/local/` | Local persistence (SwiftData) and progress sync |
-   | `pages/`, `components/`, `layouts/` | SwiftUI screens and views |
-   | `store/`, `plugins/`, `mixins/`, `utils/`, `objects/`, `middleware/` | App state, services, and helpers |
-   | `assets/`, `static/` | Asset catalog (only if the asset is still used) |
-   | `strings/*.json` | String Catalog — run `mise run strings` after syncing `strings/` |
+   | `ios/App/Shared/player/`, `AbsAudioPlayer` and matching player pages/components/store | Playback (`ABSPlayback`, Now Playing, CarPlay) |
+   | `AbsDownloader`, `ios/App/Shared/models/download/` and matching download pages/components/store | Downloads and offline UI (`ABSDownloads`) |
+   | `ApiClient`, server models, auth/connect plugins and middleware | API, authentication and realtime (`ABSAPI`, `ABSRealtime`) |
+   | `ios/App/Shared/util/Database.swift`, `ios/App/Shared/models/local/` | Local persistence and progress sync (`ABSData`, `ABSPlayback`) |
+   | Matching settings pages/components/store | Settings and accounts (`ABSAppModel`, `ABSUI`) |
+   | Other `pages/`, `components/`, `layouts/`, `store/`, `plugins/`, `mixins/`, `utils/`, `objects/`, `assets/`, `static/` | The matching SwiftUI feature and `ABSAppModel`; assets only if still used |
+   | `strings/*.json` | String Catalog — run `mise run strings` and `mise run strings:check` |
    | `android/` | Usually not applicable; check whether a server/API fix also affects us |
    | `.github/`, `fastlane/`, Node/Capacitor config | Not applicable |
 
-   Exact Swift module paths will be listed in [`AGENTS.md`](../AGENTS.md) once the
-   Phase 0 app structure lands.
+   The workflow puts recognizable player, download, API/auth, persistence and
+   settings paths into separate changed-area groups. Broad or ambiguous legacy
+   paths stay grouped as feature UI and state; inspect the file and commit before
+   choosing the native feature. Local code lives in
+   [`AGENTS.md`](../AGENTS.md)'s module map.
 4. Open one porting PR per issue-sized change, reference the upstream commit or PR
    (for example `Ports advplyr/audiobookshelf-app#2002`), and link the PR in the
    `upstream-port` issue.
