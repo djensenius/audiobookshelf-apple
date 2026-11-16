@@ -20,15 +20,17 @@ classify() {
   case "$1" in
     ios/App/Shared/player/* | ios/App/App/plugins/AbsAudioPlayer.swift | \
       pages/player* | components/player/* | components/app/AudioPlayer.vue | \
-      store/player* | plugins/AbsAudioPlayer.js)
+      store/player* | plugins/AbsAudioPlayer.js | plugins/capacitor/AbsAudioPlayer.js)
       area=1
       ;;
     ios/App/App/plugins/AbsDownloader.swift | ios/App/Shared/models/download/* | \
-      pages/download* | components/download* | store/download* | plugins/AbsDownloader.js)
+      pages/download* | components/download* | store/download* | plugins/AbsDownloader.js | \
+      plugins/capacitor/AbsDownloader.js)
       area=2
       ;;
     ios/App/Shared/util/ApiClient.swift | ios/App/Shared/models/server/* | \
-      plugins/*ApiClient* | plugins/*Auth* | middleware/* | pages/connect* | components/connect*)
+      plugins/*ApiClient* | plugins/*Auth* | plugins/axios.js | plugins/nativeHttp.js | plugins/server.js | \
+      middleware/* | pages/connect* | components/connect*)
       area=3
       ;;
     ios/App/Shared/util/Database.swift | ios/App/Shared/models/local/*)

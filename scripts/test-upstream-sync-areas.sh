@@ -17,10 +17,15 @@ check_area() {
 
 check_area "ios/App/Shared/player/AudioPlayer.swift" 1
 check_area "store/player.js" 1
+check_area "plugins/capacitor/AbsAudioPlayer.js" 1
 check_area "ios/App/App/plugins/AbsDownloader.swift" 2
 check_area "components/download/DownloadItem.vue" 2
+check_area "plugins/capacitor/AbsDownloader.js" 2
 check_area "ios/App/Shared/util/ApiClient.swift" 3
 check_area "middleware/auth.js" 3
+check_area "plugins/axios.js" 3
+check_area "plugins/nativeHttp.js" 3
+check_area "plugins/server.js" 3
 check_area "pages/library.vue" 4
 check_area "ios/App/Shared/util/Database.swift" 5
 check_area "store/settings.js" 6
