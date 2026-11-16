@@ -11,7 +11,11 @@ depends = ["lint:repo", "lint:swift"]
 
 [tasks."lint:repo"]
 description = "Lint shell scripts and workflows (no Xcode needed)"
-depends = ["lint:shell", "lint:actions", "lint:nowplaying", "test:kit:ios:runner"]
+depends = ["lint:shell", "lint:actions", "lint:nowplaying", "test:kit:ios:runner", "test:upstream:areas"]
+
+[tasks."test:upstream:areas"]
+description = "Test upstream-sync path mapping"
+run = "bash scripts/test-upstream-sync-areas.sh"
 
 [tasks."lint:shell"]
 description = "Lint shell scripts with ShellCheck"
