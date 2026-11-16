@@ -9,6 +9,7 @@ private enum RealtimeContractError: Error, Sendable {
     case timeout
     case wrongIdentity(expected: String, actual: String)
     case unexpectedProgressEvent
+    case observerUnavailable
 }
 
 /// One production Socket.IO client connected to the disposable contract server.
@@ -51,11 +52,19 @@ private actor RealtimeContractListener {
     func assertNoProgressEvent(for duration: Duration) async throws {
         let event = await waitForMatching(
             {
-                if case .userItemProgressUpdated = $0 { return true }
-                return false
+                switch $0 {
+                case .userItemProgressUpdated, .disconnected, .authFailed: return true
+                default: return false
+                }
             }, timeout: duration)
-        if event != nil {
+        guard let event else { return }
+        switch event {
+        case .userItemProgressUpdated:
             throw RealtimeContractError.unexpectedProgressEvent
+        case .disconnected, .authFailed:
+            throw RealtimeContractError.observerUnavailable
+        default:
+            return
         }
     }
 
@@ -95,12 +104,14 @@ struct RealtimeContractTests {
             try await server.withUser { other in
                 let ownerSocket = try RealtimeContractListener(session: owner)
                 let otherSocket = try RealtimeContractListener(session: other)
+                var playback: PlaybackSession?
                 do {
                     try await ownerSocket.connect(as: owner.user.id)
                     try await otherSocket.connect(as: other.user.id)
 
-                    let playback = try await owner.play(seed.taleID)
-                    try await owner.sync(playback, to: 12, listened: 2)
+                    let started = try await owner.play(seed.taleID)
+                    playback = started
+                    try await owner.sync(started, to: 12, listened: 2)
                     let event = try await ownerSocket.next(matching: {
                         guard case .userItemProgressUpdated(let update) = $0 else { return false }
                         return update.progress.libraryItemId == seed.taleID && update.progress.currentTime == 12
@@ -109,11 +120,16 @@ struct RealtimeContractTests {
                         throw RealtimeContractError.timeout
                     }
                     #expect(update.progress.userId == owner.user.id)
-                    #expect(update.progress.progress == 0.24)
+                    #expect(approximately(update.progress.progress, 12 / started.duration, tolerance: 0.001))
 
                     #expect(try await owner.progress(seed.taleID) == update.progress)
                     try await otherSocket.assertNoProgressEvent(for: .seconds(2))
+                    _ = try await owner.client.send(SessionEndpoints.close(sessionID: started.id))
+                    playback = nil
                 } catch {
+                    if let playback {
+                        _ = try? await owner.client.send(SessionEndpoints.close(sessionID: playback.id))
+                    }
                     await ownerSocket.disconnect()
                     await otherSocket.disconnect()
                     throw error
