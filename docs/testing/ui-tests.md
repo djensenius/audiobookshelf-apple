@@ -33,6 +33,18 @@ enabled on the runner. Otherwise the step passes with a *macOS UI tests skipped*
 annotation on the run: an administrator must enable Automation Mode on the runner (the command
 above) before CI covers macOS.
 
+On the simulator, CI also fails a test that runs for more than 10 minutes
+(`-test-timeouts-enabled YES`, with `-default-test-execution-time-allowance` and
+`-maximum-test-execution-time-allowance` both 600 seconds), so a hung test is retried within the
+job's 60 minutes: on #660 an accessibility audit hung for 25 minutes and the job ran out of time
+(#661). The slowest passing test, an audit, has taken up to 371 seconds on a slow runner, and most
+take under 250. Recent runs took 36 to 53 minutes (median 46); one hang adds the 10 minutes and
+about 1 more to stop the test and relaunch the runner, so a median run with a hang ends by minute
+57 or so. XCTest stops a timed-out test by ending the test runner, and `-retry-tests-on-failure`
+retries it only with `-test-repetition-relaunch-enabled YES`, which runs each retry in a new
+runner; without it the run moves on and the timed-out test fails. To try the limits locally, pass
+the same flags after `--`.
+
 ## The fixture server
 
 A Debug build launched with `-ABSFixtures` (`Audiobookshelf/Fixtures/FixtureServer.swift`):
