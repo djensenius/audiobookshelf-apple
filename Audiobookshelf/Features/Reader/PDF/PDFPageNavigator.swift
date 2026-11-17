@@ -18,6 +18,8 @@ struct PDFPageNavigator: View {
     var background = PDFReaderBackground.light
     /// Whether the navigation shows. The page doesn't move when it comes and goes.
     var showsControls = true
+    /// A tap on the page, for the container's chrome. Taps on the controls don't reach it.
+    var onTap: () -> Void = {}
     /// The 1-based page the reader turned to.
     var onPageChange: @MainActor (Int) -> Void = { _ in }
 
@@ -38,6 +40,8 @@ struct PDFPageNavigator: View {
             onPageChange(page)
         }
         .ignoresSafeArea()
+        // On the page only, under the controls, so their buttons and thumbnails don't toggle the chrome.
+        .simultaneousGesture(TapGesture().onEnded { onTap() })
         .overlay {
             if showsControls, document.pageCount > 0 {
                 controls

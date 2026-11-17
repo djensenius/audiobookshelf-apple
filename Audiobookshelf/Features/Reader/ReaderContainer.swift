@@ -371,14 +371,13 @@ private struct PDFReaderHost: View {
         ZStack {
             if let document {
                 let pageCount = document.pageCount
-                PDFReaderView(
+                PDFPageNavigator(
                     document: document, initialPage: model.resumePoint.location?.startPage(pageCount: pageCount) ?? 1,
-                    isSpread: isSpread, background: PDFReaderBackground(theme)
+                    isSpread: isSpread, background: PDFReaderBackground(theme),
+                    showsControls: model.isChromeVisible, onTap: model.toggleChrome
                 ) { page in
                     model.record(.page(page), progress: EbookLocation.progress(page: page, pageCount: pageCount))
                 }
-                .ignoresSafeArea()
-                .simultaneousGesture(TapGesture().onEnded { model.toggleChrome() })
             } else if let failure {
                 ErrorStateView(
                     title: L10n.string(failure == .locked ? "MessageReaderPDFLocked" : "MessageReaderLoadFailed"),
