@@ -96,7 +96,8 @@ struct AppPlayback {
     /// account and the participant's play action.
     ///
     /// The App Shortcuts' book and episode parameters are fetched again as each session starts,
-    /// reconnects or ends, and as the player starts another item (``ShortcutParametersRefresher``).
+    /// reconnects or ends, and once another item the player starts has had time to sync its progress
+    /// (``ShortcutParametersRefresher``).
     /// Call before `lifecycle.start()`.
     func registerIntents(settings: AppSettings, lifecycle: SessionLifecycle, library: LibraryStore?) {
         let handler = PlaybackIntentHandler(
@@ -107,8 +108,10 @@ struct AppPlayback {
             library: { [weak library] in library })
         PlaybackIntentRouter.handler = handler
         PlayableEntityRouter.handler = handler
-        // The lifecycle keeps the refresher.
-        let refresher = ShortcutParametersRefresher { AudiobookshelfShortcuts.updateAppShortcutParameters() }
+        // The lifecycle keeps the refresher. The test host's leaves the system's shortcuts alone.
+        let refresher = ShortcutParametersRefresher {
+            if !AppEnvironment.isTestHost { AudiobookshelfShortcuts.updateAppShortcutParameters() }
+        }
         lifecycle.register(refresher, stage: .connect)
         refresher.follow(player)
     }
