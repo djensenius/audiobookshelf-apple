@@ -107,7 +107,7 @@ packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 | `mise run screenshots` | App Store screenshots from the fixture server into `build/screenshots/` (`-- --device <id> --locale <tag>`); see [docs/testing/screenshots.md](docs/testing/screenshots.md) |
 | `mise run xcproj:check` / `xcproj:format` | Check or rewrite `project.xcproj` in canonical form |
 | `mise run release:version <x.y.z>` | Set `MARKETING_VERSION` for every target, then `xcproj:check` ([docs/release.md](docs/release.md#versioning)) |
-| `mise run release:testflight [ios\|macos] [--export-only]` | Archive from a clean checkout and upload to TestFlight until Xcode Cloud is set up ([docs/release.md](docs/release.md#uploading-from-a-mac)) |
+| `mise run release:testflight [ios\|macos] [--export-only]` | Archive a clean checkout of a commit on `origin/main` and upload it to TestFlight until Xcode Cloud is set up ([docs/release.md](docs/release.md#uploading-from-a-mac)) |
 
 Run `mise run lint`, `mise run xcproj:check`, and `mise run test` before pushing.
 

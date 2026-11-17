@@ -490,16 +490,22 @@ class ReleaseTagTests(unittest.TestCase):
 class TestFlightUploadTests(unittest.TestCase):
     """scripts/testflight-upload.sh against a stub xcodebuild, a scratch checkout and HOME."""
 
+    # Logs each call's arguments. -version reports the environment instead. STUB_FAIL fails a
+    # call that has that argument, after the archive has made its DerivedData.
     STUB = """#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
+if args == ["-version"]:
+    print("Xcode stub DEVELOPER_DIR=%s umask=%03o" % (os.environ.get("DEVELOPER_DIR"), os.umask(0)))
+    sys.exit(0)
 with open({log!r}, "a") as log:
     log.write(json.dumps(args) + "\\n")
 if args[0] == "archive":
-    if os.environ.get("STUB_FAIL") == "archive":
-        sys.exit(65)
-    os.makedirs(args[args.index("-archivePath") + 1])
     os.makedirs(args[args.index("-derivedDataPath") + 1], exist_ok=True)
+if os.environ.get("STUB_FAIL") in args:
+    sys.exit(70)
+if args[0] == "archive":
+    os.makedirs(args[args.index("-archivePath") + 1])
 """
 
     def setUp(self):
@@ -514,6 +520,10 @@ if args[0] == "archive":
         git(self.repo, "add", ".")
         git(self.repo, "commit", "--quiet", "-m", "baseline")
         self.commit = git(self.repo, "rev-parse", "--short", "HEAD").strip()
+        origin = self.scratch / "origin.git"
+        git(self.scratch, "init", "--quiet", "--bare", str(origin))
+        git(self.repo, "remote", "add", "origin", str(origin))
+        git(self.repo, "push", "--quiet", "origin", "HEAD:main")
         self.home = self.scratch / "home"
         self.home.mkdir()
         self.out = self.scratch / "out"
@@ -523,12 +533,18 @@ if args[0] == "archive":
         stub = bin_dir / "xcodebuild"
         stub.write_text(self.STUB.format(log=str(self.log)))
         stub.chmod(0o755)
-        self.env = {key: value for key, value in os.environ.items() if not key.startswith(("CI_", "ABS_", "STUB_"))}
+        self.env = {key: value for key, value in os.environ.items()
+                    if not key.startswith(("CI_", "ABS_", "STUB_")) and key != "DEVELOPER_DIR"}
         self.env.update(PATH=f"{bin_dir}:{self.env.get('PATH', '/usr/bin:/bin')}", HOME=str(self.home),
                         ABS_TESTFLIGHT_DIR=str(self.out))
 
-    def upload(self, *args, **env):
-        return run([str(self.repo / "scripts/testflight-upload.sh"), *args], cwd=self.repo, env={**self.env, **env})
+    def upload(self, *args, shell=None, **env):
+        # A restrictive umask, which the script must not pass on to xcodebuild.
+        command = ["/bin/sh", "-c", 'umask 077 && exec "$@"', "sh"]
+        if shell:
+            command.append(shell)
+        return run([*command, str(self.repo / "scripts/testflight-upload.sh"), *args], cwd=self.repo,
+                   env={**self.env, **env})
 
     def calls(self):
         if not self.log.exists():
@@ -547,28 +563,35 @@ if args[0] == "archive":
     def option(self, call, name):
         return call[call.index(name) + 1]
 
-    def test_by_default_it_archives_and_uploads_ios_then_macos(self):
-        result = self.upload()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("uses the account signed in to Xcode", result.stdout)
-        folder = self.output_dir()
-        calls = self.calls()
-        self.assertEqual([call[0] for call in calls], ["archive", "-exportArchive"] * 2)
-        for (archive, export), (platform, name) in zip(zip(calls[::2], calls[1::2]), [("ios", "iOS"), ("macos", "macOS")]):
-            self.assertEqual(self.option(archive, "-scheme"), "Audiobookshelf")
-            self.assertEqual(self.option(archive, "-configuration"), "Release")
-            self.assertEqual(self.option(archive, "-destination"), f"generic/platform={name}")
-            self.assertEqual(self.option(archive, "-archivePath"), str(folder / f"{platform}.xcarchive"))
-            self.assertEqual(self.option(export, "-archivePath"), str(folder / f"{platform}.xcarchive"))
-            self.assertEqual(self.option(export, "-exportOptionsPlist"), str(folder / "ExportOptions.plist"))
-            for call in (archive, export):
-                self.assertIn("-allowProvisioningUpdates", call)
-                self.assertNotIn("-authenticationKeyPath", call)
-        self.assertEqual(self.export_options(), {
-            "method": "app-store-connect", "destination": "upload", "teamID": "9JALHNGRBQ",
-            "signingStyle": "automatic", "uploadSymbols": True, "manageAppVersionAndBuildNumber": True,
-        })
-        self.assertFalse((folder / "DerivedData").exists())
+    def test_by_default_it_archives_both_platforms_then_uploads_them(self):
+        # /bin/bash is the bash 3.2 macOS ships; mise and the shebang may find a newer one.
+        for shell in [None] + (["/bin/bash"] if Path("/bin/bash").exists() else []):
+            with self.subTest(shell=shell):
+                self.log.unlink(missing_ok=True)
+                shutil.rmtree(self.out, ignore_errors=True)
+                result = self.upload(shell=shell)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("uses the account signed in to Xcode", result.stdout)
+                self.assertIn("DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer umask=022", result.stdout)
+                folder = self.output_dir()
+                calls = self.calls()
+                self.assertEqual([call[0] for call in calls], ["archive", "archive", "-exportArchive", "-exportArchive"])
+                for archive, export, (platform, name) in zip(calls[:2], calls[2:], [("ios", "iOS"), ("macos", "macOS")]):
+                    self.assertEqual(self.option(archive, "-scheme"), "Audiobookshelf")
+                    self.assertEqual(self.option(archive, "-configuration"), "Release")
+                    self.assertEqual(self.option(archive, "-destination"), f"generic/platform={name}")
+                    self.assertEqual(self.option(archive, "-archivePath"), str(folder / f"{platform}.xcarchive"))
+                    self.assertIn("-onlyUsePackageVersionsFromResolvedFile", archive)
+                    self.assertEqual(self.option(export, "-archivePath"), str(folder / f"{platform}.xcarchive"))
+                    self.assertEqual(self.option(export, "-exportOptionsPlist"), str(folder / "ExportOptions.plist"))
+                    for call in (archive, export):
+                        self.assertIn("-allowProvisioningUpdates", call)
+                        self.assertNotIn("-authenticationKeyPath", call)
+                self.assertEqual(self.export_options(), {
+                    "method": "app-store-connect", "destination": "upload", "teamID": "9JALHNGRBQ",
+                    "signingStyle": "automatic", "uploadSymbols": True, "manageAppVersionAndBuildNumber": True,
+                })
+                self.assertFalse((folder / "DerivedData").exists())
 
     def test_export_only_builds_the_named_platform_once_without_uploading(self):
         result = self.upload("--export-only", "macos", "macos")
@@ -599,6 +622,7 @@ if args[0] == "archive":
                 result = self.upload("ios", **env)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn(f"App Store Connect API key {expected[1]}", result.stdout)
+                self.assertNotIn("not a real key", result.stdout + result.stderr)
                 for call in self.calls():
                     self.assertEqual(
                         [self.option(call, flag) for flag in
@@ -613,6 +637,7 @@ if args[0] == "archive":
             ({"ABS_ASC_KEY_PATH": str(self.scratch / "missing.p8"), "ABS_ASC_KEY_ID": "ENV",
               "ABS_ASC_ISSUER_ID": "issuer"}, 66, "not found"),
             ({"ABS_ASC_API_KEY_JSON": str(bad_json)}, 66, "needs the strings key_filepath, key_id and issuer_id"),
+            ({"ABS_ASC_API_KEY_JSON": str(self.scratch / "missing.json")}, 66, "not found"),
         ):
             with self.subTest(env=env):
                 result = self.upload(**env)
@@ -636,11 +661,37 @@ if args[0] == "archive":
                 self.assertIn("usage:", result.stderr)
         self.assertEqual(self.calls(), [])
 
-    def test_a_failed_archive_stops_before_the_upload(self):
-        result = self.upload(STUB_FAIL="archive")
+    def test_a_commit_that_is_not_on_origin_main_stops_before_building(self):
+        (self.repo / "local.txt").write_text("")
+        git(self.repo, "add", ".")
+        git(self.repo, "commit", "--quiet", "-m", "local only")
+        result = self.upload()
         self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
-        self.assertEqual([call[0] for call in self.calls()], ["archive"])
+        self.assertIn("isn't on origin/main", result.stderr)
+        self.assertEqual(self.calls(), [])
+        result = self.upload("ios", ABS_TESTFLIGHT_ALLOW_ANY_COMMIT="1")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        git(self.repo, "remote", "set-url", "origin", str(self.scratch / "nowhere.git"))
+        result = self.upload()
+        self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+        self.assertIn("couldn't fetch origin/main", result.stderr)
+
+    def test_a_failed_archive_uploads_nothing(self):
+        result = self.upload(STUB_FAIL="generic/platform=macOS")
+        self.assertEqual(result.returncode, 70, result.stdout + result.stderr)
+        self.assertEqual([self.option(call, "-destination") for call in self.calls()],
+                         ["generic/platform=iOS", "generic/platform=macOS"])
         self.assertFalse((self.output_dir() / "DerivedData").exists())
+
+    def test_a_failed_upload_names_the_platforms_already_uploaded(self):
+        stub = self.scratch / "bin/xcodebuild"
+        stub.write_text(stub.read_text().replace(
+            'if os.environ.get("STUB_FAIL") in args:',
+            'if args[0] == "-exportArchive" and args[args.index("-exportPath") + 1].endswith("/macos"):'))
+        result = self.upload()
+        self.assertEqual(result.returncode, 65, result.stdout + result.stderr)
+        self.assertEqual([call[0] for call in self.calls()], ["archive", "archive", "-exportArchive", "-exportArchive"])
+        self.assertIn("macOS failed, but ios was already uploaded", result.stderr)
 
 
 if __name__ == "__main__":

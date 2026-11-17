@@ -15,13 +15,16 @@
 # it uses the account signed in to Xcode. App Store Connect picks the build number
 # (manageAppVersionAndBuildNumber), and the version is MARKETING_VERSION.
 #
-# The checkout must be clean, so the build is exactly its commit. Archives and exports go
-# to .build/testflight/<time>-<commit>, or ABS_TESTFLIGHT_DIR/<time>-<commit>. DerivedData
-# is deleted when the script exits.
+# The checkout must be clean and its commit on origin/main, so every build can be traced to
+# a commit everyone has (ABS_TESTFLIGHT_ALLOW_ANY_COMMIT=1 skips the origin/main check).
+# Every platform is archived before anything is uploaded. Archives and exports go to
+# .build/testflight/<time>-<commit>, or ABS_TESTFLIGHT_DIR/<time>-<commit>. DerivedData is
+# deleted when the script exits.
 set -euo pipefail
 # App Store Connect rejects a macOS package with files only their owner can read
 # (ITMS-90255), so don't inherit a restrictive umask.
 umask 022
+export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 team="9JALHNGRBQ"
@@ -53,12 +56,26 @@ if [[ -n "$(git -C "$root" status --porcelain --untracked-files=all)" ]]; then
   exit 65
 fi
 commit="$(git -C "$root" rev-parse --short HEAD)"
+if [[ "${ABS_TESTFLIGHT_ALLOW_ANY_COMMIT:-}" != "1" ]]; then
+  if ! git -C "$root" fetch --quiet origin main; then
+    echo "error: couldn't fetch origin/main to check that $commit is on it" >&2
+    exit 65
+  fi
+  if ! git -C "$root" merge-base --is-ancestor HEAD origin/main; then
+    echo "error: $commit isn't on origin/main. Upload from an up-to-date main, or set ABS_TESTFLIGHT_ALLOW_ANY_COMMIT=1" >&2
+    exit 65
+  fi
+fi
 
 key_path="${ABS_ASC_KEY_PATH:-}"
 key_id="${ABS_ASC_KEY_ID:-}"
 issuer="${ABS_ASC_ISSUER_ID:-}"
 if [[ -z "$key_path$key_id$issuer" ]]; then
   key_json="${ABS_ASC_API_KEY_JSON:-$HOME/.appstoreconnect/api_key.json}"
+  if [[ -n "${ABS_ASC_API_KEY_JSON:-}" && ! -f "$key_json" ]]; then
+    echo "error: App Store Connect API key description $key_json not found" >&2
+    exit 66
+  fi
   if [[ -f "$key_json" ]]; then
     if ! key_path="$(plutil -extract key_filepath raw -o - "$key_json")" ||
       ! key_id="$(plutil -extract key_id raw -o - "$key_json")" ||
@@ -110,11 +127,19 @@ cat >"$out/ExportOptions.plist" <<EOF
 </plist>
 EOF
 
-for platform in $platforms; do
-  case "$platform" in
-    ios) name="iOS" ;;
-    macos) name="macOS" ;;
+platform_name() {
+  case "$1" in
+    ios) echo "iOS" ;;
+    macos) echo "macOS" ;;
   esac
+}
+
+xcodebuild -version
+
+# Archive everything first, so a platform that fails to build or sign doesn't leave the
+# others uploaded on their own.
+for platform in $platforms; do
+  name="$(platform_name "$platform")"
   echo "=== Archiving $name at $commit"
   xcodebuild archive \
     -project "$root/Audiobookshelf.xcodeproj" \
@@ -123,19 +148,37 @@ for platform in $platforms; do
     -destination "generic/platform=$name" \
     -archivePath "$out/$platform.xcarchive" \
     -derivedDataPath "$out/DerivedData" \
+    -onlyUsePackageVersionsFromResolvedFile \
     -allowProvisioningUpdates \
+    -allowProvisioningDeviceRegistration \
     ${auth[@]+"${auth[@]}"}
+done
+
+if [[ "$destination" == "upload" ]]; then
+  done_word="uploaded"
+else
+  done_word="exported"
+fi
+finished=""
+for platform in $platforms; do
+  name="$(platform_name "$platform")"
   if [[ "$destination" == "upload" ]]; then
     echo "=== Uploading $name to App Store Connect"
   else
     echo "=== Exporting $name to $out/$platform"
   fi
-  xcodebuild -exportArchive \
+  if ! xcodebuild -exportArchive \
     -archivePath "$out/$platform.xcarchive" \
     -exportPath "$out/$platform" \
     -exportOptionsPlist "$out/ExportOptions.plist" \
     -allowProvisioningUpdates \
-    ${auth[@]+"${auth[@]}"}
+    ${auth[@]+"${auth[@]}"}; then
+    if [[ -n "$finished" ]]; then
+      echo "error: $name failed, but$finished was already $done_word. Rerun with only the platforms that are left." >&2
+    fi
+    exit 65
+  fi
+  finished="$finished $platform"
 done
 
 if [[ "$destination" == "upload" ]]; then

@@ -1,9 +1,9 @@
 # Releases (Xcode Cloud and TestFlight)
 
-Xcode Cloud builds every push to `main` and sends iOS and macOS builds to internal
-TestFlight testers. A second workflow builds `v*` tags and sends them to external
-testers through Beta App Review ([Releasing a version](#releasing-a-version)). There is
-no Fastlane. Until those workflows exist (issue #20), builds are uploaded from a Mac with
+Once it's set up (issue #20), Xcode Cloud builds every push to `main` and sends iOS and
+macOS builds to internal TestFlight testers. A second workflow builds `v*` tags and sends
+them to external testers through Beta App Review ([Releasing a version](#releasing-a-version)).
+There is no Fastlane. Until those workflows exist, builds are uploaded from a Mac with
 `mise run release:testflight` ([Uploading from a Mac](#uploading-from-a-mac)). GitHub
 Actions only lints, builds and tests (see `.github/workflows/`). The App Store listing,
 privacy answers, privacy manifests, export compliance and review notes are in
@@ -27,8 +27,9 @@ A release is identified by its **TestFlight build number**, for example "TestFli
 build 42". That number is the Xcode Cloud build number (`CI_BUILD_NUMBER`). TestFlight
 shows it as `0.1.0 (42)`, where `0.1.0` is `MARKETING_VERSION`. One Xcode Cloud build
 archives both platforms, so the iOS and macOS builds from the same commit share the
-number. A build uploaded from a Mac gets its number from App Store Connect instead
-([Uploading from a Mac](#uploading-from-a-mac)). Use it in issues, PRs and bug reports.
+number. A build uploaded from a Mac is numbered per platform instead, so its iOS and macOS
+numbers can differ ([Uploading from a Mac](#uploading-from-a-mac)). Use the number in
+issues, PRs and bug reports.
 
 ## Build numbers
 
@@ -51,8 +52,8 @@ So the project needs no build-number step:
   number in App Store Connect › your app › Xcode Cloud › Settings › Build Number (Admin or
   App Manager role) before Xcode Cloud uploads again.
 
-Check this on the first build: TestFlight must show the Xcode Cloud build number, not
-`(1)`. If it shows `(1)`, see [Troubleshooting](#troubleshooting).
+Check this on the first Xcode Cloud build: TestFlight must show the Xcode Cloud build
+number, not `(1)`. If it shows `(1)`, see [Troubleshooting](#troubleshooting).
 
 ## Versioning
 
@@ -189,38 +190,48 @@ mise run release:testflight --export-only   # sign and export into .build/testfl
 
 Before the first upload:
 
-- The account holder has accepted the current agreements in App Store Connect › Business.
-  Until then every App Store Connect request, automatic signing and uploads included, fails
-  with `FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED`.
+- The account holder has agreed to the latest Apple Developer Program License Agreement
+  (developer.apple.com › Account) and to any agreements App Store Connect › Business
+  lists. Until then App Store Connect requests fail with
+  `FORBIDDEN.REQUIRED_AGREEMENTS_MISSING_OR_EXPIRED`, and the archive fails before it
+  compiles with "PLA Update available … must agree to the latest Program License
+  Agreement", followed by profile errors about the App Groups capability.
 - The App Store Connect app record for `org.davidjensenius.Audiobookshelf` exists with the
   iOS and macOS platforms ([maintainer checklist](#maintainer-setup-checklist)). A script
   can't create it.
-- Xcode can sign in to Apple: with an App Store Connect API key that can manage
-  certificates, identifiers and profiles, described by `~/.appstoreconnect/api_key.json`
-  (`key_filepath`, `key_id` and `issuer_id`) or by `ABS_ASC_KEY_PATH`, `ABS_ASC_KEY_ID`
-  and `ABS_ASC_ISSUER_ID`; without a key, with the account signed in to Xcode. Never
-  commit or print the key.
+- Xcode can sign in to Apple. Either use a team App Store Connect API key with the Admin
+  role (creating cloud-managed distribution certificates needs it), or the account signed
+  in to Xcode. The key is described by `~/.appstoreconnect/api_key.json` (`key_filepath`,
+  `key_id` and `issuer_id`), by another such file named in `ABS_ASC_API_KEY_JSON`, or by
+  `ABS_ASC_KEY_PATH`, `ABS_ASC_KEY_ID` and `ABS_ASC_ISSUER_ID`. Never commit or print the key.
 
 The script:
 
-- refuses a checkout with uncommitted or untracked files, so the build is exactly its
-  commit. Upload from an up-to-date `main`;
+- refuses a checkout with uncommitted or untracked files, or whose commit isn't on
+  `origin/main` (it fetches first), so every build is a commit everyone can find. Set
+  `ABS_TESTFLIGHT_ALLOW_ANY_COMMIT=1` to upload another commit on purpose;
+- uses `/Applications/Xcode.app` unless `DEVELOPER_DIR` names another Xcode, prints its
+  version, and builds packages at their committed `Package.resolved` versions;
 - signs automatically for team `9JALHNGRBQ` with `-allowProvisioningUpdates`, so Xcode
   registers the App IDs and creates the distribution certificates and profiles it needs,
   with the entitlements from [ADR 0002](adr/0002-identity-and-no-migration.md);
-- uploads App Store-eligible builds (not internal-only) with their symbols. App Store
-  Connect picks the build number (`manageAppVersionAndBuildNumber`): the next free one for
-  that `MARKETING_VERSION`;
-- keeps the archives, with their dSYMs, in `.build/testflight/<time>-<commit>`, and
-  deletes its DerivedData when it exits. Remove old folders when you no longer need them.
+- archives every platform before it uploads any, so a platform that fails to build or
+  sign uploads nothing. If an upload fails after another platform's succeeded, it says
+  which went up: rerun with only the rest, or that platform gets a second build;
+- uploads App Store-eligible builds (not internal-only) with their symbols. The archive's
+  build number is `CURRENT_PROJECT_VERSION`; Xcode raises it above the platform's earlier
+  uploads when it's taken (`manageAppVersionAndBuildNumber`);
+- keeps the archives, with their dSYMs, in `.build/testflight/<time>-<commit>` (or under
+  `ABS_TESTFLIGHT_DIR`), and deletes its DerivedData when it exits. Remove old folders
+  when you no longer need them.
 
 After the upload:
 
 1. Wait for App Store Connect to process the builds; Apple emails when each is ready.
    Export compliance needs no answer ([why](app-store.md#export-compliance)).
 2. A Mac upload has no "What to Test" notes. Write them with the command in
-   [What to Test notes](#what-to-test-notes), fix the build number on their first line,
-   and paste them into TestFlight › the build › Test Details.
+   [What to Test notes](#what-to-test-notes), with `CI_BUILD_NUMBER` set to the TestFlight
+   build number, and paste them into TestFlight › the build › Test Details.
 3. Add the builds to the internal group, unless it gets new builds automatically. For
    external testers, add them to the external group, which submits them to Beta App Review.
 4. Record the TestFlight build numbers ([Referring to builds](#referring-to-builds)).
