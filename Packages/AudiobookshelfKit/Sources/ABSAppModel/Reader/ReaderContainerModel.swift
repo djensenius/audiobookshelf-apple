@@ -226,7 +226,17 @@ public final class ReaderContainerModel {
         progressModel?.record(location, progress: progress)
     }
 
+    /// Keeps the chrome shown, so its Close, contents and settings stay reachable: set while
+    /// VoiceOver runs on iOS, where it can't be relied on to offer the page's Show Controls
+    /// action. Pinning shows the chrome; page taps leave it shown while pinned.
+    public var isChromePinned = false {
+        didSet {
+            if isChromePinned { isChromeVisible = true }
+        }
+    }
+
     public func toggleChrome() {
+        guard !isChromePinned else { return }
         isChromeVisible.toggle()
     }
 

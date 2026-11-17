@@ -223,6 +223,19 @@ private func comicData(pages: Int) throws -> Data {
         #expect(model.isChromeVisible)
     }
 
+    @Test func aPinnedChromeShowsAndStaysShown() {
+        let model = makeModel()
+        model.toggleChrome()
+        model.isChromePinned = true
+        #expect(model.isChromeVisible)
+        model.toggleChrome()
+        #expect(model.isChromeVisible)
+
+        model.isChromePinned = false
+        model.toggleChrome()
+        #expect(!model.isChromeVisible)
+    }
+
     // MARK: With a progress model
 
     @Test func turnsGoThroughTheProgressModelButOpeningDoesNot() async throws {

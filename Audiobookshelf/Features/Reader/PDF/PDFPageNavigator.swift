@@ -50,7 +50,7 @@ struct PDFPageNavigator: View {
             .simultaneousGesture(TapGesture().onEnded { onTap() })
         #endif
         // A container of the page's elements, so the action is kept: on the PDF view alone SwiftUI
-        // drops it, handing the view's elements on as they are.
+        // drops it on Mac (the tests check there). On iOS, VoiceOver running pins the chrome instead.
         .accessibilityElement(children: .contain)
         .readerChromeAccessibilityAction(isChromeVisible: showsControls, toggle: onTap)
         .overlay {
