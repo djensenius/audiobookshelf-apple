@@ -197,6 +197,7 @@ run = "python3 scripts/ui-test-ci-tests.py"
 [tasks."privacy:check"]
 description = "Check app and extension required-reason APIs against their privacy manifests"
 usage = 'arg "<app>" help="built .app bundle to inspect"'
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = 'python3 scripts/check-privacy-manifests.py "$usage_app"'
 
 [tasks."privacy:check:tests"]
