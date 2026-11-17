@@ -1,5 +1,6 @@
 #if canImport(CarPlay) && os(iOS)
     import ABSAppModel
+    import ABSCore
     import ABSUI
     import CarPlay
 
@@ -16,7 +17,9 @@
     /// root included (`CPInterfaceController.pushTemplate(_:animated:completion:)`; CarPlay
     /// Developer Guide, "Templates"), so over Now Playing pushed from a list at the browse tree's
     /// deepest level, the chapters and queue don't open and Now Playing stays
-    /// (``CarPlayNowPlayingControls/canPushList(stackCount:limits:isPushing:isListShown:)``).
+    /// (``CarPlayNowPlayingControls/canPushList(stackCount:limits:isPushing:isListShown:)``); the
+    /// Chapters and Up Next buttons are disabled there whenever Now Playing appears
+    /// (``refreshButtons()``).
     @MainActor
     final class CarPlayNowPlayingController: NSObject, CPNowPlayingTemplateObserver {
         /// How the rate button shows the rate.
@@ -73,11 +76,26 @@
             }
             guard buttons != shownButtons else { return }
             shownButtons = buttons
+            apply(buttons)
+        }
+
+        /// Shows the buttons again with whether a list fits over Now Playing in the stack now, so
+        /// Chapters and Up Next are disabled rather than dead when it's full. The scene delegate
+        /// calls it as Now Playing appears.
+        func refreshButtons() {
+            guard isConnected, let shownButtons else { return }
+            apply(shownButtons)
+        }
+
+        private func apply(_ buttons: CarPlayNowPlayingButtons) {
             let template = CPNowPlayingTemplate.shared
+            let templates = interfaceController.templates
+            let listFits = CarPlayNowPlayingControls.listFitsOverNowPlaying(
+                nowPlayingIndex: templates.firstIndex { $0 === template }, stackCount: templates.count, limits: limits)
             template.updateNowPlayingButtons([
-                rateButton(rate: buttons.rate), sleepTimerButton(buttons), chaptersButton(buttons),
+                rateButton(rate: buttons.rate), sleepTimerButton(buttons), chaptersButton(buttons, listFits: listFits),
             ])
-            template.isUpNextButtonEnabled = buttons.upNext != nil
+            template.isUpNextButtonEnabled = buttons.upNext != nil && listFits
             template.upNextTitle = L10n.string(buttons.upNext == .queue ? "HeaderUpNext" : "LabelChapters")
         }
 
@@ -99,11 +117,11 @@
             return button
         }
 
-        private func chaptersButton(_ buttons: CarPlayNowPlayingButtons) -> CPNowPlayingButton {
+        private func chaptersButton(_ buttons: CarPlayNowPlayingButtons, listFits: Bool) -> CPNowPlayingButton {
             let button = CPNowPlayingImageButton(image: Self.symbol("list.bullet")) { [weak self] _ in
                 self?.showChapters()
             }
-            button.isEnabled = buttons.hasChapters
+            button.isEnabled = buttons.hasChapters && listFits
             return button
         }
 
@@ -128,14 +146,17 @@
 
         /// Updates the chapter list while it shows. The current chapter follows the playback time,
         /// so this runs on every tick, but the list changes only when a row does. Each loop
-        /// belongs to its `list` and ends once a newer list replaces it or it's no longer shown.
+        /// belongs to its `list` and ends once a newer list replaces it or it's no longer shown; a
+        /// list being pushed counts as shown, as CarPlay adds it to `templates` only once pushed.
         private func observeChapters(_ list: CPListTemplate) {
             guard isConnected else { return }
             let rows = withObservationTracking {
                 model.chapters
             } onChange: { [weak self, weak list] in
                 Task { @MainActor in
-                    guard let self, let list, self.chapterObservation.continues(list, isShown: self.isShown(list))
+                    guard let self, let list else { return }
+                    let isPushing = self.isPushingList && self.chapterObservation.list === list
+                    guard self.chapterObservation.continues(list, isShown: self.isShown(list) || isPushing)
                     else { return }
                     self.observeChapters(list)
                 }
@@ -201,11 +222,12 @@
                     isListShown: isShown)
         }
 
-        /// Pushes `list` over Now Playing. The completion handler ends the push either way, and
-        /// keeps a failed push from raising CarPlay's exception.
+        /// Pushes `list` over Now Playing. The completion handler ends the push either way, logs a
+        /// failure, and keeps a failed push from raising CarPlay's exception.
         private func push(_ list: CPListTemplate) {
             isPushingList = true
-            interfaceController.pushTemplate(list, animated: true) { [weak self] _, _ in
+            interfaceController.pushTemplate(list, animated: true) { [weak self] pushed, error in
+                CarPlayPushLog.record("list over Now Playing", pushed: pushed, error: error)
                 Task { @MainActor in self?.isPushingList = false }
             }
         }
@@ -240,6 +262,16 @@
                 let bounds = string.boundingRect(with: size, options: .usesLineFragmentOrigin, context: nil)
                 string.draw(at: CGPoint(x: (size.width - bounds.width) / 2, y: (size.height - bounds.height) / 2))
             }
+        }
+    }
+
+    /// Logs a template push CarPlay refused, from its completion handler.
+    enum CarPlayPushLog {
+        static func record(_ template: StaticString, pushed: Bool, error: (any Error)?) {
+            guard !pushed else { return }
+            let reason = Log.redact(error.map { String(describing: $0) } ?? "unknown")
+            Log.ui.error(
+                "CarPlay couldn't push \(String(describing: template), privacy: .public): \(reason, privacy: .public)")
         }
     }
 #endif

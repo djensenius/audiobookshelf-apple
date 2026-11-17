@@ -257,6 +257,24 @@ private func chapterRows(_ count: Int) -> [PlayerChapterRow] {
             !CarPlayNowPlayingControls.canPushList(stackCount: 2, limits: limits, isPushing: false, isListShown: true))
     }
 
+    /// Review of #79: Chapters and Up Next are disabled when Now Playing is the fifth template,
+    /// whether it's already in the stack or about to be pushed onto it.
+    @Test func theListButtonsAreEnabledOnlyWhenAListFitsOverNowPlaying() {
+        let limits = CarPlayLimits.standard
+        func fits(_ index: Int?, _ count: Int) -> Bool {
+            CarPlayNowPlayingControls.listFitsOverNowPlaying(nowPlayingIndex: index, stackCount: count, limits: limits)
+        }
+        // Root, Now Playing.
+        #expect(fits(1, 2))
+        // Root, two lists, Now Playing, Chapters (being popped back to Now Playing).
+        #expect(fits(3, 5))
+        // Root, three lists, Now Playing.
+        #expect(!fits(4, 5))
+        // Being pushed onto root, two lists; onto root, three lists.
+        #expect(fits(nil, 3))
+        #expect(!fits(nil, 4))
+    }
+
     // MARK: List observation
 
     /// Review of #564: reopening Chapters ends the first list's loop, so loops don't pile up.

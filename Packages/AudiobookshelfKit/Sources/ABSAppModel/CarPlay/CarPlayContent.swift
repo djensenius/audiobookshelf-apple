@@ -158,6 +158,22 @@ public struct CarPlayRow: Sendable, Hashable, Identifiable {
         self.isEnabled = isEnabled
         self.action = action
     }
+
+    /// The playback action `CPPlaybackConfiguration` shows for the row: pause for the row
+    /// `isPlaying`, replay for a finished one, play otherwise. `nil` for a row that doesn't play,
+    /// or whose ``elapsed`` or ``duration`` is unknown: it gets no playback configuration.
+    public func playbackAction(isPlaying: Bool) -> CarPlayRowPlaybackAction? {
+        guard case .play = action, elapsed != nil, duration != nil else { return nil }
+        if isPlaying { return .pause }
+        return (progress ?? 0) >= 1 ? .replay : .play
+    }
+}
+
+/// What tapping a playable row does to its playback, for `CPPlaybackConfiguration.Action`.
+public enum CarPlayRowPlaybackAction: Sendable, Hashable {
+    case play
+    case pause
+    case replay
 }
 
 public struct CarPlaySection: Sendable, Hashable, Identifiable {

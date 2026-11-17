@@ -211,11 +211,13 @@
             perform(alerts.request(alert))
         }
 
-        /// Reloads the shelves when the Continue tab shows again, for example after Now Playing.
+        /// Reloads the shelves when the Continue tab shows again, for example after Now Playing, and
+        /// enables Now Playing's list buttons as the stack allows when it shows.
         func templateWillAppear(_ aTemplate: CPTemplate, animated: Bool) {
             // Back on the tab bar, from a pushed list or Now Playing: its selected tab shows again.
             refreshBrowse((aTemplate as? CPTabBarTemplate)?.selectedTemplate ?? aTemplate)
             refreshDownloads((aTemplate as? CPTabBarTemplate)?.selectedTemplate ?? aTemplate)
+            if aTemplate === CPNowPlayingTemplate.shared { nowPlaying?.refreshButtons() }
             guard let model, aTemplate is CPTabBarTemplate || aTemplate === continueTemplate else { return }
             if hasShownContinue { Task { await model.refresh() } }
             hasShownContinue = true
@@ -250,7 +252,7 @@
             let image = row.image.flatMap(cover(for:)).map { UIImage(cgImage: $0.cgImage) }
             let item = CPListItem(text: row.text, detailText: row.detail, image: image)
             if let progress = row.progress { item.playbackProgress = CGFloat(progress) }
-            item.playbackConfiguration = Self.playbackConfiguration(for: row)
+            item.playbackConfiguration = Self.playbackConfiguration(for: row, isPlaying: isPlaying)
             item.isPlaying = isPlaying
             item.isEnabled = row.isEnabled
             item.handler = { [weak self] _, completion in
@@ -260,14 +262,24 @@
             return item
         }
 
-        /// What a playable row shows of its playback: where it was left and its length, set only
-        /// when both are known, like `playbackProgress`, so the row claims no position it doesn't
-        /// know. Selecting it plays and shows Now Playing.
-        private static func playbackConfiguration(for row: CarPlayRow) -> CPPlaybackConfiguration? {
-            guard case .play = row.action, let elapsed = row.elapsed, let duration = row.duration else { return nil }
+        /// What a playable row shows of its playback: where it was left, its length and its action
+        /// (``CarPlayRow/playbackAction(isPlaying:)``), set only when both times are known, like
+        /// `playbackProgress`, so the row claims no position it doesn't know. The presentation is
+        /// none: the app shows Now Playing itself once the play starts, and a failed or blocked
+        /// play shows its alert over the list instead (``showNowPlaying(after:)``).
+        private static func playbackConfiguration(for row: CarPlayRow, isPlaying: Bool) -> CPPlaybackConfiguration? {
+            guard let action = row.playbackAction(isPlaying: isPlaying), let elapsed = row.elapsed,
+                let duration = row.duration
+            else { return nil }
+            let playbackAction: CPPlaybackConfiguration.Action =
+                switch action {
+                case .play: .play
+                case .pause: .pause
+                case .replay: .replay
+                }
             let timescale = CMTimeScale(NSEC_PER_SEC)
             return CPPlaybackConfiguration(
-                preferredPresentation: .audio, playbackAction: .play,
+                preferredPresentation: CPPlaybackConfiguration.Presentation.none, playbackAction: playbackAction,
                 elapsedTime: CMTime(seconds: elapsed, preferredTimescale: timescale),
                 duration: CMTime(seconds: duration, preferredTimescale: timescale))
         }
@@ -292,7 +304,10 @@
                 switch CarPlayNowPlayingControls.nowPlayingNavigation(
                     index: templates.firstIndex { $0 === nowPlaying }, count: templates.count)
                 {
-                case .push: interfaceController.pushTemplate(nowPlaying, animated: true, completion: nil)
+                case .push:
+                    interfaceController.pushTemplate(nowPlaying, animated: true) { pushed, error in
+                        CarPlayPushLog.record("Now Playing", pushed: pushed, error: error)
+                    }
                 case .pop: interfaceController.pop(to: nowPlaying, animated: true, completion: nil)
                 case .none: break
                 }
@@ -560,7 +575,9 @@
                 let template = CPListTemplate(title: row.text, sections: [])
                 template.emptyViewTitleVariants = [L10n.string("MessageLoading")]
                 browseTemplates.append(BrowseTemplate(template, destination))
-                interfaceController.pushTemplate(template, animated: true, completion: nil)
+                interfaceController.pushTemplate(template, animated: true) { pushed, error in
+                    CarPlayPushLog.record("browse list", pushed: pushed, error: error)
+                }
                 Task { await browse.load(destination) }
                 observeBrowse()
             case .more(let destination, let offset):

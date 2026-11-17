@@ -123,6 +123,13 @@ public enum CarPlayNowPlayingControls {
         !isPushing && !isListShown && limits.canPush(onto: stackCount)
     }
 
+    /// Whether a list would fit over Now Playing, which sits at `nowPlayingIndex` of a stack of
+    /// `stackCount` templates, or is about to be pushed onto it when `nil`. Lists over Now Playing
+    /// don't count: they're popped before one is pushed again. For enabling the list buttons.
+    public static func listFitsOverNowPlaying(nowPlayingIndex: Int?, stackCount: Int, limits: CarPlayLimits) -> Bool {
+        limits.canPush(onto: nowPlayingIndex.map { $0 + 1 } ?? stackCount + 1)
+    }
+
     /// The chapter list's rows, at most `limit`: all of them when they fit, otherwise a window
     /// that starts one before the current chapter, so it and the next ones show.
     public static func chapterRows(_ chapters: [PlayerChapterRow], currentIndex: Int?, limit: Int)
