@@ -73,6 +73,22 @@ scripts/set-version.sh "$usage_version"
 mise run xcproj:check
 """
 
+[tasks."release:testflight"]
+description = "Archive Release and upload it to TestFlight from this Mac (docs/release.md › Uploading from a Mac)"
+usage = '''
+flag "--export-only" help="Sign and export into .build/testflight; upload nothing"
+arg "[platform]" var=#true help="ios or macos (default: both)"
+'''
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = """
+#!/usr/bin/env bash
+set -euo pipefail
+args=()
+if [[ "${usage_export_only:-}" == "true" ]]; then args+=(--export-only); fi
+for platform in ${usage_platform:-}; do args+=("$platform"); done
+scripts/testflight-upload.sh ${args[@]+"${args[@]}"}
+"""
+
 [tasks."build:kit:extension"]
 description = "Build AudiobookshelfKit as application-extension-only code for the iOS Simulator (widgets/extensions)"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
@@ -221,7 +237,7 @@ env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xco
 run = "swift test --package-path Tools/StringsImport --scratch-path .build/strings-import"
 
 [tasks."test:release"]
-description = "Test scripts/set-version.sh, the What to Test notes in ci_scripts/ci_post_xcodebuild.sh, and the release tag check in ci_scripts/ci_post_clone.sh"
+description = "Test scripts/set-version.sh, the What to Test notes in ci_scripts/ci_post_xcodebuild.sh, the release tag check in ci_scripts/ci_post_clone.sh, and scripts/testflight-upload.sh"
 env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
 run = "python3 scripts/test-release-tests.py"
 
