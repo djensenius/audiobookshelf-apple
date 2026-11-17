@@ -198,7 +198,7 @@ The settings mapping is in [Settings](settings.md); this table records status.
 | Legacy | Native | Tracking | Status | Notes |
 | --- | --- | --- | --- | --- |
 | `Reader.vue` | `ReaderContainer` | #101, PRs #474, #596 | Needs acceptance (#101) | Reachable from Read; other formats offer Open In. |
-| `EpubReader.vue` | `EPUBWebView` | #104, PRs #456, #457, #458, #475, #548, #583, #597 | Needs acceptance (#104) | Reachable from Read, with a table of contents, a gap over the Duo hinge and keep screen awake. |
+| `EpubReader.vue` | `EPUBWebView` | #104, PRs #456, #457, #458, #475, #548, #583, #597 | Needs acceptance (#104) | Reachable from Read, with a table of contents, a gap over the Duo hinge, margins and keep screen awake. |
 | `PdfReader.vue` | `PDFReaderView` | #102, PRs #452, #510 | Needs acceptance (#102) | Reachable from Read. |
 | `ComicReader.vue` (CBZ) | `ComicArchive`, `ComicReaderView` | #105, PRs #447, #477, #547 | Needs acceptance (#105) | Reachable from Read. |
 | `ComicReader.vue` (CBR) | — | — | Dropped | [ADR 0008](adr/0008-readers.md), decision 4. |

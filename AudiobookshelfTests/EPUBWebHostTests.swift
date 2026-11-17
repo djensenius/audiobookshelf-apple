@@ -175,7 +175,8 @@ private final class ReaderPage {
                 css(name)
               }
             },
-            spread: function (value) { window.fakeSpread = value },
+            spread: function (value, minWidth) { window.fakeSpread = value; window.fakeMinSpreadWidth = minWidth },
+            resize: function () { window.fakeResizes = (window.fakeResizes || 0) + 1 },
             started: new Promise(function (resolve) {
               setTimeout(function () { window.fakeSpread = true; resolve() }, 0)
             }),
@@ -649,6 +650,38 @@ private final class ReaderPage {
         try await page.open("tiny", settings: ["spread": "none"])
 
         #expect(try await page.evaluate("window.fakeSpread") == #""none""#)
+    }
+
+    /// The margins pad the viewer on both sides, narrow epub.js's spread threshold to match, and lay
+    /// the pages out again once shown; none (the default) leaves the layout as it was.
+    @Test(.timeLimit(.minutes(1))) func theMarginsPadTheViewerAndKeepTheSpreadThreshold() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS()
+        let padding =
+            "(function (v) { return [v.style.paddingLeft, v.style.paddingRight] })(document.getElementById('viewer'))"
+        func apply(_ margins: Int) async throws {
+            try await page.controller.send(
+                Data(#"{"type":"applySettings","settings":{"themeRules":{},"margins":\#(margins)}}"#.utf8))
+        }
+
+        try await page.open("tiny")
+        #expect(try await page.evaluate(padding) == #"["",""]"#)
+        #expect(try await page.evaluate("window.fakeMinSpreadWidth") == "800")
+        // As epub.js once it's showing the book.
+        _ = try await page.evaluate("window.fakeRendition.manager = { settings: {}, stage: {} }")
+
+        try await apply(6)
+        #expect(try await page.evaluate(padding) == #"["6%","6%"]"#)
+        #expect(try await page.evaluate("window.fakeMinSpreadWidth") == "704")
+        #expect(try await page.evaluate("window.fakeResizes") == "1")
+
+        try await apply(6)
+        #expect(try await page.evaluate("window.fakeResizes") == "1")
+
+        try await apply(0)
+        #expect(try await page.evaluate(padding) == #"["",""]"#)
+        #expect(try await page.evaluate("window.fakeMinSpreadWidth") == "800")
+        #expect(try await page.evaluate("window.fakeResizes") == "2")
     }
 
     /// Cached locations that aren't an array of CFIs aren't loaded; they're generated afresh.

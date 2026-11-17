@@ -55,6 +55,8 @@
   // Until the first display lands, relocations are epub.js settling on the start, not the reader.
   let displaying = false
   let lastRelocation = null
+  // The page margin applied to the viewer (see `pageMargin`).
+  let appliedMargin = 0
   // The open book's own state: the displays a command is awaiting (their failures reach that
   // command, not the `displayerror` post), whether the reader's font is applied, and `closed`,
   // which rejects when the book is replaced so nothing awaiting it is stranded.
@@ -201,6 +203,30 @@
     return gap > 0 ? gap : undefined
   }
 
+  // The extra margin on each side, percent of the reader's width (ReaderSettings.margins). It's
+  // padding on the viewer, which epub.js takes off the width it lays pages out in, so epub.js's own
+  // margins and column gap (the Duo hinge, which stays centred) are kept; `0` adds nothing.
+  function pageMargin(next) {
+    const margin = Number(next.margins)
+    return margin > 0 && margin < 50 ? margin : 0
+  }
+
+  // epub.js shows a spread from `minSpreadWidth` of its own width, which the margins narrow; the
+  // threshold narrows with it, so the spread still turns on at an 800-point reader (as native does).
+  function minSpreadWidth() {
+    return Math.floor((MIN_SPREAD_WIDTH * (100 - 2 * pageMargin(settings))) / 100)
+  }
+
+  function applyMargins(shown) {
+    const margin = pageMargin(settings)
+    if (margin === appliedMargin) return
+    appliedMargin = margin
+    const viewer = document.getElementById('viewer')
+    viewer.style.paddingLeft = viewer.style.paddingRight = margin ? margin + '%' : ''
+    // Lays the pages out again in the new width, as a window resize does (once epub.js is showing).
+    if (shown.manager && shown.manager.stage) shown.resize()
+  }
+
   function applySettings(next) {
     settings = validSettings(next)
     if (!rendition) return
@@ -220,10 +246,11 @@
     rendition.settings.gap = gap
     if (rendition.manager) rendition.manager.settings.gap = gap
     applySpread(rendition)
+    applyMargins(rendition)
   }
 
   function applySpread(shown) {
-    shown.spread(settings.spread === 'none' ? 'none' : 'auto', MIN_SPREAD_WIDTH)
+    shown.spread(settings.spread === 'none' ? 'none' : 'auto', minSpreadWidth())
   }
 
   // Keeps a section's inline font (a spine content hook, before epub.js applies any override).
@@ -648,7 +675,7 @@
       width: '100%',
       height: '100%',
       spread: settings.spread === 'none' ? 'none' : 'auto',
-      minSpreadWidth: MIN_SPREAD_WIDTH,
+      minSpreadWidth: minSpreadWidth(),
       allowScriptedContent: false,
       // The legacy app's and web client's layout (ADR 0008).
       flow: 'paginated',

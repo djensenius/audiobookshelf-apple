@@ -54,12 +54,17 @@ public struct ReaderSettings: Sendable, Hashable, Codable {
     public static let lineSpacingScale = Scale(range: 100...300, step: 5, defaultValue: 115)
     /// Text stroke ("font boldness"), hundredths of a pixel (legacy 0...300 step 5, default 0).
     public static let textStrokeScale = Scale(range: 0...300, step: 5, defaultValue: 0)
+    /// Extra horizontal page margin, percent of the reader's width on each side (0...12 step 2,
+    /// default 0). Native, not legacy: it adds to epub.js's own margins, so `0` is the layout
+    /// from before the setting existed.
+    public static let marginsScale = Scale(range: 0...12, step: 2, defaultValue: 0)
 
     public var theme: Theme
     public var fontFamily: FontFamily
     public var fontScale: Int { didSet { fontScale = Self.fontScaleScale.clamp(fontScale) } }
     public var lineSpacing: Int { didSet { lineSpacing = Self.lineSpacingScale.clamp(lineSpacing) } }
     public var textStroke: Int { didSet { textStroke = Self.textStrokeScale.clamp(textStroke) } }
+    public var margins: Int { didSet { margins = Self.marginsScale.clamp(margins) } }
     public var spread: Spread
     /// Keeps the screen from sleeping while a reader is shown (legacy `keepScreenAwake`).
     public var keepScreenAwake: Bool
@@ -68,7 +73,8 @@ public struct ReaderSettings: Sendable, Hashable, Codable {
         theme: Theme = .matchSystem, fontFamily: FontFamily = .serif,
         fontScale: Int = ReaderSettings.fontScaleScale.defaultValue,
         lineSpacing: Int = ReaderSettings.lineSpacingScale.defaultValue,
-        textStroke: Int = ReaderSettings.textStrokeScale.defaultValue, spread: Spread = .auto,
+        textStroke: Int = ReaderSettings.textStrokeScale.defaultValue,
+        margins: Int = ReaderSettings.marginsScale.defaultValue, spread: Spread = .auto,
         keepScreenAwake: Bool = false
     ) {
         self.theme = theme
@@ -76,12 +82,13 @@ public struct ReaderSettings: Sendable, Hashable, Codable {
         self.fontScale = Self.fontScaleScale.clamp(fontScale)
         self.lineSpacing = Self.lineSpacingScale.clamp(lineSpacing)
         self.textStroke = Self.textStrokeScale.clamp(textStroke)
+        self.margins = Self.marginsScale.clamp(margins)
         self.spread = spread
         self.keepScreenAwake = keepScreenAwake
     }
 
     private enum CodingKeys: String, CodingKey {
-        case theme, fontFamily, fontScale, lineSpacing, textStroke, spread, keepScreenAwake
+        case theme, fontFamily, fontScale, lineSpacing, textStroke, margins, spread, keepScreenAwake
     }
 
     public init(from decoder: any Decoder) throws {
@@ -94,7 +101,8 @@ public struct ReaderSettings: Sendable, Hashable, Codable {
             theme: value(.theme) ?? defaults.theme, fontFamily: value(.fontFamily) ?? defaults.fontFamily,
             fontScale: value(.fontScale) ?? defaults.fontScale,
             lineSpacing: value(.lineSpacing) ?? defaults.lineSpacing,
-            textStroke: value(.textStroke) ?? defaults.textStroke, spread: value(.spread) ?? defaults.spread,
+            textStroke: value(.textStroke) ?? defaults.textStroke, margins: value(.margins) ?? defaults.margins,
+            spread: value(.spread) ?? defaults.spread,
             keepScreenAwake: value(.keepScreenAwake) ?? defaults.keepScreenAwake)
     }
 }

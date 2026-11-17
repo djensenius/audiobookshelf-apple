@@ -26,6 +26,7 @@ struct ReaderSettingsMenu: View {
                     stepper(
                         .textStroke, value: $settings.readerSettings.textStroke,
                         scale: ReaderSettings.textStrokeScale)
+                    stepper(.margins, value: $settings.readerSettings.margins, scale: ReaderSettings.marginsScale)
                 }
                 Toggle(isOn: $settings.readerSettings.keepScreenAwake) {
                     Text(verbatim: L10n.string(ReaderSettingsLabel.keepScreenAwake.titleKey))
@@ -91,5 +92,7 @@ struct ReaderSettingsMenu: View {
         } label: {
             Text(verbatim: "\(L10n.string(label.titleKey)): \(value.wrappedValue)%")
         }
+        .accessibilityLabel(Text(verbatim: L10n.string(label.titleKey)))
+        .accessibilityValue(Text(verbatim: "\(value.wrappedValue)%"))
     }
 }

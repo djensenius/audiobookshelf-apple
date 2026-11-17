@@ -156,6 +156,7 @@
   "LabelMiniPlayerHint": "Opens the full player.",
   "LabelMinimizePlayer": "Minimize player",
   "LabelNextChapter": "Next chapter",
+  "LabelPageMargins": "Margins",
   "LabelPlayFromBookmarkHint": "Moves playback to this bookmark.",
   "LabelPlayQueueItemHint": "Plays it now.",
   "LabelPlaybackRate": "{0}×",

@@ -86,7 +86,8 @@ public enum ReaderTheme: String, CaseIterable, Sendable, Hashable, Encodable {
 /// - the theme, already resolved;
 /// - the font family, for `rendition.themes.font` (an inline `!important` override on `body`,
 ///   as in the legacy reader, so a book's own font rules can't win);
-/// - the numbers as stored;
+/// - the numbers as stored (`margins` is applied as padding around the pages, so epub.js lays
+///   them out narrower; it never changes the column `gap`);
 /// - the column `gap` in CSS pixels (`0` is epub.js's default; the Duo hinge width when spanned);
 /// - the precomputed ``ReaderTheme/themeRules(for:resolvedAppearance:)``.
 public struct ReaderSettingsPayload: Sendable, Hashable, Encodable {
@@ -95,6 +96,7 @@ public struct ReaderSettingsPayload: Sendable, Hashable, Encodable {
     public let fontScale: Int
     public let lineSpacing: Int
     public let textStroke: Int
+    public let margins: Int
     public let spread: ReaderSettings.Spread
     public let gap: Double
     public let themeRules: [String: [String: String]]
@@ -106,6 +108,7 @@ public struct ReaderSettingsPayload: Sendable, Hashable, Encodable {
         fontScale = settings.fontScale
         lineSpacing = settings.lineSpacing
         textStroke = settings.textStroke
+        margins = settings.margins
         spread = settings.spread
         self.gap = gap.isFinite ? max(gap, 0) : 0
         themeRules = ReaderTheme.themeRules(for: settings, resolvedAppearance: resolvedAppearance)

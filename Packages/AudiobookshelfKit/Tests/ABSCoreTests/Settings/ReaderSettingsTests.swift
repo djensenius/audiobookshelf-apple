@@ -12,6 +12,8 @@ import Testing
         #expect(settings.fontScale == 100)
         #expect(settings.lineSpacing == 115)
         #expect(settings.textStroke == 0)
+        // No margins beyond epub.js's own: the layout from before the setting existed.
+        #expect(settings.margins == 0)
         #expect(settings.spread == .auto)
         #expect(!settings.keepScreenAwake)
     }
@@ -46,10 +48,18 @@ import Testing
         #expect(assigned == initialised)
     }
 
+    @Test(arguments: [(-4, 0), (0, 0), (1, 2), (3, 4), (6, 6), (12, 12), (40, 12)])
+    func marginsClampToTheirSteps(input: Int, margins: Int) {
+        #expect(ReaderSettings(margins: input).margins == margins)
+        var assigned = ReaderSettings()
+        assigned.margins = input
+        #expect(assigned.margins == margins)
+    }
+
     @Test func codableRoundTrips() throws {
         let settings = ReaderSettings(
-            theme: .sepia, fontFamily: .sansSerif, fontScale: 140, lineSpacing: 180, textStroke: 25, spread: .none,
-            keepScreenAwake: true)
+            theme: .sepia, fontFamily: .sansSerif, fontScale: 140, lineSpacing: 180, textStroke: 25, margins: 8,
+            spread: .none, keepScreenAwake: true)
         let data = try JSONEncoder().encode(settings)
         #expect(try JSONDecoder().decode(ReaderSettings.self, from: data) == settings)
 
@@ -57,7 +67,20 @@ import Testing
         #expect(object["theme"] as? String == "sepia")
         #expect(object["fontFamily"] as? String == "sans-serif")
         #expect(object["spread"] as? String == "none")
+        #expect(object["margins"] as? Int == 8)
         #expect(object["keepScreenAwake"] as? Bool == true)
+    }
+
+    /// Settings saved before margins existed keep the layout they had.
+    @Test func settingsWithoutMarginsDecodeWithNone() throws {
+        let json =
+            #"{"theme":"dark","fontFamily":"serif","fontScale":120,"lineSpacing":115,"textStroke":0,"spread":"auto","keepScreenAwake":true}"#
+        let settings = try JSONDecoder().decode(ReaderSettings.self, from: Data(json.utf8))
+        #expect(settings == ReaderSettings(theme: .dark, fontScale: 120, keepScreenAwake: true))
+        #expect(settings.margins == 0)
+        #expect(
+            try JSONDecoder().decode(ReaderSettings.self, from: Data(#"{"margins":"wide"}"#.utf8)) == ReaderSettings())
+        #expect(try JSONDecoder().decode(ReaderSettings.self, from: Data(#"{"margins":99}"#.utf8)).margins == 12)
     }
 
     /// Settings saved before the setting existed keep the screen's normal sleep.

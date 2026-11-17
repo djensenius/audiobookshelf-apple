@@ -77,19 +77,23 @@ import Testing
 
     @Test func payloadMatchesTheBridgeContract() throws {
         let settings = ReaderSettings(
-            theme: .matchSystem, fontFamily: .sansSerif, fontScale: 120, lineSpacing: 150, textStroke: 10,
+            theme: .matchSystem, fontFamily: .sansSerif, fontScale: 120, lineSpacing: 150, textStroke: 10, margins: 6,
             spread: .none)
         let payload = ReaderSettingsPayload(settings: settings, resolvedAppearance: .dark, gap: 24)
         let data = try JSONEncoder().encode(payload)
         let object = try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
         #expect(
             Set(object.keys)
-                == ["theme", "fontFamily", "fontScale", "lineSpacing", "textStroke", "spread", "gap", "themeRules"])
+                == [
+                    "theme", "fontFamily", "fontScale", "lineSpacing", "textStroke", "margins", "spread", "gap",
+                    "themeRules",
+                ])
         #expect(object["theme"] as? String == "dark")
         #expect(object["fontFamily"] as? String == "sans-serif")
         #expect(object["fontScale"] as? Int == 120)
         #expect(object["lineSpacing"] as? Int == 150)
         #expect(object["textStroke"] as? Int == 10)
+        #expect(object["margins"] as? Int == 6)
         #expect(object["spread"] as? String == "none")
         #expect(object["gap"] as? Double == 24)
         let rules = try #require(object["themeRules"] as? [String: [String: String]])
@@ -120,11 +124,24 @@ import Testing
         #expect(spread.gap == 24)
     }
 
+    /// Margins pass through whatever the spread, and never change the column gap (the Duo hinge).
+    @Test func payloadCarriesMarginsBesideTheGap() {
+        let settings = ReaderSettings(margins: 10)
+        let single = ReaderSettingsPayload(settings: settings, resolvedAppearance: .light, layout: .single)
+        #expect(single.margins == 10)
+        #expect(single.gap == 0)
+        let spread = ReaderSettingsPayload(settings: settings, resolvedAppearance: .light, layout: .twoUp(gap: 28))
+        #expect(spread.margins == 10)
+        #expect(spread.gap == 28)
+        #expect(ReaderSettingsPayload(settings: ReaderSettings(), resolvedAppearance: .light).margins == 0)
+    }
+
     @Test func everyOptionHasALocalizationKey() {
         #expect(ReaderSettings.Theme.allCases.map(\.titleKey).allSatisfy { $0.hasPrefix("LabelTheme") })
         #expect(Set(ReaderSettings.Theme.allCases.map(\.titleKey)).count == ReaderSettings.Theme.allCases.count)
         #expect(ReaderSettings.FontFamily.allCases.map(\.titleKey) == ["LabelFontFamilySerif", "LabelFontFamilySans"])
         #expect(ReaderSettings.Spread.allCases.map(\.titleKey) == ["LabelLayoutAuto", "LabelLayoutSinglePage"])
         #expect(ReaderSettingsLabel.textStroke.titleKey == "LabelFontBoldness")
+        #expect(ReaderSettingsLabel.margins.titleKey == "LabelPageMargins")
     }
 }
