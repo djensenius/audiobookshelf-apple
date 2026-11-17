@@ -322,22 +322,49 @@
   // the same distance, speed and direction rules as a swipe on the page. A touch's later events
   // target the element it started on, so a swipe from the page isn't handled twice. Only once the
   // snapper listens itself (paginated, with touch), so the margins swipe exactly when the page does.
-  // A cancelled touch (the system took it, as near the screen's edges) settles back on the page
-  // shown and forgets where it started, which the snapper otherwise keeps for the next swipe.
+  //
+  // A cancelled touch (the system took it, as near the screen's edges) goes back to the page it
+  // started on. The snapper's moves scroll the pages with the finger, and its snap goes to the page
+  // nearest where they are, so past halfway it would turn; the start's page is put back instead, and
+  // the touch forgotten, which the snapper otherwise keeps for the next swipe.
+  let marginTouchStart
   function onMarginTouch(event) {
     if (!rendition) return
     const target = event.target
     if (target && typeof target.closest === 'function' && target.closest('.epub-container')) return
     const snapper = rendition.manager && rendition.manager.snapper
     if (!snapper || !snapper._onTouchStart) return
-    if (event.type === 'touchstart') snapper.onTouchStart(event)
-    else if (event.type === 'touchmove') snapper.onTouchMove(event)
-    else if (event.type === 'touchend') snapper.onTouchEnd(event)
-    else if (event.type === 'touchcancel') {
-      // No distance, so no turn: the end snaps back and clears the touch.
-      snapper.endTouchX = snapper.startTouchX
+    if (event.type === 'touchstart') {
+      if (snapper.startTouchX === undefined) marginTouchStart = snapperPageOffset(snapper)
+      snapper.onTouchStart(event)
+    } else if (event.type === 'touchmove') snapper.onTouchMove(event)
+    else if (event.type === 'touchend') {
+      marginTouchStart = undefined
       snapper.onTouchEnd(event)
+    } else if (event.type === 'touchcancel') cancelMarginTouch(snapper)
+  }
+
+  // The offset of the page the snapper's scroller shows, or is nearest to while it moves.
+  function snapperPageOffset(snapper) {
+    const width = snapper.layout.pageWidth * snapper.layout.divisor
+    const left = snapper.fullsize ? window.scrollX : snapper.scroller.scrollLeft
+    return width > 0 ? Math.round(left / width) * width : left
+  }
+
+  // Puts the scroller back on the cancelled touch's starting page, as the snapper's own end does
+  // without its snap, and clears the touch.
+  function cancelMarginTouch(snapper) {
+    const start = marginTouchStart
+    marginTouchStart = undefined
+    if (snapper.startTouchX === undefined) return
+    if (start !== undefined) {
+      snapper.scrollTo(start, 0)
+      snapper.scrollLeft = start
     }
+    if (snapper.fullsize) snapper.disableScroll()
+    snapper.touchCanceler = false
+    snapper.startTouchX = snapper.startTouchY = snapper.startTime = undefined
+    snapper.endTouchX = snapper.endTouchY = snapper.endTime = undefined
   }
 
   // How many bytes `entry` inflates to, failing once that passes `limit`.
