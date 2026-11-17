@@ -170,6 +170,8 @@ struct ReaderContent: View {
     @State private var size = CGSize.zero
     /// The hinge's width while a Duo is spanned across it (``ReaderHingeReader``).
     @State private var hingeWidth: CGFloat?
+    /// The height of the chrome over the top of the page, for the PDF thumbnails to keep clear of.
+    @State private var chromeHeight: CGFloat = 0
 
     var body: some View {
         let readerSettings = settings?.readerSettings ?? ReaderSettings()
@@ -186,6 +188,11 @@ struct ReaderContent: View {
                 .modifier(ReaderHingeReader(hingeWidth: $hingeWidth))
             if model.isChromeVisible {
                 ReaderChrome(model: model, title: title, close: close)
+                    .onGeometryChange(for: CGFloat.self) {
+                        $0.size.height
+                    } action: {
+                        chromeHeight = $0
+                    }
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
@@ -213,7 +220,7 @@ struct ReaderContent: View {
         case .unsupported(let file):
             ReaderUnsupportedView(model: model, file: file, serverURL: serverURL)
         case .pdf(let url):
-            PDFReaderHost(model: model, url: url, isSpread: layout.isTwoUp, theme: theme)
+            PDFReaderHost(model: model, url: url, isSpread: layout.isTwoUp, theme: theme, topInset: chromeHeight)
         case .epub(let url):
             EPUBReaderView(
                 model: model, fileURL: url,
@@ -363,6 +370,8 @@ private struct PDFReaderHost: View {
     let url: URL
     let isSpread: Bool
     let theme: ReaderTheme
+    /// The height of the reader's chrome over the top of the page.
+    let topInset: CGFloat
     @State private var document: PDFDocument?
     @State private var failure: PDFDocumentLoadError?
 
@@ -374,7 +383,7 @@ private struct PDFReaderHost: View {
                 PDFPageNavigator(
                     document: document, initialPage: model.resumePoint.location?.startPage(pageCount: pageCount) ?? 1,
                     isSpread: isSpread, background: PDFReaderBackground(theme),
-                    showsControls: model.isChromeVisible, onTap: model.toggleChrome
+                    showsControls: model.isChromeVisible, topInset: topInset, onTap: model.toggleChrome
                 ) { page in
                     model.record(.page(page), progress: EbookLocation.progress(page: page, pageCount: pageCount))
                 }

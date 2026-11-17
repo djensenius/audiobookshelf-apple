@@ -18,6 +18,9 @@ struct PDFPageNavigator: View {
     var background = PDFReaderBackground.light
     /// Whether the navigation shows. The page doesn't move when it comes and goes.
     var showsControls = true
+    /// The height of the container's chrome over the top of the page, which the Mac thumbnail
+    /// column keeps clear of while the controls show.
+    var topInset: CGFloat = 0
     /// A tap on the page, for the container's chrome. Taps on the controls don't reach it.
     var onTap: () -> Void = {}
     /// The 1-based page the reader turned to.
@@ -45,8 +48,10 @@ struct PDFPageNavigator: View {
         .overlay {
             if showsControls, document.pageCount > 0 {
                 controls
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .animation(.default, value: showsControls)
         .onChange(of: ObjectIdentifier(document)) {
             reportedPage = nil
             request = nil
@@ -85,6 +90,8 @@ struct PDFPageNavigator: View {
                     }
                     Spacer(minLength: 0)
                 }
+                // Under the container's chrome, not behind it.
+                .padding(.top, topInset)
                 // Fills the height whether or not the thumbnails show, so the bar stays at the bottom.
                 .frame(maxHeight: .infinity)
             #else
@@ -160,10 +167,22 @@ struct PDFPageNavigator: View {
 }
 
 /// Joins a ``PDFReaderView``'s page view to a ``PDFThumbnailStrip``, whichever is made first:
-/// PDFKit's `PDFThumbnailView` shows and turns a `PDFView`. It holds both weakly.
-@MainActor final class PDFReaderLink {
+/// PDFKit's `PDFThumbnailView` shows and turns a `PDFView`. It holds both weakly. On Mac, a page
+/// picked in the thumbnails gives the keyboard back to the page view, so the arrow keys turn pages.
+@MainActor final class PDFReaderLink: NSObject {
     weak var pdfView: PDFView? {
-        didSet { join() }
+        didSet {
+            #if os(macOS)
+                if let oldValue, oldValue !== pdfView {
+                    NotificationCenter.default.removeObserver(self, name: .PDFViewPageChanged, object: oldValue)
+                }
+                if let pdfView, oldValue !== pdfView {
+                    NotificationCenter.default.addObserver(
+                        self, selector: #selector(pageChanged(_:)), name: .PDFViewPageChanged, object: pdfView)
+                }
+            #endif
+            join()
+        }
     }
     weak var thumbnailView: PDFThumbnailView? {
         didSet { join() }
@@ -173,6 +192,20 @@ struct PDFPageNavigator: View {
         guard let thumbnailView, thumbnailView.pdfView !== pdfView else { return }
         thumbnailView.pdfView = pdfView
     }
+
+    #if os(macOS)
+        /// After the click that picked the page has made the thumbnails first responder.
+        @objc private func pageChanged(_ notification: Notification) {
+            Task { @MainActor [weak self] in self?.returnFocusFromThumbnails() }
+        }
+
+        private func returnFocusFromThumbnails() {
+            guard let pdfView, let thumbnailView, let window = pdfView.window,
+                let responder = window.firstResponder as? NSView, responder.isDescendant(of: thumbnailView)
+            else { return }
+            window.makeFirstResponder(pdfView)
+        }
+    #endif
 }
 
 /// PDFKit's thumbnails of the pages a ``PDFReaderView`` shows, through a ``PDFReaderLink``: the
