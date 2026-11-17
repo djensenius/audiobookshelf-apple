@@ -110,6 +110,10 @@
   },
   "LabelDownloadedTotalSize": "Total size: {0}",
   "LabelDownloadsAvailable": "{0} available",
+  "LabelDownloadsInProgress": {
+    "one": "{0} in progress",
+    "other": "{0} in progress"
+  },
   "LabelDownloadsUsed": "{0} downloaded",
   "LabelGroupItemCount": "{0} items",
   "LabelGroupOneItem": "1 item",

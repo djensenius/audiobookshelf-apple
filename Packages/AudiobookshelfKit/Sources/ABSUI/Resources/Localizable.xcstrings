@@ -59827,6 +59827,29 @@
         }
       }
     },
+    "LabelDownloadsInProgress" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%1$lld in progress"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%1$lld in progress"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "LabelDownloadsUsed" : {
       "extractionState" : "manual",
       "localizations" : {
