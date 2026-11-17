@@ -106,7 +106,7 @@ struct SceneLibrarySync: ViewModifier {
 
 extension AccountManager {
     /// Whether the signed-in user may add podcasts, or `nil` while unknown (offline or authorizing).
-    fileprivate var canAddPodcast: Bool? { authorization?.user.canAddPodcasts }
+    var canAddPodcast: Bool? { authorization?.user.canAddPodcasts }
 }
 
 #Preview {
