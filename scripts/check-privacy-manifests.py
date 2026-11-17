@@ -64,11 +64,22 @@ def manifest_categories(manifest):
     entries = manifest.get("NSPrivacyAccessedAPITypes", [])
     if not isinstance(entries, list):
         raise ValueError("NSPrivacyAccessedAPITypes must be an array")
-    return {
-        entry["NSPrivacyAccessedAPIType"]
-        for entry in entries
-        if isinstance(entry, dict) and isinstance(entry.get("NSPrivacyAccessedAPIType"), str)
-    }
+    categories = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"NSPrivacyAccessedAPITypes entry {index} must be a dictionary")
+        category = entry.get("NSPrivacyAccessedAPIType")
+        if not isinstance(category, str) or not category.strip():
+            raise ValueError(f"NSPrivacyAccessedAPITypes entry {index} has no API category")
+        reasons = entry.get("NSPrivacyAccessedAPITypeReasons")
+        if (
+            not isinstance(reasons, list)
+            or not reasons
+            or any(not isinstance(reason, str) or not reason.strip() for reason in reasons)
+        ):
+            raise ValueError(f"NSPrivacyAccessedAPITypes entry {index} needs non-empty reason strings")
+        categories.add(category)
+    return categories
 
 
 def missing_categories(detected, declared):
@@ -124,6 +135,31 @@ def binary_api_output(binary):
     return "\n".join(output)
 
 
+def demangle_output(output, run=subprocess.run):
+    """Demangle Swift symbols with Xcode's tool, then the PATH fallback."""
+    failures = []
+    for command in (["xcrun", "swift-demangle"], ["swift-demangle"]):
+        try:
+            result = run(command, input=output, check=False, capture_output=True, text=True, errors="replace")
+        except OSError as error:
+            failures.append(f"{' '.join(command)}: {error}")
+            continue
+        if result.returncode == 0:
+            return result.stdout
+        detail = result.stderr.strip() or f"exit status {result.returncode}"
+        failures.append(f"{' '.join(command)}: {detail}")
+    raise ValueError(
+        "Swift demangler unavailable or failed (tried `xcrun swift-demangle` and `swift-demangle`): "
+        + "; ".join(failures)
+    )
+
+
+def detected_binary_categories(binary_output, run=subprocess.run):
+    """Detect APIs in both raw and Swift-demangled nm/strings output."""
+    demangled = demangle_output(binary_output, run=run)
+    return detected_categories(binary_output + "\n" + demangled)
+
+
 def check_bundle(bundle):
     manifest_path, _ = bundle_paths(bundle)
     try:
@@ -134,7 +170,7 @@ def check_bundle(bundle):
         found = set()
         owners = {}
         for binary in binaries:
-            categories = detected_categories(binary_api_output(binary))
+            categories = detected_binary_categories(binary_api_output(binary))
             found.update(categories)
             for category in categories:
                 owners.setdefault(category, []).append(binary.name)

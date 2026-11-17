@@ -4,6 +4,7 @@
 import runpy
 from pathlib import Path
 import plistlib
+from types import SimpleNamespace
 import unittest
 
 
@@ -33,6 +34,53 @@ class PrivacyManifestTests(unittest.TestCase):
         (undefined) external _stat
         """
         self.assertIn("NSPrivacyAccessedAPICategoryFileTimestamp", CHECKER["detected_categories"](output))
+
+    def test_raw_swift_mangled_symbols_are_demangled_before_detection(self):
+        examples = [
+            (
+                "_$s10Foundation17URLResourceValuesV19volumeTotalCapacitySiSgvg",
+                "Foundation.URLResourceValues.volumeTotalCapacity.getter : Swift.Int?",
+                "NSPrivacyAccessedAPICategoryDiskSpace",
+            ),
+            (
+                "_$s10Foundation17URLResourceValuesV12creationDate10Foundation4DateVSgvg",
+                "Foundation.URLResourceValues.creationDate.getter : Foundation.Date?",
+                "NSPrivacyAccessedAPICategoryFileTimestamp",
+            ),
+            (
+                "_$s10Foundation17URLResourceValuesV20fileModificationDate10Foundation4DateVSgvg",
+                "Foundation.URLResourceValues.fileModificationDate.getter : Foundation.Date?",
+                "NSPrivacyAccessedAPICategoryFileTimestamp",
+            ),
+        ]
+        for mangled, demangled, category in examples:
+            with self.subTest(mangled=mangled):
+                self.assertEqual(set(), CHECKER["detected_categories"](mangled))
+
+                def fake_run(command, **kwargs):
+                    self.assertEqual(["xcrun", "swift-demangle"], command)
+                    return SimpleNamespace(returncode=0, stdout=demangled, stderr="")
+
+                self.assertEqual({category}, CHECKER["detected_binary_categories"](mangled, run=fake_run))
+
+    def test_swift_demangler_falls_back_to_path_executable(self):
+        commands = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            if command[0] == "xcrun":
+                raise FileNotFoundError("xcrun unavailable")
+            return SimpleNamespace(returncode=0, stdout="demangled", stderr="")
+
+        self.assertEqual("demangled", CHECKER["demangle_output"]("mangled", run=fake_run))
+        self.assertEqual([["xcrun", "swift-demangle"], ["swift-demangle"]], commands)
+
+    def test_missing_swift_demangler_fails_clearly(self):
+        def unavailable(command, **kwargs):
+            raise FileNotFoundError(f"{command[0]} unavailable")
+
+        with self.assertRaisesRegex(ValueError, "Swift demangler unavailable or failed"):
+            CHECKER["demangle_output"]("mangled", run=unavailable)
 
     def test_file_timestamp_creation_and_modification_date_forms_individually(self):
         self.assert_category_for_each(
@@ -126,8 +174,14 @@ class PrivacyManifestTests(unittest.TestCase):
     def test_manifest_categories_and_missing_category_mapping(self):
         manifest = {
             "NSPrivacyAccessedAPITypes": [
-                {"NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults"},
-                {"NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryFileTimestamp"},
+                {
+                    "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryUserDefaults",
+                    "NSPrivacyAccessedAPITypeReasons": ["CA92.1"],
+                },
+                {
+                    "NSPrivacyAccessedAPIType": "NSPrivacyAccessedAPICategoryFileTimestamp",
+                    "NSPrivacyAccessedAPITypeReasons": ["C617.1"],
+                },
             ]
         }
         declared = CHECKER["manifest_categories"](manifest)
@@ -174,6 +228,35 @@ class PrivacyManifestTests(unittest.TestCase):
             CHECKER["manifest_categories"]({"NSPrivacyAccessedAPITypes": {}})
         with self.assertRaises(ValueError):
             CHECKER["manifest_categories"]([])
+
+    def test_missing_or_empty_reasons_fail_closed(self):
+        category = "NSPrivacyAccessedAPICategoryUserDefaults"
+        with self.assertRaisesRegex(ValueError, "non-empty reason strings"):
+            CHECKER["manifest_categories"](
+                {"NSPrivacyAccessedAPITypes": [{"NSPrivacyAccessedAPIType": category}]}
+            )
+        with self.assertRaisesRegex(ValueError, "non-empty reason strings"):
+            CHECKER["manifest_categories"](
+                {
+                    "NSPrivacyAccessedAPITypes": [
+                        {
+                            "NSPrivacyAccessedAPIType": category,
+                            "NSPrivacyAccessedAPITypeReasons": [],
+                        }
+                    ]
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "non-empty reason strings"):
+            CHECKER["manifest_categories"](
+                {
+                    "NSPrivacyAccessedAPITypes": [
+                        {
+                            "NSPrivacyAccessedAPIType": category,
+                            "NSPrivacyAccessedAPITypeReasons": ["  "],
+                        }
+                    ]
+                }
+            )
 
 
 if __name__ == "__main__":
