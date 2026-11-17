@@ -16,25 +16,30 @@ API_PATTERNS = {
         r"initWithSuiteName:",
     ),
     "NSPrivacyAccessedAPICategoryFileTimestamp": (
-        r"NSURLContentModificationDateKey",
-        r"NSFileModificationDate",
-        r"contentModificationDate",
-        r"setAttributes:ofItemAtPath:error:",
+        r"(?<![A-Za-z0-9])_?(?:NSURLCreationDateKey|NSURLContentModificationDateKey|"
+        r"NSFileCreationDate|NSFileModificationDate)(?![A-Za-z0-9])",
+        r"(?<![A-Za-z0-9])(?:creationDate|creationDateKey|fileCreationDate|contentModificationDate|"
+        r"contentModificationDateKey|fileModificationDate|fileModificationDateKey|modificationDate)(?![A-Za-z0-9])",
+        r"(?:attributesOfItemAtPath|setAttributes:ofItemAtPath):error:",
         r"(?<![A-Za-z0-9])_?(?:stat|lstat|fstat|fstatat|fgetattrlist|getattrlist|"
-        r"getattrlistbulk|getattrlistat|utimes|futimes|futimens|utimensat)(?![A-Za-z0-9])",
+        r"getattrlistbulk|getattrlistat|utime|utimes|futimes|futimesat|futimens|utimensat)(?![A-Za-z0-9])",
     ),
     "NSPrivacyAccessedAPICategoryDiskSpace": (
-        r"volumeAvailableCapacity(?:ForImportantUsage)?",
+        r"(?<![A-Za-z0-9])_?(?:NSURLVolumeTotalCapacityKey|NSURLVolumeAvailableCapacityKey|"
+        r"NSURLVolumeAvailableCapacityForImportantUsageKey|"
+        r"NSURLVolumeAvailableCapacityForOpportunisticUsageKey|NSFileSystemFreeSize|"
+        r"NSFileSystemSize|volumeTotalCapacity|volumeAvailableCapacity|"
+        r"volumeAvailableCapacityForImportantUsage|volumeAvailableCapacityForOpportunisticUsage|"
+        r"systemFreeSize|systemSize)(?![A-Za-z0-9])",
+        r"attributesOfFileSystemForPath:error:",
         r"(?<![A-Za-z0-9])_?(?:statfs|fstatfs|statvfs|fstatvfs|getfsstat|getmntinfo)(?![A-Za-z0-9])",
     ),
     "NSPrivacyAccessedAPICategorySystemBootTime": (
-        r"systemUptime",
-        r"mach_absolute_time",
-        r"mach_continuous_time",
+        r"(?<![A-Za-z0-9])(?:systemUptime|mach_absolute_time|mach_continuous_time|"
+        r"mach_approximate_time|mach_continuous_approximate_time|CACurrentMediaTime)(?![A-Za-z0-9])",
     ),
     "NSPrivacyAccessedAPICategoryActiveKeyboards": (
-        r"activeInputModes",
-        r"primaryLanguage",
+        r"(?<![A-Za-z0-9])(?:activeInputModes|primaryLanguage)(?![A-Za-z0-9])",
     ),
 }
 COMPILED_PATTERNS = {

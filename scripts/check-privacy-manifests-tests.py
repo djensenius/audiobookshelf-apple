@@ -11,6 +11,11 @@ CHECKER = runpy.run_path(str(Path(__file__).with_name("check-privacy-manifests.p
 
 
 class PrivacyManifestTests(unittest.TestCase):
+    def assert_category_for_each(self, category, forms):
+        for form in forms:
+            with self.subTest(form=form):
+                self.assertEqual({category}, CHECKER["detected_categories"](form))
+
     def test_user_defaults_symbols_and_selectors(self):
         output = """
         (undefined) external _OBJC_CLASS_$_NSUserDefaults
@@ -29,15 +34,91 @@ class PrivacyManifestTests(unittest.TestCase):
         """
         self.assertIn("NSPrivacyAccessedAPICategoryFileTimestamp", CHECKER["detected_categories"](output))
 
+    def test_file_timestamp_creation_and_modification_date_forms_individually(self):
+        self.assert_category_for_each(
+            "NSPrivacyAccessedAPICategoryFileTimestamp",
+            [
+                "NSURLCreationDateKey",
+                "_NSURLCreationDateKey",
+                "NSFileCreationDate",
+                "URLResourceValues.creationDate",
+                "FileAttributeKey.creationDate",
+                "fileCreationDate",
+                "creationDateKey",
+                "NSURLContentModificationDateKey",
+                "NSFileModificationDate",
+                "URLResourceValues.fileModificationDate",
+                "FileAttributeKey.modificationDate",
+                "fileModificationDate",
+                "fileModificationDateKey",
+                "modificationDate",
+                "contentModificationDateKey",
+                "-[NSFileManager attributesOfItemAtPath:error:]",
+                "-[NSFileManager setAttributes:ofItemAtPath:error:]",
+                "_utime",
+                "_futimesat",
+            ],
+        )
+
     def test_disk_space_symbols_and_selectors(self):
         output = "volumeAvailableCapacityForImportantUsage _statfs"
         self.assertIn("NSPrivacyAccessedAPICategoryDiskSpace", CHECKER["detected_categories"](output))
 
-    def test_boot_time_and_active_keyboard_categories(self):
-        output = "systemUptime mach_absolute_time activeInputModes primaryLanguage"
-        categories = CHECKER["detected_categories"](output)
-        self.assertIn("NSPrivacyAccessedAPICategorySystemBootTime", categories)
-        self.assertIn("NSPrivacyAccessedAPICategoryActiveKeyboards", categories)
+    def test_disk_space_constants_and_selectors_individually(self):
+        self.assert_category_for_each(
+            "NSPrivacyAccessedAPICategoryDiskSpace",
+            [
+                "NSURLVolumeTotalCapacityKey",
+                "_NSURLVolumeTotalCapacityKey",
+                "volumeTotalCapacity",
+                "NSURLVolumeAvailableCapacityKey",
+                "NSURLVolumeAvailableCapacityForImportantUsageKey",
+                "NSURLVolumeAvailableCapacityForOpportunisticUsageKey",
+                "volumeAvailableCapacity",
+                "volumeAvailableCapacityForImportantUsage",
+                "volumeAvailableCapacityForOpportunisticUsage",
+                "NSFileSystemFreeSize",
+                "NSFileSystemSize",
+                "FileAttributeKey.systemFreeSize",
+                "FileAttributeKey.systemSize",
+                "attributesOfFileSystemForPath:error:",
+                "_statfs",
+                "_fstatfs",
+                "_statvfs",
+                "_fstatvfs",
+                "_getfsstat",
+                "_getmntinfo",
+            ],
+        )
+        self.assertEqual(
+            set(),
+            CHECKER["detected_categories"](
+                "subsystemSize systemSizeHelper mysystemSize systemSizeSuffix "
+                "volumeTotalCapacityCache NSFileSystemSizeValue"
+            ),
+        )
+
+    def test_boot_time_apis_individually(self):
+        self.assert_category_for_each(
+            "NSPrivacyAccessedAPICategorySystemBootTime",
+            [
+                "ProcessInfo.systemUptime",
+                "_mach_absolute_time",
+                "_mach_continuous_time",
+                "_mach_approximate_time",
+                "_mach_continuous_approximate_time",
+                "CACurrentMediaTime",
+            ],
+        )
+
+    def test_active_keyboard_apis_individually(self):
+        self.assert_category_for_each(
+            "NSPrivacyAccessedAPICategoryActiveKeyboards",
+            [
+                "activeInputModes",
+                "UITextInputMode.primaryLanguage",
+            ],
+        )
 
     def test_unrelated_symbols_do_not_trigger_categories(self):
         self.assertEqual(set(), CHECKER["detected_categories"]("static clock_gettime continuousClock"))
