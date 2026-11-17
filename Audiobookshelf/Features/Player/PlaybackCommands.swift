@@ -5,12 +5,14 @@ import SwiftUI
 
 /// The Playback menu (ADR 0004, #82), on a Mac and in the iPad hardware keyboard's ⌘ overlay:
 /// Play/Pause (Space), jump back and forward (⌘← and ⌘→), previous and next chapter (⌥⌘← and ⌥⌘→),
-/// speed down and up (⌘− and ⌘+), Create Bookmark (⌘B) and a Sleep Timer submenu.
+/// speed down and up (⌘− and ⌘+), Create Bookmark (⌘B), a Sleep Timer submenu and Show Now Playing
+/// (⌘0).
 /// ``PlaybackCommandsModel`` has the rules.
 ///
 /// The commands act on the app's one player, not the focused scene's, so they work from any window.
 /// The account's sleep timer and bookmarks come from the playback participant (#183), read in
-/// ``body`` so the menu follows each session's; between sessions those items are disabled.
+/// ``body`` so the menu follows each session's; between sessions those items are disabled. Show Now
+/// Playing acts on the focused signed-in scene, and is disabled without one.
 ///
 /// Space has no modifier, so a focused text field takes it first and types a space; the menu gets
 /// it only when the focused view doesn't handle it. ⌘ shortcuts go to the menu first, so while an
@@ -25,10 +27,12 @@ struct PlaybackCommands: Commands {
     var participant: PlaybackSessionParticipant?
     /// The focused window's alert, for a command that fails.
     @FocusedValue(PlaybackCommandAlert.self) private var alert: PlaybackCommandAlert?
+    /// The focused signed-in scene's router, where Show Now Playing shows the full player.
+    @FocusedValue(Router.self) private var router: Router?
 
     var body: some Commands {
         CommandMenu(Text(verbatim: L10n.string("HeaderPlayback"))) {
-            PlaybackMenu(model: model, alert: alert)
+            PlaybackMenu(model: model, alert: alert, router: router)
         }
     }
 
@@ -46,6 +50,7 @@ struct PlaybackCommands: Commands {
 private struct PlaybackMenu: View {
     let model: PlaybackCommandsModel
     let alert: PlaybackCommandAlert?
+    let router: Router?
 
     var body: some View {
         PlaybackMenuItem(command: .playPause, model: model, alert: alert)
@@ -70,7 +75,32 @@ private struct PlaybackMenu: View {
         } label: {
             Text(verbatim: L10n.string("HeaderSleepTimer"))
         }
+        Divider()
+        ShowNowPlayingMenuItem(model: model, router: router)
     }
+}
+
+/// Show Now Playing (⌘0): turns on the focused scene's full player, which ``PlayerSlot`` shows as
+/// the full-screen player on iOS and the Now Playing window on a Mac.
+struct ShowNowPlayingMenuItem: View {
+    let model: PlaybackCommandsModel
+    let router: Router?
+
+    var body: some View {
+        Button {
+            model.showNowPlaying(in: router)
+        } label: {
+            Text(verbatim: L10n.string(Self.titleKey))
+        }
+        .keyboardShortcut(Self.shortcut)
+        .disabled(!model.canShowNowPlaying(in: router))
+    }
+
+    nonisolated static let titleKey = "ButtonShowNowPlaying"
+
+    /// ⌘0: next to the Go menu's ⌘1 to ⌘5, as Mail's ⌘0 brings back its main viewer. No other menu
+    /// takes it.
+    nonisolated static let shortcut = KeyboardShortcut("0")
 }
 
 private struct PlaybackMenuItem: View {
