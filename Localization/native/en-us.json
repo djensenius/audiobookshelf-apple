@@ -100,6 +100,10 @@
   "LabelBookmarkTime": "Time",
   "LabelCurrentChapter": "Current chapter",
   "LabelDecreaseSpeed": "Decrease speed",
+  "LabelDownloadQueueAccessibility": {
+    "one": "{0} download, {1} done",
+    "other": "{0} downloads, {1} done"
+  },
   "LabelDownloadStatusDownloading": "Downloading",
   "LabelDownloadStatusFailed": "Failed",
   "LabelDownloadStatusPaused": "Paused",
@@ -110,10 +114,6 @@
   },
   "LabelDownloadedTotalSize": "Total size: {0}",
   "LabelDownloadsAvailable": "{0} available",
-  "LabelDownloadsInProgress": {
-    "one": "{0} in progress",
-    "other": "{0} in progress"
-  },
   "LabelDownloadsUsed": "{0} downloaded",
   "LabelGroupItemCount": "{0} items",
   "LabelGroupOneItem": "1 item",

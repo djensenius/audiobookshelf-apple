@@ -97,10 +97,31 @@ public struct DownloadsListing: Sendable, Equatable {
 
     /// How much of ``downloads`` is done, from 0 to 1, by bytes (legacy
     /// `DownloadProgressIndicator.vue`); 0 while no size is known.
-    public var downloadingFraction: Double {
-        let expected = downloads.reduce(0.0) { $0 + $1.bytes.expected }
+    public var downloadingFraction: Double { Self.fraction(of: downloads.map(\.bytes)) }
+
+    /// How many ``downloads`` a listing of `records` for `serverConnectionID` has, without
+    /// building them: for the toolbar's download indicator, which reads only the records.
+    public static func downloadCount(records: [DownloadRecordDTO], serverConnectionID: UUID?) -> Int {
+        records.count { lists($0, for: serverConnectionID) }
+    }
+
+    /// The ``downloadingFraction`` of a listing of `records` for `serverConnectionID`, without
+    /// building its rows (no titles): for the toolbar's download indicator.
+    public static func downloadingFraction(
+        records: [DownloadRecordDTO], progress: [UUID: DownloadsController.Progress], serverConnectionID: UUID?
+    ) -> Double {
+        fraction(of: records.filter { lists($0, for: serverConnectionID) }.map { Bytes($0, progress: progress[$0.id]) })
+    }
+
+    /// Whether ``downloads`` lists `record`: it's for `serverConnectionID`.
+    private static func lists(_ record: DownloadRecordDTO, for serverConnectionID: UUID?) -> Bool {
+        record.key.serverConnectionID == serverConnectionID
+    }
+
+    private static func fraction(of bytes: [Bytes]) -> Double {
+        let expected = bytes.reduce(0.0) { $0 + $1.expected }
         guard expected > 0 else { return 0 }
-        let written = downloads.reduce(0.0) { $0 + min($1.bytes.written, $1.bytes.expected) }
+        let written = bytes.reduce(0.0) { $0 + min($1.written, $1.expected) }
         return min(written / expected, 1)
     }
 
@@ -117,7 +138,7 @@ public struct DownloadsListing: Sendable, Equatable {
             by: Self.byTitle)
         books = listed.filter { $0.mediaType != .podcast }
         podcasts = listed.filter { $0.mediaType == .podcast }
-        downloads = records.filter { $0.key.serverConnectionID == serverConnectionID }.map {
+        downloads = records.filter { Self.lists($0, for: serverConnectionID) }.map {
             Self.download($0, progress: progress[$0.id])
         }
         downloadedBytes = listed.reduce(0) { Self.adding($0, $1.byteCount) }

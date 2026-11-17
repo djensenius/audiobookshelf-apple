@@ -57844,6 +57844,29 @@
         }
       }
     },
+    "LabelDownloadQueueAccessibility" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%1$lld download, %2$@ done"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%1$lld downloads, %2$@ done"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "LabelDownloadStatusDownloading" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -59823,29 +59846,6 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "%1$@ available"
-          }
-        }
-      }
-    },
-    "LabelDownloadsInProgress" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "en" : {
-          "variations" : {
-            "plural" : {
-              "one" : {
-                "stringUnit" : {
-                  "state" : "translated",
-                  "value" : "%1$lld in progress"
-                }
-              },
-              "other" : {
-                "stringUnit" : {
-                  "state" : "translated",
-                  "value" : "%1$lld in progress"
-                }
-              }
-            }
           }
         }
       }
