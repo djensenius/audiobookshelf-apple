@@ -96,11 +96,11 @@ struct ShowNowPlayingMenuItem: View {
         .disabled(!model.canShowNowPlaying(in: router))
     }
 
-    static let titleKey = "ButtonShowNowPlaying"
+    nonisolated static let titleKey = "ButtonShowNowPlaying"
 
     /// ⌘0: next to the Go menu's ⌘1 to ⌘5, as Mail's ⌘0 brings back its main viewer. No other menu
     /// takes it.
-    static let shortcut = KeyboardShortcut("0")
+    nonisolated static let shortcut = KeyboardShortcut("0")
 }
 
 private struct PlaybackMenuItem: View {
