@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regressions for CI's UI-test run: python3 scripts/ui-test-ci-tests.py (mise run test:ui:retry).
+"""Regressions for CI's UI-test run: python3 scripts/ui-test-ci-tests.py (mise run test:ui:runner).
 
 Runs scripts/ui-test-ci.sh with fake `mise` and `xcrun` commands, scripts/ui-test-results.py on
 result trees shaped like xcresulttool 0.5.0's (Xcode 27.2), and test:ui's script from mise.toml
@@ -256,9 +256,7 @@ class ResultTests(unittest.TestCase):
 
 class ScriptTests(unittest.TestCase):
     def setUp(self):
-        parent = ROOT / ".build/ui-test-ci-regressions"
-        parent.mkdir(parents=True, exist_ok=True)
-        self.temporary = tempfile.TemporaryDirectory(prefix="case.", dir=parent)
+        self.temporary = tempfile.TemporaryDirectory(prefix="ui-test-ci.")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         (self.root / "scripts").mkdir()
@@ -364,6 +362,22 @@ class ScriptTests(unittest.TestCase):
                 (self.root / "calls.jsonl").unlink(missing_ok=True)
                 result = self.run_script(steps, 65)
                 self.assertIn("error: UI tests failed (exit 65), and aren't run again", result.stderr)
+
+    def test_a_first_run_stopped_by_a_signal_doesnt_run_again(self):
+        tree = first_run(failed_twice("testOne()"))
+        for status in (137, 143):
+            with self.subTest(status=status):
+                (self.root / "calls.jsonl").unlink(missing_ok=True)
+                result = self.run_script([{"exit": status, "tests": tree}], status)
+                self.assertIn(f"error: UI tests failed (exit {status}), and aren't run again: the first run was "
+                              "stopped by a signal", result.stderr)
+                self.assertFalse((self.root / "xcrun.log").exists())
+
+    def test_the_caller_cant_pick_the_result_bundle(self):
+        for args in (["-resultBundlePath", "/tmp/ui.xcresult"], ["-jobs", "2", "-resultBundlePath=/tmp/ui.xcresult"]):
+            with self.subTest(args=args):
+                result = self.run_script([], 2, args)
+                self.assertIn("error: don't pass -resultBundlePath", result.stderr)
 
     def test_arguments_go_to_the_first_run_and_its_selection_only(self):
         only = f"-only-testing:{BUNDLE}/FailingTests"

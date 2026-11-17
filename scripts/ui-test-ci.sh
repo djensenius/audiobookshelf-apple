@@ -11,10 +11,12 @@
 # So if the first run fails, every test it selected has a result, and its only failures are one
 # to three tests, those tests run once more without building, and that run decides: it passes
 # only if each of them ran and passed. Any other failure (a build error, a crash outside a test,
-# tests that never ran, more failures, results this can't read) fails without another run.
+# a first run stopped by a signal, tests that never ran, more failures, results this can't read)
+# fails without another run.
 #
 # Arguments go to the first run, for example -only-testing:<id> to try this on part of the
-# suite. Result bundles and the lists of tests are left in .build/ui-tests/.
+# suite, but not -resultBundlePath. Result bundles and the lists of tests are left in
+# .build/ui-tests/.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
@@ -25,6 +27,15 @@ trap 'exit 143' TERM
 max_retried=3
 out=.build/ui-tests
 limits=(-test-timeouts-enabled YES -default-test-execution-time-allowance 600 -maximum-test-execution-time-allowance 600)
+
+for arg in "$@"; do
+  case "$arg" in
+    -resultBundlePath | -resultBundlePath=*)
+      echo "error: don't pass -resultBundlePath; the script writes its result bundles to $out/" >&2
+      exit 2
+      ;;
+  esac
+done
 
 # xcodebuild won't write a result bundle over an existing one.
 rm -rf "$out"
@@ -41,6 +52,11 @@ no_retry() {
   echo "error: UI tests failed (exit $status), and aren't run again: $1" >&2
   exit "$status"
 }
+
+# 128 + the signal, for example 137 (SIGKILL) or 143 (SIGTERM): xcodebuild was stopped, not failed.
+if ((status > 128)); then
+  no_retry "the first run was stopped by a signal"
+fi
 
 echo "UI tests failed (exit $status); checking whether at most $max_retried tests failed, to run them again"
 results() {

@@ -108,7 +108,8 @@ jobs:
     # Recent passing runs take 36–58 minutes (median 47). One stalled test (#627) adds about 13:
     # the UI-test step stops it after 10 (#661), then needs about 3 to restart the runner, list the
     # tests and run it again alone (#666). 75 fits that in even the slowest run seen (58 + 13);
-    # 70 didn't. A passing run doesn't take longer.
+    # 70 didn't. A second stall, in either run, may not fit: the job then times out and fails
+    # rather than passing. A passing run doesn't take longer.
     timeout-minutes: 75
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
@@ -151,6 +152,16 @@ jobs:
         env:
           ABS_UI_PLATFORM: ios
         run: scripts/ui-test-ci.sh
+
+      # The result bundles and lists of tests the script left, to see why the step failed.
+      - name: Upload the iPhone UI test results
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-tests-iphone-duo-attempt-${{ github.run_attempt }}
+          path: .build/ui-tests/
+          retention-days: 7
+          if-no-files-found: ignore
 
       # XCUITest on macOS needs Automation Mode, which only an administrator on the runner can
       # enable (docs/testing/ui-tests.md). Until then, warn rather than pass silently. Once it runs,

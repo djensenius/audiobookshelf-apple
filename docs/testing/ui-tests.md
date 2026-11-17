@@ -56,16 +56,20 @@ step passes only if each of those tests ran and passed, and it then adds a *UI t
 run again* warning annotation naming them. A test is run again only if its result is *Failed*
 (it failed twice, ran out of time or crashed); one that passed on the runner's retry, was
 skipped or is an expected failure isn't. Anything else (a build error, a crash outside a test,
-tests without a result, more than three failures, results the script can't read) fails the
-step with the first run's exit status, without another run.
+an `xcodebuild` stopped by a signal, tests without a result, more than three failures, results
+the script can't read) fails the step with the first run's exit status, without another run.
 
 Recent passing runs took 36 to 58 minutes (median 47). A flaky test costs only its retry in the
 runner. A hang adds the 10 minutes and about 3 more to restart the runner, list the tests and
 run it again, so the job's limit is 75 minutes: the slowest run seen with a hang would end by
-minute 71 or so.
+minute 71 or so. A second hang, in either run, may not fit; the job then times out and fails
+rather than passing.
+
+If the step fails, the job uploads `.build/ui-tests/` (the result bundles and lists of tests) as
+the `ui-tests-iphone-duo-attempt-<attempt>` artifact, kept for 7 days.
 
 To try it locally, pass a selection after the script's name; the result bundles and lists of
-tests are left in `.build/ui-tests/`. `mise run test:ui:retry` (part of `mise run lint:repo`)
+tests are left in `.build/ui-tests/`. `mise run test:ui:runner` (part of `mise run lint:repo`)
 checks the script and `scripts/ui-test-results.py` with fake `mise` and `xcrun` commands, so it
 needs no Xcode or simulator.
 
