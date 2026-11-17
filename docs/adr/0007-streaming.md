@@ -60,7 +60,7 @@ Server facts below come from the server source at `advplyr/audiobookshelf` `mast
 
 - **No user auth since v2.22.0.** Commit `1f7b181b` "Update HLS stream endpoints to not include user token" (PR #4266, release note: "HLS stream endpoint no longer requires user token in URL") changed `router.use('/hls', this.authMiddleware…)` to `router.use('/hls', this.hlsRouter.router)`. Current: `server/Server.js:346`.
 - **Access control.** `HlsRouter` only checks that the stream id is an open stream, that the file stays inside the stream directory, and that the extension is `.ts` or `.m3u8` (`server/routers/HlsRouter.js:51-96`). So `?token=` on `/hls` is neither needed nor read.
-- **Format.** The playlist is `/hls/{sessionId}/output.m3u8` (`server/objects/Stream.js:101`). It uses **relative** segment URIs `output-N.ts`: MPEG-TS, `-hls_time 6`, VOD (`server/utils/generators/hlsPlaylistGenerator.js`, `Stream.js:83-84,286`). Audio is copied or re-encoded to AAC (`Stream.js:270-282`).
+- **Format.** The playlist is `/hls/{sessionId}/output.m3u8` (`server/objects/Stream.js:101`). It uses **relative** segment URIs `output-N.ts`: MPEG-TS, `-hls_time 6`, VOD (`server/utils/generators/hlsPlaylistGenerator.js`, `Stream.js:83-84,286`). Audio is copied or re-encoded to AAC (`Stream.js:270-282`). Before 2.29.0 every segment URI also carries `?token=` with the user's legacy, non-expiring token, which `/hls` ignores (removed upstream by `2cc6e56b`; observed on 2.26.0, #662).
 
 **Authenticated file route: `/api/items/:id/file/:fileid`.**
 
@@ -414,8 +414,8 @@ Cons:
   - **What they see:** a blocking "This server runs Audiobookshelf X. Version 2.26.0 or newer is required." message at sign-in, with upgrade guidance.
   - **What they must do:** upgrade the server (2.26.0 shipped 2025-07-12; the current release is v2.37.2).
   - **Not yet settled:** the floor is provisional until the owner signs off (#48).
-- **New failure mode.** Expired access tokens can no longer cause mid-playback 401s from Audiobookshelf, because streaming URLs carry no user token. Losing the session (restart, 36-hour idle, same-device takeover) is now the main failure mode. The engine handles it with the bounded recovery in Decision 3, so the engine carries more state: the saved position, the per-session listening deltas, and a persisted sync queue.
-- **Session ids are capabilities.** Never log full track URLs at info level.
+- **New failure mode.** Expired access tokens can no longer cause mid-playback 401s from Audiobookshelf, because streaming URLs carry no user access token. (Before 2.29.0, HLS segment URIs carry the legacy, non-expiring token; see #662.) Losing the session (restart, 36-hour idle, same-device takeover) is now the main failure mode. The engine handles it with the bounded recovery in Decision 3, so the engine carries more state: the saved position, the per-session listening deltas, and a persisted sync queue.
+- **Session ids are capabilities.** Never log full track URLs, HLS playlist or segment URIs, or the URIs in an `AVPlayerItem`'s access and error logs at info level. Before 2.29.0 the segment URIs also carry the user's legacy token (#662).
 - **Header-gated proxies.** Users get direct play through a resource loader that we must maintain and test, but no transcode. This is a documented limitation, and still better than the legacy app, whose streaming ignored custom headers entirely.
 - **Ogg books transcode.** Vorbis and Opus books will transcode until the matrix proves direct play works. This costs server CPU but plays reliably.
 - **One `?token=` path remains,** for null-index podcast episodes on servers 2.26.0–2.26.2. Delete it when the floor is raised to 2.26.3 or later.
@@ -442,6 +442,8 @@ Cons:
 | 2.26.3–2.27.x | as above | as above | as above | as above |
 | ≥ 2.28.0 (test on 2.37.2) | as above | as above | as above | as above |
 | Any ≥ 2.26.0 behind a custom-header proxy | Direct play via resource loader | Direct play via resource loader | Error (needs transcode) | Direct play via resource loader |
+
+**Server side observed.** `StreamingFormatContractTests` ([server contracts](../testing/server-contracts.md#streaming-formats)) checks the server's half of this matrix against real 2.26.0 and 2.37.2 servers, using the app's play request as built on the macOS test host: the play method, track order, `Content-Type` and `206` ranges for direct play, and for Opus and a forced m4b transcode, a playlist and first segment fetched without `Authorization`. The results match this matrix. One thing differs from "relative segment URIs `output-N.ts`" above: every release before 2.29.0 adds `?token=` with the user's legacy, non-expiring token to every segment URI (removed upstream by `2cc6e56b`, "remove token from hls url", 2025-08-19). The suite observes this on 2.26.0, and 2.37.2 doesn't add it. The device checks and the proxy row are still manual (#49). Recorded for the owner's sign-off (#48, #662); decision 1 stays provisional.
 
 **Additional checks in #49,** on one supported server:
 - `forceTranscode: true` on an m4b returns `playMethod 2`, and `/hls/…/output.m3u8` plays without any `Authorization` header.
