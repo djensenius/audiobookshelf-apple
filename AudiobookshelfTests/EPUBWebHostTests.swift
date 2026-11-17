@@ -739,7 +739,8 @@ private final class ReaderPage {
     /// With real epub.js, a swipe that starts in the margins, outside epub.js's container, turns the
     /// page as one on the page does: epub.js's snapper gets its touches and decides the direction. A
     /// swipe on the page reaches the snapper once, from epub.js's own listener. The Mac test host has
-    /// no touch, so the page claims it before epub.js looks, and the touches are synthesized.
+    /// no touch, so the page claims it before epub.js looks, and the touches are synthesized. A
+    /// cancelled swipe doesn't turn the page or leave its start behind for the next.
     @Test(.timeLimit(.minutes(1))) func aSwipeFromTheMarginsTurnsThePage() async throws {
         let page = try await realEPUBJSPage(touch: true)
 
@@ -763,20 +764,20 @@ private final class ReaderPage {
               return 1
             })(\(snapper))
             """)
-        func swipe(_ target: String, from start: Int, to end: Int) async throws {
+        func swipe(_ target: String, from start: Int, to end: Int, cancelled: Bool = false) async throws {
             _ = try await page.evaluate(
                 """
                 (function (target) {
                   function touch(type, x) {
                     const event = new Event(type, { bubbles: true })
-                    const touches = type === 'touchend' ? [] : [{ screenX: x, screenY: 300, clientX: x, clientY: 300 }]
+                    const touches = type === 'touchend' || type === 'touchcancel' ? [] : [{ screenX: x, screenY: 300, clientX: x, clientY: 300 }]
                     Object.defineProperty(event, 'touches', { value: touches })
                     target.dispatchEvent(event)
                   }
                   touch('touchstart', \(start))
                   touch('touchmove', \((start + end) / 2))
                   touch('touchmove', \(end))
-                  touch('touchend', \(end))
+                  touch('\(cancelled ? "touchcancel" : "touchend")', \(end))
                   return 1
                 })(\(target))
                 """)
@@ -789,6 +790,11 @@ private final class ReaderPage {
         #expect(try await page.evaluate("window.snaps") == "[1,-1]")
         try await swipe("document.querySelector('.epub-container')", from: 590, to: 510)
         #expect(try await page.evaluate("window.snaps") == "[1,-1,1]")
+        // A cancelled swipe from the margins settles on the page, and the next starts afresh.
+        try await swipe(viewer, from: 90, to: 50, cancelled: true)
+        #expect(try await page.evaluate("window.snaps") == "[1,-1,1,0]")
+        try await swipe(viewer, from: 10, to: 90)
+        #expect(try await page.evaluate("window.snaps") == "[1,-1,1,0,-1]")
     }
 
     /// A reader page whose epub.js renders on timers rather than animation frames, which WebKit runs

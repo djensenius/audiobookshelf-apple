@@ -137,6 +137,8 @@ import Testing
             #expect(!tap.cancelsTouchesInView)
             let gate = try #require(tap.delegate)
             let doubleTaps = Self.tapRecognizers(in: view).filter { $0.numberOfTapsRequired == 2 }
+            // PDFKit zooms with a double-tap recognizer; if it ever stops (another gesture, or none),
+            // the gate below has nothing to wait for and this says so, rather than passing vacuously.
             #expect(!doubleTaps.isEmpty)
             for doubleTap in doubleTaps {
                 #expect(gate.gestureRecognizer?(tap, shouldRequireFailureOf: doubleTap) == true)

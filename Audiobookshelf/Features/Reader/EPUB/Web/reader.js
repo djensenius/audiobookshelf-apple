@@ -320,16 +320,24 @@
   // A swipe that starts in the margins, outside epub.js's container and its sections' frames, whose
   // touches epub.js's snapper (`snap: true`) hears. It's handed this one's, so it turns the page with
   // the same distance, speed and direction rules as a swipe on the page. A touch's later events
-  // target the element it started on, so a swipe from the page isn't handled twice.
+  // target the element it started on, so a swipe from the page isn't handled twice. Only once the
+  // snapper listens itself (paginated, with touch), so the margins swipe exactly when the page does.
+  // A cancelled touch (the system took it, as near the screen's edges) settles back on the page
+  // shown and forgets where it started, which the snapper otherwise keeps for the next swipe.
   function onMarginTouch(event) {
     if (!rendition) return
     const target = event.target
     if (target && typeof target.closest === 'function' && target.closest('.epub-container')) return
     const snapper = rendition.manager && rendition.manager.snapper
-    if (!snapper) return
+    if (!snapper || !snapper._onTouchStart) return
     if (event.type === 'touchstart') snapper.onTouchStart(event)
     else if (event.type === 'touchmove') snapper.onTouchMove(event)
     else if (event.type === 'touchend') snapper.onTouchEnd(event)
+    else if (event.type === 'touchcancel') {
+      // No distance, so no turn: the end snaps back and clears the touch.
+      snapper.endTouchX = snapper.startTouchX
+      snapper.onTouchEnd(event)
+    }
   }
 
   // How many bytes `entry` inflates to, failing once that passes `limit`.
@@ -961,7 +969,7 @@
   }
 
   document.addEventListener('click', onMarginClick)
-  for (const type of ['touchstart', 'touchmove', 'touchend']) {
+  for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
     document.addEventListener(type, onMarginTouch, { passive: true })
   }
 
