@@ -176,12 +176,13 @@ private func trackChange(of read: @escaping @MainActor () -> Void) -> Flag {
             #expect(defaults.persistentDomain(forName: suiteName)?.isEmpty ?? true)
 
             let changed = ReaderSettings(
-                theme: .sepia, fontFamily: .sansSerif, fontScale: 150, spread: .none, keepScreenAwake: true)
+                theme: .sepia, fontFamily: .sansSerif, fontScale: 150, margins: 4, spread: .none,
+                keepScreenAwake: true)
             settings.readerSettings = changed
             let stored = try #require(defaults.string(forKey: key))
             #expect(
                 stored
-                    == #"{"fontFamily":"sans-serif","fontScale":150,"keepScreenAwake":true,"lineSpacing":115,"spread":"none","textStroke":0,"theme":"sepia"}"#
+                    == #"{"fontFamily":"sans-serif","fontScale":150,"keepScreenAwake":true,"lineSpacing":115,"margins":4,"spread":"none","textStroke":0,"theme":"sepia"}"#
             )
             #expect(AppSettings(defaults: defaults).readerSettings == changed)
             #expect(AppSettings.snapshot(from: defaults).readerSettings == changed)

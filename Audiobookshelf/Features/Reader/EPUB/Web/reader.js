@@ -55,6 +55,8 @@
   // Until the first display lands, relocations are epub.js settling on the start, not the reader.
   let displaying = false
   let lastRelocation = null
+  // The page margin applied to the viewer (see `pageMargin`).
+  let appliedMargin = 0
   // The open book's own state: the displays a command is awaiting (their failures reach that
   // command, not the `displayerror` post), whether the reader's font is applied, and `closed`,
   // which rejects when the book is replaced so nothing awaiting it is stranded.
@@ -201,6 +203,31 @@
     return gap > 0 ? gap : undefined
   }
 
+  // The extra margin on each side, percent of the reader's width (ReaderSettings.margins). It's
+  // padding on the viewer, which epub.js takes off the width it lays pages out in, so epub.js's own
+  // margins and column gap (the Duo hinge, which stays centred) are kept; `0` adds nothing.
+  function pageMargin(next) {
+    const margin = Number(next.margins)
+    return margin > 0 && margin < 50 ? margin : 0
+  }
+
+  // epub.js shows a spread from `minSpreadWidth` of its own width, which the margins narrow. The
+  // threshold is scaled by the same margin, so epub.js's choice agrees with the spread native decided
+  // (ReaderSpreadPolicy, which sends `none` for a single page) exactly as it did without margins.
+  function minSpreadWidth() {
+    return Math.floor((MIN_SPREAD_WIDTH * (100 - 2 * pageMargin(settings))) / 100)
+  }
+
+  function applyMargins(shown) {
+    const margin = pageMargin(settings)
+    if (margin === appliedMargin) return
+    appliedMargin = margin
+    const viewer = document.getElementById('viewer')
+    viewer.style.paddingLeft = viewer.style.paddingRight = margin ? margin + '%' : ''
+    // Lays the pages out again in the new width, as a window resize does (once epub.js is showing).
+    if (shown.manager && shown.manager.stage) shown.resize()
+  }
+
   function applySettings(next) {
     settings = validSettings(next)
     if (!rendition) return
@@ -220,10 +247,11 @@
     rendition.settings.gap = gap
     if (rendition.manager) rendition.manager.settings.gap = gap
     applySpread(rendition)
+    applyMargins(rendition)
   }
 
   function applySpread(shown) {
-    shown.spread(settings.spread === 'none' ? 'none' : 'auto', MIN_SPREAD_WIDTH)
+    shown.spread(settings.spread === 'none' ? 'none' : 'auto', minSpreadWidth())
   }
 
   // Keeps a section's inline font (a spine content hook, before epub.js applies any override).
@@ -267,14 +295,26 @@
     if (selection && !selection.isCollapsed) return
     const frame = view && view.frameElement
     const offset = frame ? frame.getBoundingClientRect() : { left: 0, top: 0 }
+    postTap(offset.left + event.clientX, offset.top + event.clientY)
+  }
+
+  // A tap at a point in the page, as a fraction of its width and height.
+  function postTap(x, y) {
     const clamp = function (value) {
       return Math.min(1, Math.max(0, value))
     }
-    post({
-      type: 'tap',
-      x: clamp((offset.left + event.clientX) / window.innerWidth),
-      y: clamp((offset.top + event.clientY) / window.innerHeight)
-    })
+    post({ type: 'tap', x: clamp(x / window.innerWidth), y: clamp(y / window.innerHeight) })
+  }
+
+  // A tap in the margins (the viewer's padding), outside epub.js's container and its sections'
+  // frames, whose clicks `onClick` hears; it turns pages or shows the chrome as theirs do.
+  function onMarginClick(event) {
+    if (!rendition) return
+    const target = event.target
+    if (target && typeof target.closest === 'function' && target.closest('.epub-container')) return
+    const selection = window.getSelection && window.getSelection()
+    if (selection && !selection.isCollapsed) return
+    postTap(event.clientX, event.clientY)
   }
 
   // How many bytes `entry` inflates to, failing once that passes `limit`.
@@ -648,7 +688,7 @@
       width: '100%',
       height: '100%',
       spread: settings.spread === 'none' ? 'none' : 'auto',
-      minSpreadWidth: MIN_SPREAD_WIDTH,
+      minSpreadWidth: minSpreadWidth(),
       allowScriptedContent: false,
       // The legacy app's and web client's layout (ADR 0008).
       flow: 'paginated',
@@ -904,6 +944,8 @@
       }
     }
   }
+
+  document.addEventListener('click', onMarginClick)
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function () {

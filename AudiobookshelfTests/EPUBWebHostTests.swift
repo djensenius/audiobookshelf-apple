@@ -175,7 +175,8 @@ private final class ReaderPage {
                 css(name)
               }
             },
-            spread: function (value) { window.fakeSpread = value },
+            spread: function (value, minWidth) { window.fakeSpread = value; window.fakeMinSpreadWidth = minWidth },
+            resize: function () { window.fakeResizes = (window.fakeResizes || 0) + 1 },
             started: new Promise(function (resolve) {
               setTimeout(function () { window.fakeSpread = true; resolve() }, 0)
             }),
@@ -649,6 +650,126 @@ private final class ReaderPage {
         try await page.open("tiny", settings: ["spread": "none"])
 
         #expect(try await page.evaluate("window.fakeSpread") == #""none""#)
+    }
+
+    /// The margins pad the viewer on both sides, narrow epub.js's spread threshold to match, and lay
+    /// the pages out again once shown; none (the default) leaves the layout as it was.
+    @Test(.timeLimit(.minutes(1))) func theMarginsPadTheViewerAndKeepTheSpreadThreshold() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        try await page.fakeEPUBJS()
+        let padding =
+            "(function (v) { return [v.style.paddingLeft, v.style.paddingRight] })(document.getElementById('viewer'))"
+        func apply(_ margins: Int) async throws {
+            try await page.controller.send(
+                Data(#"{"type":"applySettings","settings":{"themeRules":{},"margins":\#(margins)}}"#.utf8))
+        }
+
+        try await page.open("tiny")
+        #expect(try await page.evaluate(padding) == #"["",""]"#)
+        #expect(try await page.evaluate("window.fakeMinSpreadWidth") == "800")
+        // As epub.js once it's showing the book.
+        _ = try await page.evaluate("window.fakeRendition.manager = { settings: {}, stage: {} }")
+
+        try await apply(6)
+        #expect(try await page.evaluate(padding) == #"["6%","6%"]"#)
+        #expect(try await page.evaluate("window.fakeMinSpreadWidth") == "704")
+        #expect(try await page.evaluate("window.fakeResizes") == "1")
+
+        try await apply(6)
+        #expect(try await page.evaluate("window.fakeResizes") == "1")
+
+        try await apply(0)
+        #expect(try await page.evaluate(padding) == #"["",""]"#)
+        #expect(try await page.evaluate("window.fakeMinSpreadWidth") == "800")
+        #expect(try await page.evaluate("window.fakeResizes") == "2")
+    }
+
+    /// A tap in the margins, outside epub.js's container, turns pages as one on the page does; one in
+    /// the container is left to epub.js's sections.
+    @Test(.timeLimit(.minutes(1))) func aTapInTheMarginsIsPosted() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        page.controller.webView.frame = CGRect(x: 0, y: 0, width: 1000, height: 600)
+        try await page.fakeEPUBJS()
+        try await page.open("tiny", settings: ["margins": 10])
+        func click(_ target: String, x: Int) async throws {
+            _ = try await page.evaluate(
+                "\(target).dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: \(x), clientY: 300 }))")
+        }
+
+        _ = try await page.evaluate(
+            "document.getElementById('viewer').appendChild(document.createElement('div')).className = 'epub-container'")
+        try await click("document.querySelector('.epub-container')", x: 500)
+        #expect(page.last("tap") == nil)
+
+        try await click("document.getElementById('viewer')", x: 50)
+        let tap = try #require(page.last("tap"))
+        #expect(tap["x"] as? Double == 0.05)
+        #expect(tap["y"] as? Double == 0.5)
+    }
+
+    /// With real epub.js, a book opened with margins is laid out in the width between them from its
+    /// first render, without laying it out again. WebKit runs no animation frames for a page that
+    /// isn't on screen, as in the test host, and epub.js renders on them, so they're timers here.
+    @Test(.timeLimit(.minutes(1))) func epubJSLaysOutBetweenTheMargins() async throws {
+        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        let webView = page.controller.webView
+        webView.frame = CGRect(x: 0, y: 0, width: 1000, height: 600)
+        webView.configuration.userContentController.addUserScript(
+            WKUserScript(
+                source: """
+                    window.requestAnimationFrame = function (f) {
+                      return setTimeout(function () { f(performance.now()) }, 0)
+                    }
+                    window.cancelAnimationFrame = clearTimeout
+                    """, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        func readies() -> Int { page.events.count { $0["type"] as? String == "ready" } }
+        webView.reload()
+        while readies() < 2 { try await Task.sleep(for: .milliseconds(20)) }
+        // Keeps epub.js's rendition and counts the reader's `resize` calls on it.
+        _ = try await page.evaluate(
+            """
+            (function () {
+              const real = window.ePub
+              window.ePub = function () {
+                const book = real.apply(this, arguments)
+                const renderTo = book.renderTo
+                book.renderTo = function () {
+                  const rendition = (window.realRendition = renderTo.apply(book, arguments))
+                  window.realResizes = 0
+                  const resize = rendition.resize
+                  rendition.resize = function () {
+                    window.realResizes++
+                    return resize.apply(rendition, arguments)
+                  }
+                  return rendition
+                }
+                return book
+              }
+              return 1
+            })()
+            """)
+
+        let opening = Task { try await page.open("tiny", settings: ["margins": 10, "spread": "none"]) }
+        defer { opening.cancel() }
+        let shown = "window.realRendition && window.realRendition.manager && window.realRendition.manager.stage"
+        while try await page.evaluate("!!(\(shown))") != "true", page.last("error") == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(page.last("error") == nil)
+        let measured = try #require(
+            try await page.evaluate(
+                """
+                [window.innerWidth, window.realRendition.manager.stage.size().width,
+                 document.querySelector('.epub-container').getBoundingClientRect().left, window.realResizes]
+                """))
+        let values = try #require(try JSONSerialization.jsonObject(with: Data(measured.utf8)) as? [Double])
+        try #require(values.count == 4)
+        let width = values[0]
+        #expect(width > 0)
+        #expect(abs(values[1] - 0.8 * width) <= 1)
+        #expect(abs(values[2] - 0.1 * width) <= 1)
+        #expect(values[3] == 0)
     }
 
     /// Cached locations that aren't an array of CFIs aren't loaded; they're generated afresh.

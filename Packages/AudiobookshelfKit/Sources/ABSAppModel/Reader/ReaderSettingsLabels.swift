@@ -40,6 +40,7 @@ public enum ReaderSettingsLabel: String, CaseIterable, Sendable {
     case fontScale = "LabelFontScale"
     case lineSpacing = "LabelLineSpacing"
     case textStroke = "LabelFontBoldness"
+    case margins = "LabelPageMargins"
     case spread = "LabelLayout"
     case keepScreenAwake = "LabelKeepScreenAwake"
 

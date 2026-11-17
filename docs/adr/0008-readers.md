@@ -206,6 +206,13 @@ dependency.
    `serif`/`sans-serif`, font scale, line spacing, text stroke and spread
    `auto`/`none`.
    - Add `sepia` (P6-12 #104 scope) and a "match system" default for the theme.
+   - Add EPUB margins (P6-12 #104 scope): extra horizontal padding around the pages,
+     0–12% of the reader width per side in steps of 2, default 0 (epub.js's own
+     margins only, the layout before the setting). epub.js lays the pages out in the
+     narrower width, so the column gap and the Duo hinge gap are unchanged. Its
+     `minSpreadWidth` is scaled by the same margin, so epub.js agrees with the spread
+     the native `ReaderSpreadPolicy` decided (decision 7) exactly as it did before.
+     Taps in the margins turn pages or show the chrome, as taps on the page do.
    - EPUB applies these as epub.js theme rules (the legacy `themeRules`). PDF and
      comics only change the chrome and page background.
 7. **Two-page spreads**
