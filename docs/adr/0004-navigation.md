@@ -585,17 +585,17 @@ ArrangementView { primary } secondary: { secondary }
 
 **Commands** (`.commands` on the main `WindowGroup`, which also fills the iPadOS menu bar)
 
-- `SidebarCommands` and `InspectorCommands`.
-- **Playback**: Play/Pause (Space), skip back and forward, previous and next chapter, speed, sleep timer, Show Now Playing.
+- `SidebarCommands` (View ▸ Show/Hide Sidebar) and `InspectorCommands` (the queue inspector).
+- **Playback**: Play/Pause (Space), skip back and forward (⌘← and ⌘→), previous and next chapter (⌥⌘← and ⌥⌘→), speed (⌘− and ⌘+), Create Bookmark (⌘B), sleep timer, Show Now Playing (⌘0). Show Now Playing is disabled with nothing loaded or without a focused signed-in window.
 - **Go**: Home through Account (⌘1–⌘5), Back (⌘[).
-- **Library**: one item per library (⌥⌘1–⌥⌘9).
-- The exact shortcuts are finalized in the Mac issue.
+- **Library**: one item per library of the focused window's account, in server order, with ⌥⌘1–⌥⌘9 for the first nine and a checkmark on the current library. Choosing one switches the library as the library picker does, and dismisses the full player. The menu stays in the menu bar; without a focused signed-in window (or before the libraries load) it shows one disabled No Libraries item.
+- The shortcuts were finalized in #82.
 
 **How commands reach state**
 
 - Navigation commands use `@FocusedValue(Router.self)`, which reads the key window's router published with `.focusedSceneValue(router)`.
 - Playback commands call `PlayerViewModel` / `PlaybackCoordinator` from `AppEnvironment`.
-- "Show Now Playing" sets the focused router's `isFullPlayerPresented` on iOS, and calls `openWindow(id: "now-playing")` on the Mac.
+- "Show Now Playing" sets the focused router's `isFullPlayerPresented`. `PlayerSlot` turns that into the full-screen player on iOS, and into `openWindow(id: "now-playing")` on the Mac, resetting the flag.
 
 ### CarPlay and `AppEnvironment`
 
