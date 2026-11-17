@@ -86,9 +86,9 @@ copies it into the bundle without a project entry:
 
 - `Audiobookshelf/PrivacyInfo.xcprivacy` covers the app and the statically linked
   `AudiobookshelfKit` package.
-- `AudiobookshelfWidgets/PrivacyInfo.xcprivacy` covers the widget extension. Its code
-  (`AudiobookshelfWidgets/`, `AudiobookshelfShared/`) uses SwiftUI, WidgetKit and App
-  Intents only and links no package, so it declares no required-reason APIs.
+- `AudiobookshelfWidgets/PrivacyInfo.xcprivacy` covers the widget extension. It links the
+  narrow `AudiobookshelfWidgetKit` product (`ABSCore` and `ABSUI`), but its call sites
+  use no required-reason APIs, so it declares none.
 
 The app's required-reason APIs
 ([Apple's list](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api)):
@@ -97,10 +97,12 @@ The app's required-reason APIs
 | --- | --- | --- |
 | User defaults | `CA92.1` (the app's own data) | Settings, last-played record and queue (`ABSCore/Settings/AppSettings.swift`, `ABSPlayback/Coordinator/PlaybackCoordinatorDependencies.swift`, `ABSPlayback/Queue/PlaybackQueueStore.swift`); `.standard` is the fallback when the App Group isn't available |
 | User defaults | `1C8F.1` (the App Group) | `AppSettings.sharedDefaults()` opens the `group.org.davidjensenius.Audiobookshelf` suite |
-| File timestamp | `C617.1` (files in the app's own or App Group container) | Cover cache ageing (`ABSCore/Images/CoverFileStore.swift`), image size check with `stat` (`ABSCore/Images/ImageDecoder.swift`), store recovery `lstat` (`ABSData/DataStack.swift`), download bookkeeping (`ABSDownloads/DownloadEngine.swift`, `ABSDownloads/DownloadLocations.swift`, `ABSDownloads/Manager/DownloadJanitor.swift`) |
+| File timestamp | `C617.1` (files in the app's own or App Group container) | Cover cache ageing (`ABSCore/Images/CoverFileStore.swift`), image size check with `stat` (`ABSCore/Images/ImageDecoder.swift`), store recovery `lstat` (`ABSData/DataStack.swift`), ebook cache aging and eviction (`ABSAppModel/Reader/EbookFileLoader.swift`, `ABSAppModel/Reader/EPUBLocationsCache.swift`), download bookkeeping (`ABSDownloads/DownloadEngine.swift`, `ABSDownloads/DownloadLocations.swift`, `ABSDownloads/Manager/DownloadJanitor.swift`) |
 | Disk space | `E174.1` (check space before writing) | `volumeAvailableCapacityForImportantUsage` before a download (`ABSDownloads/Manager/StorageCapacity.swift`) |
 
-Paths are under `Packages/AudiobookshelfKit/Sources/`. No code reads system boot time
+These sources are under `Packages/AudiobookshelfKit/Sources/`. The widget reads its
+snapshot and cover files from the App Group and checks cover-file type, but doesn't read
+file timestamps, access `UserDefaults`, or check disk space. No code reads system boot time
 (`systemUptime`, `mach_absolute_time`) or active keyboards; `ContinuousClock` and
 `SuspendingClock` aren't on Apple's list. Update the manifest, and this table, when
 code starts using another API on the list.
