@@ -92,7 +92,5 @@ struct ReaderSettingsMenu: View {
         } label: {
             Text(verbatim: "\(L10n.string(label.titleKey)): \(value.wrappedValue)%")
         }
-        .accessibilityLabel(Text(verbatim: L10n.string(label.titleKey)))
-        .accessibilityValue(Text(verbatim: "\(value.wrappedValue)%"))
     }
 }
