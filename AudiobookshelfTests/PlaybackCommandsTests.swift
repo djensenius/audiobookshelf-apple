@@ -28,9 +28,13 @@ import Testing
     }
 
     @Test func shortcutsAreDistinctFromGoMenu() {
-        let playback = PlaybackCommand.allCases.map(\.shortcut)
+        let playback = PlaybackCommand.allCases.map(\.shortcut) + [ShowNowPlayingMenuItem.shortcut]
         #expect(Set(playback).count == playback.count)
         #expect(Set(GoCommand.allCases.map(\.shortcut)).isDisjoint(with: playback))
+    }
+
+    @Test func showNowPlayingTakesCommandZero() {
+        #expect(ShowNowPlayingMenuItem.shortcut == KeyboardShortcut("0", modifiers: .command))
     }
 
     @Test func playPauseReadsPauseWhilePlayIsRequested() {
@@ -60,7 +64,7 @@ import Testing
     @Test(
         arguments: [
             "HeaderPlayback", "HeaderSleepTimer", "LabelEndOfChapter", "ButtonCancelTimer", "ButtonPause",
-            PlaybackCommandFailure.addBookmark.messageKey,
+            PlaybackCommandFailure.addBookmark.messageKey, ShowNowPlayingMenuItem.titleKey,
         ] + PlaybackCommand.allCases.map { $0.titleKey(showsPause: false) })
     func menuStringsResolve(key: String) {
         #expect(L10n.string(key) != key, "\(key) is missing from the catalog")

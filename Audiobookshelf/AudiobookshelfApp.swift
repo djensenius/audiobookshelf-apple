@@ -55,6 +55,8 @@ struct AudiobookshelfApp: App {
             RefreshCommands()
             PlaybackCommands(player: environment.player, participant: environment.playback.participant)
             GoCommands()
+            // View > Show/Hide Sidebar toggles the split view's sidebar (ADR 0004).
+            SidebarCommands()
             // View > Show/Hide Inspector toggles the scene's queue inspector (ADR 0004).
             InspectorCommands()
         }

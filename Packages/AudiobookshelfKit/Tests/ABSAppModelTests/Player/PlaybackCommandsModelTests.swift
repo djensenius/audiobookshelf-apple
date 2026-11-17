@@ -326,4 +326,44 @@ struct PlaybackCommandsModelTests {
         model.perform(.cancel)
         #expect(harness.timer.isRunning)
     }
+
+    // MARK: Show Now Playing
+
+    @Test func showNowPlayingNeedsAnItemAndAFocusedScene() throws {
+        let harness = try Harness()
+        let model = harness.model()
+        let router = Router(serverID: "server-1", userID: "user-1")
+
+        // No item: nothing to show.
+        #expect(!model.canShowNowPlaying(in: router))
+        model.showNowPlaying(in: router)
+        #expect(!router.isFullPlayerPresented)
+
+        harness.load()
+        // No signed-in scene focused.
+        #expect(!model.canShowNowPlaying(in: nil))
+        model.showNowPlaying(in: nil)
+        #expect(!PlaybackCommandsModel(player: nil).canShowNowPlaying(in: router))
+
+        #expect(model.canShowNowPlaying(in: router))
+        model.showNowPlaying(in: router)
+        #expect(router.isFullPlayerPresented)
+        #expect(!model.canShowNowPlaying(in: router), "The scene already shows the full player")
+
+        // On a Mac the flag resets once the window opens, and the item can bring it forward again.
+        router.isFullPlayerPresented = false
+        #expect(model.canShowNowPlaying(in: router))
+    }
+
+    @Test func showNowPlayingDisabledOnceTheItemCloses() throws {
+        let harness = try Harness()
+        let model = harness.model()
+        let router = Router()
+        harness.load()
+        #expect(model.canShowNowPlaying(in: router))
+        harness.playback.phase = .idle
+        #expect(!model.canShowNowPlaying(in: router))
+        model.showNowPlaying(in: router)
+        #expect(!router.isFullPlayerPresented)
+    }
 }

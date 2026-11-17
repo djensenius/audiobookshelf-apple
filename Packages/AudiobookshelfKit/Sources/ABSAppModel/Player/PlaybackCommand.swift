@@ -132,6 +132,25 @@ public struct PlaybackCommandsModel {
         return timeline.previousChapterStart(from: time) != time
     }
 
+    // MARK: Show Now Playing
+
+    /// Whether Show Now Playing is enabled: the player has an item and a signed-in scene is focused
+    /// (`router`, `nil` otherwise) that doesn't already show the full player. On a Mac the scene's
+    /// flag resets once the Now Playing window opens, so the item stays enabled and brings the window
+    /// forward.
+    public func canShowNowPlaying(in router: Router?) -> Bool {
+        guard let router, activePlayer != nil else { return false }
+        return !router.isFullPlayerPresented
+    }
+
+    /// Shows the full player in `router`'s scene (``Router/isFullPlayerPresented``), as the mini
+    /// player does: the full-screen player on iOS, the Now Playing window on a Mac. Does nothing when
+    /// it isn't enabled.
+    public func showNowPlaying(in router: Router?) {
+        guard canShowNowPlaying(in: router), let router else { return }
+        router.isFullPlayerPresented = true
+    }
+
     // MARK: Sleep timer
 
     /// Whether `command` is enabled now: starting a timer needs an item, and End of Chapter a chapter
