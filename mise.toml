@@ -11,7 +11,7 @@ depends = ["lint:repo", "lint:swift"]
 
 [tasks."lint:repo"]
 description = "Lint shell scripts and workflows (no Xcode needed)"
-depends = ["lint:shell", "lint:actions", "lint:nowplaying", "test:kit:ios:runner", "test:ui:runner", "test:upstream:areas"]
+depends = ["lint:shell", "lint:actions", "lint:nowplaying", "test:kit:ios:runner", "test:ui:runner", "privacy:check:tests", "test:upstream:areas"]
 
 [tasks."test:upstream:areas"]
 description = "Test upstream-sync path mapping"
@@ -193,6 +193,16 @@ esac
 [tasks."test:ui:runner"]
 description = "Fake-CLI regressions for CI's UI-test retry (scripts/ui-test-ci.sh) and test:ui's arguments (no Xcode or simulator)"
 run = "python3 scripts/ui-test-ci-tests.py"
+
+[tasks."privacy:check"]
+description = "Check app and extension required-reason APIs against their privacy manifests"
+usage = 'arg "<app>" help="built .app bundle to inspect"'
+env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xcode.app/Contents/Developer') }}" }
+run = 'python3 scripts/check-privacy-manifests.py "$usage_app"'
+
+[tasks."privacy:check:tests"]
+description = "Test required-reason API detection and manifest mapping"
+run = "python3 scripts/check-privacy-manifests-tests.py"
 
 [tasks.screenshots]
 description = "App Store screenshots into build/screenshots/ (--device <id>, --locale <tag>; docs/testing/screenshots.md)"
