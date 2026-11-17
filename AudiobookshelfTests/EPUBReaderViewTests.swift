@@ -1,5 +1,6 @@
 import ABSAppModel
 import ABSCore
+import ABSUI
 import Foundation
 import SwiftUI
 import Testing
@@ -86,6 +87,53 @@ import WebKit
                 try await Task.sleep(for: .milliseconds(10))
             }
             #expect(Self.webView(in: hosting) != nil)
+        }
+
+        /// VoiceOver turns pages and shows or hides the chrome from the page with named actions
+        /// (#675). They're on the page's container: SwiftUI drops those given to the web view alone.
+        @Test func thePageHasActionsForItsPagesAndTheChrome() async throws {
+            try await AccessibilityTree.with {
+                let request = EbookFileRequest(
+                    connectionID: UUID(), itemID: "book", fileIno: "1", fileExtension: "epub", version: "1")
+                let loader = EbookFileLoader(
+                    directory: FileManager.default.temporaryDirectory.appending(path: UUID().uuidString),
+                    fetcher: NoEbookFetcher())
+                let model = ReaderContainerModel(
+                    request: request, kind: .epub, loader: loader, progress: nil, serverProgress: nil)
+                let payload = ReaderSettingsPayload(
+                    settings: ReaderSettings(), resolvedAppearance: .light, layout: .single)
+                let hosting = NSHostingView(
+                    rootView: ZStack {
+                        Color.black
+                        EPUBReaderView(model: model, fileURL: URL(filePath: "/nonexistent/book.epub"), payload: payload)
+                    })
+                let window = NSWindow(
+                    contentRect: CGRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.titled], backing: .buffered,
+                    defer: false)
+                window.isReleasedWhenClosed = false
+                window.contentView = hosting
+                defer { window.close() }
+                let webView = try #require(try await Self.waitForWebView(in: hosting) { $0 != nil })
+                @MainActor func actions() -> [String] {
+                    AccessibilityTree.container(of: webView, in: hosting).map(AccessibilityTree.actionNames(of:)) ?? []
+                }
+                let hide = L10n.string("ButtonReaderHideControls")
+                let show = L10n.string("ButtonReaderShowControls")
+
+                #expect(
+                    Set(actions()) == [
+                        L10n.string("ButtonReaderPreviousPage"), L10n.string("ButtonReaderNextPage"), hide,
+                    ])
+                let page = try #require(AccessibilityTree.container(of: webView, in: hosting))
+                #expect(AccessibilityTree.perform(hide, on: page))
+                #expect(!model.isChromeVisible)
+                for _ in 0..<200 where !actions().contains(show) {
+                    hosting.layoutSubtreeIfNeeded()
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+                #expect(actions().contains(show))
+                #expect(!actions().contains(hide))
+            }
         }
 
         /// A replacement model (the account's client changed) gets a new reader session, rather than

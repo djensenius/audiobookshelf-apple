@@ -121,8 +121,8 @@ enum TinyEPUB {
         return archive
     }
 
-    /// A ZIP of `entries`, in order.
-    private static func zip(_ entries: [Entry]) -> Data {
+    /// A ZIP of `entries`, in order; also the comic reader's tests' CBZ.
+    static func zip(_ entries: [Entry]) -> Data {
         var archive = Data()
         var directory = Data()
         for entry in entries {

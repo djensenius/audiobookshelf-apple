@@ -166,6 +166,7 @@ struct ReaderContent: View {
     @Environment(\.colorScheme) private var colorScheme
     #if os(iOS)
         @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+        @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     #endif
     @State private var size = CGSize.zero
     /// The hinge's width while a Duo is spanned across it (``ReaderHingeReader``).
@@ -197,6 +198,13 @@ struct ReaderContent: View {
             }
         }
         .animation(.default, value: model.isChromeVisible)
+        .environment(\.readerChromeIsPinned, model.isChromePinned)
+        #if os(iOS)
+            // VoiceOver on iOS focuses the elements inside the page's web or PDF view, and whether it
+            // offers their container's Show Controls action there isn't certain, so with it running
+            // the chrome stays shown and its buttons reachable (#675).
+            .onChange(of: voiceOverEnabled, initial: true) { _, enabled in model.isChromePinned = enabled }
+        #endif
         // A replacement model (the account's client changed) gets fresh reader state: the EPUB
         // session, PDF view and their resume points belong to the model they were made for.
         .id(ObjectIdentifier(model))

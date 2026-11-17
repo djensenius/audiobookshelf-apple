@@ -22,6 +22,10 @@ struct EPUBReaderView: View {
             } else if let session {
                 EPUBWebView(controller: session.controller)
                     .ignoresSafeArea()
+                    // A container of the page's elements, so the actions below are kept: on the web
+                    // view alone SwiftUI drops them on Mac (the tests check there). On iOS, VoiceOver
+                    // focuses the elements inside, and VoiceOver running pins the chrome instead.
+                    .accessibilityElement(children: .contain)
                     // For VoiceOver and Switch Control; the hidden buttons below are the keyboard's.
                     .accessibilityAction(named: Text(verbatim: L10n.string("ButtonReaderPreviousPage"))) {
                         session.turn(.prev)
@@ -29,6 +33,9 @@ struct EPUBReaderView: View {
                     .accessibilityAction(named: Text(verbatim: L10n.string("ButtonReaderNextPage"))) {
                         session.turn(.next)
                     }
+                    .readerChromeAccessibilityAction(
+                        isChromeVisible: model.isChromeVisible, toggle: model.toggleChrome
+                    )
                     .background {
                         // Hidden buttons, so the arrow keys turn pages wherever focus is. Not mirrored
                         // in right-to-left languages: the handler maps the physical key by the book's

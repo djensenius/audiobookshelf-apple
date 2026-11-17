@@ -62,6 +62,10 @@ struct PDFReaderView {
     var requestedPage: PDFPageRequest?
     /// Lends the page view to a thumbnail strip (``PDFThumbnailStrip``).
     var link: PDFReaderLink?
+    /// A tap on the page, on iPhone and iPad: a single one, once PDFKit's double tap to zoom has
+    /// failed, so a double tap doesn't also count as two (#675). On Mac clicks are left to the
+    /// caller's gestures and this is never called.
+    var onTap: () -> Void = {}
     /// The 1-based page the reader turned to.
     var onPageChange: @MainActor (Int) -> Void = { _ in }
 
@@ -168,6 +172,9 @@ struct PDFReaderView {
         }
         coordinator.follow(requestedPage, in: view)
         view.backgroundColor = background.color
+        #if os(iOS)
+            view.onTap = onTap
+        #endif
         if let link, link.pdfView !== view { link.pdfView = view }
     }
 }
@@ -213,7 +220,26 @@ struct PDFReaderView {
     }
 
     /// One page swipes with a page view controller. A spread can't use one, so swipes turn it.
+    /// A single tap calls ``onTap`` once no double tap (PDFKit's zoom) claims it.
     final class ReaderPDFView: PDFView {
+        /// The tap on the page, for the reader's chrome.
+        var onTap: () -> Void = {}
+        /// Recognizes alongside PDFKit's own taps, after its double taps fail: those on the page's
+        /// zooming views too, which PDFKit makes as pages are shown, so they're found as they come.
+        let chromeTap = UITapGestureRecognizer()
+        private let chromeTapGate = ReaderChromeTapGate()
+
+        override init(frame: CGRect) {
+            super.init(frame: frame)
+            chromeTap.addTarget(self, action: #selector(tapped(_:)))
+            chromeTap.cancelsTouchesInView = false
+            chromeTap.delegate = chromeTapGate
+            addGestureRecognizer(chromeTap)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
         private lazy var swipes: [UISwipeGestureRecognizer] = ([.left, .right] as [UISwipeGestureRecognizer.Direction])
             .map { direction in
                 let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
@@ -233,6 +259,29 @@ struct PDFReaderView {
             } else if swipe.direction == .right, canGoToPreviousPage {
                 goToPreviousPage(nil)
             }
+        }
+
+        @objc private func tapped(_ tap: UITapGestureRecognizer) {
+            onTap()
+        }
+    }
+
+    /// The delegate of ``ReaderPDFView/chromeTap``. Not the view: PDFKit's view may already be its
+    /// own recognizers' delegate.
+    @MainActor final class ReaderChromeTapGate: NSObject, UIGestureRecognizerDelegate {
+        /// Waits for any double tap the touch also reaches, so it's one tap or the other.
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer, shouldRequireFailureOf other: UIGestureRecognizer
+        ) -> Bool {
+            ((other as? UITapGestureRecognizer)?.numberOfTapsRequired ?? 1) > 1
+        }
+
+        /// Leaves PDFKit's single taps (links, ending a selection) working.
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
+        ) -> Bool {
+            true
         }
     }
 #endif

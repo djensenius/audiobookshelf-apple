@@ -37,14 +37,22 @@ struct PDFPageNavigator: View {
     var body: some View {
         PDFReaderView(
             document: document, initialPage: initialPage, isSpread: isSpread, background: background,
-            requestedPage: request, link: link
+            requestedPage: request, link: link, onTap: onTap
         ) { page in
             reportedPage = page
             onPageChange(page)
         }
         .ignoresSafeArea()
         // On the page only, under the controls, so their buttons and thumbnails don't toggle the chrome.
-        .simultaneousGesture(TapGesture().onEnded { onTap() })
+        // On iPhone and iPad the page view takes the tap itself, so PDFKit's double tap to zoom
+        // doesn't also count as two; on Mac it's this gesture.
+        #if os(macOS)
+            .simultaneousGesture(TapGesture().onEnded { onTap() })
+        #endif
+        // A container of the page's elements, so the action is kept: on the PDF view alone SwiftUI
+        // drops it on Mac (the tests check there). On iOS, VoiceOver running pins the chrome instead.
+        .accessibilityElement(children: .contain)
+        .readerChromeAccessibilityAction(isChromeVisible: showsControls, toggle: onTap)
         .overlay {
             if showsControls, document.pageCount > 0 {
                 controls

@@ -711,7 +711,141 @@ private final class ReaderPage {
     /// first render, without laying it out again. WebKit runs no animation frames for a page that
     /// isn't on screen, as in the test host, and epub.js renders on them, so they're timers here.
     @Test(.timeLimit(.minutes(1))) func epubJSLaysOutBetweenTheMargins() async throws {
-        let page = try await ReaderPage(loadBook: { _ in TinyEPUB.data })
+        let page = try await realEPUBJSPage()
+
+        let opening = Task { try await page.open("tiny", settings: ["margins": 10, "spread": "none"]) }
+        defer { opening.cancel() }
+        let shown = "window.realRendition && window.realRendition.manager && window.realRendition.manager.stage"
+        while try await page.evaluate("!!(\(shown))") != "true", page.last("error") == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(page.last("error") == nil)
+        let measured = try #require(
+            try await page.evaluate(
+                """
+                [window.innerWidth, window.realRendition.manager.stage.size().width,
+                 document.querySelector('.epub-container').getBoundingClientRect().left, window.realResizes]
+                """))
+        let values = try #require(try JSONSerialization.jsonObject(with: Data(measured.utf8)) as? [Double])
+        try #require(values.count == 4)
+        let width = values[0]
+        #expect(width > 0)
+        #expect(abs(values[1] - 0.8 * width) <= 1)
+        #expect(abs(values[2] - 0.1 * width) <= 1)
+        #expect(values[3] == 0)
+    }
+
+    /// With real epub.js, a swipe that starts in the margins, outside epub.js's container, turns the
+    /// page as one on the page does: epub.js's snapper gets its touches and decides the direction. A
+    /// swipe on the page reaches the snapper once, from epub.js's own listener. The Mac test host has
+    /// no touch, so the page claims it before epub.js looks, and the touches are synthesized. A
+    /// swipe cancelled past halfway goes back to the page it started on, with no snap after, and
+    /// doesn't leave its start behind for the next.
+    @Test(.timeLimit(.minutes(1))) func aSwipeFromTheMarginsTurnsThePage() async throws {
+        let long = "<p>\(String(repeating: "Lorem ipsum dolor sit amet. ", count: 3000))</p>"
+        let page = try await realEPUBJSPage(touch: true, book: TinyEPUB.data(chapterBody: long))
+
+        let opening = Task { try await page.open("tiny", settings: ["margins": 10, "spread": "none"]) }
+        defer { opening.cancel() }
+        let snapper = "window.realRendition && window.realRendition.manager && window.realRendition.manager.snapper"
+        // The snapper's scroll offset, as its moves and snaps set it.
+        let offset =
+            "(function (s) { return Math.round(s.fullsize ? window.scrollX : s.scroller.scrollLeft) })(\(snapper))"
+        while try await page.evaluate("!!(\(snapper))") != "true", page.last("error") == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        #expect(page.last("error") == nil)
+        // Records each snap: 1 for the next page, -1 for the previous, 0 to settle on the one shown.
+        // Snaps land at once: WebKit throttles the timers of a page that isn't on screen, which would
+        // leave their animations partway.
+        _ = try await page.evaluate(
+            """
+            (function (snapper) {
+              snapper.settings.duration = 0
+              window.snaps = []
+              const snap = snapper.snap
+              snapper.snap = function (howMany) {
+                window.snaps.push(howMany || 0)
+                return snap.apply(snapper, arguments)
+              }
+              return 1
+            })(\(snapper))
+            """)
+        /// Returns where the pages were scrolled to just before the touch ended.
+        @discardableResult
+        func swipe(_ target: String, from start: Int, to end: Int, cancelled: Bool = false) async throws -> Int? {
+            try await page.evaluate(
+                """
+                (function (target) {
+                  function touch(type, x) {
+                    const event = new Event(type, { bubbles: true })
+                    const touches = type === 'touchend' || type === 'touchcancel' ? [] : [{ screenX: x, screenY: 300, clientX: x, clientY: 300 }]
+                    Object.defineProperty(event, 'touches', { value: touches })
+                    target.dispatchEvent(event)
+                    // WebKit sends a page that isn't on screen no scroll events, which the snapper
+                    // keeps its offset by: this one stands in for the next frame's.
+                    const snapper = \(snapper)
+                    snapper.scroller.dispatchEvent(new Event('scroll'))
+                  }
+                  touch('touchstart', \(start))
+                  touch('touchmove', \((start + end) / 2))
+                  touch('touchmove', \(end))
+                  const scrolled = \(offset)
+                  touch('\(cancelled ? "touchcancel" : "touchend")', \(end))
+                  return scrolled
+                })(\(target))
+                """
+            ).flatMap { Int($0) }
+        }
+        func scrolled() async throws -> Int? { try await page.evaluate(offset).flatMap { Int($0) } }
+        let viewer = "document.getElementById('viewer')"
+        // A page's width, once the chapter is laid out in at least three, for the swipes to scroll
+        // through.
+        let layout = """
+            (function (s) {
+              const width = Math.round(s.layout.pageWidth * s.layout.divisor)
+              const scroller = s.fullsize ? document.scrollingElement : s.scroller
+              return width > 0 && scroller.scrollWidth >= width * 3 ? width : 0
+            })(\(snapper))
+            """
+        var width = 0
+        for _ in 0..<250 {
+            width = try await page.evaluate(layout).flatMap { Int($0) } ?? 0
+            if width > 0 { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(width > 0)
+        // The opening layout's resizes would cancel the first snap.
+        _ = try await page.evaluate("(function (s) { s.resizeCanceler = false; return 1 })(\(snapper))")
+
+        try await swipe(viewer, from: 90, to: 10)
+        #expect(try await page.evaluate("window.snaps") == "[1]")
+        #expect(try await scrolled() == width)
+        try await swipe(viewer, from: 10, to: 90)
+        #expect(try await page.evaluate("window.snaps") == "[1,-1]")
+        #expect(try await scrolled() == 0)
+        try await swipe("document.querySelector('.epub-container')", from: 590, to: 510)
+        #expect(try await page.evaluate("window.snaps") == "[1,-1,1]")
+        #expect(try await scrolled() == width)
+
+        // Dragged most of a page on and cancelled: back on the second page, where it started.
+        let dragged = try #require(try await swipe(viewer, from: 900, to: 900 - width * 7 / 10, cancelled: true))
+        #expect(dragged > width * 3 / 2)
+        #expect(try await scrolled() == width)
+        #expect(try await page.evaluate("window.snaps") == "[1,-1,1]")
+        // The next swipe starts afresh.
+        try await swipe(viewer, from: 10, to: 90)
+        #expect(try await page.evaluate("window.snaps") == "[1,-1,1,-1]")
+        #expect(try await scrolled() == 0)
+    }
+
+    /// A reader page whose epub.js renders on timers rather than animation frames, which WebKit runs
+    /// none of for a page that isn't on screen, as in the test host. Its rendition, once a book is
+    /// opened, is `window.realRendition`, and the reader's `resize` calls on it `window.realResizes`.
+    /// With `touch`, epub.js finds touch support, as on iPhone and iPad, and swipes to turn pages.
+    private func realEPUBJSPage(touch: Bool = false, book: Data = TinyEPUB.data) async throws -> ReaderPage {
+        let page = try await ReaderPage(loadBook: { _ in book })
         let webView = page.controller.webView
         webView.frame = CGRect(x: 0, y: 0, width: 1000, height: 600)
         webView.configuration.userContentController.addUserScript(
@@ -721,6 +855,7 @@ private final class ReaderPage {
                       return setTimeout(function () { f(performance.now()) }, 0)
                     }
                     window.cancelAnimationFrame = clearTimeout
+                    \(touch ? "window.ontouchstart = null" : "")
                     """, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         func readies() -> Int { page.events.count { $0["type"] as? String == "ready" } }
         webView.reload()
@@ -748,28 +883,7 @@ private final class ReaderPage {
               return 1
             })()
             """)
-
-        let opening = Task { try await page.open("tiny", settings: ["margins": 10, "spread": "none"]) }
-        defer { opening.cancel() }
-        let shown = "window.realRendition && window.realRendition.manager && window.realRendition.manager.stage"
-        while try await page.evaluate("!!(\(shown))") != "true", page.last("error") == nil {
-            try await Task.sleep(for: .milliseconds(20))
-        }
-
-        #expect(page.last("error") == nil)
-        let measured = try #require(
-            try await page.evaluate(
-                """
-                [window.innerWidth, window.realRendition.manager.stage.size().width,
-                 document.querySelector('.epub-container').getBoundingClientRect().left, window.realResizes]
-                """))
-        let values = try #require(try JSONSerialization.jsonObject(with: Data(measured.utf8)) as? [Double])
-        try #require(values.count == 4)
-        let width = values[0]
-        #expect(width > 0)
-        #expect(abs(values[1] - 0.8 * width) <= 1)
-        #expect(abs(values[2] - 0.1 * width) <= 1)
-        #expect(values[3] == 0)
+        return page
     }
 
     /// Cached locations that aren't an array of CFIs aren't loaded; they're generated afresh.
