@@ -87,6 +87,11 @@ public final class SessionLifecycle {
     /// The connection the last of those tried to switch to, whose session was rejected or
     /// unreadable; set before ``signedOutSwitches`` counts it.
     public private(set) var signedOutSwitchConnectionID: UUID?
+    /// How many sessions finished their teardown: each participant's ``SessionParticipant/sessionWillEnd(_:)``
+    /// returned, or was cut off after its synchronous part, so the library is cleared. Counted
+    /// before the next session starts. Watch it to act on what an ended session leaves, such as the
+    /// App Shortcuts' suggestions (``ShortcutParametersRefresher``).
+    public private(set) var endedSessions = 0
 
     /// The session the gate shows as ready, for a screen to name as a change's origin; `nil`
     /// unless the gate is ready.
@@ -647,6 +652,7 @@ public final class SessionLifecycle {
             if !finished.isFired { worker.cancel() }
         }
         timer.cancel()
+        endedSessions += 1
     }
 
     /// Flushes and ends the session with `reason`; or, when the source already signed out by

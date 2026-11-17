@@ -138,6 +138,22 @@ struct PodcastEpisodeEntityQuery: EntityStringQuery {
     }
 }
 
+// MARK: - Now Playing
+
+/// Links Now Playing to the entities (ADR 0006): the composition root's
+/// `NowPlayingEntityIdentifiers`.
+enum NowPlayingEntities {
+    /// The ``BookEntity`` or, for an episode, the ``PodcastEpisodeEntity`` that `key` names. Its
+    /// identifier is the key's raw value, as ``PlayableEntityRecord/id`` makes it.
+    @Sendable static func identifiers(for key: MediaKey) -> [EntityIdentifier] {
+        if key.episodeId == nil {
+            [EntityIdentifier(for: BookEntity.self, identifier: key.rawValue)]
+        } else {
+            [EntityIdentifier(for: PodcastEpisodeEntity.self, identifier: key.rawValue)]
+        }
+    }
+}
+
 // MARK: - Intents
 
 // Plain intents rather than `@AppIntent(schema: .audio.playAudio)`: that schema takes one

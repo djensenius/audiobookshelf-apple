@@ -1,6 +1,8 @@
 import ABSAppModel
 import ABSCore
+import ABSData
 import ABSPlayback
+import AppIntents
 import Foundation
 import Testing
 
@@ -179,5 +181,32 @@ import Testing
             _ = try await PlayBookIntent(book: book).perform()
         }
         #expect(await PlayableEntityRouter.entities(for: [book.id]).isEmpty)
+    }
+
+    // MARK: Now Playing entities (#87)
+
+    @Test func nowPlayingLinksABookToItsBookEntity() throws {
+        let connectionID = UUID()
+        let book = try book(on: connectionID)
+        let key = MediaKey(serverConnectionID: connectionID, libraryItemId: "li_1")
+
+        let identifiers = NowPlayingEntities.identifiers(for: key)
+
+        #expect(identifiers == [EntityIdentifier(for: book)])
+        #expect(identifiers.allSatisfy { $0.entityType == BookEntity.self })
+    }
+
+    @Test func nowPlayingLinksAnEpisodeToItsEpisodeEntity() throws {
+        let connectionID = UUID()
+        let summary = ItemSummary(
+            id: "li_pod-ep_1", itemID: "li_pod", episodeID: "ep_1", kind: .episode, title: "Episode")
+        let episode = try #require(
+            PlayableEntityRecord(summary: summary, connectionID: connectionID).flatMap(PodcastEpisodeEntity.init))
+        let key = MediaKey(serverConnectionID: connectionID, libraryItemId: "li_pod", episodeId: "ep_1")
+
+        let identifiers = NowPlayingEntities.identifiers(for: key)
+
+        #expect(identifiers == [EntityIdentifier(for: episode)])
+        #expect(identifiers.allSatisfy { $0.entityType == PodcastEpisodeEntity.self })
     }
 }
