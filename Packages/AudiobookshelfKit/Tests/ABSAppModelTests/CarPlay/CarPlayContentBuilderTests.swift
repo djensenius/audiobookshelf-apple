@@ -246,6 +246,67 @@ private let books3 = CarPlayDestination.items(libraryID: "lib")
         #expect(list.rows.allSatisfy { if case .play = $0.action { true } else { false } })
     }
 
+    /// Audit of #79: a row's playback configuration has its seconds listened and its length,
+    /// from its progress and the item's duration.
+    @Test func continueListeningRowsCarryElapsedAndDuration() {
+        func timed(_ index: Int, duration: TimeInterval?) -> ItemSummary {
+            ItemSummary(
+                id: "b\(index)", itemID: "b\(index)", kind: .book, title: "Book \(index)", duration: duration)
+        }
+        let sections = [
+            HomeSection(
+                id: "continue-listening", titleKey: nil, label: "", kind: .book,
+                entries: [
+                    .item(timed(0, duration: 3600)), .item(timed(1, duration: 3600)), .item(timed(2, duration: nil)),
+                    .item(timed(3, duration: 0)),
+                ])
+        ]
+        let list = builder().continueListening(sections: sections) { item in
+            item.id == "b1" ? nil : ItemProgress(fraction: 0.25)
+        }
+        #expect(list.rows.map(\.duration) == [3600, 3600, nil, nil])
+        // Unknown progress or duration claims no position.
+        #expect(list.rows.map(\.elapsed) == [900, nil, nil, nil])
+        #expect(list.rows.map(\.progress) == [0.25, nil, 0.25, 0.25])
+        #expect(list.rows.allSatisfy { !$0.isFinished })
+        let finished = builder().continueListening(sections: sections) { _ in
+            ItemProgress(fraction: 0.5, isFinished: true)
+        }
+        #expect(finished.rows.map(\.isFinished) == [true, true, true, true])
+        #expect(finished.rows.map(\.elapsed) == [3600, 3600, nil, nil])
+    }
+
+    /// A browse row's progress isn't known, so it gets no playback configuration, which would
+    /// claim it was never started.
+    @Test func browseRowsWithoutProgressGetNoPlaybackConfiguration() {
+        let item = ItemSummary(id: "b0", itemID: "b0", kind: .book, title: "Book 0", duration: 120)
+        let row = builder().items([item], reachedEnd: true, in: books3, title: "Books").rows[0]
+        #expect(row.elapsed == nil)
+        #expect(row.playbackAction(isPlaying: false) == nil)
+        #expect(builder().library(library).rows.allSatisfy { $0.playbackAction(isPlaying: false) == nil })
+    }
+
+    /// Review of #79: a row advertises what its tap does. A tap never pauses, so the playing row
+    /// offers play; a finished item starts over, so it offers replay; the others resume (play).
+    @Test func aRowsPlaybackActionFollowsItsState() {
+        let play = CarPlayRow.Action.play(itemID: "b", episodeID: nil)
+        func row(progress: Double?, elapsed: TimeInterval?, isFinished: Bool = false) -> CarPlayRow {
+            CarPlayRow(
+                id: "b", text: "B", progress: progress, elapsed: elapsed, duration: 100, isFinished: isFinished,
+                action: play)
+        }
+        #expect(row(progress: 0.5, elapsed: 50).playbackAction(isPlaying: false) == .play)
+        #expect(row(progress: 0.5, elapsed: 50).playbackAction(isPlaying: true) == .play)
+        #expect(row(progress: 1, elapsed: 100, isFinished: true).playbackAction(isPlaying: false) == .replay)
+        #expect(row(progress: 1, elapsed: 100, isFinished: true).playbackAction(isPlaying: true) == .play)
+        // Listened to the end but not marked finished: it resumes there.
+        #expect(row(progress: 1, elapsed: 100).playbackAction(isPlaying: false) == .play)
+        #expect(row(progress: nil, elapsed: nil).playbackAction(isPlaying: true) == nil)
+        let open = CarPlayRow(
+            id: "o", text: "O", progress: 0.5, elapsed: 50, duration: 100, action: .open(.libraries))
+        #expect(open.playbackAction(isPlaying: false) == nil)
+    }
+
     @Test func aPodcastLibraryShowsPodcastsThatOpenTheirEpisodes() {
         let podcasts = Library(id: "pods", name: "Podcasts", mediaType: .podcast)
         let builder = builder()

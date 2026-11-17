@@ -10,9 +10,12 @@ public struct CarPlayLimits: Sendable, Hashable {
     public let maximumItemCount: Int
     /// Sections in one list. At least 1.
     public let maximumSectionCount: Int
-    /// List templates in one tab's stack, its root included. At least 1. The deepest list the
-    /// browse tree has (``CarPlayDestination/depth``) is 4, which leaves room for Now Playing
-    /// under the default of 5.
+    /// Templates in the navigation stack, its root (the tab bar, standing for each tab's root list)
+    /// included. At least 1. Apple limits audio apps to 5: "the root template counts as the first
+    /// template in the total" (`CPInterfaceController.pushTemplate(_:animated:completion:)`, and
+    /// the CarPlay Developer Guide's template depth). The deepest list the browse tree has
+    /// (``CarPlayDestination/depth``) is 4, which leaves room for Now Playing, but not for a list
+    /// over it (``canPush(onto:)``).
     public let maximumDepth: Int
 
     public init(maximumItemCount: Int = 12, maximumSectionCount: Int = 12, maximumDepth: Int = 5) {
@@ -23,6 +26,13 @@ public struct CarPlayLimits: Sendable, Hashable {
 
     /// Lists trimmed to 12 rows (#79) within five levels.
     public static let standard = CarPlayLimits()
+
+    /// Whether one more template fits on a stack of `stackCount` templates
+    /// (`CPInterfaceController.templates.count`): pushing past ``maximumDepth`` fails, and
+    /// without a completion handler CarPlay raises an exception.
+    public func canPush(onto stackCount: Int) -> Bool {
+        stackCount < maximumDepth
+    }
 }
 
 /// The localized texts the builder needs. ABSAppModel has no strings, so the delegate passes
@@ -101,7 +111,8 @@ public enum CarPlayDestination: Sendable, Hashable {
 
 /// One row of a CarPlay list: a text, an image and what tapping it does. Rows carry no
 /// descriptive text (a description, duration, …), which CarPlay's driving guidelines discourage;
-/// a Downloads row names its author or podcast in ``detail``.
+/// a Downloads row names its author or podcast in ``detail``. A playable row's ``elapsed`` and
+/// ``duration`` are for `CPListItem.playbackConfiguration`, which the system draws, not text.
 public struct CarPlayRow: Sendable, Hashable, Identifiable {
     public enum Action: Sendable, Hashable {
         /// Pushes the destination's list.
@@ -124,22 +135,51 @@ public struct CarPlayRow: Sendable, Hashable, Identifiable {
     public let image: ImageKey?
     /// Listening progress from 0 to 1, for `CPListItem.playbackProgress`; `nil` when not shown.
     public let progress: Double?
+    /// Seconds listened, for `CPPlaybackConfiguration.elapsedTime`; `nil` when ``progress`` or
+    /// ``duration`` is unknown, like ``progress``, so the row claims no position it doesn't know.
+    public let elapsed: TimeInterval?
+    /// The item's length in seconds, for `CPPlaybackConfiguration.duration`; `nil` when unknown.
+    public let duration: TimeInterval?
+    /// Whether the item is marked finished, so playing it starts over (``playbackAction(isPlaying:)``).
+    public let isFinished: Bool
     /// An item that can't be played (missing on the server, or without audio) is shown disabled.
     public let isEnabled: Bool
     public let action: Action
 
     public init(
         id: String, text: String, detail: String? = nil, image: ImageKey? = nil, progress: Double? = nil,
-        isEnabled: Bool = true, action: Action
+        elapsed: TimeInterval? = nil, duration: TimeInterval? = nil, isFinished: Bool = false, isEnabled: Bool = true,
+        action: Action
     ) {
         self.id = id
         self.text = text
         self.detail = detail
         self.image = image
         self.progress = progress
+        self.elapsed = elapsed
+        self.duration = duration
+        self.isFinished = isFinished
         self.isEnabled = isEnabled
         self.action = action
     }
+
+    /// The playback action `CPPlaybackConfiguration` shows for the row: what tapping it does.
+    /// A tap always plays through `PlayItemAction` with no start time, which never pauses: the
+    /// item `isPlaying` keeps playing where it is, so it's play. A finished item that isn't playing
+    /// starts over from 0 (`ResumePosition.startTime`, and `PlaybackCoordinator.resumeLoaded`
+    /// from the end), so it's replay; anything else resumes, so it's play. `nil` for a row that
+    /// doesn't play, or whose ``elapsed`` or ``duration`` is unknown: it gets no playback
+    /// configuration.
+    public func playbackAction(isPlaying: Bool) -> CarPlayRowPlaybackAction? {
+        guard case .play = action, elapsed != nil, duration != nil else { return nil }
+        return isFinished && !isPlaying ? .replay : .play
+    }
+}
+
+/// What tapping a playable row does to its playback, for `CPPlaybackConfiguration.Action`.
+public enum CarPlayRowPlaybackAction: Sendable, Hashable {
+    case play
+    case replay
 }
 
 public struct CarPlaySection: Sendable, Hashable, Identifiable {
