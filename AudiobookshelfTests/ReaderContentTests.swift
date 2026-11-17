@@ -44,6 +44,43 @@ import Testing
             #expect(later === first)
         }
 
+        /// The PDF opens in the page navigator (#102): with the chrome, its bar along the bottom
+        /// takes a click there and the page one in the middle; without, the page takes both.
+        @Test func thePDFShowsThePageNavigatorWithTheChrome() async throws {
+            let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let request = EbookFileRequest(
+                connectionID: UUID(), itemID: "book", fileIno: "1", fileExtension: "pdf", version: "1")
+            let model = ReaderContainerModel(
+                request: request, kind: .pdf, loader: EbookFileLoader(directory: directory, fetcher: PDFFetcher()),
+                progress: nil, serverProgress: nil)
+            await model.load()
+            let hosting = NSHostingView(rootView: ReaderContent(model: model, title: "Book", serverURL: nil, close: {}))
+            let window = NSWindow(
+                contentRect: CGRect(x: 0, y: 0, width: 600, height: 400), styleMask: [.borderless],
+                backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = hosting
+            defer { window.close() }
+            _ = try #require(try await Self.document(in: hosting) { $0 != nil })
+            let reader = try #require(Self.pdfView(in: hosting))
+            // Window coordinates run up from the bottom-left corner of the 600×400 window.
+            let bottom = NSPoint(x: 300, y: 4)
+            let middle = NSPoint(x: 300, y: 200)
+
+            #expect(model.isChromeVisible)
+            #expect(hosting.hitTest(bottom)?.isDescendant(of: reader) == false)
+            #expect(hosting.hitTest(middle)?.isDescendant(of: reader) == true)
+
+            model.toggleChrome()
+            for _ in 0..<100 where hosting.hitTest(bottom)?.isDescendant(of: reader) != true {
+                hosting.layoutSubtreeIfNeeded()
+                try await Task.sleep(for: .milliseconds(10))
+            }
+            #expect(hosting.hitTest(bottom)?.isDescendant(of: reader) == true)
+            #expect(hosting.hitTest(middle)?.isDescendant(of: reader) == true)
+        }
+
         /// Lays the view out until `done` holds for its PDF view's document, or about a second passes.
         private static func document(
             in hosting: NSView, until done: (PDFDocument?) -> Bool

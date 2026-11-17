@@ -229,6 +229,27 @@ import Testing
             #expect(scroll.contentView.bounds.minY > 0)
         }
 
+        /// A page picked in the thumbnails gives the keyboard back to the page view, so the arrow
+        /// keys turn pages again.
+        @Test func aPagePickedInTheThumbnailsReturnsTheKeyboardToTheReader() async throws {
+            let book = try #require(PDFDocument(data: pdfData(pages: 8)))
+            let link = PDFReaderLink()
+            let window = Self.window(
+                showing: HStack(spacing: 0) {
+                    PDFThumbnailStrip(link: link).frame(width: 112)
+                    PDFReaderView(document: book, link: link)
+                })
+            defer { window.close() }
+            let reader = try #require(link.pdfView)
+            let thumbnails = try #require(link.thumbnailView)
+            let list = try #require(Self.scrollViews(in: thumbnails).first?.documentView)
+            #expect(window.makeFirstResponder(list))
+
+            reader.go(to: try #require(book.page(oneBased: 4)))
+            await settle(until: { window.firstResponder === reader })
+            #expect(window.firstResponder === reader)
+        }
+
         /// `content` in a borderless 600×400 window, not shown, so AppKit lays it out and hit-tests
         /// it as it would on screen.
         private static func window(showing content: some View) -> NSWindow {
