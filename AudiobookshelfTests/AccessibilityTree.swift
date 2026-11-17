@@ -24,6 +24,11 @@
             }
         }
 
+        /// The element under `root` labelled `label`.
+        static func element(labelled label: String, in root: NSView) -> NSObject? {
+            elements(in: root).first { value(of: $0, "accessibilityLabel") == label }
+        }
+
         /// The names of `element`'s custom actions.
         static func actionNames(of element: NSObject) -> [String] {
             customActions(of: element).map(\.name)

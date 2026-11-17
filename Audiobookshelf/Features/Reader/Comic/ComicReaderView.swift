@@ -86,13 +86,19 @@ private struct ComicPagesView: View {
             .environment(\.layoutDirection, .leftToRight)
             .ignoresSafeArea()
             // The pages are decorative images, so VoiceOver has nothing to land on without this one
-            // element, which carries the action that brings back the chrome.
+            // element, which turns the pages (in reading order) and brings back the chrome.
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(
                 Text(
                     verbatim: L10n.string(
                         "LabelReaderPageNumber", model.currentPage.formatted(), model.pageCount.formatted()))
             )
+            .accessibilityAction(named: Text(verbatim: L10n.string("ButtonReaderPreviousPage"))) {
+                model.turn(by: -1)
+            }
+            .accessibilityAction(named: Text(verbatim: L10n.string("ButtonReaderNextPage"))) {
+                model.turn(by: 1)
+            }
             .readerChromeAccessibilityAction(isChromeVisible: showsControls, toggle: onTap)
             if showsControls {
                 ComicControls(model: model)
