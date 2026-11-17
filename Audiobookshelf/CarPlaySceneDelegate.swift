@@ -3,6 +3,7 @@
     import ABSCore
     import ABSUI
     import CarPlay
+    import CoreMedia
 
     /// Scene delegate for the CarPlay audio app scene declared in `Info.plist` (#79): a thin
     /// adapter that shows ``CarPlayRootModel``'s content in CarPlay's templates.
@@ -249,6 +250,7 @@
             let image = row.image.flatMap(cover(for:)).map { UIImage(cgImage: $0.cgImage) }
             let item = CPListItem(text: row.text, detailText: row.detail, image: image)
             if let progress = row.progress { item.playbackProgress = CGFloat(progress) }
+            item.playbackConfiguration = Self.playbackConfiguration(for: row)
             item.isPlaying = isPlaying
             item.isEnabled = row.isEnabled
             item.handler = { [weak self] _, completion in
@@ -256,6 +258,18 @@
                 completion()
             }
             return item
+        }
+
+        /// What a playable row shows of its playback: where it was left and its length, set only
+        /// when both are known, like `playbackProgress`, so the row claims no position it doesn't
+        /// know. Selecting it plays and shows Now Playing.
+        private static func playbackConfiguration(for row: CarPlayRow) -> CPPlaybackConfiguration? {
+            guard case .play = row.action, let elapsed = row.elapsed, let duration = row.duration else { return nil }
+            let timescale = CMTimeScale(NSEC_PER_SEC)
+            return CPPlaybackConfiguration(
+                preferredPresentation: .audio, playbackAction: .play,
+                elapsedTime: CMTime(seconds: elapsed, preferredTimescale: timescale),
+                duration: CMTime(seconds: duration, preferredTimescale: timescale))
         }
 
         private func select(_ row: CarPlayRow) {

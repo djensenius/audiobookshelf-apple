@@ -111,7 +111,8 @@ public enum CarPlayDestination: Sendable, Hashable {
 
 /// One row of a CarPlay list: a text, an image and what tapping it does. Rows carry no
 /// descriptive text (a description, duration, …), which CarPlay's driving guidelines discourage;
-/// a Downloads row names its author or podcast in ``detail``.
+/// a Downloads row names its author or podcast in ``detail``. A playable row's ``elapsed`` and
+/// ``duration`` are for `CPListItem.playbackConfiguration`, which the system draws, not text.
 public struct CarPlayRow: Sendable, Hashable, Identifiable {
     public enum Action: Sendable, Hashable {
         /// Pushes the destination's list.
@@ -134,19 +135,26 @@ public struct CarPlayRow: Sendable, Hashable, Identifiable {
     public let image: ImageKey?
     /// Listening progress from 0 to 1, for `CPListItem.playbackProgress`; `nil` when not shown.
     public let progress: Double?
+    /// Seconds listened, for `CPPlaybackConfiguration.elapsedTime`; `nil` when ``progress`` or
+    /// ``duration`` is unknown, like ``progress``, so the row claims no position it doesn't know.
+    public let elapsed: TimeInterval?
+    /// The item's length in seconds, for `CPPlaybackConfiguration.duration`; `nil` when unknown.
+    public let duration: TimeInterval?
     /// An item that can't be played (missing on the server, or without audio) is shown disabled.
     public let isEnabled: Bool
     public let action: Action
 
     public init(
         id: String, text: String, detail: String? = nil, image: ImageKey? = nil, progress: Double? = nil,
-        isEnabled: Bool = true, action: Action
+        elapsed: TimeInterval? = nil, duration: TimeInterval? = nil, isEnabled: Bool = true, action: Action
     ) {
         self.id = id
         self.text = text
         self.detail = detail
         self.image = image
         self.progress = progress
+        self.elapsed = elapsed
+        self.duration = duration
         self.isEnabled = isEnabled
         self.action = action
     }

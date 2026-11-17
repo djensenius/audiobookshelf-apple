@@ -246,6 +246,38 @@ private let books3 = CarPlayDestination.items(libraryID: "lib")
         #expect(list.rows.allSatisfy { if case .play = $0.action { true } else { false } })
     }
 
+    /// Audit of #79: a row's playback configuration has its seconds listened and its length,
+    /// from its progress and the item's duration.
+    @Test func continueListeningRowsCarryElapsedAndDuration() {
+        func timed(_ index: Int, duration: TimeInterval?) -> ItemSummary {
+            ItemSummary(
+                id: "b\(index)", itemID: "b\(index)", kind: .book, title: "Book \(index)", duration: duration)
+        }
+        let sections = [
+            HomeSection(
+                id: "continue-listening", titleKey: nil, label: "", kind: .book,
+                entries: [
+                    .item(timed(0, duration: 3600)), .item(timed(1, duration: 3600)), .item(timed(2, duration: nil)),
+                    .item(timed(3, duration: 0)),
+                ])
+        ]
+        let list = builder().continueListening(sections: sections) { item in
+            item.id == "b1" ? nil : ItemProgress(fraction: 0.25)
+        }
+        #expect(list.rows.map(\.duration) == [3600, 3600, nil, nil])
+        // Unknown progress or duration claims no position.
+        #expect(list.rows.map(\.elapsed) == [900, nil, nil, nil])
+        #expect(list.rows.map(\.progress) == [0.25, nil, 0.25, 0.25])
+    }
+
+    @Test func browseRowsCarryDurationButNoElapsed() {
+        let item = ItemSummary(id: "b0", itemID: "b0", kind: .book, title: "Book 0", duration: 120)
+        let row = builder().items([item], reachedEnd: true, in: books3, title: "Books").rows[0]
+        #expect(row.duration == 120)
+        #expect(row.elapsed == nil)
+        #expect(builder().library(library).rows.allSatisfy { $0.duration == nil && $0.elapsed == nil })
+    }
+
     @Test func aPodcastLibraryShowsPodcastsThatOpenTheirEpisodes() {
         let podcasts = Library(id: "pods", name: "Podcasts", mediaType: .podcast)
         let builder = builder()

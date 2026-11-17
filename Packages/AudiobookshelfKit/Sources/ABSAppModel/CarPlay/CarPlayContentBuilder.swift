@@ -241,10 +241,16 @@ public struct CarPlayContentBuilder: Sendable {
 
     // MARK: - Helpers
 
+    /// A row playing `item`, with its `progress` (0 to 1) and, from it and the item's duration,
+    /// the seconds listened.
     private func itemRow(_ item: ItemSummary, in destination: CarPlayDestination, progress: Double?) -> CarPlayRow {
-        CarPlayRow(
-            id: item.id, text: item.title, image: imageKey(item.cover), progress: progress.map { min(max($0, 0), 1) },
-            isEnabled: !item.isMissing && item.hasAudio, action: .play(itemID: item.itemID, episodeID: item.episodeID))
+        let progress = progress.map { min(max($0, 0), 1) }
+        let duration = item.duration.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        let elapsed = progress.flatMap { progress in duration.map { progress * $0 } }
+        return CarPlayRow(
+            id: item.id, text: item.title, image: imageKey(item.cover), progress: progress, elapsed: elapsed,
+            duration: duration, isEnabled: !item.isMissing && item.hasAudio,
+            action: .play(itemID: item.itemID, episodeID: item.episodeID))
     }
 
     /// A row opening `destination` from the list `parent`, or `nil` unless `destination` is the
