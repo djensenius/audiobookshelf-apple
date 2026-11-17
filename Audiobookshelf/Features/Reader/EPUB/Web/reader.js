@@ -211,8 +211,9 @@
     return margin > 0 && margin < 50 ? margin : 0
   }
 
-  // epub.js shows a spread from `minSpreadWidth` of its own width, which the margins narrow; the
-  // threshold narrows with it, so the spread still turns on at an 800-point reader (as native does).
+  // epub.js shows a spread from `minSpreadWidth` of its own width, which the margins narrow. The
+  // threshold is scaled by the same margin, so epub.js's choice agrees with the spread native decided
+  // (ReaderSpreadPolicy, which sends `none` for a single page) exactly as it did without margins.
   function minSpreadWidth() {
     return Math.floor((MIN_SPREAD_WIDTH * (100 - 2 * pageMargin(settings))) / 100)
   }
@@ -294,14 +295,26 @@
     if (selection && !selection.isCollapsed) return
     const frame = view && view.frameElement
     const offset = frame ? frame.getBoundingClientRect() : { left: 0, top: 0 }
+    postTap(offset.left + event.clientX, offset.top + event.clientY)
+  }
+
+  // A tap at a point in the page, as a fraction of its width and height.
+  function postTap(x, y) {
     const clamp = function (value) {
       return Math.min(1, Math.max(0, value))
     }
-    post({
-      type: 'tap',
-      x: clamp((offset.left + event.clientX) / window.innerWidth),
-      y: clamp((offset.top + event.clientY) / window.innerHeight)
-    })
+    post({ type: 'tap', x: clamp(x / window.innerWidth), y: clamp(y / window.innerHeight) })
+  }
+
+  // A tap in the margins (the viewer's padding), outside epub.js's container and its sections'
+  // frames, whose clicks `onClick` hears; it turns pages or shows the chrome as theirs do.
+  function onMarginClick(event) {
+    if (!rendition) return
+    const target = event.target
+    if (target && typeof target.closest === 'function' && target.closest('.epub-container')) return
+    const selection = window.getSelection && window.getSelection()
+    if (selection && !selection.isCollapsed) return
+    postTap(event.clientX, event.clientY)
   }
 
   // How many bytes `entry` inflates to, failing once that passes `limit`.
@@ -931,6 +944,8 @@
       }
     }
   }
+
+  document.addEventListener('click', onMarginClick)
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function () {
