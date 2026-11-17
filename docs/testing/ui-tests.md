@@ -12,7 +12,8 @@ ABS_UI_PLATFORM=ios mise run test:ui               # the iPhone Duo simulator (I
 mise run test:ui -- -only-testing:AudiobookshelfUITests/FixtureSmokeTests -jobs 2
 ```
 
-`test:app` and `test:ios` skip `AudiobookshelfUITests`; `test:ui` runs only it.
+`test:app` and `test:ios` skip `AudiobookshelfUITests`; `test:ui` runs only it, or only the tests
+you pick with `-only-testing`.
 
 On macOS, XCUITest needs Automation Mode. If a run stops with an authentication prompt or
 "Automation Mode is disabled", check it with `automationmodetool` and enable it once with
@@ -23,27 +24,58 @@ On macOS, XCUITest needs Automation Mode. If a run stops with an authentication 
 The CI workflow's *UI tests* job runs beside *Lint, build, and test*, so its cold builds don't
 lengthen that job. It creates its own iPhone Duo simulator (`abs-ui-<run>-<attempt>`), boots it
 and waits for the boot to finish (`xcrun simctl bootstatus <udid> -b`, as a cold simulator's
-first launch can time out), runs `ABS_UI_PLATFORM=ios mise run test:ui` on it with
-`IOS_SIMULATOR_ID`, and always deletes it. In CI only, a failed test runs once more
-(`-retry-tests-on-failure -test-iterations 2`), so a launch timeout on a busy runner is retried
-while a test that fails twice still fails the job.
+first launch can time out), runs `scripts/ui-test-ci.sh` (below) on it with
+`ABS_UI_PLATFORM=ios` and `IOS_SIMULATOR_ID`, and always deletes it.
 
 It then runs `mise run test:ui` on macOS only if `automationmodetool` reports Automation Mode
 enabled on the runner. Otherwise the step passes with a *macOS UI tests skipped* warning
 annotation on the run: an administrator must enable Automation Mode on the runner (the command
 above) before CI covers macOS.
 
-On the simulator, CI also fails a test that runs for more than 10 minutes
-(`-test-timeouts-enabled YES`, with `-default-test-execution-time-allowance` and
-`-maximum-test-execution-time-allowance` both 600 seconds), so a hung test is retried within the
-job's 70 minutes: on #660 an accessibility audit hung for 25 minutes and the job ran out of time
-(#661). The slowest passing test, an audit, has taken up to 371 seconds on a slow runner (it ran
-first and paid for the cold app launch); in most runs the slowest takes under 250. Recent runs
-took 36 to 53 minutes (median 46); one hang adds the 10 minutes and about 2 more to stop the test
-and relaunch the runner, so even the slowest run seen with a hang ends by minute 65 or so. XCTest stops a timed-out test by ending the test runner, and `-retry-tests-on-failure`
-retries it only with `-test-repetition-relaunch-enabled YES`, which runs each retry in a new
-runner; without it the run moves on and the timed-out test fails. To try the limits locally, pass
-the same flags after `--`.
+`scripts/ui-test-ci.sh` runs `mise run test:ui` with these flags, which local runs of `test:ui`
+don't add:
+
+- `-retry-tests-on-failure -test-iterations 2`: a failed test runs once more in the same test
+  runner, so a launch timeout on a busy runner is retried without another run.
+- `-test-timeouts-enabled YES`, with `-default-test-execution-time-allowance` and
+  `-maximum-test-execution-time-allowance` both 600 seconds: a test still running after 10
+  minutes fails, so a hang ends in time. On #660 an accessibility audit hung for 25 minutes and
+  the job ran out of time (#661). The slowest passing test, an audit, has taken up to 371
+  seconds on a slow runner (it ran first and paid for the cold app launch); in most runs the
+  slowest takes under 250.
+
+XCTest stops a timed-out test by ending the test runner, so the runner's retry can't repeat it:
+the run restarts the runner, moves on, and the test fails. `-test-repetition-relaunch-enabled YES`
+would retry it in a new runner, but it also ran the whole suite a second time after one flaky
+failure, and the job ran out of time (#666). Instead, if the first run fails, the script reads
+its result bundle (`xcrun xcresulttool get test-results tests`) and the tests it selected
+(`-enumerate-tests`). If every selected test has a result, nothing failed outside a test and one
+to three tests failed, it runs only those once more, without building
+(`ABS_UI_ACTION=test-without-building`), with the same 10-minute limit. That run decides: the
+step passes only if each of those tests ran and passed, and it then adds a *UI tests passed when
+run again* warning annotation naming them. A test is run again only if its result is *Failed*
+(it failed twice, ran out of time or crashed); one that passed on the runner's retry, was
+skipped or is an expected failure isn't. Anything else (a build error, a crash outside a test,
+an `xcodebuild` stopped by a signal, tests without a result, more than three failures, results
+the script can't read) fails the step with the first run's exit status, without another run.
+
+Recent passing runs took 36 to 58 minutes (median 47). A flaky test costs only its retry in the
+runner. A hang adds the 10 minutes and about 3 more to restart the runner, list the tests and
+run it again, so the job's limit is 75 minutes: the slowest run seen with a hang would end by
+minute 71 or so. A second hang, in either run, may not fit; the job then times out and fails
+rather than passing.
+
+If the step fails, the job uploads `.build/ui-tests/` (the result bundles and lists of tests) as
+the `ui-tests-iphone-duo-attempt-<attempt>` artifact, kept for 7 days.
+
+To try it locally, pass a selection after the script's name; the result bundles and lists of
+tests are left in `.build/ui-tests/`. `mise run test:ui:runner` (part of `mise run lint:repo`)
+checks the script and `scripts/ui-test-results.py` with fake `mise` and `xcrun` commands, so it
+needs no Xcode or simulator.
+
+```sh
+ABS_UI_PLATFORM=ios scripts/ui-test-ci.sh -only-testing:AudiobookshelfUITests/FixtureSmokeTests
+```
 
 ## The fixture server
 
