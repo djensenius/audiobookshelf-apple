@@ -6,13 +6,40 @@
     /// NSAccessibility selectors.
     @MainActor
     enum AccessibilityTree {
-        /// Has SwiftUI build its accessibility tree, as an attached assistive app does. Returns the undo.
-        static func build() -> () -> Void {
-            let app = NSApplication.shared
-            let key = "accessibilityEnhancedUserInterface"
-            let was = app.value(forKey: key)
-            app.setValue(true, forKey: key)
-            return { app.setValue(was, forKey: key) }
+        /// Runs `body` with SwiftUI building its accessibility tree, as for an attached assistive app.
+        /// The flag is the whole app's and tests overlap across their suspensions, so it's counted:
+        /// the first user sets it and the last puts back what it was.
+        static func with<T>(_ body: @MainActor () async throws -> T) async rethrows -> T {
+            acquire()
+            defer { release() }
+            return try await body()
+        }
+
+        /// ``with(_:)`` for a synchronous `body`.
+        static func with<T>(_ body: @MainActor () throws -> T) rethrows -> T {
+            acquire()
+            defer { release() }
+            return try body()
+        }
+
+        private static let key = "accessibilityEnhancedUserInterface"
+        private static var users = 0
+        private static var original: Any?
+
+        private static func acquire() {
+            if users == 0 {
+                original = NSApplication.shared.value(forKey: key)
+                NSApplication.shared.setValue(true, forKey: key)
+            }
+            users += 1
+        }
+
+        private static func release() {
+            users -= 1
+            if users == 0 {
+                NSApplication.shared.setValue(original, forKey: key)
+                original = nil
+            }
         }
 
         /// The element under `root` that contains `view`'s elements: SwiftUI's container for the page,

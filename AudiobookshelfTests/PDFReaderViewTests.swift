@@ -162,21 +162,21 @@ import Testing
         func thePageHasAnActionTogglingTheChrome(showsControls: Bool) throws {
             let book = try #require(PDFDocument(data: pdfData(pages: 3)))
             let toggles = Reported()
-            let restore = AccessibilityTree.build()
-            defer { restore() }
-            let window = Self.window(
-                showing: PDFPageNavigator(
-                    document: book, showsControls: showsControls, onTap: { toggles.pages.append(1) }))
-            defer { window.close() }
-            let content = try #require(window.contentView)
-            let name = L10n.string(showsControls ? "ButtonReaderHideControls" : "ButtonReaderShowControls")
-            let other = L10n.string(showsControls ? "ButtonReaderShowControls" : "ButtonReaderHideControls")
+            try AccessibilityTree.with {
+                let window = Self.window(
+                    showing: PDFPageNavigator(
+                        document: book, showsControls: showsControls, onTap: { toggles.pages.append(1) }))
+                defer { window.close() }
+                let content = try #require(window.contentView)
+                let name = L10n.string(showsControls ? "ButtonReaderHideControls" : "ButtonReaderShowControls")
+                let other = L10n.string(showsControls ? "ButtonReaderShowControls" : "ButtonReaderHideControls")
 
-            let reader = try #require(HostedReader.find(in: content))
-            let page = try #require(AccessibilityTree.container(of: reader, in: content))
-            #expect(!AccessibilityTree.actionNames(of: page).contains(other))
-            #expect(AccessibilityTree.perform(name, on: page))
-            #expect(toggles.pages.count == 1)
+                let reader = try #require(HostedReader.find(in: content))
+                let page = try #require(AccessibilityTree.container(of: reader, in: content))
+                #expect(!AccessibilityTree.actionNames(of: page).contains(other))
+                #expect(AccessibilityTree.perform(name, on: page))
+                #expect(toggles.pages.count == 1)
+            }
         }
 
         /// Through SwiftUI's own make and update calls: opening on a later page, toggling the
