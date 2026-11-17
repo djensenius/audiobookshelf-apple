@@ -269,4 +269,39 @@ struct DownloadsListingTests {
         #expect(!DownloadsListing.Status.queued.isRetryable)
         #expect(!DownloadsListing.Status.downloading(0.5).isRetryable)
     }
+
+    /// The toolbar's download indicator shows the count and ring of the queue's Downloading
+    /// header, failed downloads included, without building the listing.
+    @Test func toolbarCountAndFractionMatchTheQueueHeader() {
+        let downloading = Self.record("downloading", state: .downloading, parts: [(100, 10)])
+        let records = [
+            downloading,
+            Self.record("queued", state: .queued, parts: [(100, 0)]),
+            Self.record("paused", state: .paused, parts: [(200, 50)]),
+            Self.record("failed", state: .failed, parts: [(100, 0)]),
+            Self.record("other", state: .downloading, connection: Self.otherConnection, parts: [(1000, 1000)]),
+        ]
+        let progress: [UUID: DownloadsController.Progress] = [downloading.id: .init(fraction: 0.5, bytes: 50)]
+        let listing = DownloadsListing(
+            items: [], records: records, progress: progress, serverConnectionID: Self.connection)
+
+        #expect(DownloadsListing.downloadCount(records: records, serverConnectionID: Self.connection) == 4)
+        #expect(
+            DownloadsListing.downloadCount(records: records, serverConnectionID: Self.connection)
+                == listing.downloads.count)
+        #expect(listing.downloadingFraction == 0.2)
+        #expect(
+            DownloadsListing.downloadingFraction(
+                records: records, progress: progress, serverConnectionID: Self.connection)
+                == listing.downloadingFraction)
+    }
+
+    @Test func toolbarCountIsZeroWithoutDownloadsOrConnection() {
+        let records = [Self.record("queued", state: .queued)]
+        #expect(DownloadsListing.downloadCount(records: [], serverConnectionID: Self.connection) == 0)
+        #expect(DownloadsListing.downloadCount(records: records, serverConnectionID: nil) == 0)
+        #expect(
+            DownloadsListing.downloadingFraction(records: records, progress: [:], serverConnectionID: Self.connection)
+                == 0)
+    }
 }

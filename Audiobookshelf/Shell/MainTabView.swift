@@ -94,6 +94,10 @@ struct MainTabView<Root: View>: View {
                         {
                             LibrarySectionToolbar(router: router)
                         }
+                        // The Downloads root lists the downloads under way itself.
+                        if tab != .downloads {
+                            DownloadQueueToolbar(tab: tab)
+                        }
                         ConnectionIndicatorToolbar()
                     }
             }
