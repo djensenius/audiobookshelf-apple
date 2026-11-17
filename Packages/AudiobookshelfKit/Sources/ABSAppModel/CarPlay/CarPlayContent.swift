@@ -140,13 +140,16 @@ public struct CarPlayRow: Sendable, Hashable, Identifiable {
     public let elapsed: TimeInterval?
     /// The item's length in seconds, for `CPPlaybackConfiguration.duration`; `nil` when unknown.
     public let duration: TimeInterval?
+    /// Whether the item is marked finished, so playing it starts over (``playbackAction(isPlaying:)``).
+    public let isFinished: Bool
     /// An item that can't be played (missing on the server, or without audio) is shown disabled.
     public let isEnabled: Bool
     public let action: Action
 
     public init(
         id: String, text: String, detail: String? = nil, image: ImageKey? = nil, progress: Double? = nil,
-        elapsed: TimeInterval? = nil, duration: TimeInterval? = nil, isEnabled: Bool = true, action: Action
+        elapsed: TimeInterval? = nil, duration: TimeInterval? = nil, isFinished: Bool = false, isEnabled: Bool = true,
+        action: Action
     ) {
         self.id = id
         self.text = text
@@ -155,24 +158,27 @@ public struct CarPlayRow: Sendable, Hashable, Identifiable {
         self.progress = progress
         self.elapsed = elapsed
         self.duration = duration
+        self.isFinished = isFinished
         self.isEnabled = isEnabled
         self.action = action
     }
 
-    /// The playback action `CPPlaybackConfiguration` shows for the row: pause for the row
-    /// `isPlaying`, replay for a finished one, play otherwise. `nil` for a row that doesn't play,
-    /// or whose ``elapsed`` or ``duration`` is unknown: it gets no playback configuration.
+    /// The playback action `CPPlaybackConfiguration` shows for the row: what tapping it does.
+    /// A tap always plays through `PlayItemAction` with no start time, which never pauses: the
+    /// item `isPlaying` keeps playing where it is, so it's play. A finished item that isn't playing
+    /// starts over from 0 (`ResumePosition.startTime`, and `PlaybackCoordinator.resumeLoaded`
+    /// from the end), so it's replay; anything else resumes, so it's play. `nil` for a row that
+    /// doesn't play, or whose ``elapsed`` or ``duration`` is unknown: it gets no playback
+    /// configuration.
     public func playbackAction(isPlaying: Bool) -> CarPlayRowPlaybackAction? {
         guard case .play = action, elapsed != nil, duration != nil else { return nil }
-        if isPlaying { return .pause }
-        return (progress ?? 0) >= 1 ? .replay : .play
+        return isFinished && !isPlaying ? .replay : .play
     }
 }
 
 /// What tapping a playable row does to its playback, for `CPPlaybackConfiguration.Action`.
 public enum CarPlayRowPlaybackAction: Sendable, Hashable {
     case play
-    case pause
     case replay
 }
 

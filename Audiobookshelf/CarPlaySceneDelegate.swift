@@ -274,7 +274,6 @@
             let playbackAction: CPPlaybackConfiguration.Action =
                 switch action {
                 case .play: .play
-                case .pause: .pause
                 case .replay: .replay
                 }
             let timescale = CMTimeScale(NSEC_PER_SEC)

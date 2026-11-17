@@ -89,7 +89,7 @@ public struct CarPlayContentBuilder: Sendable {
         }
         let rows = items.compactMap { item -> CarPlayRow? in
             guard item.kind == .book || item.kind == .episode else { return nil }
-            return itemRow(item, in: .continueListening, progress: progress(item)?.fraction)
+            return itemRow(item, in: .continueListening, progress: progress(item))
         }
         return list(.continueListening, title: labels.continueListening, rows: rows)
     }
@@ -241,16 +241,18 @@ public struct CarPlayContentBuilder: Sendable {
 
     // MARK: - Helpers
 
-    /// A row playing `item`, with its `progress` (0 to 1) and, from it and the item's duration,
-    /// the seconds listened.
-    private func itemRow(_ item: ItemSummary, in destination: CarPlayDestination, progress: Double?) -> CarPlayRow {
-        let progress = progress.map { min(max($0, 0), 1) }
+    /// A row playing `item`, with its `progress` (0 to 1, and whether it's finished) and, from it
+    /// and the item's duration, the seconds listened.
+    private func itemRow(
+        _ item: ItemSummary, in destination: CarPlayDestination, progress itemProgress: ItemProgress?
+    ) -> CarPlayRow {
+        let progress = itemProgress.map { min(max($0.fraction, 0), 1) }
         let duration = item.duration.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
         let elapsed = progress.flatMap { progress in duration.map { progress * $0 } }
         return CarPlayRow(
             id: item.id, text: item.title, image: imageKey(item.cover), progress: progress, elapsed: elapsed,
-            duration: duration, isEnabled: !item.isMissing && item.hasAudio,
-            action: .play(itemID: item.itemID, episodeID: item.episodeID))
+            duration: duration, isFinished: itemProgress?.isFinished ?? false,
+            isEnabled: !item.isMissing && item.hasAudio, action: .play(itemID: item.itemID, episodeID: item.episodeID))
     }
 
     /// A row opening `destination` from the list `parent`, or `nil` unless `destination` is the

@@ -268,6 +268,12 @@ private let books3 = CarPlayDestination.items(libraryID: "lib")
         // Unknown progress or duration claims no position.
         #expect(list.rows.map(\.elapsed) == [900, nil, nil, nil])
         #expect(list.rows.map(\.progress) == [0.25, nil, 0.25, 0.25])
+        #expect(list.rows.allSatisfy { !$0.isFinished })
+        let finished = builder().continueListening(sections: sections) { _ in
+            ItemProgress(fraction: 0.5, isFinished: true)
+        }
+        #expect(finished.rows.map(\.isFinished) == [true, true, true, true])
+        #expect(finished.rows.map(\.elapsed) == [3600, 3600, nil, nil])
     }
 
     /// A browse row's progress isn't known, so it gets no playback configuration, which would
@@ -280,16 +286,21 @@ private let books3 = CarPlayDestination.items(libraryID: "lib")
         #expect(builder().library(library).rows.allSatisfy { $0.playbackAction(isPlaying: false) == nil })
     }
 
-    /// Review of #79: the playing row offers pause, a finished one replay, the others play.
+    /// Review of #79: a row advertises what its tap does. A tap never pauses, so the playing row
+    /// offers play; a finished item starts over, so it offers replay; the others resume (play).
     @Test func aRowsPlaybackActionFollowsItsState() {
         let play = CarPlayRow.Action.play(itemID: "b", episodeID: nil)
-        func row(progress: Double?, elapsed: TimeInterval?) -> CarPlayRow {
-            CarPlayRow(id: "b", text: "B", progress: progress, elapsed: elapsed, duration: 100, action: play)
+        func row(progress: Double?, elapsed: TimeInterval?, isFinished: Bool = false) -> CarPlayRow {
+            CarPlayRow(
+                id: "b", text: "B", progress: progress, elapsed: elapsed, duration: 100, isFinished: isFinished,
+                action: play)
         }
         #expect(row(progress: 0.5, elapsed: 50).playbackAction(isPlaying: false) == .play)
-        #expect(row(progress: 0.5, elapsed: 50).playbackAction(isPlaying: true) == .pause)
-        #expect(row(progress: 1, elapsed: 100).playbackAction(isPlaying: false) == .replay)
-        #expect(row(progress: 1, elapsed: 100).playbackAction(isPlaying: true) == .pause)
+        #expect(row(progress: 0.5, elapsed: 50).playbackAction(isPlaying: true) == .play)
+        #expect(row(progress: 1, elapsed: 100, isFinished: true).playbackAction(isPlaying: false) == .replay)
+        #expect(row(progress: 1, elapsed: 100, isFinished: true).playbackAction(isPlaying: true) == .play)
+        // Listened to the end but not marked finished: it resumes there.
+        #expect(row(progress: 1, elapsed: 100).playbackAction(isPlaying: false) == .play)
         #expect(row(progress: nil, elapsed: nil).playbackAction(isPlaying: true) == nil)
         let open = CarPlayRow(
             id: "o", text: "O", progress: 0.5, elapsed: 50, duration: 100, action: .open(.libraries))
