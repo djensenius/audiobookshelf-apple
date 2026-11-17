@@ -1,3 +1,4 @@
+import ABSUI
 import CoreGraphics
 import Foundation
 import PDFKit
@@ -117,7 +118,65 @@ import Testing
         #expect(PDFPageNavigator.page(from: "1", pageCount: 0) == nil)
     }
 
+    #if os(iOS)
+        /// The page's tap waits for every double tap the touch reaches, PDFKit's zoom included, so a
+        /// double tap doesn't toggle the chrome twice (#675). It still recognizes alongside PDFKit's
+        /// single taps, and doesn't cancel the touches they need.
+        @Test func thePagesTapWaitsForPDFKitsDoubleTap() throws {
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 600))
+            let view = ReaderPDFView(frame: window.bounds)
+            window.addSubview(view)
+            window.isHidden = false
+            defer { window.isHidden = true }
+            view.setSpread(false)
+            view.document = try #require(PDFDocument(data: pdfData(pages: 3)))
+            view.layoutIfNeeded()
+
+            let tap = view.chromeTap
+            #expect(view.gestureRecognizers?.contains(tap) == true)
+            #expect(!tap.cancelsTouchesInView)
+            let gate = try #require(tap.delegate)
+            let doubleTaps = Self.tapRecognizers(in: view).filter { $0.numberOfTapsRequired == 2 }
+            #expect(!doubleTaps.isEmpty)
+            for doubleTap in doubleTaps {
+                #expect(gate.gestureRecognizer?(tap, shouldRequireFailureOf: doubleTap) == true)
+            }
+            let singleTap = UITapGestureRecognizer()
+            #expect(gate.gestureRecognizer?(tap, shouldRequireFailureOf: singleTap) == false)
+            #expect(gate.gestureRecognizer?(tap, shouldRecognizeSimultaneouslyWith: singleTap) == true)
+        }
+
+        private static func tapRecognizers(in view: UIView) -> [UITapGestureRecognizer] {
+            (view.gestureRecognizers ?? []).compactMap { $0 as? UITapGestureRecognizer }
+                + view.subviews.flatMap { tapRecognizers(in: $0) }
+        }
+    #endif
+
     #if os(macOS)
+        /// With the chrome hidden, VoiceOver can show it from the page with a named action, and hide
+        /// it again once shown (#675). The action is on the page's own container: one given to the
+        /// PDF view alone would be dropped, as SwiftUI hands the view's elements on as they are.
+        @Test(arguments: [false, true])
+        func thePageHasAnActionTogglingTheChrome(showsControls: Bool) throws {
+            let book = try #require(PDFDocument(data: pdfData(pages: 3)))
+            let toggles = Reported()
+            let restore = AccessibilityTree.build()
+            defer { restore() }
+            let window = Self.window(
+                showing: PDFPageNavigator(
+                    document: book, showsControls: showsControls, onTap: { toggles.pages.append(1) }))
+            defer { window.close() }
+            let content = try #require(window.contentView)
+            let name = L10n.string(showsControls ? "ButtonReaderHideControls" : "ButtonReaderShowControls")
+            let other = L10n.string(showsControls ? "ButtonReaderShowControls" : "ButtonReaderHideControls")
+
+            let reader = try #require(HostedReader.find(in: content))
+            let page = try #require(AccessibilityTree.container(of: reader, in: content))
+            #expect(!AccessibilityTree.actionNames(of: page).contains(other))
+            #expect(AccessibilityTree.perform(name, on: page))
+            #expect(toggles.pages.count == 1)
+        }
+
         /// Through SwiftUI's own make and update calls: opening on a later page, toggling the
         /// spread both ways and replacing the document report nothing and keep the right page.
         @Test func hostedReaderReportsOnlyTurns() throws {

@@ -21584,6 +21584,251 @@
         }
       }
     },
+    "ButtonReaderHideControls" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hide Controls"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Hide Controls"
+          }
+        }
+      }
+    },
     "ButtonReaderNextPage" : {
       "extractionState" : "manual",
       "localizations" : {
@@ -22070,6 +22315,251 @@
           "stringUnit" : {
             "state" : "new",
             "value" : "Previous Page"
+          }
+        }
+      }
+    },
+    "ButtonReaderShowControls" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "be" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "bg" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "bn" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "ca" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "cs" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "da" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "el" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Show Controls"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "et" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "fa" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "fi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "gu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "hi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "hr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "hu" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "is" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "lt" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "nb" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "ro" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "sk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "sl" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "sv" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "ta" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "uk" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "vi" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "new",
+            "value" : "Show Controls"
           }
         }
       }
