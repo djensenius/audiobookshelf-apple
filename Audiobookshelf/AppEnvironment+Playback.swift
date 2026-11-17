@@ -94,6 +94,10 @@ struct AppPlayback {
     /// `lifecycle.start()`: an intent can launch the app without a scene to start it.
     /// The play-item intents and entity queries (#87) use the same handler, with `library`'s
     /// account and the participant's play action.
+    ///
+    /// The App Shortcuts' book and episode parameters are fetched again as each session starts,
+    /// reconnects or ends, and as the player starts another item (``ShortcutParametersRefresher``).
+    /// Call before `lifecycle.start()`.
     func registerIntents(settings: AppSettings, lifecycle: SessionLifecycle, library: LibraryStore?) {
         let handler = PlaybackIntentHandler(
             playback: current, settings: settings,
@@ -103,6 +107,10 @@ struct AppPlayback {
             library: { [weak library] in library })
         PlaybackIntentRouter.handler = handler
         PlayableEntityRouter.handler = handler
+        // The lifecycle keeps the refresher.
+        let refresher = ShortcutParametersRefresher { AudiobookshelfShortcuts.updateAppShortcutParameters() }
+        lifecycle.register(refresher, stage: .connect)
+        refresher.follow(player)
     }
 
     /// Tells the running scope's auto-advance of each change to the library's progress (seeds,
@@ -150,10 +158,10 @@ struct AppPlayback {
             history: history, downloads: downloads)
         let scope = PlaybackScope.make(scopeConfiguration) {
             coordinator in
-            // No artwork or App Intents entities yet.
+            // No artwork yet. The item's App Intents entity links Now Playing to Siri and Shortcuts (#87).
             NowPlayingBridge(
                 coordinator: coordinator, settings: settings, coverProvider: { _ in nil },
-                entityIdentifiers: { _ in [] })
+                entityIdentifiers: NowPlayingEntities.identifiers(for:))
         }
         interruptions?.heldPlayIntent = scope.coordinator
         return scope
