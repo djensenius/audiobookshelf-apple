@@ -563,6 +563,23 @@ private func teardown(_ reason: String) -> [String] {
         #expect(harness.lifecycle.gate == .ready(identityB, isOffline: false))
     }
 
+    @Test func aTeardownCountsOnceEveryParticipantEndedBeforeTheNextSessionStarts() async throws {
+        let harness = Harness()
+        try await harness.started()
+        var endedAsImagesEnd: Int?
+        harness.images.onEnd = { endedAsImagesEnd = harness.lifecycle.endedSessions }
+        var endedAtNextStart: Int?
+        harness.images.onStart = { endedAtNextStart = harness.lifecycle.endedSessions }
+
+        try await harness.lifecycle.switchAccount(to: identityB.connectionID)
+        #expect(await eventually { harness.log.entries.contains("library.seed(b)") })
+
+        // The images end before the library clears: not counted yet. The count comes before B starts.
+        #expect(endedAsImagesEnd == 0)
+        #expect(endedAtNextStart == 1)
+        #expect(harness.lifecycle.endedSessions == 1)
+    }
+
     @Test func accountChangesChosenFromAnAccountThatHasGoneDoNothing() async throws {
         let harness = Harness()
         try await harness.started()

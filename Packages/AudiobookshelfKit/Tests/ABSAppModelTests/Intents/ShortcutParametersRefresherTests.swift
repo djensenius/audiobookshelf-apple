@@ -2,9 +2,17 @@ import ABSCore
 import ABSData
 import ABSPlayback
 import Foundation
+import Observation
 import Testing
 
 @testable import ABSAppModel
+
+/// What ``ShortcutParametersRefresher/followEndedSessions(of:)`` reads, as `SessionLifecycle`
+/// counts it.
+@MainActor @Observable
+private final class FakeEndings {
+    var count = 0
+}
 
 /// Holds each wait until ``release()``, counting them.
 @MainActor
@@ -32,6 +40,7 @@ private final class WaitGate {
     private let gate = WaitGate()
     /// Holds item requests.
     private let itemGate = WaitGate()
+    private let endings = FakeEndings()
     private var updates = 0
 
     init() throws {
@@ -43,10 +52,12 @@ private final class WaitGate {
     }
 
     private func makeRefresher() -> ShortcutParametersRefresher {
-        let (gate, itemGate) = (gate, itemGate)
-        return ShortcutParametersRefresher(
+        let (gate, itemGate, endings) = (gate, itemGate, endings)
+        let refresher = ShortcutParametersRefresher(
             sessionWait: { await gate.wait() }, itemWait: { await itemGate.wait() }
         ) { [weak self] in self?.updates += 1 }
+        refresher.followEndedSessions { endings.count }
+        return refresher
     }
 
     private func context() -> SessionContext {
@@ -75,16 +86,26 @@ private final class WaitGate {
         #expect(ShortcutParametersRefresher.itemDelay > .seconds(ProgressSyncer.syncInterval))
     }
 
-    @Test func aSessionsStartAndEndEachUpdate() async {
+    @Test func aSessionsStartAndTheEndOfItsTeardownEachUpdate() async {
         let refresher = makeRefresher()
 
         await refresher.sessionDidStart(context())
         #expect(await eventually { gate.waits == 1 })
         #expect(await releaseUpdate(1))
 
-        await refresher.sessionWillEnd(.signOut)
+        endings.count += 1
         #expect(await eventually { gate.waits == 2 })
         #expect(await releaseUpdate(2))
+    }
+
+    @Test func anEndingSessionDoesntUpdateBeforeItsTeardownIsOver() async {
+        let refresher = makeRefresher()
+
+        await refresher.sessionWillEnd(.signOut)
+        await settle()
+
+        #expect(gate.waits == 0)
+        #expect(updates == 0)
     }
 
     @Test func requestsWhileOneWaitsJoinIt() async {
@@ -136,6 +157,24 @@ private final class WaitGate {
         #expect(await releaseUpdate(2, of: itemGate))
     }
 
+    @Test func anItemStartingWhileAnotherWaitsStartsTheWaitOver() async {
+        let (playback, player) = makePlayer()
+        let refresher = makeRefresher()
+        refresher.follow(player)
+        playback.load(FakePlaybackControl.bookSession(), at: 0, playing: true)
+        #expect(await eventually { itemGate.waits == 1 })
+
+        // The next item starts before the first one's wait is over.
+        playback.load(FakePlaybackControl.bookSession(item: "li_other"), at: 0, playing: true)
+        #expect(await eventually { itemGate.waits == 2 })
+        // Both waits end together: the first one's was cancelled, so only the second updates.
+        #expect(await releaseUpdate(1, of: itemGate))
+        await settle()
+
+        #expect(itemGate.waits == 2)
+        #expect(updates == 1)
+    }
+
     @Test func aSignOutWhileAnItemWaitsUpdatesOnce() async {
         let (playback, player) = makePlayer()
         let refresher = makeRefresher()
@@ -144,6 +183,7 @@ private final class WaitGate {
         #expect(await eventually { itemGate.waits == 1 })
 
         await refresher.sessionWillEnd(.signOut)
+        endings.count += 1
         #expect(await eventually { gate.waits == 1 })
         #expect(await releaseUpdate(1))
         itemGate.release()
@@ -158,6 +198,8 @@ private final class WaitGate {
         #expect(await eventually { gate.waits == 1 })
 
         await refresher.sessionWillEnd(.signOut)
+        endings.count += 1
+        await settle()
         #expect(await releaseUpdate(1))
         await settle()
 
@@ -169,6 +211,7 @@ private final class WaitGate {
         let refresher = makeRefresher()
 
         await refresher.sessionWillEnd(.switch)
+        endings.count += 1
         await refresher.sessionDidStart(context())
         #expect(await eventually { gate.waits == 1 })
         #expect(await releaseUpdate(1))
@@ -176,5 +219,43 @@ private final class WaitGate {
 
         #expect(gate.waits == 1)
         #expect(updates == 1)
+    }
+
+    // MARK: Lifecycle
+
+    /// Registered like the app's, last of the `.connect` participants, so the lifecycle ends it
+    /// first: the sign-out's update still waits until the library is cleared, after a slow
+    /// participant ended in between.
+    @Test func aSignOutUpdatesOnlyOnceTheLibraryIsCleared() async throws {
+        let log = CallLog()
+        let source = FakeAccountSource(log: log)
+        source.restoredPhase = .active(identityA, isOffline: false)
+        let images = FakeParticipant("images", log: log)
+        let lifecycle = SessionLifecycle(source: source, clock: ManualClock())
+        lifecycle.register(seeder: FakeLibrary(log: log))
+        lifecycle.register(images, stage: .connect)
+        let refresher = makeRefresher()
+        refresher.followEndedSessions { [weak lifecycle] in lifecycle?.endedSessions ?? 0 }
+        lifecycle.register(refresher, stage: .connect)
+        await lifecycle.start()
+        try #require(await eventually { log.entries.contains("library.seed(a)") })
+        try #require(await eventually { gate.waits == 1 })
+        #expect(await releaseUpdate(1))
+
+        let endGate = Gate()
+        images.endGate = endGate
+        defer { endGate.open() }
+        let signOut = Task { await lifecycle.signOut() }
+        #expect(await eventually { log.entries.contains("images.end(signOut)") })
+        await settle()
+        #expect(gate.waits == 1)
+        #expect(!log.entries.contains("library.clear(signOut)"))
+
+        endGate.open()
+        _ = await signOut.value
+        #expect(log.entries.contains("library.clear(signOut)"))
+        #expect(lifecycle.endedSessions == 1)
+        #expect(await eventually { gate.waits == 2 })
+        #expect(await releaseUpdate(2))
     }
 }

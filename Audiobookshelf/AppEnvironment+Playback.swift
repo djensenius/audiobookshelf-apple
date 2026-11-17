@@ -95,8 +95,8 @@ struct AppPlayback {
     /// The play-item intents and entity queries (#87) use the same handler, with `library`'s
     /// account and the participant's play action.
     ///
-    /// The App Shortcuts' book and episode parameters are fetched again as each session starts,
-    /// reconnects or ends, and once another item the player starts has had time to sync its progress
+    /// The App Shortcuts' book and episode parameters are fetched again as each session starts or
+    /// reconnects, once each session's teardown is over, and once another item the player starts has had time to sync its progress
     /// (``ShortcutParametersRefresher``).
     /// Call before `lifecycle.start()`.
     func registerIntents(settings: AppSettings, lifecycle: SessionLifecycle, library: LibraryStore?) {
@@ -114,6 +114,7 @@ struct AppPlayback {
         }
         lifecycle.register(refresher, stage: .connect)
         refresher.follow(player)
+        refresher.followEndedSessions { [weak lifecycle] in lifecycle?.endedSessions ?? 0 }
     }
 
     /// Tells the running scope's auto-advance of each change to the library's progress (seeds,

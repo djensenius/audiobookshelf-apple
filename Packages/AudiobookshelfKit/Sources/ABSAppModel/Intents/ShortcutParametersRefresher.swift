@@ -5,15 +5,18 @@ import Observation
 /// Tells the system to fetch the App Shortcuts' entity parameters again (#87), so phrases such as
 /// "Play <book> in Audiobookshelf" offer the signed-in account's Continue Listening.
 ///
-/// - When an account's session starts, reconnects or ends, the suggestions are another account's
-///   or none: it updates after `sessionWait` (2 seconds by default), and session requests made
-///   meanwhile join it.
+/// - When an account's session starts or reconnects, and once one's teardown is over
+///   (``followEndedSessions(of:)``, `SessionLifecycle.endedSessions`), the suggestions are
+///   another account's or none: it updates after `sessionWait` (2 seconds by default), and session
+///   requests made meanwhile join it. Not from ``sessionWillEnd(_:)``: the lifecycle ends the
+///   participants one at a time, the library possibly seconds later, and an update before the
+///   library is cleared would publish the ended account's items again.
 /// - When the player starts an item other than the last one it started (``follow(_:)``), the
 ///   server moves it to the front of Continue Listening, but only once its progress is synced
 ///   (`ProgressSyncer.syncInterval`, 15 seconds, after it starts). With no signal for that sync,
-///   it updates after `itemWait` (20 seconds by default), so the suggestions are read after it;
-///   item requests made meanwhile join it. Never on the player's other changes, such as each
-///   progress tick.
+///   it updates after `itemWait` (20 seconds by default), so the suggestions are read after it.
+///   Another item starting meanwhile starts the wait over, for its own sync. Never on the
+///   player's other changes, such as each progress tick.
 /// - A session that starts or ends drops a waiting item request: the session's update covers it.
 ///
 /// `update` is the app's `AppShortcutsProvider.updateAppShortcutParameters()`; ABSAppModel never
@@ -29,6 +32,7 @@ public final class ShortcutParametersRefresher: SessionParticipant {
     private var pendingSession: Task<Void, Never>?
     private var pendingItem: Task<Void, Never>?
     private var following: Task<Void, Never>?
+    private var endings: Task<Void, Never>?
 
     /// - Parameters:
     ///   - sessionWait: How long a session request waits for others to join it; tests pass a gate.
@@ -49,6 +53,7 @@ public final class ShortcutParametersRefresher: SessionParticipant {
 
     isolated deinit {
         following?.cancel()
+        endings?.cancel()
         pendingSession?.cancel()
         pendingItem?.cancel()
     }
@@ -58,8 +63,10 @@ public final class ShortcutParametersRefresher: SessionParticipant {
         schedule(\.pendingSession, after: sessionWait)
     }
 
-    /// Updates the parameters after `itemWait`, once for every item request made meanwhile.
+    /// Updates the parameters after `itemWait` from now: a waiting item request, for an earlier
+    /// item, starts over, so the update comes after this item's first sync.
     func requestItemUpdate() {
+        dropItemRequest()
         schedule(\.pendingItem, after: itemWait)
     }
 
@@ -79,6 +86,23 @@ public final class ShortcutParametersRefresher: SessionParticipant {
         }
     }
 
+    /// Calls ``requestUpdate()`` each time `ended` (`SessionLifecycle.endedSessions`) counts
+    /// another session's finished teardown, until the refresher is released or this is called
+    /// again.
+    public func followEndedSessions(of ended: @escaping @MainActor @Sendable () -> Int) {
+        endings?.cancel()
+        let initial = ended()
+        endings = Task { [weak self] in
+            var seen = initial
+            for await count in Observations({ @MainActor in ended() }) {
+                guard !Task.isCancelled, let self else { return }
+                guard count != seen else { continue }
+                seen = count
+                self.requestUpdate()
+            }
+        }
+    }
+
     /// Runs `update` after `wait` unless `slot` already waits. A cancelled wait updates nothing;
     /// whoever cancels it empties `slot`.
     private func schedule(
@@ -94,7 +118,7 @@ public final class ShortcutParametersRefresher: SessionParticipant {
         }
     }
 
-    /// The session's update covers a waiting item request.
+    /// Cancels a waiting item request.
     private func dropItemRequest() {
         pendingItem?.cancel()
         pendingItem = nil
@@ -111,8 +135,9 @@ public final class ShortcutParametersRefresher: SessionParticipant {
         requestUpdate()
     }
 
+    /// Drops a waiting item request only: the update waits for the whole teardown
+    /// (``followEndedSessions(of:)``).
     public func sessionWillEnd(_ reason: SessionEndReason) async {
         dropItemRequest()
-        requestUpdate()
     }
 }
