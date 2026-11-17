@@ -228,6 +228,35 @@ private func chapterRows(_ count: Int) -> [PlayerChapterRow] {
         #expect(CarPlayNowPlayingControls.nowPlayingNavigation(index: 1, count: 2) == CarPlayNowPlayingNavigation.none)
     }
 
+    /// Audit of #79: Apple limits audio apps to 5 templates, the root included, so a list fits
+    /// over Now Playing only below that; Now Playing over a series' books (the tab bar, library,
+    /// Series, the series' books) is the fifth, and the chapters aren't pushed.
+    @Test func aListIsPushedOverNowPlayingOnlyWithinAppleDepthLimit() {
+        let limits = CarPlayLimits.standard
+        func canPush(_ count: Int) -> Bool {
+            CarPlayNowPlayingControls.canPushList(
+                stackCount: count, limits: limits, isPushing: false, isListShown: false)
+        }
+        // Root, Now Playing.
+        #expect(canPush(2))
+        // Root, library, Books, Now Playing.
+        #expect(canPush(4))
+        // Root, library, Series, series' books, Now Playing.
+        #expect(!canPush(5))
+        #expect(!canPush(6))
+        #expect(CarPlayLimits(maximumDepth: 3).canPush(onto: 2))
+        #expect(!CarPlayLimits(maximumDepth: 3).canPush(onto: 3))
+    }
+
+    /// Audit of #79: a second tap while a list is being pushed, or once it shows, pushes nothing.
+    @Test func aListIsNotPushedTwice() {
+        let limits = CarPlayLimits.standard
+        #expect(
+            !CarPlayNowPlayingControls.canPushList(stackCount: 2, limits: limits, isPushing: true, isListShown: false))
+        #expect(
+            !CarPlayNowPlayingControls.canPushList(stackCount: 2, limits: limits, isPushing: false, isListShown: true))
+    }
+
     // MARK: List observation
 
     /// Review of #564: reopening Chapters ends the first list's loop, so loops don't pile up.

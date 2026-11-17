@@ -109,7 +109,8 @@
                     sleepTimer: { environment.playback.participant?.sleepTimer },
                     queue: { environment.playback.participant?.queue },
                     playQueued: { [weak model] in model?.playQueued($0) },
-                    chapterLimit: CPListTemplate.maximumItemCount))
+                    chapterLimit: CPListTemplate.maximumItemCount),
+                limits: limits)
 
             let list = CPListTemplate(title: Self.labels.continueListening, sections: [])
             list.tabImage = UIImage(systemName: "play.circle")

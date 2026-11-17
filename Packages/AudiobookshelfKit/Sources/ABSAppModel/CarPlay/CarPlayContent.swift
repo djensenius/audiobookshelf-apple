@@ -10,9 +10,12 @@ public struct CarPlayLimits: Sendable, Hashable {
     public let maximumItemCount: Int
     /// Sections in one list. At least 1.
     public let maximumSectionCount: Int
-    /// List templates in one tab's stack, its root included. At least 1. The deepest list the
-    /// browse tree has (``CarPlayDestination/depth``) is 4, which leaves room for Now Playing
-    /// under the default of 5.
+    /// Templates in the navigation stack, its root (the tab bar, standing for each tab's root list)
+    /// included. At least 1. Apple limits audio apps to 5: "the root template counts as the first
+    /// template in the total" (`CPInterfaceController.pushTemplate(_:animated:completion:)`, and
+    /// the CarPlay Developer Guide's template depth). The deepest list the browse tree has
+    /// (``CarPlayDestination/depth``) is 4, which leaves room for Now Playing, but not for a list
+    /// over it (``canPush(onto:)``).
     public let maximumDepth: Int
 
     public init(maximumItemCount: Int = 12, maximumSectionCount: Int = 12, maximumDepth: Int = 5) {
@@ -23,6 +26,13 @@ public struct CarPlayLimits: Sendable, Hashable {
 
     /// Lists trimmed to 12 rows (#79) within five levels.
     public static let standard = CarPlayLimits()
+
+    /// Whether one more template fits on a stack of `stackCount` templates
+    /// (`CPInterfaceController.templates.count`): pushing past ``maximumDepth`` fails, and
+    /// without a completion handler CarPlay raises an exception.
+    public func canPush(onto stackCount: Int) -> Bool {
+        stackCount < maximumDepth
+    }
 }
 
 /// The localized texts the builder needs. ABSAppModel has no strings, so the delegate passes

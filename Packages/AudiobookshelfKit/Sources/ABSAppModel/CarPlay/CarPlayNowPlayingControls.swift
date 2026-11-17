@@ -111,6 +111,18 @@ public enum CarPlayNowPlayingControls {
         return index < count - 1 ? .pop : .none
     }
 
+    /// Whether the chapters or the queue can be pushed over Now Playing on a stack of
+    /// `stackCount` templates: not while a list push is under way (a double tap) or `isListShown`
+    /// already, nor once the stack is full (``CarPlayLimits/canPush(onto:)``). Now Playing pushed
+    /// from a list at the browse tree's deepest level is the fifth template, Apple's limit for
+    /// audio apps, so then the list isn't pushed and Now Playing stays: popping the lists under
+    /// it would lose the driver's place, and CarPlay can't present a list modally.
+    public static func canPushList(
+        stackCount: Int, limits: CarPlayLimits, isPushing: Bool, isListShown: Bool
+    ) -> Bool {
+        !isPushing && !isListShown && limits.canPush(onto: stackCount)
+    }
+
     /// The chapter list's rows, at most `limit`: all of them when they fit, otherwise a window
     /// that starts one before the current chapter, so it and the next ones show.
     public static func chapterRows(_ chapters: [PlayerChapterRow], currentIndex: Int?, limit: Int)

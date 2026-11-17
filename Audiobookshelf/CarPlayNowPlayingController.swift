@@ -11,6 +11,12 @@
     /// they show changes. Up Next opens the queue when it has items, else the chapters. The chapter
     /// list marks the chapter playing and follows playback while it shows; choosing a chapter seeks
     /// to its start and goes back to Now Playing. The mini player stays on.
+    ///
+    /// A list is pushed only when it fits: Apple limits an audio app's stack to 5 templates, the
+    /// root included (`CPInterfaceController.pushTemplate(_:animated:completion:)`; CarPlay
+    /// Developer Guide, "Templates"), so over Now Playing pushed from a list at the browse tree's
+    /// deepest level, the chapters and queue don't open and Now Playing stays
+    /// (``CarPlayNowPlayingControls/canPushList(stackCount:limits:isPushing:isListShown:)``).
     @MainActor
     final class CarPlayNowPlayingController: NSObject, CPNowPlayingTemplateObserver {
         /// How the rate button shows the rate.
@@ -26,15 +32,21 @@
 
         private let interfaceController: CPInterfaceController
         private let model: CarPlayNowPlayingModel
+        private let limits: CarPlayLimits
+        /// Whether a list push is under way, so a second tap before it lands pushes nothing.
+        private var isPushingList = false
+        /// The queue list shown, so Up Next doesn't push it twice.
+        private weak var queueList: CPListTemplate?
         private var isConnected = true
         private var shownButtons: CarPlayNowPlayingButtons?
         /// The chapter list shown, and its one observation loop.
         private let chapterObservation = CarPlayListObservation<CPListTemplate>()
         private var shownChapters: [CarPlayChapterRow]?
 
-        init(interfaceController: CPInterfaceController, model: CarPlayNowPlayingModel) {
+        init(interfaceController: CPInterfaceController, model: CarPlayNowPlayingModel, limits: CarPlayLimits) {
             self.interfaceController = interfaceController
             self.model = model
+            self.limits = limits
             super.init()
             let template = CPNowPlayingTemplate.shared
             template.allowsMiniPlayer = true
@@ -105,13 +117,13 @@
         // MARK: - Chapters
 
         private func showChapters() {
-            guard isConnected, !isShown(chapterObservation.list) else { return }
+            guard canPushList(isShown: isShown(chapterObservation.list)) else { return }
             let list = CPListTemplate(title: L10n.string("LabelChapters"), sections: [])
             list.emptyViewTitleVariants = [L10n.string("MessageNoChapters")]
             chapterObservation.begin(list)
             shownChapters = nil
             observeChapters(list)
-            interfaceController.pushTemplate(list, animated: true, completion: nil)
+            push(list)
         }
 
         /// Updates the chapter list while it shows. The current chapter follows the playback time,
@@ -155,7 +167,7 @@
         // MARK: - Queue
 
         private func showQueue() {
-            guard isConnected else { return }
+            guard canPushList(isShown: isShown(queueList)) else { return }
             let items = model.queueRows.map { row in
                 let item = CPListItem(text: row.title, detailText: row.subtitle)
                 item.handler = { [weak self] _, completion in
@@ -165,7 +177,8 @@
                 return item
             }
             let list = CPListTemplate(title: L10n.string("HeaderUpNext"), sections: [CPListSection(items: items)])
-            interfaceController.pushTemplate(list, animated: true, completion: nil)
+            queueList = list
+            push(list)
         }
 
         /// Plays `row` through the root model; a blocked or failed play stays on the list while
@@ -179,6 +192,23 @@
         }
 
         // MARK: - Helpers
+
+        /// Whether a list fits over Now Playing now and none is shown or being pushed.
+        private func canPushList(isShown: Bool) -> Bool {
+            isConnected
+                && CarPlayNowPlayingControls.canPushList(
+                    stackCount: interfaceController.templates.count, limits: limits, isPushing: isPushingList,
+                    isListShown: isShown)
+        }
+
+        /// Pushes `list` over Now Playing. The completion handler ends the push either way, and
+        /// keeps a failed push from raising CarPlay's exception.
+        private func push(_ list: CPListTemplate) {
+            isPushingList = true
+            interfaceController.pushTemplate(list, animated: true) { [weak self] _, _ in
+                Task { @MainActor in self?.isPushingList = false }
+            }
+        }
 
         private func isShown(_ template: CPTemplate?) -> Bool {
             guard let template else { return false }
