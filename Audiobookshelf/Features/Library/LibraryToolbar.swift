@@ -32,6 +32,9 @@ struct LibraryToolbar: ToolbarContent {
         #endif
     }
 
+    /// ⌥⌘F opens the filter on the frontmost library screen.
+    nonisolated static let filterShortcut = KeyboardShortcut("f", modifiers: [.command, .option])
+
     /// The filter button and the sort menu.
     @ViewBuilder private var controls: some View {
         if let filterModel {
@@ -57,7 +60,7 @@ struct LibraryToolbar: ToolbarContent {
                         ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
             }
         }
-        .keyboardShortcut(isFrontmost ? KeyboardShortcut("f", modifiers: [.command, .option]) : nil)
+        .keyboardShortcut(isFrontmost ? Self.filterShortcut : nil)
         // A screen pinned to one filter (a narrator's, say) can't change it.
         .disabled(model.pinnedFilter != nil)
         .accessibilityLabel(Text(verbatim: title))

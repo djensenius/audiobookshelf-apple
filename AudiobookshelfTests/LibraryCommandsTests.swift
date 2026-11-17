@@ -23,12 +23,18 @@ import Testing
         }
         let others =
             GoCommand.allCases.map(\.shortcut) + PlaybackCommand.allCases.map(\.shortcut) + [
-                ShowNowPlayingMenuItem.shortcut
+                ShowNowPlayingMenuItem.shortcut, LibraryToolbar.filterShortcut,
             ]
         #expect(Set(library).isDisjoint(with: others))
     }
 
-    @Test func menuTitleResolves() {
-        #expect(L10n.string(LibraryCommands.titleKey) != LibraryCommands.titleKey)
+    @Test func menuTitleIsTheLibraryTabs() {
+        #expect(LibraryCommands.titleKey == AppTab.library.titleKey)
+        #expect(LibraryCommands.titleKey == GoCommand.library.titleKey)
+    }
+
+    @Test(arguments: [LibraryCommands.titleKey, LibraryCommands.placeholderKey])
+    func menuStringsResolve(key: String) {
+        #expect(L10n.string(key) != key, "\(key) is missing from the catalog")
     }
 }

@@ -26,10 +26,11 @@ public struct LibraryCommandItem: Identifiable, Hashable, Sendable {
 /// - The items are the store's libraries, in server order (the library picker's), while it serves
 ///   the router's account (``SceneLibrarySelection/isServing(router:store:)``). With no signed-in
 ///   scene focused, during an account switch, or before the libraries load, there are none, and
-///   the menu is hidden.
+///   the menu shows a disabled placeholder, so the menu bar doesn't change as windows take focus.
 /// - The first nine take ⌥⌘1 to ⌥⌘9 in that order.
 /// - Choosing one is the library picker's choice (``SceneLibrarySelection/select(_:router:store:canAddPodcast:)``):
-///   the scene shows it, and it's saved as the account's last library.
+///   the scene shows it, and it's saved as the account's last library. Like the Go menu's
+///   commands, it dismisses the full player, which would cover the library.
 @MainActor
 public enum LibraryCommand {
     /// How many libraries take a shortcut: ⌥⌘1 to ⌥⌘9.
@@ -46,11 +47,14 @@ public enum LibraryCommand {
         }
     }
 
-    /// Switches `router`'s scene to the library `id`, as the library picker does; does nothing
-    /// without a router or a store, or when the store doesn't serve the router's account or has no
-    /// such library.
+    /// Switches `router`'s scene to the library `id`, as the library picker does, and dismisses the
+    /// full player, as ``Router/select(tab:)`` does; does nothing without a router or a store, or
+    /// when the store doesn't serve the router's account or has no such library.
     public static func select(_ id: String, router: Router?, store: LibraryStore?, canAddPodcast: Bool? = nil) {
-        guard let router, let store else { return }
+        guard let router, let store, SceneLibrarySelection.isServing(router: router, store: store),
+            store.libraries.contains(where: { $0.id == id })
+        else { return }
+        router.isFullPlayerPresented = false
         SceneLibrarySelection.select(id, router: router, store: store, canAddPodcast: canAddPodcast)
     }
 }

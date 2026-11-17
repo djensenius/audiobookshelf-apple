@@ -34,9 +34,28 @@ private func loadedStore(_ settings: AppSettings, libraries: [Library]) async ->
             let router = Router(identity: identityB)
             #expect(LibraryCommand.items(router: router, store: store).isEmpty)
 
+            router.isFullPlayerPresented = true
             LibraryCommand.select("books", router: router, store: store)
             #expect(router.libraryID == nil)
             #expect(store.lastLibraryID == nil)
+            #expect(router.isFullPlayerPresented, "Nothing was selected, so the full player stays")
+        }
+    }
+
+    @Test func noItemsBeforeTheLibrariesLoad() async throws {
+        try await withLibrarySettings { settings in
+            let store = LibraryStore(settings: settings)
+            store.attach(client: nil, connectionKey: key)
+            #expect(!store.hasLoaded)
+            #expect(LibraryCommand.items(router: Router(identity: identityA), store: store).isEmpty)
+        }
+    }
+
+    @Test func noItemsWithoutLibraries() async throws {
+        try await withLibrarySettings { settings in
+            let store = await loadedStore(settings, libraries: [])
+            #expect(store.hasLoaded)
+            #expect(LibraryCommand.items(router: Router(identity: identityA), store: store).isEmpty)
         }
     }
 
@@ -60,15 +79,19 @@ private func loadedStore(_ settings: AppSettings, libraries: [Library]) async ->
             SceneLibrarySelection.reconcile(router, store: store)
             #expect(LibraryCommand.items(router: router, store: store).map(\.isCurrent) == [true, false])
 
+            router.isFullPlayerPresented = true
             LibraryCommand.select("pods", router: router, store: store)
             #expect(router.libraryID == "pods")
+            #expect(!router.isFullPlayerPresented, "The full player would cover the library")
             #expect(router.libraryKind == .podcast)
             #expect(store.lastLibraryID == "pods")
             #expect(LibraryCommand.items(router: router, store: store).map(\.isCurrent) == [false, true])
 
-            // A library that's gone is ignored.
+            // A library that's gone is ignored, and leaves the full player.
+            router.isFullPlayerPresented = true
             LibraryCommand.select("unknown", router: router, store: store)
             #expect(router.libraryID == "pods")
+            #expect(router.isFullPlayerPresented)
         }
     }
 }
