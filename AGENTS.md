@@ -71,7 +71,6 @@ not built:
 | --- | --- |
 | `pages/`, `components/`, `layouts/` | Vue screens and components (UI behavior to port to SwiftUI) |
 | `store/`, `plugins/`, `mixins/`, `utils/` | App state, server/API helpers, shared logic |
-| `ios/App/` | Capacitor-era native Swift — the best reference for the player, downloads, and progress sync |
 | `android/` | Android app — ignore |
 | `strings/` | Translations for 42 locales — the source for localization |
 

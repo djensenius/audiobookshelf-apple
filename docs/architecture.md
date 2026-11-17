@@ -274,5 +274,4 @@ The limits are in [AGENTS.md](../AGENTS.md#pull-requests); in short:
   playback, SwiftData, OIDC, String Catalogs, zip, Socket.IO.
 - [Xcode project and CI research](research/xcode-project-and-ci.md): JSON project
   format, xcprojformatter, CI, Xcode Cloud.
-- Legacy references for porting: `ios/App/Shared/` (player, API client, storage),
-  `plugins/`, and `store/`.
+- Legacy references for porting: `plugins/` and `store/`.
