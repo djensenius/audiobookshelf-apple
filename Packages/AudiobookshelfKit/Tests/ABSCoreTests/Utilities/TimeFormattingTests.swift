@@ -79,6 +79,47 @@ import Testing
     }
 }
 
+/// Timestamps people read use the locale's digits (#689) and keep the ASCII shape.
+@Suite struct TimeFormattingLocalizedTimestampTests {
+    static let seconds: [TimeInterval] = [0, 5.9, 65, 599, 3599, 3600, 3723, 36_000, 360_000, -3, .nan, .infinity]
+
+    @Test(arguments: ["en_US", "de", "de_DE", "en_US_POSIX"])
+    func latinDigitLocalesAreUnchanged(identifier: String) {
+        let locale = Locale(identifier: identifier)
+        for value in Self.seconds {
+            #expect(TimeFormatting.timestamp(value, locale: locale) == TimeFormatting.timestamp(value), "\(value)")
+            #expect(
+                TimeFormatting.fullTimestamp(value, locale: locale) == TimeFormatting.fullTimestamp(value), "\(value)")
+        }
+    }
+
+    @Test(
+        arguments: [
+            (0, "٠:٠٠"), (13, "٠:١٣"), (245, "٤:٠٥"), (3599, "٥٩:٥٩"), (3723.9, "١:٠٢:٠٣"), (36_000, "١٠:٠٠:٠٠"),
+            (-3, "٠:٠٠"),
+        ] as [(TimeInterval, String)])
+    func arabicUsesArabicIndicDigits(seconds: TimeInterval, expected: String) {
+        #expect(TimeFormatting.timestamp(seconds, locale: Locale(identifier: "ar_SA")) == expected)
+    }
+
+    @Test func arabicFullTimestampUsesArabicIndicDigits() {
+        let locale = Locale(identifier: "ar_SA")
+        #expect(TimeFormatting.fullTimestamp(3723.4, locale: locale) == "٠١:٠٢:٠٣")
+        #expect(TimeFormatting.fullTimestamp(360_000, locale: locale) == "١٠٠:٠٠:٠٠")
+    }
+
+    /// Whatever digits a locale uses for other numbers, timestamps use the same ones, and long
+    /// hours aren't grouped.
+    @Test(arguments: ["ar", "ar_SA", "fa_IR", "hi_IN@numbers=deva", "en_US"])
+    func digitsMatchTheLocalesNumbers(identifier: String) {
+        let locale = Locale(identifier: identifier)
+        let style = IntegerFormatStyle<Int>(locale: locale).grouping(.never)
+        let digit = { (value: Int) in value.formatted(style) }
+        let expected = "\(12_345.formatted(style)):\(digit(0))\(digit(6)):\(digit(0))\(digit(7))"
+        #expect(TimeFormatting.timestamp(12_345 * 3600 + 6 * 60 + 7, locale: locale) == expected)
+    }
+}
+
 /// Listening totals become whole minutes in one clamped conversion: a finite server value such
 /// as 1e30 would trap `Int(_:)`, so it is bounded first.
 @Suite struct TimeFormattingWholeMinutesTests {

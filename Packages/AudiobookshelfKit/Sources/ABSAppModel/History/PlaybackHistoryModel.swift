@@ -47,7 +47,7 @@ public final class PlaybackHistoryModel {
         public let name: PlaybackHistoryEventName
         /// The playback position in seconds, if the event recorded one.
         public let position: TimeInterval?
-        /// The position as `hh:mm:ss` (legacy `$secondsToTimestampFull`).
+        /// The position as `hh:mm:ss` (legacy `$secondsToTimestampFull`), in the locale's digits.
         public let positionText: String?
         /// The position rounded to the whole second ``positionText`` shows; speak this one so
         /// VoiceOver and the screen agree (3723.6 is "01:02:04" and 1 h 2 min 4 s).
@@ -221,7 +221,7 @@ public final class PlaybackHistoryModel {
             id: event.id,
             name: event.name,
             position: event.currentTime,
-            positionText: event.currentTime.map(TimeFormatting.fullTimestamp),
+            positionText: event.currentTime.map { TimeFormatting.fullTimestamp($0, locale: locale) },
             // Rounded like `TimeFormatting.fullTimestamp`.
             shownPosition: event.currentTime.map { $0.isFinite ? max($0, 0).rounded() : 0 },
             timestamp: event.timestamp,

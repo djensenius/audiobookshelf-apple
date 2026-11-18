@@ -16,6 +16,17 @@ import Testing
         #expect(PlayerScrubber.remainingText(.nan, locale: locale) == "-0:00")
     }
 
+    /// #689: the player's times use the locale's digits, like its other numbers.
+    @Test func timesUseTheLocalesDigits() {
+        let arabic = Locale(identifier: "ar_SA")
+        #expect(DurationStyle.timestamp.string(13, locale: arabic) == "٠:١٣")
+        #expect(PlayerScrubber.remainingText(26, locale: arabic) == "-٠:٢٦")
+        #expect(PlayerScrubber.remainingText(3_723, locale: arabic) == "-١:٠٢:٠٣")
+        let german = Locale(identifier: "de")
+        #expect(DurationStyle.timestamp.string(3_723, locale: german) == "1:02:03")
+        #expect(PlayerScrubber.remainingText(26, locale: german) == "-0:26")
+    }
+
     @Test func accessibilityValueSpeaksElapsedAndRemaining() {
         let value = PlayerScrubber.accessibilityValue(elapsed: 245, remaining: 3_600, locale: locale)
         #expect(value == "4 minutes, 5 seconds, 1 hour remaining")
