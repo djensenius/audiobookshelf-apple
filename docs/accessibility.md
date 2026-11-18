@@ -231,9 +231,12 @@ behind it):
 
 The chapter list's times, measured from iPhone 17 and iPad Pro 13-inch (M5) screenshots in each
 theme (#705), which no walk audits: at the Chapters sheet's medium detent, as it opens on an
-iPhone, the list is on glass over the player, `rgb(214, 211, 210)` in light and `rgb(67, 66, 65)`
-in dark and black. There the other chapters' times, in `mutedForeground`, measured 3.7–3.8:1 in
-light and 3.5:1 in dark and black, and 4.0:1 and 3.7:1 on the iPad's sheet. They now use
+iPhone, the list is on glass over the player, on average `rgb(214, 211, 210)` in light and
+`rgb(67, 66, 65)` in dark and black. There the other chapters' times, in `mutedForeground`,
+measured 3.7–3.8:1 in light and 3.5:1 in dark and black, and 4.0:1 and 3.7:1 on the iPad's sheet:
+`MeasuredContrast`'s 10th percentile against the glass around each glyph, not against the
+average colour, which computes 4.1:1 and 3.9:1. `DesignSystemTests` checks against greys fitted
+to those measurements instead, `rgb(202, 202, 202)` and `rgb(72, 72, 72)`. The times now use
 `ABSColor.mutedForegroundOnGlass`, its light value darkened from `mutedForeground`'s to
 `rgb(71, 78, 86)`: 5.2:1 in light and 6.2–6.3:1 in dark and black on the iPhone's glass, 5.4:1
 and 6.9:1 on the iPad's, and 8.2–11.6:1 at the large detent and in the iPad's landscape details

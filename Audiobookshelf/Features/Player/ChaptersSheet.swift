@@ -225,7 +225,8 @@ private struct ChapterRow: View, Equatable {
 
     /// The current row's times are primary, like its title: on the row's tint, muted measures 4.2:1
     /// in light. The others' are for glass: at the sheet's medium detent the list is on glass over
-    /// the player, where `mutedForeground` measures 3.7:1 in light and 3.5:1 in dark. #705
+    /// the player, where `mutedForeground` measures 3.7:1 in light and 3.5:1 in dark against the
+    /// glass around its glyphs (not the glass's average colour). #705
     private var timesStyle: AnyShapeStyle {
         isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(ABSColor.mutedForegroundOnGlass)
     }
