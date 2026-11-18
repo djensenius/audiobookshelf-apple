@@ -189,7 +189,7 @@ enum SearchFilterRaw {
 extension SearchContractGateTests {
     @Test(
         "synthetic filter responses reject swapped ID/name associations on both endpoints",
-        arguments: ["authors", "series"], ["2.26.0", "2.37.2"])
+        arguments: ["authors", "series"], ["2.26.0", "2.37.2", "2.38.0"])
     func filterIdentityNamesCannotBeSwapped(group: String, version: String) throws {
         // Independent synthetic ledger, not captured server evidence or a response-derived oracle.
         let token = "search0123456789abcdef"

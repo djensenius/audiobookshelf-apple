@@ -136,12 +136,17 @@ observations:
 - Collection socket events go only to the acting user: `collection_added`, `collection_updated`
   and `collection_removed` use `SocketAuthority.clientEmitter(req.user.id, …)` instead of a
   broadcast, with the collection filtered for that user
-  ([writes](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/CollectionController.js#L32-L222)).
-  Other users' apps see another user's collection changes only on their next fetch. Create now
-  answers with that filtered collection, which is `null` when the creator's tag or
-  explicit-content restrictions hide every book; the old response was unfiltered.
-  `DELETE /api/collections/:id/book/:bookId` needs update permission instead of delete; the app
-  uses `batch/remove`.
+  ([writes](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/CollectionController.js#L32-L222),
+  [book add/remove](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/CollectionController.js#L233-L307),
+  [batch/middleware](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/CollectionController.js#L317-L455)).
+  Other users' apps see another user's collection changes only on their next fetch. Create and
+  every write that returns the collection (update, book add/remove, batch add/remove) now answer
+  with the filtered collection (`getOldJsonExpanded(req.user)`), which is `null`, a 200 with a
+  `null` body, when the user's tag or explicit-content restrictions hide every book; the old
+  responses were unfiltered. When it is `null` the socket event is skipped entirely, and delete
+  likewise sends no `collection_removed`.
+  `DELETE /api/collections/:id/book/:bookId` now needs update permission (2.37.2 checked no
+  permission for it); the app uses `batch/remove`.
 - `rss_feed_open` and `rss_feed_closed` go only to users who can access the feed's library, and
   a close is sent only when the feed's entity still has a library.
 - `PATCH /api/me/progress/:id` answers 403 for an item the user can't access, and 400 when an
@@ -448,8 +453,8 @@ Canonical source is `advplyr/audiobookshelf`, with immutable evidence:
   [user deletion](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/UserController.js#L363-L406),
   [permission provisioning](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/UserController.js#L152-L168),
   [ordinary defaults](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/models/User.js#L169-L184).
-  Its socket events and filtered create response changed ([above](#what-2380-changed-48)); the
-  request and response shapes the suite checks did not.
+  Its socket events, filtered write responses and book-removal permission changed
+  ([above](#what-2380-changed-48)); the request and response shapes the suite checks did not.
 
 The two `ABSAPITests/Fixtures/collection-writes-*.json` fixtures were captured on 2026-11-10
 from one actual create per owned disposable official image, using the existing ordered
