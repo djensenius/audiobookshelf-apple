@@ -165,18 +165,21 @@ struct CollectionWriteContractTests {
     @Test func nameSanitizingAndLibraryAccessRemainVersionSpecific() async throws {
         try await CollectionContractFixture.withFixture { fixture in
             let version = try #require(ContractServer.current?.version)
-            try #require(["2.26.0", "2.37.2"].contains(version), "This contract requires an exact validated release")
+            try #require(
+                ["2.26.0", "2.37.2", "2.38.0"].contains(version), "This contract requires an exact validated release")
+            // 2.37.2 and 2.38.0 sanitize names and check library access; 2.26.0 does neither.
+            let hardened = version != "2.26.0"
             let writer = try await fixture.user()
             let restricted = try await fixture.user(accessibleLibraries: [fixture.seed.podcastLibraryID])
             let name = "collection-" + UUID().uuidString
             let collection = try await fixture.create(as: writer, name: "<b>\(name)</b>")
-            #expect(collection.name == (version == "2.37.2" ? name : "<b>\(name)</b>"))
+            #expect(collection.name == (hardened ? name : "<b>\(name)</b>"))
             let updated = try await fixture.send(
                 CollectionEndpoints.update(id: collection.id, CollectionUpdateRequest(name: "<i>\(name)</i>")),
                 as: writer)
-            #expect(updated.name == (version == "2.37.2" ? name : "<i>\(name)</i>"))
+            #expect(updated.name == (hardened ? name : "<i>\(name)</i>"))
             #expect(try await fixture.read(collection.id, as: writer).name == updated.name)
-            if version == "2.37.2" {
+            if hardened {
                 await expectCollectionStatus(403) { try await fixture.create(as: restricted) }
                 await expectCollectionStatus(404) { try await fixture.read(collection.id, as: restricted) }
                 await expectCollectionStatus(404) {

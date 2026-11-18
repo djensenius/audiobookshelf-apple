@@ -161,7 +161,7 @@ struct ExpandedBookContractTests {
         let seed = try await ContractSeed.shared.data()
         let itemID = kind == "m4b" ? seed.singleFileID : seed.taleID
         let version = try #require(ContractServer.current?.version)
-        try #require(["2.26.0", "2.37.2"].contains(version))
+        try #require(["2.26.0", "2.37.2", "2.38.0"].contains(version))
         let library = try await client.send(LibraryEndpoints.library(id: seed.bookLibraryID)).library
         #expect(library.id == seed.bookLibraryID && library.mediaType == .book && library.name == "Books")
         let folders = try #require(library.folders)

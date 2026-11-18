@@ -12,7 +12,7 @@ reports every test as skipped, with a message that points here.
 
 ```sh
 mise run test:server                              # server 2.26.0, the minimum, in Docker
-ABS_SERVER_VERSION=2.37.2 mise run test:server    # another release
+ABS_SERVER_VERSION=2.38.0 mise run test:server    # another release
 mise run server:run                               # keep a seeded server for manual use
 scripts/test-server.sh test --filter ProgressContractTests   # swift test arguments replace the default filter
 scripts/test-server.sh test --search-contract                # only isolated owned search, not ordinary suites
@@ -87,14 +87,15 @@ separate `ABSRealtimeTests` still cover protocol edge cases against a fake trans
 
 See [owned search contracts](search-contracts.md) for the explicit mode, fail-closed ownership,
 Docker/node provenance, disjoint media, capture format and reproduction commands. Default full
-runs require one of the two reviewed pins; other releases remain usable with focused ordinary
-Swift selectors. Search skips in ad-hoc/package runs are **not** live search evidence.
+runs require one of the reviewed pins (2.26.0, 2.37.2 and 2.38.0); other releases remain usable
+with focused ordinary Swift selectors. Search skips in ad-hoc/package runs are **not** live search
+evidence.
 
 ## Differences between versions
 
 The suite asserts these per version. Other versions check only what holds for all.
 
-| | 2.26.0 | 2.37.2 |
+| | 2.26.0 | 2.37.2 and 2.38.0 |
 | --- | --- | --- |
 | Access / refresh token lifetime | 12 h / 7 d | 1 h / 30 d |
 | Token id (`jti`) | none: two tokens for one user in the same second are identical | present |
@@ -104,7 +105,12 @@ The suite asserts these per version. Other versions check only what holds for al
 | `relPath` of a podcast from `POST /api/podcasts` | the whole path without its leading `/` (it strips `folder.fullPath`, which the model lacks) | relative to the folder |
 | HLS playlist segment URIs | `output-N.ts?token=…`, as in every release before 2.29.0 (#662): the user's legacy token, which has no expiry and signs in to the API | `output-N.ts` |
 
-Behaviour that holds on both, and that fixtures did not capture:
+2.38.0 shares the 2.37.2 column: between the two tags the token, refresh, HLS playlist,
+podcast-creation and probe code (`server/auth/TokenManager.js`, `server/Auth.js`,
+`server/utils/generators/hlsPlaylistGenerator.js`, `server/objects/Stream.js`,
+`server/controllers/PodcastController.js`, `server/utils/prober.js`) is unchanged.
+
+Behaviour that holds on every reviewed pin, and that fixtures did not capture:
 
 - `POST /login` returns the refresh token only in a cookie unless `x-return-tokens: true` is sent.
   `POST /logout` revokes the cookie's refresh token before the `x-refresh-token` header's.
@@ -120,6 +126,36 @@ Behaviour that holds on both, and that fixtures did not capture:
 - A bookmark is matched by item and `time ==` the number in the path, so `12.345` must travel as
   `12.345`. Creating at an existing time renames that bookmark. Updating or deleting a missing
   one is a 404, and an empty title is a 400 `Invalid title`.
+
+### What 2.38.0 changed (#48)
+
+Reviewed from the source diff `v2.37.2...v2.38.0` (`1430c9fc642d586ff91c8d4cbed20aab2c47e473`).
+The suite's unrestricted users don't reach these paths, so they are source findings, not live
+observations:
+
+- Collection socket events go only to the acting user: `collection_added`, `collection_updated`
+  and `collection_removed` use `SocketAuthority.clientEmitter(req.user.id, …)` instead of a
+  broadcast, with the collection filtered for that user
+  ([writes](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/CollectionController.js#L32-L222)).
+  Other users' apps see another user's collection changes only on their next fetch. Create now
+  answers with that filtered collection, which is `null` when the creator's tag or
+  explicit-content restrictions hide every book; the old response was unfiltered.
+  `DELETE /api/collections/:id/book/:bookId` needs update permission instead of delete; the app
+  uses `batch/remove`.
+- `rss_feed_open` and `rss_feed_closed` go only to users who can access the feed's library, and
+  a close is sent only when the feed's entity still has a library.
+- `PATCH /api/me/progress/:id` answers 403 for an item the user can't access, and 400 when an
+  episode doesn't belong to the given item; the batch update skips such an item and still answers
+  200. `GET /api/me/items-in-progress` leaves inaccessible items out.
+- `GET /api/libraries` returns no libraries to a user with `accessAllLibraries: false` and an
+  empty `librariesAccessible`, where it used to return all of them; in library item queries an
+  empty tag allow-list with `accessAllTags: false` now hides every item.
+- `DELETE /api/sessions/:id` on another user's session is a 403 for a non-admin.
+- `notifications_updated` goes to administrators only; a non-string user name or password fails
+  `POST /login`; OIDC logout no longer fails when OIDC isn't configured.
+
+Unchanged between the tags: the token code above, `PlaylistController.js`, `Playlist.js`,
+`Collection.js`, `UserController.js`, `PlaybackSessionManager.js` and `PodcastEpisode.js`.
 
 ### Sequential session evidence and the reconciliation test model (#275)
 
@@ -150,6 +186,12 @@ nonzero deltas. `server/routers/ApiRouter.js` lines 522–525 / 530–533 sort s
 descending `updatedAt`; `server/controllers/MeController.js` lines 65–92 / 185–218 slice
 pages and report metadata. A source-only difference is the newer route's library-access
 check; these unrestricted-user contracts do not characterize permission failures.
+
+The full node run on 2.38.0 passed the same assertions and printed the same summaries
+(`CONTRACT-PAGES … total=12 pages=2 counts=10/2`, `CONTRACT-TAKEOVER … stored=3/10`,
+`CONTRACT-ZERO … takeover=0 close=0 positions=8/9`, `CONTRACT-STALE … positions=20/5/4
+stored=6/4`). At `1430c9fc642d586ff91c8d4cbed20aab2c47e473` the cited code is unchanged; only the
+`ApiRouter.js` sort moved, to lines 531–534.
 
 `ABSPlaybackTests/Sync/ReconciliationSessionModel.swift` is opt-in through the existing
 `StubSessionService` and `StubProgressSyncService` `sessionClient` seams. A shared actor owns
@@ -255,7 +297,8 @@ and runs this suite last with `ABS_STREAMING_CONTRACT=1`; anywhere else it is sk
 alone, pass `--filter StreamingFormatContractTests`, which sets the variable. To play the
 formats by hand, run `ABS_STREAMING_CONTRACT=1 mise run server:run`.
 
-Observed on 2.26.0 and 2.37.2 (node backend), the same on both except the segment URIs:
+Observed on 2.26.0, 2.37.2 and 2.38.0 (node backend), the same on all three except the segment
+URIs:
 
 | Book | Play method | Tracks | Served as | Ranges / HLS |
 | --- | --- | --- | --- | --- |
@@ -322,7 +365,7 @@ endpoint wrappers, `LocalProgressStore`) and wrap the test in
 afterwards, so tests share no progress, sessions or tokens. Find the seeded items with
 `ContractSeed.shared.data()`. Compare durations with `approximately` (±0.5 s), and branch on
 `ContractServer.current?.version` only for a difference listed above. Run `mise run test:server`
-on 2.26.0 and 2.37.2.
+on 2.26.0 and 2.38.0.
 
 ## Cleanup
 
@@ -375,10 +418,11 @@ than promising request order. Remove ignores unknown/nonmember IDs but returns 5
 array. Empty collections return 200 `books: []`, including detail GET; a nonempty collection
 with all books filtered from a user instead returns 404 (not the owned two-book seed scenario).
 
-2.37.2 strips tags from names, rejects inaccessible-library create with 403 and hides inaccessible
-IDs with 404. 2.26.0 lacks these library-access checks and name sanitization. Tests preserve these
-differences and avoid exotic invalid JSON types. Unknown collection lookup precedes write permission
-checks. All writes except delete need update permission; delete needs delete permission.
+2.37.2 and 2.38.0 strip tags from names, reject inaccessible-library create with 403 and hide
+inaccessible IDs with 404. 2.26.0 lacks these library-access checks and name sanitization. Tests
+preserve these differences and avoid exotic invalid JSON types. Unknown collection lookup precedes
+write permission checks. All writes except delete need update permission; delete needs delete
+permission.
 
 Canonical source is `advplyr/audiobookshelf`, with immutable evidence:
 
@@ -396,6 +440,16 @@ Canonical source is `advplyr/audiobookshelf`, with immutable evidence:
   [user deletion](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/UserController.js#L363-L406),
   [permission provisioning](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/UserController.js#L152-L168),
   [ordinary defaults](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/models/User.js#L169-L184).
+- 2.38.0 pin `1430c9fc642d586ff91c8d4cbed20aab2c47e473`:
+  [routes](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/routers/ApiRouter.js#L145-L155),
+  [writes](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/CollectionController.js#L32-L222),
+  [batch/middleware](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/CollectionController.js#L317-L455),
+  [serialization](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/models/Collection.js#L222-L289),
+  [user deletion](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/UserController.js#L363-L406),
+  [permission provisioning](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/UserController.js#L152-L168),
+  [ordinary defaults](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/models/User.js#L169-L184).
+  Its socket events and filtered create response changed ([above](#what-2380-changed-48)); the
+  request and response shapes the suite checks did not.
 
 The two `ABSAPITests/Fixtures/collection-writes-*.json` fixtures were captured on 2026-11-10
 from one actual create per owned disposable official image, using the existing ordered
@@ -409,11 +463,17 @@ decoding. Capture collections were explicitly deleted and the servers/temp direc
 | --- | --- | --- | --- |
 | `:2.26.0` | `sha256:16685fbba37a21d403f5390b907d286e15b3086d26527269b4ad785f71f571e5` | `2.26.0` | `264ae928a9c1af620487488110eec816b14e23ec` |
 | `:2.37.2` | `sha256:b897c33f05972fb1bf484f7487bc878fa91ec8691335c1db6e2929c3a7658efa` | `2.37.2` | `edb1f7efc92ecacdef51aafb4d9d5054ce10604f` |
+| `:2.38.0` | `sha256:60064c23f32fd9099fd39e82c5132c51701d1221135bbca04cd099b589e1edc3` | `2.38.0` (node backend) | `1430c9fc642d586ff91c8d4cbed20aab2c47e473` |
 
 `Config.Labels` also reported `org.opencontainers.image.source=https://github.com/advplyr/audiobookshelf`,
 `title=audiobookshelf`, `url=https://github.com/advplyr/audiobookshelf`, `licenses=GPL-3.0`,
 `description=Self-hosted audiobook and podcast server`; `version` matched each release, and `created`
-was respectively `2025-07-12T19:13:12.866Z` / `2026-10-23T19:58:49.792Z`.
+was respectively `2025-07-12T19:13:12.866Z` / `2026-10-23T19:58:49.792Z` / `2026-11-17T23:34:48.071Z`.
+The 2.38.0 row was read on 2026-11-18 (UTC) without Docker, from the GHCR registry API with an anonymous
+pull token: the RepoDigest is the multi-arch OCI index's digest (the same request reproduced the
+2.26.0 and 2.37.2 digests above), and the `linux/amd64` and `linux/arm64` image configs carry the
+same eight labels, the revision label equal to the `v2.38.0` tag's commit. Its
+`/status.serverVersion` was observed on the node backend, whose harness checks out that commit.
 Before any new acceptance run, inspect official image digests, actual server version and **all**
 labels. Require a present revision label matching the exact pin. A mismatch fails the gate;
 an absent label is not proof: pause for a coordinator decision on a separately recorded
@@ -421,7 +481,7 @@ exact-source disposable build fallback. A tag or version string alone is insuffi
 
 Run the focused `Collection|LibraryEndpointsTests|ItemEndpointsTests|LibraryResponseDecodingTests|LibraryModelTests`
 package filter, then `scripts/test-server.sh test --filter CollectionWriteContractTests` and
-`mise run test:server` with each exact `ABS_SERVER_VERSION=2.26.0` and `2.37.2`. Record actual
+`mise run test:server` with each exact `ABS_SERVER_VERSION=2.26.0` and `2.38.0`. Record actual
 non-skipped live test counts and cleanup, not default-suite skips. Also run `mise run lint`,
 `mise run xcproj:check` and `mise run test`, with `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer`
 and `MISE_TRUSTED_CONFIG_PATHS=$PWD`. These checks do not constitute VM, UI or device acceptance.
@@ -467,6 +527,9 @@ Observed safe characterization on **both** 2.26.0 and 2.37.2:
   ID routes after that owner's library access is removed. 2.26.0 preserves tags and permits these
   operations. Neither version's non-owner restriction is bypassed by admin privileges.
 
+The full node run on 2.38.0 passed `PlaylistWriteContractTests` with the 2.37.2 expectations,
+including the characterization above; no playlist captures were taken on 2.38.0.
+
 **Source-only hazards, deliberately not live-tested:** podcast batch adds without episode IDs,
 bogus episode IDs on books, mixed/cross-library adds, duplicate entries within one add, and
 nonmember reorders. The server does not safely validate all combinations and can leave dangling
@@ -486,6 +549,12 @@ Immutable canonical source evidence (not inferred from a version string):
 | Serialization | [335–376](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/models/Playlist.js#L335-L376) | [335–376](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/models/Playlist.js#L335-L376) |
 | User-delete cascade | [365–407](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/UserController.js#L365-L407) | [363–406](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/UserController.js#L363-L406) |
 | Library list | [855–872](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/LibraryController.js#L855-L872) | [853–870](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/LibraryController.js#L853-L870) |
+
+At the 2.38.0 pin `1430c9fc642d586ff91c8d4cbed20aab2c47e473` every row above is the same code as
+2.37.2. Only two moved:
+[routes 158–169](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/routers/ApiRouter.js#L158-L169)
+and
+[library list 855–872](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/LibraryController.js#L855-L872).
 
 ### Playlist ownership and reproduction
 
@@ -596,6 +665,16 @@ which calls `Number()` before the controller. String paging is tested only as de
 | Controller | [1285–1298](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/controllers/LibraryController.js#L1285-L1298) | [1283–1296](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/controllers/LibraryController.js#L1283-L1296) |
 | Selection and serialization | [506–558](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/utils/queries/libraryItemsPodcastFilters.js#L506-L558) | [506–558](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/utils/queries/libraryItemsPodcastFilters.js#L506-L558) |
 | Audio track | [184–190](https://github.com/advplyr/audiobookshelf/blob/264ae928a9c1af620487488110eec816b14e23ec/server/models/PodcastEpisode.js#L184-L190) | [184–191](https://github.com/advplyr/audiobookshelf/blob/edb1f7efc92ecacdef51aafb4d9d5054ce10604f/server/models/PodcastEpisode.js#L184-L191) |
+
+At the 2.38.0 pin `1430c9fc642d586ff91c8d4cbed20aab2c47e473` the same code sits at
+[route](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/routers/ApiRouter.js#L93),
+[normalization 1477–1496](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/LibraryController.js#L1477-L1496),
+[controller 1285–1298](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/controllers/LibraryController.js#L1285-L1298),
+[selection 509–561](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/utils/queries/libraryItemsPodcastFilters.js#L509-L561)
+and [audio track 184–191](https://github.com/advplyr/audiobookshelf/blob/1430c9fc642d586ff91c8d4cbed20aab2c47e473/server/models/PodcastEpisode.js#L184-L191).
+The selection's permission query (`getUserPermissionPodcastWhereQuery`) now hides every item from
+a user with an empty tag allow-list; the suite reads as the seeded root user, who can access every
+tag. No captures were taken on 2.38.0.
 
 Source selects unfinished episodes in descending publication order. The controller's omitted-limit
 default is numeric zero; source suggests zero rows, **not unlimited**. Omitted limit, invalid numeric
@@ -727,7 +806,9 @@ evidence is separate. No UI/device acceptance is claimed.
 ## CI
 
 `.github/workflows/server-contract.yml` runs on `workflow_dispatch` (optionally with one
-version) and every night, for 2.26.0 and 2.37.2. A failure fails the job.
+version) and every night, for 2.26.0 (the minimum) and 2.38.0 (the latest reviewed release; it
+replaced 2.37.2 after dispatch run 44203118568 stopped at `owned search requires a reviewed source
+pin for 2.38.0`). A failure fails the job.
 
 GitHub's macOS runners have no Docker, and `ABSCore`, `ABSAPI` and `ABSData` use Apple
 frameworks (Security, SwiftData), so a Linux runner cannot build the suite. The job runs on the
@@ -735,7 +816,8 @@ macOS `xcode-27` runner with `ABS_SERVER_BACKEND=node`: Node 20 from mise, ffmpe
 and the server's source release from GitHub.
 
 Checked on a developer Mac: ShellCheck, actionlint, the Docker backend and the node backend (Node
-20.20.2) on both versions. Only a hosted run shows that the runner has network access for
+20.20.2) on 2.26.0 and 2.37.2, and the node backend on 2.38.0 (Docker wasn't available for that
+check). Only a hosted run shows that the runner has network access for
 `brew install ffmpeg`, the Node download and the sqlite3 binary, how long the job takes, and
 that the schedule fires.
 

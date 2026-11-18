@@ -17,13 +17,13 @@ mkdir -p .build/server-tmp
 export TMPDIR=$PWD/.build/server-tmp
 
 ABS_SERVER_VERSION=2.26.0 scripts/test-server.sh test --search-contract
-ABS_SERVER_VERSION=2.37.2 scripts/test-server.sh test --search-contract
+ABS_SERVER_VERSION=2.38.0 scripts/test-server.sh test --search-contract
 ABS_SERVER_VERSION=2.26.0 mise run test:server
-ABS_SERVER_VERSION=2.37.2 mise run test:server
+ABS_SERVER_VERSION=2.38.0 mise run test:server
 
 ABS_SERVER_BACKEND=node ABS_SERVER_VERSION=2.26.0 \
   mise exec node@20 -- scripts/test-server.sh test --search-contract
-ABS_SERVER_BACKEND=node ABS_SERVER_VERSION=2.37.2 \
+ABS_SERVER_BACKEND=node ABS_SERVER_VERSION=2.38.0 \
   mise exec node@20 -- scripts/test-server.sh test --search-contract
 ```
 
@@ -121,7 +121,8 @@ Missing/mismatching revision is a failure, never a guessed fallback. Node startu
 fresh checkout's exact HEAD and clean status before its existing dependency installation.
 Both backends check the actual `/status.serverVersion`. Full runs on unreviewed versions fail
 closed; a focused ordinary selector retains legacy behavior without enabling search writes.
-The existing scheduled workflow runs the **full** node-backed harness on both reviewed pins.
+The existing scheduled workflow runs the **full** node-backed harness on 2.26.0 and 2.38.0; 2.37.2
+remains a reviewed pin for manual runs.
 
 Optionally set `ABS_SEARCH_LIVE_CAPTURE_DIR=$PWD/.build/search-live/<backend>-<version>-<run>`.
 Only a path inside this worktree's `.build` is accepted. Per-fixture UUID directories contain
