@@ -98,6 +98,8 @@ struct LogsView: View {
 
     /// Loads the entries without the saved custom header values, which only the accounts know.
     private func load() async {
+        // The secrets are read before `model.load` bumps its generation, so of overlapping loads
+        // the one whose Keychain read finishes last wins; harmless, as the values rarely differ.
         await model.load(secrets: await accounts?.customHeaderValuesForLogs() ?? [])
     }
 

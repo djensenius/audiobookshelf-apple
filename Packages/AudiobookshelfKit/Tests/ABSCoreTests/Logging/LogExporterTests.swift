@@ -133,7 +133,8 @@ private func entry(
                 2027-01-15T08:00:01.000Z [error] [realtime] header X-Key: <redacted>, GET /socket.io/?token=<redacted>
                 """
         )
-        #expect(try await exporter.entries(matching: LogFilter(minimumLevel: .fault), secrets: ["x-y-z"]).isEmpty)
+        // Like the redactor's own, a secret shorter than `Redactor.minimumSecretLength` is ignored.
+        #expect(try await exporter.entries(secrets: ["Req"]).first?.message.hasPrefix("Request failed") == true)
         #expect(try await exporter.export().contains("cf-proxy-secret"))
     }
 
