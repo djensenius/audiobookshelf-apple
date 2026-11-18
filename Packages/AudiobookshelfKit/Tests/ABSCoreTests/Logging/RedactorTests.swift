@@ -137,6 +137,61 @@ private let legacyToken =
         )
     }
 
+    // MARK: JSON credentials (#662)
+
+    /// A server's error body or a decoding error can quote a credential that isn't a JWT.
+    @Test(arguments: [
+        "token", "accessToken", "access_token", "refreshToken", "refresh_token", "apiKey", "api_key", "password",
+        "secret", "ACCESS_TOKEN", "ApiKey",
+    ])
+    func redactsJSONCredentialValues(key: String) {
+        #expect(Log.redact(#"{"\#(key)":"0paque-value","next":1}"#) == #"{"\#(key)":"<redacted>","next":1}"#)
+    }
+
+    @Test func redactsJSONCredentialValuesWithWhitespaceAroundTheColon() {
+        #expect(
+            Log.redact("{\"token\" : \"0paque\",\n  \"apiKey\":\n    \"0paque-key\"}")
+                == "{\"token\" : \"<redacted>\",\n  \"apiKey\":\n    \"<redacted>\"}")
+    }
+
+    @Test func redactsJSONCredentialValuesWithEscapedQuotes() {
+        #expect(
+            Log.redact(#"{"refreshToken":"0pa\"que\\","next":"kept"}"#)
+                == #"{"refreshToken":"<redacted>","next":"kept"}"#)
+    }
+
+    /// An error's description escapes the JSON body it quotes once more, including an escaped quote
+    /// in the value (`\\\"`).
+    @Test(arguments: ["token", "accessToken", "refresh_token", "api_key", "password", "secret"])
+    func redactsEscapedJSONCredentialValues(key: String) {
+        #expect(
+            Log.redact(#"message: Optional("{\"\#(key)\" : \"0pa\\\"que\",\"next\":1}")"#)
+                == #"message: Optional("{\"\#(key)\" : \"<redacted>\",\"next\":1}")"#)
+    }
+
+    @Test func redactedErrorLosesJSONCredentialsInItsServerMessage() {
+        struct ServerFailure: Error {
+            let status: Int
+            let message: String?
+        }
+        let error = ServerFailure(status: 500, message: #"{"error":"bad","accessToken":"0paque-access"}"#)
+        #expect(String(describing: error).contains("0paque-access"))
+        #expect(!Log.redacted(error).contains("0paque"))
+        #expect(Log.redacted(error).contains(#"\"accessToken\":\"<redacted>\""#))
+    }
+
+    @Test func keepsOtherJSONKeysAndProse() {
+        for text in [
+            #"{"username":"root","tokenType":"jwt","mytoken":"x","secretary":"y","passwordHint":"z"}"#,
+            #"{\"username\":\"root\",\"tokenExpiry\":\"soon\"}"#,
+            #"The token expired: "sign in again""#,
+            #"The "token" field is missing; "secret" too"#,
+            "refresh the token and the secret, then retry",
+        ] {
+            #expect(Log.redact(text) == text)
+        }
+    }
+
     @Test func redactsJWTWithWhitespacePrefixedHeader() {
         let jwt = "\(base64URL(#"{ "alg":"HS256"}"#)).\(base64URL(#"{"sub":"1"}"#)).c2lnbmF0dXJl"
         #expect(jwt.hasPrefix("eyAi"))

@@ -152,7 +152,7 @@ public struct DataStack: Sendable {
             guard allowsSave, isIncompatible(error, storeURL: url) else { throw error }
             // A corrupt or unmigratable store: start empty. The server still holds synced progress,
             // and the orphan sweep removes downloads that are no longer referenced.
-            logger.fault("Store is incompatible (\(String(describing: error), privacy: .public)); moving it aside")
+            logger.fault("Store is incompatible (\(Log.redacted(error), privacy: .public)); moving it aside")
             try moveStoreAside(at: url, now: now)
             return try makeContainer(schema: schema, configuration: configuration)
         }
@@ -334,7 +334,7 @@ public struct DataStack: Sendable {
                 )
             #endif
         } catch {
-            logger.error("Couldn't prepare the store directory: \(String(describing: error), privacy: .public)")
+            logger.error("Couldn't prepare the store directory: \(Log.redacted(error), privacy: .public)")
         }
     }
 }

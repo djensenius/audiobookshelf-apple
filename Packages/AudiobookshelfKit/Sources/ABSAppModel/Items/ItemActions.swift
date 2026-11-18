@@ -269,7 +269,7 @@ public final class ProgressItemActions: ItemActionPerforming {
             try await local(localSync)
         } catch {
             Log.data.error(
-                "Couldn't update local progress after an item action: \(String(describing: error), privacy: .public)")
+                "Couldn't update local progress after an item action: \(Log.redacted(error), privacy: .public)")
         }
     }
 
