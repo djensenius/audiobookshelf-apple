@@ -3,9 +3,9 @@
 # - MediaPlayer (and its Now Playing symbols) is banned in every native source.
 # - NowPlaying / _NowPlaying_AppIntents may be imported only under ABSPlayback/NowPlaying/ and its
 #   tests, ABSPlaybackTests/NowPlaying/.
-# Scans the app, its tests, the shared and widget/extension folders, Packages and Tools; legacy ios/ still imports
-# MediaPlayer and is not scanned. Lines whose first token is a comment marker (//, /*, *) are
-# skipped for the MediaPlayer ban. Fails if grep itself errors (exit > 1). Runs on macOS /bin/bash 3.2 with BSD grep (grep -E only).
+# Scans the app, its tests, the shared and widget/extension folders, Packages and Tools.
+# Lines whose first token is a comment marker (//, /*, *) are skipped for the MediaPlayer ban.
+# Fails if grep itself errors (exit > 1). Runs on macOS /bin/bash 3.2 with BSD grep (grep -E only).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
