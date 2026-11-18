@@ -139,9 +139,11 @@ private struct ChaptersList: View {
                             // Lines the columns up with the rows' current-chapter checkmark.
                             Image(systemName: "checkmark").hidden()
                         }
-                        // As Settings' headers: the system's header colour is 3.3:1 on the grouped
-                        // background in light. #705
-                        .foregroundStyle(ABSColor.mutedForeground)
+                        // Not the system's header colour, 3.3:1 on the grouped background in light,
+                        // and for glass, as the other rows' times: at the sheet's medium detent,
+                        // `mutedForeground` measured down to 4.1:1 on an iPhone and 3.6:1 on an
+                        // iPad against the glass just past its glyphs' edges. #705
+                        .foregroundStyle(ABSColor.mutedForegroundOnGlass)
                         .accessibilityHidden(true)
                     }
                 }
@@ -233,14 +235,14 @@ private struct ChapterRow: View, Equatable {
 }
 
 /// A title followed by the start and duration columns, for the rows and the header. The columns
-/// default to `ABSColor.mutedForeground`, the header's, not `.secondary`: in the list's section
-/// header, which is secondary already, `.secondary` drew the header's Start and Duration at 1.7:1
-/// in light and 2.3:1 in dark, and in a row it's 4.0:1 on white. Rows pass their own. #705
+/// default to `ABSColor.mutedForegroundOnGlass`, the header's, not `.secondary`: in the list's
+/// section header, which is secondary already, `.secondary` drew the header's Start and Duration at
+/// 1.7:1 in light and 2.3:1 in dark, and in a row it's 4.0:1 on white. Rows pass their own. #705
 private struct ChapterColumns<Title: View>: View {
     let columnWidth: CGFloat
     let start: String
     let duration: String
-    var timesStyle = AnyShapeStyle(ABSColor.mutedForeground)
+    var timesStyle = AnyShapeStyle(ABSColor.mutedForegroundOnGlass)
     @ViewBuilder let title: Title
 
     var body: some View {

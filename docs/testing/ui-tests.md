@@ -288,7 +288,10 @@ set); elsewhere, the Chapters sheet (`player.chapters`, in the overflow menu of 
 its large detent. It checks that the current chapter's row background differs from another row's,
 and that its times measure 4.5:1 or more in black (`MeasuredContrast`).
 In landscape the screenshot is the portrait framebuffer tagged with its orientation, so the test
-draws it upright before reading the rows' frames.
+draws it upright before reading the rows' frames. On an iPhone (skipped on an iPad) a second test
+opens the sheet at its medium detent, on glass over the player, and checks that the list header's
+Start and Duration, in `ABSColor.mutedForegroundOnGlass`, measure 4.5:1 or more there; not its
+semibold "Chapters", whose wide strokes `MeasuredContrast` misreads (see docs/accessibility.md).
 
 `PlayerToolbarTests` (iOS) checks the player's bottom toolbar on an iPad in portrait (#705): from
 iOS 27.1 the split arrangement shows the details pane only side by side, so in portrait the bar
