@@ -147,7 +147,7 @@ private struct DetailArrangementContainer<Scroll: View, Primary: View, Secondary
         var body: some View {
             DetailPane {
                 primary
-                if axis == nil { secondary }
+                if !SplitArrangement.showsSecondaryPane(axis: axis) { secondary }
             }
         }
     }

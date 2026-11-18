@@ -85,9 +85,30 @@ final class AccessibilityAuditTests: XCTestCase {
         var buttons: [(label: String, failure: String)] = []
         var hasUnnamed = false
         let name = "\(screen.name) (\(textSize))"
+        // "Dynamic Type font sizes are partially unsupported (User will not be able to change the
+        // font size of this UILabel)" with no element at AX5 on a 13-inch iPad, every run, on every
+        // screen with the tab bar along the top: two to four per audit, no more than the tab titles
+        // it shows. The system's UIKit labels are capped at the bar's height, as a navigation bar's
+        // items are (#647); the app's own text, a menu picker's UIKit value included, comes with its
+        // element. None on the full player, which covers the bar. So per audit, at most as many as
+        // the bar's row of hittable tab buttons (`KnownAuditIssue.topTabBarButtonCount`), never on
+        // the Player or Bookmarks, and only "partially" (a fixed font size is "unsupported"); any
+        // more fail. #698
+        #if os(iOS)
+            let tabBarLabels =
+                types.contains(.dynamicType) && ![FixtureScreen.player, .bookmarks].contains(screen)
+                ? KnownAuditIssue.topTabBarButtonCount(in: app) : 0
+        #else
+            let tabBarLabels = 0
+        #endif
+        var tabBarIssues = 0
         do {
             try app.performAccessibilityAudit(for: types) { issue in
                 if KnownAuditIssue.all.contains(where: { $0.matches(issue, on: screen, in: app) }) { return true }
+                if tabBarIssues < tabBarLabels, KnownAuditIssue.isUnnamedUILabelDynamicType(issue) {
+                    tabBarIssues += 1
+                    return true
+                }
                 // Reported below, with the screen's name.
                 if KnownAuditIssue.isUnnamedContrastUnderBottomBar(issue, on: screen, in: app) {
                     deferred.append("\(name): \(Self.failure(issue))")
@@ -343,10 +364,11 @@ final class AccessibilityAuditTests: XCTestCase {
 
     /// Checks the contrast issues ``KnownAuditIssue/contentButtonUnderBottomBar(_:on:in:)`` deferred
     /// (`buttons`: each button's label and failure) and returns what fails. It scrolls each button
-    /// up until it's wholly between the bars (``BottomBarAttribution/isWhollyInBand(_:band:)``), as
+    /// up (or, if the text's pass scrolled it under the navigation bar, down) until it's wholly between
+    /// the bars (``BottomBarAttribution/isWhollyInBand(_:band:)``), as
     /// ``auditAboveBottomBar(_:deferring:namedDeferrals:hasUnnamed:on:in:named:)`` does for text, and
-    /// audits contrast there: an issue naming the button fails. If it never gets there, its deferred
-    /// failure stands. #698
+    /// audits contrast there: an issue naming the button, or naming no element, fails. If it never
+    /// gets there, as when the content stops scrolling, its deferred failure stands. #698
     @MainActor
     private func auditButtonsAboveBottomBar(
         _ buttons: [(label: String, failure: String)], on screen: FixtureScreen, in app: XCUIApplication,
@@ -368,8 +390,15 @@ final class AccessibilityAuditTests: XCTestCase {
                         if KnownAuditIssue.all.contains(where: { $0.matches(issue, on: screen, in: app) }) {
                             return true
                         }
-                        if let found = issue.element, found.elementType == .button, found.label == button.label {
-                            failures.append("\(name), '\(button.label)' above the bottom bar: \(Self.failure(issue))")
+                        // One with no element could be the button's, so it fails too.
+                        if let found = issue.element {
+                            if found.elementType == .button, found.label == button.label {
+                                failures.append(
+                                    "\(name), '\(button.label)' above the bottom bar: \(Self.failure(issue))")
+                            }
+                        } else {
+                            failures.append(
+                                "\(name), auditing '\(button.label)' above the bottom bar: \(Self.failure(issue))")
                         }
                         return true
                     }
@@ -379,14 +408,21 @@ final class AccessibilityAuditTests: XCTestCase {
                     audited = true
                     break
                 }
-                // Already scrolled up under the navigation bar, or no band to scroll it into.
-                guard step < 10, frame.minY >= top, barTop - top > 2 * margin else { break }
-                let distance = max(16, min(frame.maxY - barTop + 4, (barTop - top) / 2))
-                let y = barTop - margin / 2
+                guard step < 10, barTop - top > 2 * margin else { break }
+                // Up into the band from under the bottom bar or, if the text pass
+                // (`auditAboveBottomBar`) scrolled it up under the navigation bar, back down.
+                let up = frame.minY >= top
+                let distance =
+                    up
+                    ? max(16, min(frame.maxY - barTop + 4, (barTop - top) / 2))
+                    : -max(16, min(top - frame.minY + 4, (barTop - top) / 2))
+                let y = up ? barTop - margin / 2 : top + margin / 2
                 let origin = app.coordinate(withNormalizedOffset: .zero)
                 origin.withOffset(CGVector(dx: x, dy: y)).press(
                     forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(dx: x, dy: y - distance)),
                     withVelocity: .slow, thenHoldForDuration: 0.3)
+                // The content can't scroll any further.
+                if abs(element.frame.minY - frame.minY) < 1 { break }
             }
             if !audited { failures.append("\(button.failure) (kept: never wholly between the bars)") }
         }
@@ -461,16 +497,13 @@ struct KnownAuditIssue {
     var type: XCUIAccessibilityAuditType
     /// Text the issue's compact description must contain; `nil` for any.
     var description: String? = nil
-    /// Text the issue's detailed description must contain; `nil` for any.
-    var detail: String? = nil
     /// Matches the issue's element (`nil` when the issue has none) in the app.
     var element: @MainActor (XCUIElement?, XCUIApplication) -> Bool
 
     @MainActor
     func matches(_ issue: XCUIAccessibilityAuditIssue, on screen: FixtureScreen, in app: XCUIApplication) -> Bool {
         (self.screen == nil || self.screen == screen) && issue.auditType == type
-            && (description.map { issue.compactDescription.contains($0) } ?? true)
-            && (detail.map { issue.detailedDescription.contains($0) } ?? true) && element(issue.element, app)
+            && (description.map { issue.compactDescription.contains($0) } ?? true) && element(issue.element, app)
     }
 
     @MainActor static let all: [KnownAuditIssue] = {
@@ -516,19 +549,25 @@ struct KnownAuditIssue {
                 KnownAuditIssue(
                     screen: .library, type: .dynamicType, description: "partially unsupported",
                     element: isSectionMenuText),
-                // "Dynamic Type font sizes are partially unsupported (User will not be able to
-                // change the font size of this UILabel)" with no element at AX5 on a 13-inch iPad,
-                // every run, on every screen with the tab bar: two to four per screen, about as many
-                // as the tab titles it shows. The tab bar floats along the top there, the system's
-                // UIKit labels capped at the bar's height, as a navigation bar's items are (#647).
-                // The app's own text, a menu picker's UIKit value included, comes with its element.
-                // None on the full player, which covers the tab bar. Only "partially" (a fixed font
-                // size is "unsupported", and fails), only with no element and a `UILabel`, and only
-                // while the tab bar is along the top (``hasTopTabBar(in:)``). #698
-                KnownAuditIssue(type: .dynamicType, description: "partially unsupported", detail: "UILabel") {
-                    element, app in
-                    element == nil && hasTopTabBar(in: app)
-                },
+                // The top tab bar's element-less labels at AX5 on a 13-inch iPad aren't filtered
+                // here but counted, per audit, against the tab buttons in the row
+                // (`AccessibilityAuditTests.audit`, `topTabBarButtonCount`). #698
+                //
+                // "Dynamic Type font sizes are partially unsupported" on Settings' toggle and menu
+                // picker rows at AX5 on a 13-inch iPad, every full walk: the toggles' titles ("Use
+                // bookshelf view", "Disable auto rewind") and the pickers' values ("System", "10s"),
+                // whichever rows are in view; none on the iPhone Duo. They're the system's `Toggle`
+                // and `Picker` rows with no font of the app's, and they scale at every size: "Use
+                // bookshelf view" is 27.5, 33.5, 39.5, 48, 56.5 and 63.5 points tall from XXXL to AX5
+                // (probed), the values likewise, and AX5 shows them whole. An audit of only Dynamic
+                // Type on Settings at AX5 reports none of them, and at XXXL or AX1 it reports the
+                // rows in view, so it's the audit's measurement, as for the cards (#622). Only
+                // "partially" (a fixed font size is "unsupported", and fails), only text in a
+                // Settings row's switch or button, and only while it's at least one AX5 body line
+                // (63.5 points) tall, so text drawn at a smaller size still fails. #698
+                KnownAuditIssue(
+                    screen: .settings, type: .dynamicType, description: "partially unsupported",
+                    element: isScaledSettingsRowText),
                 // "Contrast failed" on the chapter's remaining time ("-0:26") on a 6.3-inch iPhone,
                 // every run, though its pixels measure 5.7:1 on the backdrop (4.5:1 needed), as do
                 // the elapsed time's beside it (5.6:1), which pass in the same font and colour.
@@ -557,7 +596,8 @@ struct KnownAuditIssue {
                 // on the backdrop's rgb(49, 39, 39), and the frame matches the text; the author below
                 // it, in the same colour, passes. Only the Player's chapter title
                 // (`player.chapter`), and only while a screenshot measures 4.5:1 or more around text in
-                // that colour, as for the times. #698
+                // that colour, as for the times. Not limited to dark and black: being measured, it
+                // filters only text that reads at 4.5:1 or more, in any theme. #698
                 KnownAuditIssue(screen: .player, type: .contrast) { element, app in
                     guard let element, element.identifier == "player.chapter" else { return false }
                     return measuresReadable(element, in: app)
@@ -593,11 +633,14 @@ struct KnownAuditIssue {
             // pixels unmeasurable, the issue fails, unfiltered. #641
             //
             // The same in light on a 13-inch iPad, every run: the author ("Jane Austen") on Settings,
-            // whose rgb(91,99,108) measures 6.0:1 on the floating mini player's light glass. #698
+            // whose rgb(91,99,108) measures 6.0:1 on the floating mini player's light glass. In light
+            // only at regular width, with the tab bar along the top (`topTabBarButtonCount`), so
+            // compact light runs keep the check they had. #698
             all.append(
                 KnownAuditIssue(type: .contrast) { element, app in
                     guard let element, isMiniPlayerText(element, in: app) else { return false }
                     let theme = FixtureTheme(launchArguments: app.launchArguments)
+                    guard theme != nil || topTabBarButtonCount(in: app) > 0 else { return false }
                     let text =
                         element.identifier == "player.mini.title"
                         ? FixtureTheme.miniPlayerTitle(theme) : FixtureTheme.miniPlayerSecondaryText(theme)
@@ -780,13 +823,48 @@ struct KnownAuditIssue {
         return menu.exists && menu.frame.contains(element.frame)
     }
 
-    /// Whether the tab bar floats along the top, as on a regular-width iPad: no `TabBar` element,
-    /// and a tab button (`tab.home`, ...) near the window's top. #698
+    /// How many tab buttons (`tab.home`, ...) the tab bar floating along the top shows, as on a
+    /// regular-width iPad: hittable ones near the window's top (within 120 points) in one row (their
+    /// tops within 2 points), counted by identifier, since the bar reports most tabs twice, and at
+    /// least two, so a sidebar's rows don't count; `0` with a `TabBar` element or without such a
+    /// row. #698
     @MainActor
-    private static func hasTopTabBar(in app: XCUIApplication) -> Bool {
-        guard !app.tabBars.firstMatch.exists else { return false }
-        let tabs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'tab.'"))
-        return tabs.allElementsBoundByIndex.contains { $0.frame.maxY < app.frame.minY + 120 }
+    static func topTabBarButtonCount(in app: XCUIApplication) -> Int {
+        guard !app.tabBars.firstMatch.exists else { return 0 }
+        let top = app.windows.firstMatch.frame.minY
+        let tabs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'tab.'")).allElementsBoundByIndex
+            .filter { $0.isHittable && $0.frame.maxY < top + 120 }
+            .map { (identifier: $0.identifier, minY: $0.frame.minY) }
+        let row =
+            tabs.map { tab in Set(tabs.filter { abs($0.minY - tab.minY) <= 2 }.map(\.identifier)).count }.max() ?? 0
+        return row >= 2 ? row : 0
+    }
+
+    /// Whether `issue` is "Dynamic Type font sizes are partially unsupported" with no element, of a
+    /// UIKit label: what the top tab bar's titles report at AX5 (``topTabBarButtonCount(in:)``).
+    /// Never on macOS, which has no Dynamic Type audit. #698
+    static func isUnnamedUILabelDynamicType(_ issue: XCUIAccessibilityAuditIssue) -> Bool {
+        #if os(iOS)
+            issue.auditType == .dynamicType && issue.element == nil
+                && issue.compactDescription.contains("partially unsupported")
+                && issue.detailedDescription.contains("UILabel")
+        #else
+            false
+        #endif
+    }
+
+    /// Whether `element` is text in a Settings row's switch or button (a `Toggle` or menu `Picker`
+    /// row, at least half the form's width), at least 60 points tall: one line of body text at AX5
+    /// is 63.5. #698
+    @MainActor
+    private static func isScaledSettingsRowText(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
+        guard let element, element.elementType == .staticText else { return false }
+        let frame = element.frame
+        guard frame.height >= 60 else { return false }
+        let form = app.descendants(matching: .any)["settings.screen"].firstMatch
+        let width = form.frame.width
+        let rows = form.switches.allElementsBoundByIndex + form.buttons.allElementsBoundByIndex
+        return rows.contains { $0.frame.width >= width / 2 && $0.frame.contains(frame) }
     }
 
     /// Whether `element` is text in an item card (`item.<id>`), which the card speaks in full, not

@@ -434,6 +434,7 @@ ArrangementView { primary } secondary: { secondary }
 
 - The view splits side by side only when the area is wider than tall: inner landscape, book pose, iPad landscape and Mac windows. Otherwise only the primary pane shows.
 - The primary pane reads `splitArrangementAxis`. When it is `nil` (not split), the primary pane shows the secondary content inline (detail) or offers it as a sheet (player).
+  *Amended by #698:* an iPad in portrait reports `.vertical` while only the primary pane shows, so only `.horizontal` means side by side (`SplitArrangement.showsSecondaryPane(axis:)`).
 - *Amended by #84:* an active vertical `.division` splits the player at any size class, so a compact window across the fold never gets the column, whose scrubber and transport would cross the hinge.
 - **Player panes.** Primary is Now Playing: artwork, title, chapter, scrubber and transport. Secondary is Chapters, Up Next, Bookmarks or Description.
 - **Detail panes.** Primary is the cover, metadata and actions. Secondary is the description, chapters, tracks or episodes.
@@ -722,6 +723,7 @@ None of this was run for this ADR. Each item is an acceptance criterion of the i
 - **Performed in #56 (P2-09):** mini player and full-player presentation on iPhone, iPad and Mac, including the Mac Now Playing window.
 - **Performed in #84 (P5-07):**
   - On the iPhone Duo simulator (Xcode 27.2), `splitArrangementAxis` is `nil` when only the primary pane shows.
+    *Amended by #698:* on an iPad Pro 13-inch simulator (iOS 27.2) in portrait it is `.vertical` with only the primary pane showing.
   - `.split.axes(.horizontal)` shows primary-only in laptop pose, with controls below the `.division` region.
   - The player is checked in flat, book, laptop, tent and outer forms.
   - The 27.0 fallback works, on the assumption that iPhone Duo always runs 27.1 or later.

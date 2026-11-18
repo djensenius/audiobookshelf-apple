@@ -1,4 +1,5 @@
 import CoreGraphics
+import SwiftUI
 import Testing
 
 @testable import Audiobookshelf
@@ -111,12 +112,12 @@ import Testing
         #expect(PlayerDetailsTab.upNext.shown(in: withoutBookmarks) == .upNext)
     }
 
-    /// The split shows its details pane, so the toolbar drops chapters, bookmarks and Up Next, only
-    /// while it's side by side: not while only the primary shows, which on an iPad in portrait
-    /// reports a vertical axis. #698
-    @Test func onlyAHorizontalSplitShowsTheDetailsPane() {
-        #expect(PlayerLayout.showsDetailsPane(splitAxis: .horizontal))
-        #expect(!PlayerLayout.showsDetailsPane(splitAxis: .vertical))
-        #expect(!PlayerLayout.showsDetailsPane(splitAxis: nil))
+    /// The split shows its secondary pane, so the player's toolbar drops chapters, bookmarks and Up
+    /// Next and item detail stops inlining the description and tables, only while it's side by side:
+    /// not while only the primary shows, which on an iPad in portrait reports a vertical axis. #698
+    @Test func onlyAHorizontalSplitShowsTheSecondaryPane() {
+        #expect(SplitArrangement.showsSecondaryPane(axis: .horizontal))
+        #expect(!SplitArrangement.showsSecondaryPane(axis: .vertical))
+        #expect(!SplitArrangement.showsSecondaryPane(axis: nil))
     }
 }

@@ -306,10 +306,17 @@ private struct ItemDetailActions: View {
         let play = ItemDetailPlayPresentation(button: model.playButton, isMissing: model.isMissing, canPlay: canPlay)
         HStack(spacing: ABSSpacing.small) {
             Button(action: onPlay) {
-                Label {
+                let label = Label {
                     Text(verbatim: L10n.string(play.titleKey))
                 } icon: {
                     Image(systemName: play.systemImage)
+                }
+                // At accessibility sizes the regular-width side column (300 points) can't fit the
+                // icon beside the title and the other buttons, which broke "Play" mid-word; the
+                // title alone fits. #698
+                ViewThatFits(in: .horizontal) {
+                    label
+                    label.labelStyle(.titleOnly)
                 }
                 .frame(maxWidth: .infinity)
                 .onAccentForeground()
