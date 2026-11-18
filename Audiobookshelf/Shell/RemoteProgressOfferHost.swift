@@ -16,6 +16,7 @@ struct RemoteProgressOfferHost: ViewModifier {
     @Environment(\.remoteProgressOffer) private var model
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.appearsActive) private var appearsActive
+    @Environment(\.locale) private var locale
 
     func body(content: Content) -> some View {
         let offer = scenePhase == .active && appearsActive ? model?.shown : nil
@@ -39,15 +40,16 @@ struct RemoteProgressOfferHost: ViewModifier {
                 Text(verbatim: L10n.string("ButtonKeepCurrentPosition"))
             }
         } message: { offer in
-            Text(verbatim: Self.message(for: offer))
+            Text(verbatim: Self.message(for: offer, locale: locale))
         }
     }
 
-    static func message(for offer: RemoteProgressOffer.Pending) -> String {
-        let position = DurationStyle.timestamp.string(offer.position)
+    /// The alert's message, with the position in `locale`'s digits.
+    static func message(for offer: RemoteProgressOffer.Pending, locale: Locale) -> String {
+        let position = DurationStyle.timestamp.string(offer.position, locale: locale)
         if let device = offer.deviceDescription, !device.isEmpty {
-            return L10n.string("MessageRemoteProgressOfferFromDevice", device, position)
+            return L10n.string("MessageRemoteProgressOfferFromDevice", device, position, locale: locale)
         }
-        return L10n.string("MessageRemoteProgressOffer", position)
+        return L10n.string("MessageRemoteProgressOffer", position, locale: locale)
     }
 }

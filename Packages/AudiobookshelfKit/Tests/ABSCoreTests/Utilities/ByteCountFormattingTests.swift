@@ -14,18 +14,6 @@ import Testing
             ByteCountFormatting.string(fromBytes: bytes, locale: locale) == bytes.formatted(Self.style.locale(locale)))
     }
 
-    /// Item detail used `.byteCount(style: .file)` and Downloads used this helper; one size must
-    /// read the same in both (#688), in any locale.
-    @Test(arguments: ["en_US", "de_DE", "ar_SA"])
-    func agreesWithItemDetailFormatting(identifier: String) {
-        let locale = Locale(identifier: identifier)
-        for bytes in [1, 1536, 432_103_424, 1_073_741_824] as [Int64] {
-            #expect(
-                ByteCountFormatting.string(fromBytes: bytes, locale: locale)
-                    == bytes.formatted(.byteCount(style: .file).locale(locale)), "\(bytes)")
-        }
-    }
-
     @Test func clampsNegativeCountsToZero() {
         let locale = Locale(identifier: "en_US")
         #expect(
