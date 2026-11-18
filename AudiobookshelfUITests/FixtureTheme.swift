@@ -26,7 +26,7 @@ enum FixtureTheme: String {
     /// changes and this doesn't, too few pixels match, the measurement is `nil` and the audit issue
     /// fails, unfiltered. #698
     static func miniPlayerSecondaryText(_ theme: FixtureTheme?) -> MeasuredContrast.RGB {
-        theme == nil ? .init(red: 91, green: 99, blue: 108) : .init(red: 214, green: 218, blue: 222)
+        theme == nil ? .init(red: 71, green: 78, blue: 86) : .init(red: 214, green: 218, blue: 222)
     }
 
     /// The colour the Player draws its elapsed and remaining times in for `theme` (`nil`: the light

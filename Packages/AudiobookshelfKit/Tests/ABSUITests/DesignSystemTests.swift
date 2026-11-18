@@ -76,7 +76,9 @@ import Testing
     /// ``ABSColor/onAccent`` on the app's `AccentColor` asset (light `#0E7C86`, dark `#4FC3CC`),
     /// as on a prominent button, and ``ABSColor/mutedForegroundOnGlass`` on the mini player's glass
     /// over Settings, measured on the iPhone 17 simulator: `rgb(87, 88, 88)` in dark, where the
-    /// glass is lightest, and `rgb(241, 243, 245)` in light. #641
+    /// glass is lightest, and `rgb(241, 243, 245)` in light. #641 And on the chapters sheet's glass
+    /// over the player at its medium detent, measured there too: `rgb(67, 66, 65)` in dark and black,
+    /// and `rgb(214, 211, 210)` in light, where the glass is darkest. #705
     @Test(arguments: [AppTheme.light, .dark, .black])
     func accentAndGlassTextMeetContrastMinimum(_ theme: AppTheme) {
         let scheme = theme.colorScheme ?? .light
@@ -86,6 +88,10 @@ import Testing
         let glass = scheme == .dark ? rgb(87, 88, 88) : rgb(241, 243, 245)
         let onGlass = contrast(resolved(ABSColor.mutedForegroundOnGlass, scheme: scheme, theme: theme), glass)
         #expect(onGlass >= 4.5, "mutedForegroundOnGlass on glass: \(onGlass)")
+        let sheetGlass = scheme == .dark ? rgb(67, 66, 65) : rgb(214, 211, 210)
+        let onSheetGlass = contrast(
+            resolved(ABSColor.mutedForegroundOnGlass, scheme: scheme, theme: theme), sheetGlass)
+        #expect(onSheetGlass >= 4.5, "mutedForegroundOnGlass on the chapters sheet's glass: \(onSheetGlass)")
     }
 
     @Test func blackThemeResolvesLegacyBlackPalette() {
