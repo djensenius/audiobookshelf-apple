@@ -111,11 +111,12 @@ jobs:
     # Recent passing runs take 36–58 minutes (median 47). One stalled test (#627) adds about 13:
     # the UI-test step stops it after 10 (#661), then needs about 3 to restart the runner, list the
     # tests and run it again alone (#666). 75 fitted that in even the slowest run seen (58 + 13);
-    # 70 didn't. The iPad steps add about 6 (create and boot a simulator, then one test without
-    # building: about 5.3 locally), so 80 fits 58 + 13 + 6 = 77. A second stall, in either run or
-    # on the iPad, may not fit: the job then times out and fails rather than passing. A passing
-    # run doesn't take longer.
-    timeout-minutes: 80
+    # 70 didn't. The iPad steps add about 3 to create and boot a simulator, then the iPad test
+    # step, which has its own 25-minute limit: about 5.3 locally, but on CI xcodebuild was still
+    # starting the test runner on the cold iPad simulator 12 minutes in. 105 fits
+    # 58 + 13 + 3 + 25 = 99 plus setup. A second stall in the iPhone run may not fit: the job then
+    # times out and fails rather than passing. A passing run doesn't take longer.
+    timeout-minutes: 105
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       MISE_TASK_RUN_AUTO_INSTALL: "false"
@@ -180,8 +181,11 @@ jobs:
           xcrun simctl bootstatus "$udid" -b
 
       # IOS_SIMULATOR_ID is set in the command, not in env:, as the iPhone step's $GITHUB_ENV also sets it.
+      # Its own limit makes a stall here fail this step, so its results are uploaded, rather than
+      # the job's limit cancelling the run.
       - name: UI tests on the iPad simulator (regular width)
         id: ipad-ui-tests
+        timeout-minutes: 25
         env:
           ABS_UI_PLATFORM: ios
           ABS_UI_ACTION: test-without-building
