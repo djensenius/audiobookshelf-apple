@@ -261,13 +261,15 @@ ABS_UI_PLATFORM=ios mise run test:ui -- -only-testing:AudiobookshelfUITests/Down
 ```
 
 `ChapterHighlightTests` (iOS) checks the current chapter's tint in the chapter list (#705), which
-the audits can't catch. It plays *Pride and Prejudice* and shows the list: on an iPad, the
-details pane beside the player turned to landscape (turned back afterwards); elsewhere, the
-Chapters sheet (`player.chapters`, in the overflow menu of a vertical bar) at its large detent.
-It checks, in light, that the current chapter's row background differs from another row's, and
-that its times measure 4.5:1 or more in black (`MeasuredContrast`). In landscape the screenshot
-is the portrait framebuffer tagged with its orientation, so the test draws it upright before
-reading the rows' frames.
+the audits can't catch. It launches in the light theme at the default text size (`-ABSTheme light`,
+`-UIPreferredContentSizeCategoryName UICTContentSizeCategoryL`), whatever the simulator's, plays
+*Pride and Prejudice* and shows the list: on an iPad from iOS 27.1, where the player has its
+arrangements, the details pane beside the player turned to landscape (turned back to the
+orientation it had afterwards); elsewhere, the Chapters sheet (`player.chapters`, in the overflow
+menu of a vertical bar) at its large detent. It checks that the current chapter's row background
+differs from another row's, and that its times measure 4.5:1 or more in black (`MeasuredContrast`).
+In landscape the screenshot is the portrait framebuffer tagged with its orientation, so the test
+draws it upright before reading the rows' frames.
 
 `AccessibilityAuditTests` audits each of those screens at the default text size and at AX5;
 see docs/accessibility.md, "Automated audits". Locally the default size takes about 80 seconds on

@@ -1,8 +1,8 @@
 import XCTest
 
 /// The chapter list's current-chapter highlight (#705), on iOS: the details pane beside the
-/// landscape player on an iPad, and the chapters sheet elsewhere. The accessibility audits can't
-/// catch a missing tint: the row stays readable without it.
+/// landscape player on an iPad from iOS 27.1, and the chapters sheet elsewhere. The accessibility
+/// audits can't catch a missing tint: the row stays readable without it.
 final class ChapterHighlightTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -13,12 +13,19 @@ final class ChapterHighlightTests: XCTestCase {
         /// difference of a channel (0 to 255). The light accent at 20% is 59 from white.
         private static let minimumTint = 20
 
-        /// In light, the current chapter's row is tinted, unlike the others, and its times are
-        /// readable on the tint: drawn in the primary colour, black, they're at least 4.5:1. The
-        /// fixture's *Pride and Prejudice* plays from Chapter 1 and has a second chapter.
+        /// The light theme and the default text size (Large), whatever the simulator's appearance and
+        /// text size: the test measures the times in black, and reads the default rows.
+        private static let launchArguments = [
+            "-ABSTheme", "light", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
+        ]
+
+        /// In the light theme at the default text size (`launchArguments`), the current chapter's row
+        /// is tinted, unlike the others, and its times are readable on the tint: drawn in the primary
+        /// colour, black, they're at least 4.5:1. The fixture's *Pride and Prejudice* plays from
+        /// Chapter 1 and has a second chapter.
         @MainActor
         func testCurrentChapterIsTinted() throws {
-            let app = signIn()
+            let app = signIn(launchArguments: Self.launchArguments)
             open(.player, in: app)
             showChapters(in: app)
             let rows = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Chapter "))
@@ -62,15 +69,18 @@ final class ChapterHighlightTests: XCTestCase {
             }
         }
 
-        /// Shows the chapter list: on an iPad, turned to landscape, the details pane beside the player
-        /// (turned back after the test); elsewhere, the chapters sheet at its large detent, where it's
-        /// opaque, not glass over the player. A vertical bar (the iPhone Duo's outer display) has the
-        /// Chapters button in its overflow menu, found by symbol as in `open(.bookmarks, in:)`.
+        /// Shows the chapter list: on an iPad from iOS 27.1, turned to landscape, the details pane
+        /// beside the player (turned back to the orientation it had after the test); elsewhere, the
+        /// chapters sheet at its large detent, where it's opaque, not glass over the player. A vertical
+        /// bar (the iPhone Duo's outer display) has the Chapters button in its overflow menu, found by
+        /// symbol as in `open(.bookmarks, in:)`.
         @MainActor
         private func showChapters(in app: XCUIApplication) {
-            if UIDevice.current.userInterfaceIdiom == .pad {
+            // The player has arrangements, and so the details pane, from iOS 27.1, as in `NowPlayingView`.
+            if UIDevice.current.userInterfaceIdiom == .pad, #available(iOS 27.1, *) {
+                let initial = XCUIDevice.shared.orientation
+                addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = initial }
                 XCUIDevice.shared.orientation = .landscapeLeft
-                addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = .portrait }
                 return
             }
             var button = app.buttons["player.chapters"].firstMatch
