@@ -24,8 +24,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The minimum supported server (ADR 0007) and the latest release at the time of writing.
-        version: ${{ fromJSON(inputs.version && format('["{0}"]', inputs.version) || '["2.26.0","2.37.2"]') }}
+        # The minimum supported server (ADR 0007) and the latest reviewed release (2.38.0, 2026-11-17).
+        version: ${{ fromJSON(inputs.version && format('["{0}"]', inputs.version) || '["2.26.0","2.38.0"]') }}
     env:
       # The image defaults to Xcode 27.1; the project needs 27.2.
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer

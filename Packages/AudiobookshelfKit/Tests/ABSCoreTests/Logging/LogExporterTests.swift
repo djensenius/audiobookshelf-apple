@@ -83,6 +83,29 @@ private func entry(
         )
     }
 
+    /// The Logs screen and `audiobookshelf-logs.txt` read through ``LogExporter``, so a stream URL
+    /// that reached the log with public privacy is exported without its token (#662).
+    @Test func exportsStreamURLsWithoutTheirTokens() async throws {
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiJ1MSJ9.c2lnbmF0dXJl"
+        let exporter = LogExporter(
+            source: FakeSource(stored: [
+                entry(0, .error, "playback", "Segment failed: https://abs.example/hls/abc/output-3.ts?token=\(jwt)"),
+                entry(1, .error, "playback", "Segment failed: /hls/abc/output-4.ts?token=0paque-legacy-token"),
+                entry(2, .error, "playback", "Track failed: https://abs.example/api/items/li-9/file/77?token=a%2Bb/c"),
+            ]),
+            timeZone: utc
+        )
+        let text = try await exporter.export()
+        for secret in [jwt, "eyJhbGciOiJIUzI1NiJ9", "0paque-legacy-token", "a%2Bb/c"] {
+            #expect(!text.contains(secret))
+        }
+        let lines = text.split(separator: "\n").map(String.init)
+        #expect(lines.count == 3)
+        #expect(lines.first?.hasSuffix(" https://abs.example/hls/abc/output-3.ts?token=<redacted>") == true)
+        #expect(lines.dropFirst().first?.hasSuffix(" /hls/abc/output-4.ts?token=<redacted>") == true)
+        #expect(lines.last?.hasSuffix(" https://abs.example/api/items/li-9/file/77?token=<redacted>") == true)
+    }
+
     @Test func appliesCustomHeaderSecrets() async throws {
         let exporter = LogExporter(
             source: FakeSource(stored: [entry(0, .info, "api", "header X-Key: hunter2")]),

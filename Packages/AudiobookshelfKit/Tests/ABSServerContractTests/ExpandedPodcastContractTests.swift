@@ -78,7 +78,7 @@ struct ExpandedPodcastContractTests {
         case "2.26.0":
             #expect(!raw.keys.contains("numFiles") && !media.keys.contains("numEpisodes"))
             #expect(item.numFiles == nil && podcast.numEpisodes == nil)
-        case "2.37.2":
+        case "2.37.2", "2.38.0":
             #expect(raw["numFiles"] as? Int == 1 && media["numEpisodes"] as? Int == 1)
             #expect(item.numFiles == 1 && podcast.numEpisodes == 1)
         default: break

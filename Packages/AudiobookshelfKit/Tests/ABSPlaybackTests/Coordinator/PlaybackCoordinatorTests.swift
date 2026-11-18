@@ -1084,6 +1084,24 @@ struct PlaybackCoordinatorTests {
         #expect(h.events.events.last == .failed(.streamUnavailable(.missingAccessToken)))
     }
 
+    /// `.unexpected` carries the error's text to a public CarPlay log, so a URL in it loses its
+    /// token (#662).
+    @Test func unexpectedFailureTextIsRedacted() async throws {
+        let url = try #require(URL(string: "https://abs.example/hls/A-1/output-3.ts?token=0paque-legacy-token"))
+        service.state.withLock {
+            $0.resolveError = URLError(.badServerResponse, userInfo: [NSURLErrorFailingURLErrorKey: url])
+        }
+        await coordinator.play(itemID: "A")
+        await coordinator.waitForPendingCloses()
+
+        guard case .unexpected(let text) = coordinator.error else {
+            Issue.record("Expected .unexpected, got \(String(describing: coordinator.error))")
+            return
+        }
+        #expect(!text.contains("0paque"))
+        #expect(text.contains("output-3.ts?token=<redacted>"))
+    }
+
     @Test func cancelledStreamResolutionIsNotAFailure() async {
         service.state.withLock { $0.resolveError = CancellationError() }
         await coordinator.play(itemID: "A")

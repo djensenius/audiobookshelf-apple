@@ -83,6 +83,18 @@ private func hlsSession(contentUrl: String? = "/hls/sess-hls/output.m3u8") -> Pl
                 == "https://abs.example/abs/api/items/li-9/file/77%2F8?token=a%2Bb/c")
     }
 
+    /// The fallback URL carries the user's access token, so a log of it must lose the token (#662).
+    @Test(arguments: ["eyJhbGciOiJIUzI1NiJ9.eyJ1c2VySWQiOiJ1MSJ9.c2lnbmF0dXJl", "a+b/c"])
+    func tokenFallbackURLIsRedactedForLogs(token: String) throws {
+        let plan = try TrackURLResolver.resolve(
+            session: episodeSession(index: nil), features: beforeNullIndexFix, configuration: configuration())
+        let url = try #require(plan.tracks.first?.authorizedURL(accessToken: token))
+        #expect(url.query?.hasPrefix("token=") == true)
+        for text in [url.absoluteString, String(describing: url)] {
+            #expect(Log.redact(text) == "https://abs.example/abs/api/items/li-9/file/77%2F8?token=<redacted>")
+        }
+    }
+
     @Test func indexedEpisodeBefore2_26_3StaysOnPublicRoute() throws {
         let plan = try TrackURLResolver.resolve(
             session: episodeSession(index: 1), features: beforeNullIndexFix, configuration: configuration())

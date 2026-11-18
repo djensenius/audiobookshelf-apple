@@ -152,6 +152,9 @@ if ((search_contract)); then
     2.37.2)
       expected_revision=edb1f7efc92ecacdef51aafb4d9d5054ce10604f
       expected_digest=sha256:b897c33f05972fb1bf484f7487bc878fa91ec8691335c1db6e2929c3a7658efa ;;
+    2.38.0)
+      expected_revision=1430c9fc642d586ff91c8d4cbed20aab2c47e473
+      expected_digest=sha256:60064c23f32fd9099fd39e82c5132c51701d1221135bbca04cd099b589e1edc3 ;;
     *) die "owned search requires a reviewed source pin for $version" ;;
   esac
 fi

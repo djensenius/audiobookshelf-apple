@@ -256,10 +256,13 @@ struct ProgressContractTests {
             let me = try await session.client.send(Endpoint<User>(.get, "/api/me"))
             #expect(me.mediaProgress.isEmpty)
 
-            // A repeated delete is 200 on 2.26.0 and 404 on 2.37.2, so a retry must accept both.
+            // A repeated delete is 200 on 2.26.0 and 404 on 2.37.2 and 2.38.0, so a retry must
+            // accept both.
             do {
                 _ = try await session.client.send(ProgressEndpoints.delete(id: row.id))
-                #expect(server.version != "2.37.2", "2.37.2 answers 404 for progress that is gone")
+                #expect(
+                    server.version != "2.37.2" && server.version != "2.38.0",
+                    "2.37.2 and 2.38.0 answer 404 for progress that is gone")
             } catch APIError.notFound {
                 #expect(server.version != "2.26.0", "2.26.0 answers 200 for progress that is gone")
             }

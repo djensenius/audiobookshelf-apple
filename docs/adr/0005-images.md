@@ -65,7 +65,7 @@ choice is [0006](0006-now-playing.md); download mechanics are owned by
 
 **Server behaviour** (verified in
 [advplyr/audiobookshelf@83dce68](https://github.com/advplyr/audiobookshelf/tree/83dce682e88c2b32b0c33a8f83a9457bfc459e0e),
-release v2.37.2):
+after release v2.37.2; none of the files cited below changed from there to v2.38.0):
 
 - `GET /api/items/:id/cover` reads `width`, `height`, `format`, `raw`, and `ts`
   ([`LibraryItemController.getCover`](https://github.com/advplyr/audiobookshelf/blob/83dce682e88c2b32b0c33a8f83a9457bfc459e0e/server/controllers/LibraryItemController.js#L401-L433)).
