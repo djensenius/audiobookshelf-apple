@@ -1,4 +1,5 @@
 import ABSAppModel
+import ABSCore
 import ABSUI
 import SwiftUI
 
@@ -207,7 +208,7 @@ private struct ItemDetailEbookFileRow: View {
     var body: some View {
         let name = file.filename.isEmpty ? L10n.string("LabelUnknown") : file.filename
         ItemDetailTableColumns(
-            values: [file.size.map { Int64($0).formatted(.byteCount(style: .file).locale(locale)) } ?? ""]
+            values: [file.size.map { ByteCountFormatting.string(fromBytes: Int64($0), locale: locale) } ?? ""]
         ) {
             HStack(alignment: .firstTextBaseline, spacing: ABSSpacing.xSmall) {
                 Text(verbatim: name)

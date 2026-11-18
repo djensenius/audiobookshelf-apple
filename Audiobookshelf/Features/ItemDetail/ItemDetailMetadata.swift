@@ -1,4 +1,5 @@
 import ABSAppModel
+import ABSCore
 import ABSUI
 import SwiftUI
 
@@ -56,7 +57,7 @@ struct ItemDetailMetadataRow: Identifiable, Equatable {
         add("LabelPublishYear", details.year.map { [.text($0)] } ?? [])
         add("LabelLanguage", details.language.map { [.text($0)] } ?? [])
         if let size = details.size, size > 0 {
-            add("LabelSize", [.text(Int64(size).formatted(.byteCount(style: .file).locale(locale)))])
+            add("LabelSize", [.text(ByteCountFormatting.string(fromBytes: Int64(size), locale: locale))])
         }
         return rows
     }
