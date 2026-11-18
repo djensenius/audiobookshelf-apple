@@ -21,63 +21,92 @@ enum ConnectionIndicatorPresentation {
         }
     }
 
-    /// The indicator's toolbar priority (#691). In compact width, connecting, offline and an unreachable server
-    /// outrank the Library screen's filter and sort (`.high`, `LibraryToolbar`), so the crowded compact Library
-    /// root keeps the problem in its bar and moves the sort into its overflow menu instead (and the filter too
-    /// while the download queue indicator, which also outranks them, is there). Connected, over Wi-Fi or
-    /// cellular, metered or not, is the usual state: it keeps the default priority, so the filter and sort stay
-    /// and the Library root's overflow menu has the indicator, as before. Regular width (an iPad, a Mac) keeps
-    /// the default too, so its layouts don't change.
+    /// The indicator's toolbar priority (#691). In compact width, a problem (connecting, offline or an unreachable
+    /// server) that has lasted (`problemPersisted`, ``ConnectionProblemDebounce``) outranks the Library screen's
+    /// filter and sort (`.high`, `LibraryToolbar`). So in a horizontal bar the crowded compact Library root keeps
+    /// the problem in view and moves the sort into its overflow menu instead (and the filter too while the
+    /// download queue indicator, which also outranks them, is there). A brief problem, such as every session
+    /// start, reconnect, token refresh and network change goes through, keeps the default, so the bar doesn't
+    /// reflow for it; a connection drops back at once. Connected, over Wi-Fi or cellular, metered or not, is the
+    /// usual state: it keeps the default priority, so the filter and sort stay and the Library root's overflow
+    /// menu has the indicator, as before. Regular width keeps the default too, so its layouts don't change; a
+    /// compact iPad window (Slide Over, a narrow Split View or Stage Manager window) behaves as an iPhone.
     ///
     /// Rejected (#691): the leading edge took room from the trailing items, so the sort went into the overflow
     /// menu even while connected; hiding a plain connection drops legacy's top-bar indicator from every tab
     /// root without freeing room on the Library root, where it was already in the overflow menu; and sharing
     /// one item with the download queue indicator needs a custom combined control in place of two system ones.
-    static func visibilityPriority(for state: ConnectionIndicatorState, isCompact: Bool)
+    static func visibilityPriority(for state: ConnectionIndicatorState, problemPersisted: Bool, isCompact: Bool)
         -> ToolbarItemVisibilityPriority
     {
-        guard isCompact else { return .automatic }
-        return switch state {
-        case .connecting, .offline, .serverUnreachable: ToolbarItemVisibilityPriority(higherThan: .high)
-        case .connected: .automatic
-        }
+        isCompact && state.isProblem && problemPersisted ? ToolbarItemVisibilityPriority(higherThan: .high) : .automatic
     }
 }
 
-/// The shell's ``ConnectionIndicator`` (#59), in each tab root's toolbar, as legacy shows it in
-/// its top bar: fed by the signed-in account, the network path, the realtime socket and the
-/// shell's connection banner. Hidden signed out and without a socket. In compact width a problem
-/// outranks the Library root's filter and sort, so it stays in the bar
-/// (``ConnectionIndicatorPresentation/visibilityPriority(for:isCompact:)``, #691).
-struct ConnectionIndicatorToolbar: ToolbarContent {
+extension EnvironmentValues {
+    /// What the tab roots' connection indicator shows, from ``ConnectionIndicatorHost``, or `nil` to hide it.
+    @Entry var connectionIndicator: ConnectionIndicatorHost.Indicator?
+}
+
+/// Works out what the shell's connection indicator shows, from the signed-in account, the network path, the
+/// realtime socket and the shell's connection banner, and whether its problem has lasted
+/// (``ConnectionProblemDebounce``, #691), for the tab roots' ``ConnectionIndicatorToolbar``. It's on the shell, not
+/// the toolbar item, so it keeps timing while the item is in an overflow menu, out of the hierarchy.
+struct ConnectionIndicatorHost: ViewModifier {
+    /// The indicator's state, and whether its problem has lasted.
+    struct Indicator: Equatable {
+        let state: ConnectionIndicatorState
+        let problemPersisted: Bool
+    }
+
     @Environment(AccountManager.self) private var accounts: AccountManager?
     @Environment(\.realtimeBridge) private var bridge
     @Environment(\.realtimeNetworkMonitor) private var monitor
     @Environment(\.connectionBanner) private var banner
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @State private var debounce = ConnectionProblemDebounce()
 
-    var body: some ToolbarContent {
-        if let state {
-            ToolbarItem(placement: .primaryAction) {
-                ConnectionIndicator(status: ConnectionIndicatorPresentation.status(for: state))
-                    // For UI tests.
-                    .accessibilityIdentifier("connection.indicator")
-            }
-            .visibilityPriority(
-                ConnectionIndicatorPresentation.visibilityPriority(
-                    for: state, isCompact: horizontalSizeClass == .compact))
-        }
+    #if DEBUG
+        /// A fixture launch has no socket; UI tests force the state instead (#691).
+        private static let fixtureState = FixtureServer.connectionState(arguments: ProcessInfo.processInfo.arguments)
+    #endif
+
+    func body(content: Content) -> some View {
+        let state = state
+        content
+            .onChange(of: state, initial: true) { _, state in debounce.update(state) }
+            .environment(
+                \.connectionIndicator, state.map { Indicator(state: $0, problemPersisted: debounce.hasPersisted) })
     }
 
     private var state: ConnectionIndicatorState? {
         let isSignedIn = accounts?.state.user != nil
         #if DEBUG
-            // A fixture launch has no socket; UI tests force the state instead (#691).
-            if let forced = FixtureServer.connectionState(arguments: ProcessInfo.processInfo.arguments) {
-                return isSignedIn ? forced : nil
-            }
+            if let forced = Self.fixtureState { return isSignedIn ? forced : nil }
         #endif
         return ConnectionIndicatorState(
             isSignedIn: isSignedIn, path: monitor?.path, socket: bridge?.connectionState, banner: banner?.model.state)
+    }
+}
+
+/// The shell's ``ConnectionIndicator`` (#59), in each tab root's toolbar, as legacy shows it in
+/// its top bar, showing ``ConnectionIndicatorHost``'s state. Hidden signed out and without a socket. In compact
+/// width a lasting problem outranks the Library root's filter and sort, so it stays in the bar
+/// (``ConnectionIndicatorPresentation/visibilityPriority(for:problemPersisted:isCompact:)``, #691).
+struct ConnectionIndicatorToolbar: ToolbarContent {
+    @Environment(\.connectionIndicator) private var indicator
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+
+    var body: some ToolbarContent {
+        if let indicator {
+            ToolbarItem(placement: .primaryAction) {
+                ConnectionIndicator(status: ConnectionIndicatorPresentation.status(for: indicator.state))
+                    // For UI tests.
+                    .accessibilityIdentifier("connection.indicator")
+            }
+            .visibilityPriority(
+                ConnectionIndicatorPresentation.visibilityPriority(
+                    for: indicator.state, problemPersisted: indicator.problemPersisted,
+                    isCompact: horizontalSizeClass == .compact))
+        }
     }
 }

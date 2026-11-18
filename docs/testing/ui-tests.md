@@ -253,7 +253,10 @@ ABS_UI_PLATFORM=ios mise run test:ui -- -only-testing:AudiobookshelfUITests/Down
 
 `ConnectionIndicatorTests` launches with `-ABSConnectionState offline` and checks the connection
 indicator is in the bar of the Home and Library roots in compact width (#691), not their overflow
-menu. A regular-width iPad and a Mac skip it.
+menu. It also checks the worst case: offline with a download stalled by `-ABSStallDownloads`,
+where the Library root's bar has both the queue indicator and the connection indicator. The
+indicator outranks the filter and sort only once the problem has lasted 3 seconds, so the checks
+wait for it. A regular-width iPad and a Mac skip it.
 
 `AccessibilityAuditTests` audits each of those screens at the default text size and at AX5;
 see docs/accessibility.md, "Automated audits". Locally the default size takes about 80 seconds on
