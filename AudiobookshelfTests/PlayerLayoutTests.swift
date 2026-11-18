@@ -110,4 +110,13 @@ import Testing
         #expect(PlayerDetailsTab.bookmarks.shown(in: withoutBookmarks) == .chapters)
         #expect(PlayerDetailsTab.upNext.shown(in: withoutBookmarks) == .upNext)
     }
+
+    /// The split shows its details pane, so the toolbar drops chapters, bookmarks and Up Next, only
+    /// while it's side by side: not while only the primary shows, which on an iPad in portrait
+    /// reports a vertical axis. #698
+    @Test func onlyAHorizontalSplitShowsTheDetailsPane() {
+        #expect(PlayerLayout.showsDetailsPane(splitAxis: .horizontal))
+        #expect(!PlayerLayout.showsDetailsPane(splitAxis: .vertical))
+        #expect(!PlayerLayout.showsDetailsPane(splitAxis: nil))
+    }
 }

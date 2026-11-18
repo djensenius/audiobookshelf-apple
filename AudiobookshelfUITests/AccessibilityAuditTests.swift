@@ -72,7 +72,9 @@ final class AccessibilityAuditTests: XCTestCase {
     /// naming the screen, the text size, the audit type, the element and the issue. An issue
     /// ``KnownAuditIssue/isUnnamedContrastUnderBottomBar(_:on:in:)`` or
     /// ``KnownAuditIssue/namedContrastUnderBottomBar(_:on:in:)`` defers is checked by
-    /// ``auditAboveBottomBar(_:deferring:namedDeferrals:hasUnnamed:on:in:named:)``.
+    /// ``auditAboveBottomBar(_:deferring:namedDeferrals:hasUnnamed:on:in:named:)``, and one
+    /// ``KnownAuditIssue/contentButtonUnderBottomBar(_:on:in:)`` defers by
+    /// ``auditButtonsAboveBottomBar(_:on:in:named:)``.
     @MainActor
     private func audit(
         _ screen: FixtureScreen, for types: XCUIAccessibilityAuditType, in app: XCUIApplication, textSize: String
@@ -80,6 +82,7 @@ final class AccessibilityAuditTests: XCTestCase {
         var failures: [String] = []
         var deferred: [String] = []
         var named: [KnownAuditIssue.NamedDeferral] = []
+        var buttons: [(label: String, failure: String)] = []
         var hasUnnamed = false
         let name = "\(screen.name) (\(textSize))"
         do {
@@ -93,6 +96,8 @@ final class AccessibilityAuditTests: XCTestCase {
                     let failure = "\(name): \(Self.failure(issue))"
                     deferred.append(failure)
                     named.append(.init(label: text.label, occurrence: text.occurrence, failure: failure))
+                } else if let label = KnownAuditIssue.contentButtonUnderBottomBar(issue, on: screen, in: app) {
+                    buttons.append((label, "\(name): \(Self.failure(issue))"))
                 } else {
                     failures.append("\(name): \(Self.failure(issue))")
                 }
@@ -102,6 +107,9 @@ final class AccessibilityAuditTests: XCTestCase {
                 failures += try auditAboveBottomBar(
                     KnownAuditIssue.contentUnderBottomBar(on: screen, in: app), deferring: deferred,
                     namedDeferrals: named, hasUnnamed: hasUnnamed, on: screen, in: app, named: name)
+            }
+            if !buttons.isEmpty {
+                failures += try auditButtonsAboveBottomBar(buttons, on: screen, in: app, named: name)
             }
         } catch {
             XCTFail("\(screen.name) (\(textSize)): the accessibility audit failed to run: \(error)")
@@ -333,6 +341,58 @@ final class AccessibilityAuditTests: XCTestCase {
         return failures + uncovered()
     }
 
+    /// Checks the contrast issues ``KnownAuditIssue/contentButtonUnderBottomBar(_:on:in:)`` deferred
+    /// (`buttons`: each button's label and failure) and returns what fails. It scrolls each button
+    /// up until it's wholly between the bars (``BottomBarAttribution/isWhollyInBand(_:band:)``), as
+    /// ``auditAboveBottomBar(_:deferring:namedDeferrals:hasUnnamed:on:in:named:)`` does for text, and
+    /// audits contrast there: an issue naming the button fails. If it never gets there, its deferred
+    /// failure stands. #698
+    @MainActor
+    private func auditButtonsAboveBottomBar(
+        _ buttons: [(label: String, failure: String)], on screen: FixtureScreen, in app: XCUIApplication,
+        named name: String
+    ) throws -> [String] {
+        let margin: CGFloat = 44
+        let navigationBar = app.navigationBars.firstMatch
+        var failures: [String] = []
+        for button in buttons {
+            let element = app.buttons.matching(NSPredicate(format: "label == %@", button.label)).firstMatch
+            let x = Self.dragX(for: element, in: app, margin: margin)
+            var audited = false
+            for step in 0...10 {
+                let barTop = KnownAuditIssue.bottomBarTop(in: app)
+                let top = navigationBar.exists ? navigationBar.frame.maxY : app.frame.minY
+                let frame = element.frame
+                if BottomBarAttribution.isWhollyInBand(frame, band: top...max(top, barTop)) {
+                    try app.performAccessibilityAudit(for: .contrast) { issue in
+                        if KnownAuditIssue.all.contains(where: { $0.matches(issue, on: screen, in: app) }) {
+                            return true
+                        }
+                        if let found = issue.element, found.elementType == .button, found.label == button.label {
+                            failures.append("\(name), '\(button.label)' above the bottom bar: \(Self.failure(issue))")
+                        }
+                        return true
+                    }
+                    XCTContext.runActivity(
+                        named: "\(name): '\(button.label)' audited above the bottom bar at step \(step), at \(frame)"
+                    ) { _ in }
+                    audited = true
+                    break
+                }
+                // Already scrolled up under the navigation bar, or no band to scroll it into.
+                guard step < 10, frame.minY >= top, barTop - top > 2 * margin else { break }
+                let distance = max(16, min(frame.maxY - barTop + 4, (barTop - top) / 2))
+                let y = barTop - margin / 2
+                let origin = app.coordinate(withNormalizedOffset: .zero)
+                origin.withOffset(CGVector(dx: x, dy: y)).press(
+                    forDuration: 0.1, thenDragTo: origin.withOffset(CGVector(dx: x, dy: y - distance)),
+                    withVelocity: .slow, thenHoldForDuration: 0.3)
+            }
+            if !audited { failures.append("\(button.failure) (kept: never wholly between the bars)") }
+        }
+        return failures
+    }
+
     /// Where ``auditAboveBottomBar(_:deferring:namedDeferrals:hasUnnamed:on:in:named:)`` drags: `margin / 2` in from the right edge of the
     /// scroll view holding `element` (Settings' form, Item detail's scroll view), and clear of a
     /// side tab bar (``KnownAuditIssue/contentMaxX(in:)``), so the drag scrolls the content, not the
@@ -401,13 +461,16 @@ struct KnownAuditIssue {
     var type: XCUIAccessibilityAuditType
     /// Text the issue's compact description must contain; `nil` for any.
     var description: String? = nil
+    /// Text the issue's detailed description must contain; `nil` for any.
+    var detail: String? = nil
     /// Matches the issue's element (`nil` when the issue has none) in the app.
     var element: @MainActor (XCUIElement?, XCUIApplication) -> Bool
 
     @MainActor
     func matches(_ issue: XCUIAccessibilityAuditIssue, on screen: FixtureScreen, in app: XCUIApplication) -> Bool {
         (self.screen == nil || self.screen == screen) && issue.auditType == type
-            && (description.map { issue.compactDescription.contains($0) } ?? true) && element(issue.element, app)
+            && (description.map { issue.compactDescription.contains($0) } ?? true)
+            && (detail.map { issue.detailedDescription.contains($0) } ?? true) && element(issue.element, app)
     }
 
     @MainActor static let all: [KnownAuditIssue] = {
@@ -453,6 +516,19 @@ struct KnownAuditIssue {
                 KnownAuditIssue(
                     screen: .library, type: .dynamicType, description: "partially unsupported",
                     element: isSectionMenuText),
+                // "Dynamic Type font sizes are partially unsupported (User will not be able to
+                // change the font size of this UILabel)" with no element at AX5 on a 13-inch iPad,
+                // every run, on every screen with the tab bar: two to four per screen, about as many
+                // as the tab titles it shows. The tab bar floats along the top there, the system's
+                // UIKit labels capped at the bar's height, as a navigation bar's items are (#647).
+                // The app's own text, a menu picker's UIKit value included, comes with its element.
+                // None on the full player, which covers the tab bar. Only "partially" (a fixed font
+                // size is "unsupported", and fails), only with no element and a `UILabel`, and only
+                // while the tab bar is along the top (``hasTopTabBar(in:)``). #698
+                KnownAuditIssue(type: .dynamicType, description: "partially unsupported", detail: "UILabel") {
+                    element, app in
+                    element == nil && hasTopTabBar(in: app)
+                },
                 // "Contrast failed" on the chapter's remaining time ("-0:26") on a 6.3-inch iPhone,
                 // every run, though its pixels measure 5.7:1 on the backdrop (4.5:1 needed), as do
                 // the elapsed time's beside it (5.6:1), which pass in the same font and colour.
@@ -473,6 +549,17 @@ struct KnownAuditIssue {
                 // #653
                 KnownAuditIssue(screen: .player, type: .contrast) { element, app in
                     guard let element, isElapsedTime(element) else { return false }
+                    return measuresReadable(element, in: app)
+                },
+                // "Contrast failed" on the chapter's title ("Chapter 1") over the full player's
+                // backdrop on a 13-inch iPad in the dark and black themes, every run. A screenshot
+                // measures 5.6:1 for its pixels, in `ABSColor.mutedForeground` (rgb(156, 161, 167)),
+                // on the backdrop's rgb(49, 39, 39), and the frame matches the text; the author below
+                // it, in the same colour, passes. Only the Player's chapter title
+                // (`player.chapter`), and only while a screenshot measures 4.5:1 or more around text in
+                // that colour, as for the times. #698
+                KnownAuditIssue(screen: .player, type: .contrast) { element, app in
+                    guard let element, element.identifier == "player.chapter" else { return false }
                     return measuresReadable(element, in: app)
                 },
             ]
@@ -504,14 +591,16 @@ struct KnownAuditIssue {
             // So text that really fails, as the author's 2.7:1 did, or text over a lighter patch
             // of glass, still fails; without the expected colour, or with over a quarter of its
             // pixels unmeasurable, the issue fails, unfiltered. #641
+            //
+            // The same in light on a 13-inch iPad, every run: the author ("Jane Austen") on Settings,
+            // whose rgb(91,99,108) measures 6.0:1 on the floating mini player's light glass. #698
             all.append(
                 KnownAuditIssue(type: .contrast) { element, app in
-                    guard let element, isMiniPlayerText(element, in: app),
-                        let theme = FixtureTheme(launchArguments: app.launchArguments)
-                    else { return false }
+                    guard let element, isMiniPlayerText(element, in: app) else { return false }
+                    let theme = FixtureTheme(launchArguments: app.launchArguments)
                     let text =
                         element.identifier == "player.mini.title"
-                        ? theme.miniPlayerTitle : theme.miniPlayerSecondaryText
+                        ? FixtureTheme.miniPlayerTitle(theme) : FixtureTheme.miniPlayerSecondaryText(theme)
                     let ratio = MeasuredContrast.ratio(in: element.frame, of: XCUIScreen.main.screenshot(), text: text)
                     return ratio.map { $0 >= 4.5 } ?? false
                 })
@@ -577,6 +666,29 @@ struct KnownAuditIssue {
             [FixtureScreen.home, .library, .item, .settings, .downloads, .series].contains(screen)
         else { return nil }
         return contentTextUnderBottomBar(element, in: app)
+    }
+
+    /// Whether `issue` is contrast on a content button under the bottom bar, on the screens
+    /// ``namedContrastUnderBottomBar(_:on:in:)`` defers text on: the button's label, or `nil` if it
+    /// isn't deferred. A button labelled by its own text has no text element to defer, as Settings'
+    /// "Open Settings" on a 13-inch iPad, opened at its top: its row starts 6 points above the
+    /// window's bottom edge, under the floating mini player, and the audit measures that sliver
+    /// through the glass. Deferred, not filtered: the test audits it again above the bar
+    /// (`auditButtonsAboveBottomBar`). Not the bars' own buttons, and only a label no other button
+    /// has, so the re-audit finds this one. #698
+    @MainActor
+    static func contentButtonUnderBottomBar(
+        _ issue: XCUIAccessibilityAuditIssue, on screen: FixtureScreen, in app: XCUIApplication
+    ) -> String? {
+        guard issue.auditType == .contrast, let element = issue.element, element.elementType == .button,
+            !element.label.isEmpty, !element.identifier.hasPrefix("player.mini"),
+            !miniPlayerTransport.contains(element.identifier),
+            [FixtureScreen.home, .library, .item, .settings, .downloads, .series].contains(screen),
+            BottomBarAttribution.isUnderBottomBar(element.frame, region: bottomBarRegion(in: app)),
+            !bottomBars(in: app).contains(where: { $0.frame.contains(element.frame) }),
+            app.buttons.matching(NSPredicate(format: "label == %@", element.label)).count == 1
+        else { return nil }
+        return element.label
     }
 
     /// A contrast issue ``namedContrastUnderBottomBar(_:on:in:)`` deferred: its text, by label and
@@ -666,6 +778,15 @@ struct KnownAuditIssue {
         guard let element, element.elementType == .staticText else { return false }
         let menu = app.navigationBars.descendants(matching: .any)["library.sectionPicker"].firstMatch
         return menu.exists && menu.frame.contains(element.frame)
+    }
+
+    /// Whether the tab bar floats along the top, as on a regular-width iPad: no `TabBar` element,
+    /// and a tab button (`tab.home`, ...) near the window's top. #698
+    @MainActor
+    private static func hasTopTabBar(in app: XCUIApplication) -> Bool {
+        guard !app.tabBars.firstMatch.exists else { return false }
+        let tabs = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'tab.'"))
+        return tabs.allElementsBoundByIndex.contains { $0.frame.maxY < app.frame.minY + 120 }
     }
 
     /// Whether `element` is text in an item card (`item.<id>`), which the card speaks in full, not
@@ -894,9 +1015,9 @@ struct KnownAuditIssue {
         return NSPredicate(format: "SELF MATCHES %@", "-[0-9]+(:[0-9]{2})+").evaluate(with: element.label)
     }
 
-    /// Whether a screenshot taken now measures 4.5:1 or more around the player's time `element`,
-    /// in the colour the app draws the times in for the theme (`FixtureTheme.playerTimes`). No
-    /// measurement is false. #653, #655
+    /// Whether a screenshot taken now measures 4.5:1 or more around the player's time or chapter
+    /// title `element`, in the colour the app draws them in for the theme (`FixtureTheme.playerTimes`).
+    /// No measurement is false. #653, #655, #698
     @MainActor
     private static func measuresReadable(_ element: XCUIElement, in app: XCUIApplication) -> Bool {
         let text = FixtureTheme.playerTimes(FixtureTheme(launchArguments: app.launchArguments))

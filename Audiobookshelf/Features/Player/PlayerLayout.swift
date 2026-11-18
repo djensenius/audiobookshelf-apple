@@ -1,4 +1,5 @@
 import CoreGraphics
+import SwiftUI
 
 /// Which way the display folds, from its active `.division` reserved regions: nothing while it
 /// lies flat (the fold's region is inactive) or on a display that doesn't fold.
@@ -73,6 +74,14 @@ struct PlayerLayout: Equatable {
             return PlayerLayout(arrangement: .split, transportInToolbar: false)
         }
         return PlayerLayout(arrangement: .column, transportInToolbar: verticalToolbar)
+    }
+
+    /// Whether a ``Arrangement/split`` arrangement shows the details pane beside the primary, from
+    /// its `splitArrangementAxis`: only along the horizontal axis, the one `.split.axes(.horizontal)`
+    /// splits along. The axis is `nil` while only the primary shows on the iPhone Duo, but vertical
+    /// on an iPad in portrait, where the toolbar must still offer the details as sheets. #698
+    static func showsDetailsPane(splitAxis: Axis?) -> Bool {
+        splitAxis == .horizontal
     }
 }
 
