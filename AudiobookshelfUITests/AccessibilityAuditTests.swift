@@ -184,24 +184,30 @@ final class AccessibilityAuditTests: XCTestCase {
     /// failure), and returns the failures of those reported again by every re-audit. Text that
     /// really doesn't scale to every size is reported every time; the Player's and Downloads'
     /// misreports haven't come twice in a row. Each re-audit records "k of N reported again" as an
-    /// activity, so how often it's needed shows in the result bundle. #705
+    /// activity, so how often it's needed shows in the result bundle. macOS has no Dynamic Type
+    /// audit, so nothing is held back there. #705
     @MainActor
     private func confirmDynamicType(
         _ issues: [(key: String, failure: String)], in app: XCUIApplication, named name: String
     ) throws -> [String] {
-        var remaining = issues
-        for attempt in 1...2 where !remaining.isEmpty {
-            var reported: Set<String> = []
-            try app.performAccessibilityAudit(for: .dynamicType) { issue in
-                if let key = KnownAuditIssue.partialDynamicTypeKey(issue) { reported.insert(key) }
-                return true
+        #if os(iOS)
+            var remaining = issues
+            for attempt in 1...2 where !remaining.isEmpty {
+                var reported: Set<String> = []
+                try app.performAccessibilityAudit(for: .dynamicType) { issue in
+                    if let key = KnownAuditIssue.partialDynamicTypeKey(issue) { reported.insert(key) }
+                    return true
+                }
+                remaining = remaining.filter { reported.contains($0.key) }
+                XCTContext.runActivity(
+                    named:
+                        "\(name): Dynamic Type re-audit \(attempt): \(remaining.count) of \(issues.count) reported again"
+                ) { _ in }
             }
-            remaining = remaining.filter { reported.contains($0.key) }
-            XCTContext.runActivity(
-                named: "\(name): Dynamic Type re-audit \(attempt): \(remaining.count) of \(issues.count) reported again"
-            ) { _ in }
-        }
-        return remaining.map(\.failure)
+            return remaining.map(\.failure)
+        #else
+            return issues.map(\.failure)
+        #endif
     }
 
     /// Checks the contrast issues that ``KnownAuditIssue/isUnnamedContrastUnderBottomBar(_:on:in:)``
