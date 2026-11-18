@@ -156,6 +156,26 @@ private func entry(
         )
     }
 
+    /// A server that escapes both `/` and non-ASCII echoes `proxy"se\cret/ü` as
+    /// `proxy\"se\\cret\/\u00fc`. The export removes it from the body and from the error's
+    /// quoted description (#662).
+    @Test func removesSecretsEchoedWithEscapedSlashAndNonASCII() async throws {
+        enum EchoError: Error { case http(status: Int, message: String) }
+        let body = #"{"error":"bad header proxy\"se\\cret\/\u00fc"}"#
+        let description = String(reflecting: EchoError.http(status: 400, message: body))
+        #expect(description.contains(#"proxy\\\"se\\\\cret\\/\\u00fc"#))
+        let exporter = LogExporter(
+            source: FakeSource(stored: [
+                entry(0, .error, "api", "Response: \(body)"),
+                entry(1, .error, "api", "Request failed: \(description)"),
+            ])
+        )
+        let messages = try await exporter.entries(secrets: [#"proxy"se\cret/ü"#]).map(\.message)
+        try #require(messages.count == 2)
+        #expect(messages[0] == #"Response: {"error":"bad header <redacted>"}"#)
+        #expect(messages[1].hasSuffix(#"message: "{\"error\":\"bad header <redacted>\"}")"#))
+    }
+
     @Test func filtersByLevelCategorySinceAndSubsystem() async throws {
         let exporter = LogExporter(
             source: FakeSource(stored: [

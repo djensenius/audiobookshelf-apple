@@ -86,19 +86,23 @@ public struct Redactor: Sendable, Equatable {
             .sorted { $0.utf16.count > $1.utf16.count }
     }
 
-    /// How `secret` can appear once a server or the app has escaped it: as a JSON string (with and
-    /// without `\/`, and with non-ASCII as `\uXXXX`), in Swift's `debugDescription` of a string
-    /// (which an error's description uses for its string payloads), percent-encoded, and each of
-    /// those escaped once more, such as a JSON error body inside an error's description (#662).
+    /// How `secret` can appear once a server or the app has escaped it: as a JSON string (with or
+    /// without `\/`, and with or without non-ASCII as `\uXXXX`, in every combination), in Swift's
+    /// `debugDescription` of a string (which an error's description uses for its string payloads),
+    /// percent-encoded, and each of those escaped once more, such as a JSON error body inside an
+    /// error's description (#662).
     /// Secrets made only of letters, digits, `-`, `.`, `_`, and `~` have no other forms.
     static func escapedForms(of secret: String) -> [String] {
-        let escapers: [(String) -> String] = [
-            { jsonEscaped($0, slash: false, asciiOnly: false) },
-            { jsonEscaped($0, slash: true, asciiOnly: false) },
-            { jsonEscaped($0, slash: false, asciiOnly: true) },
+        var escapers: [(String) -> String] = [
             { String(String(reflecting: $0).dropFirst().dropLast()) },
             { $0.addingPercentEncoding(withAllowedCharacters: percentUnreserved) ?? $0 },
         ]
+        // Every combination of the JSON options, so none can be left out.
+        for slash in [false, true] {
+            for asciiOnly in [false, true] {
+                escapers.append { jsonEscaped($0, slash: slash, asciiOnly: asciiOnly) }
+            }
+        }
         let once = escapers.map { $0(secret) }
         let twice = once.flatMap { form in escapers.map { $0(form) } }
         var seen: Set<String> = [secret]

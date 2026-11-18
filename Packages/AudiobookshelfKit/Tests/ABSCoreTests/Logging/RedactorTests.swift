@@ -58,12 +58,20 @@ private let legacyToken =
         #"proxy\"se\\cret/ü"#,  // JSON, as JSONEncoder writes it with `.withoutEscapingSlashes`
         #"proxy\"se\\cret\/ü"#,  // JSON, as JSONSerialization writes it
         #"proxy\"se\\cret/\u00fc"#,  // JSON with non-ASCII escaped
+        #"proxy\"se\\cret\/\u00fc"#,  // JSON with `\/` and non-ASCII escaped
         #"proxy\\\"se\\\\cret\\/ü"#,  // JSON inside an error's description
+        #"proxy\\\"se\\\\cret\\/\\u00fc"#,  // JSON with `\/` and `\u00fc` inside an error's description
         "proxy%22se%5Ccret%2F%C3%BC",  // percent-encoded
     ])
     func redactsEscapedFormsOfCustomHeaderValues(form: String) {
         let redactor = Redactor(secrets: [#"proxy"se\cret/ü"#])
         #expect(redactor.redact(#"body: {"error":""# + form + #""}"#) == #"body: {"error":"<redacted>"}"#)
+    }
+
+    /// A server that escapes both `/` and non-ASCII writes `proxy/ü-secret` as `proxy\/\u00fc-secret` (#662).
+    @Test func redactsJSONFormWithEscapedSlashAndNonASCII() {
+        let redactor = Redactor(secrets: ["proxy/ü-secret"])
+        #expect(redactor.redact(#"{"error":"proxy\/\u00fc-secret"}"#) == #"{"error":"<redacted>"}"#)
     }
 
     @Test func leavesOrdinaryTextAlone() {
