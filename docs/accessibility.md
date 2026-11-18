@@ -285,13 +285,15 @@ element, each with the reason and its issue:
   never with it clipped or off screen (0 of 30). With the footer removed it wasn't reported at
   all (0 of 25 audits, 3 launches, from the bottom of the list up); with it in `.footnote`, in
   `ABSColor.mutedForeground` as Data's footer is, or cut to one short sentence or to Data's
-  footer text, it still was (1 of 1 each, at AX1). So it isn't the text, its font or its colour,
-  and nothing else in the footer can be: it's a plain `Text`, with no link, image or Markdown,
-  and no font, frame or line limit of the app's. It scales: its frame grows from 59 points tall
-  at XXXL to 68.5 at AX1. So it's the audit's, not fixed. It isn't filtered either, because no
-  walk reaches it: the walks audit Settings at the default size and AX5, near its top. A walk
-  that scrolls Settings to its end at those sizes should filter only this: Settings, Dynamic
-  Type, "unsupported" (not "partially"), with no element, while that footer is wholly on screen.
+  footer text, it still was (1 of 1 each, at AX1). The footer is a plain `Text`, with no link,
+  image or Markdown, and no font, frame or line limit of the app's, and it scales: its frame
+  grows from 59 points tall at XXXL to 68.5 at AX1. So it's likely an XCTest/SwiftUI false
+  positive, but that isn't proven: an issue with no element can't be attributed, and while the
+  footer is on screen it could come from another element. It isn't fixed, and it isn't filtered:
+  no walk reaches it (the walks audit Settings at the default size and AX5, near its top). Before
+  a walk that reaches it filters it, the issue needs a reproducible attribution, and the filter
+  needs to be narrow (Settings, Dynamic Type, "unsupported" but not "partially", no element) and
+  covered by a regression test that shows it still fails a real Dynamic Type issue there.
 - Contrast on content text under the bottom bar, on every screen but the Player (#623, #650).
   On iOS the tab bar floats over the content, with the mini player above it, so a
   screen at rest has rows under the bar's glass, and the audit measures them through it. On an
