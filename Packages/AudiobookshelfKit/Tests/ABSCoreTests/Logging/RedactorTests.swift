@@ -15,6 +15,14 @@ private let legacyToken =
     "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1MSIsInVzZXJuYW1lIjoicm9vdCIsImlhdCI6MTc1MjMwMDAwMH0"
     + ".c2lnbmF0dXJl"
 
+/// The two `APIError` cases that quote a response body, in the same shape. `ABSCoreTests` can't
+/// import ABSAPI; neither enum customises its description, so `String(describing:)` escapes a body
+/// the same way for both, and a line break in it reads `\n`.
+private enum BodyQuotingError: Error {
+    case http(status: Int, message: String?)
+    case decoding(String)
+}
+
 @Suite struct RedactorTests {
     @Test func redactsBearerTokens() {
         #expect(Log.redact("Authorization: Bearer abc.def-123") == "Authorization: Bearer <redacted>")
@@ -155,6 +163,14 @@ private let legacyToken =
                 == "{\"token\" : \"<redacted>\",\n  \"apiKey\":\n    \"<redacted>\"}")
     }
 
+    /// Plain JSON can have a real newline, carriage return, or tab on either side of the colon.
+    @Test(arguments: ["\n", "\r", "\t", "\r\n", " \n\t "])
+    func redactsJSONCredentialValuesWithLineBreaksOrTabsAroundTheColon(space: String) {
+        #expect(
+            Log.redact("{\"token\"\(space):\(space)\"0paque\",\"next\":1}")
+                == "{\"token\"\(space):\(space)\"<redacted>\",\"next\":1}")
+    }
+
     @Test func redactsJSONCredentialValuesWithEscapedQuotes() {
         #expect(
             Log.redact(#"{"refreshToken":"0pa\"que\\","next":"kept"}"#)
@@ -181,6 +197,39 @@ private let legacyToken =
         #expect(String(describing: error).contains("0paque-access"))
         #expect(!Log.redacted(error).contains("0paque"))
         #expect(Log.redacted(error).contains(#"\"accessToken\":\"<redacted>\""#))
+    }
+
+    /// Pretty-printing puts its line breaks around the members, and an error's description escapes
+    /// them, so the body reaches the rules as `{\n  \"error\" : \"bad\",\n  \"token\" : \"…\"\n}`.
+    @Test func redactedErrorLosesCredentialsInAPrettyPrintedBody() throws {
+        let data = try JSONSerialization.data(
+            withJSONObject: ["error": "bad", "token": "0paque-token"], options: [.prettyPrinted, .sortedKeys])
+        let body = String(decoding: data, as: UTF8.self)
+        for error in [BodyQuotingError.http(status: 500, message: body), .decoding(body)] {
+            let description = String(describing: error)
+            #expect(description.contains(#"{\n  \"error\" : \"bad\",\n  \"token\" : \"0paque-token\"\n}"#))
+            #expect(Log.redacted(error) == description.replacingOccurrences(of: "0paque-token", with: "<redacted>"))
+        }
+    }
+
+    /// A newline, carriage return, or tab around the colon reads `\n`, `\r`, or `\t` once an error's
+    /// description escapes the body, which `\s` alone doesn't match.
+    @Test(arguments: ["\n", "\r", "\t", "\r\n", "\n\t", " \n  "])
+    func redactedErrorLosesCredentialsWithEscapedWhitespaceAroundTheColon(space: String) {
+        let body = "{\"error\":\"bad\",\n\"token\"\(space):\(space)\"0paque-token\"}"
+        for error in [BodyQuotingError.http(status: 500, message: body), .decoding(body)] {
+            let description = String(describing: error)
+            #expect(description.contains("0paque-token"))
+            #expect(Log.redacted(error) == description.replacingOccurrences(of: "0paque-token", with: "<redacted>"))
+        }
+    }
+
+    @Test func keepsOtherJSONKeysWithEscapedWhitespaceAroundTheColon() {
+        let body = "{\"tokenType\"\n:\t\"jwt\",\r\n\"username\" :\n  \"root\"}"
+        for error in [BodyQuotingError.http(status: 500, message: body), .decoding(body)] {
+            #expect(String(describing: error).contains(#"\"tokenType\"\n:\t\"jwt\""#))
+            #expect(Log.redacted(error) == String(describing: error))
+        }
     }
 
     @Test func keepsOtherJSONKeysAndProse() {

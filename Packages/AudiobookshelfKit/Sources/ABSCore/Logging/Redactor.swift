@@ -10,7 +10,8 @@ import Foundation
 ///   names are redacted,
 /// - string values of the JSON keys `token`, `accessToken`, `access_token`, `refreshToken`, `refresh_token`,
 ///   `apiKey`, `api_key`, `password`, and `secret` (in any case), also when the JSON is escaped again
-///   inside an error's description (`\"token\":\"…\"`),
+///   inside an error's description (`\"token\":\"…\"`, with any whitespace around the colon written
+///   as `\n`, `\r`, or `\t`),
 /// - JSON Web Tokens anywhere in the text (three base64url segments whose first two decode to
 ///   JSON objects, the first with an `"alg"` key).
 ///
@@ -190,6 +191,11 @@ public struct Redactor: Sendable, Equatable {
     /// JSON keys whose string values are credentials. Rules match them in any case, as whole keys.
     private static let sensitiveJSONKey = #"(?:token|access_?token|refresh_?token|api_?key|password|secret)"#
 
+    /// Whitespace between tokens of JSON that an error's description has escaped again: a newline,
+    /// carriage return, or tab there reads `\n`, `\r`, or `\t`. Each alternative starts with a different
+    /// character, and the quantifier is possessive, so matching stays linear.
+    private static let escapedJSONWhitespace = #"(?:\s|\\[nrt])*+"#
+
     private static let rules = [
         // Bearer credentials, whether a JWT or an opaque token.
         Rule(#"\bBearer\s+(?<value>[^\s,;"']+)"#),
@@ -197,7 +203,9 @@ public struct Redactor: Sendable, Equatable {
         Rule(#""\#(sensitiveJSONKey)"\s*:\s*"(?<value>(?:[^"\\]|\\.)*)"#),
         // The same JSON escaped once more, as an error's description quotes a response body:
         // `\"token\":\"a\\\"b\"`. A `\\` starts an escape in the JSON; any other `\` is the outer one.
-        Rule(#"\\"\#(sensitiveJSONKey)\\"\s*:\s*\\"(?<value>(?:\\\\(?:\\.|[^\\])|\\[^\\"]|[^\\"])*)"#),
+        Rule(
+            #"\\"\#(sensitiveJSONKey)\\"\#(escapedJSONWhitespace):\#(escapedJSONWhitespace)"#
+                + #"\\"(?<value>(?:\\\\(?:\\.|[^\\])|\\[^\\"]|[^\\"])*)"#),
     ]
 
     /// Token, API key, and OAuth (PKCE) parameter names, lowercased. Compared after percent-decoding.
