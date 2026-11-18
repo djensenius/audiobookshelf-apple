@@ -31,13 +31,17 @@ runner, so it doesn't run on every push (#712). It runs:
 
 Otherwise its *UI tests* job is skipped, and a small gate job notes why. Add the label once a
 change has passed review, as the last check before merging. Any PR that changes the app, its
-packages or the UI tests needs it, and merges only after *UI tests* passes on its head (see
-`AGENTS.md`). A UI regression in a PR merged without it shows up in the next nightly run.
-Documentation-only changes (`docs/**`, `**/*.md`) skip both this workflow and the CI workflow's
-*Lint, build, and test*.
+packages or the UI tests needs it, and merges only after a *UI tests* run on its head commit has
+a *UI tests* job that succeeded (see `AGENTS.md`). A skipped *UI tests* check isn't a pass:
+adding any other label to a labelled PR starts a run whose job skips, and the PR's checks may then
+show that run rather than the real result, so look in *Actions*. A UI regression in a PR merged
+without the label shows up in the next nightly run, if someone checks it: GitHub emails a
+scheduled run's failure only to whoever last changed its cron. Documentation-only changes
+(`docs/**`, `**/*.md` except `THIRD_PARTY_NOTICES.md`, which ships in the app) skip both this
+workflow and the CI workflow's *Lint, build, and test*.
 
-The *UI tests* job runs beside the CI workflow's *Lint, build, and test*, so its cold builds
-don't lengthen that job. It creates its own iPhone Duo simulator (`abs-ui-<run>-<attempt>`), boots it
+On a push, the *UI tests* job runs beside the CI workflow's *Lint, build, and test*, so its cold
+builds don't lengthen that job. It creates its own iPhone Duo simulator (`abs-ui-<run>-<attempt>`), boots it
 and waits for the boot to finish (`xcrun simctl bootstatus <udid> -b`, as a cold simulator's
 first launch can time out), runs `scripts/ui-test-ci.sh` (below) on it with
 `ABS_UI_PLATFORM=ios` and `IOS_SIMULATOR_ID`, and always deletes it.

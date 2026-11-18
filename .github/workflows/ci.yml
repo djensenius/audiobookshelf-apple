@@ -7,11 +7,15 @@ on:
     paths-ignore:
       - "docs/**"
       - "**/*.md"
+      # Copied into the app bundle.
+      - "!THIRD_PARTY_NOTICES.md"
   push:
     branches: [main]
     paths-ignore:
       - "docs/**"
       - "**/*.md"
+      # Copied into the app bundle.
+      - "!THIRD_PARTY_NOTICES.md"
 
 permissions:
   contents: read

@@ -15,6 +15,8 @@ on:
     paths-ignore:
       - "docs/**"
       - "**/*.md"
+      # Copied into the app bundle.
+      - "!THIRD_PARTY_NOTICES.md"
   schedule:
     - cron: "0 7 * * *"
   workflow_dispatch:
@@ -68,7 +70,7 @@ jobs:
           if [ "$run" = true ]; then
             echo "Running the UI tests ($EVENT)."
           else
-            echo "::notice title=UI tests skipped::Not labelled ready-to-ship, or no new commits on main since yesterday (#712)."
+            echo "::notice title=UI tests skipped::Not labelled ready-to-ship, a label other than ready-to-ship was added, or no new commits on main since yesterday (#712). A skipped UI tests check is not a pass: look in Actions for a UI tests run on this commit whose job succeeded."
           fi
 
   ui-tests:

@@ -174,8 +174,10 @@ tests, including the partial UIKit image-hosting and network-policy branches.
 - CI must be green on the exact head SHA before merging.
 - The UI tests take over an hour, so they run only on pull requests labelled
   `ready-to-ship`, and nightly on `main` (#712). Once review is done, add the label to any
-  PR that changes the app, its packages or its UI tests, and merge only after *UI tests*
-  passes on the exact head. Other PRs may skip it and rely on the nightly run. See
+  PR that changes the app, its packages or its UI tests, and merge only after a *UI tests*
+  run on the exact head has a *UI tests* job that succeeded. A skipped *UI tests* check
+  isn't a pass: adding any other label starts a run that skips, and it can hide the real
+  result in the PR's checks. Other PRs may skip it and rely on the nightly run. See
   [docs/testing/ui-tests.md](docs/testing/ui-tests.md#in-ci).
 
 ## Legacy code and upstream
