@@ -212,9 +212,13 @@ extension XCTestCase {
             #if os(iOS)
                 openTab(.library, in: app)
                 // A sidebar (regular width) has a Series tab; a compact Library root has its section menu.
+                // A regular-width iPad's top tab bar leaves Series to its sidebar, and its Library root
+                // has no section menu, so it's chosen from the sidebar there. #698
                 let tab = app.descendants(matching: .any)["tab.series"].firstMatch
                 if tab.exists && tab.isHittable {
                     tab.press()
+                } else if app.buttons["ToggleSideBar"].exists {
+                    chooseFromSidebar("tab.series", in: app)
                 } else {
                     chooseSection(symbol: "rectangle.stack", in: app)
                 }
@@ -289,29 +293,34 @@ extension XCTestCase {
         revealTab(button, in: app)
         button.press()
         #if os(iOS)
-            chooseFromSidebar(button, in: app)
+            chooseFromSidebar("tab.\(tab.rawValue)", in: app)
         #endif
     }
 
     #if os(iOS)
-        /// Selects `tab` from the sidebar if pressing it in the tab bar didn't: at accessibility text
-        /// sizes a regular-width iPad's top tab bar pages, and a later tab (Account) sits behind the
-        /// next one and the Next Page button, where its press lands. It shows the sidebar
-        /// (`ToggleSideBar`), presses the tab's sidebar cell (the tab bar's copies are buttons), and
-        /// hides the sidebar again (`ToggleSidebar`), leaving the layout as it was. No-op once `tab`
-        /// is selected, or where there's no sidebar toggle (iPhone).
+        /// Selects the tab with `identifier` from the sidebar if pressing it in the tab bar didn't: at
+        /// accessibility text sizes a regular-width iPad's top tab bar pages, and a later tab
+        /// (Account) sits behind the next one and the Next Page button, where its press lands; and
+        /// Series is only in the sidebar.
+        /// It shows the sidebar (`ToggleSideBar`), presses the tab's sidebar cell (the tab bar's
+        /// copies are buttons), and hides the sidebar again (`ToggleSidebar`), leaving the layout as
+        /// it was. No-op once the tab is selected, or where there's no sidebar toggle (iPhone). A tab
+        /// only in the sidebar (Series) isn't in the tree while it's hidden, nor once choosing it has
+        /// hidden it again, so then the screen it opens is the check.
         @MainActor
-        private func chooseFromSidebar(_ tab: XCUIElement, in app: XCUIApplication) {
+        private func chooseFromSidebar(_ identifier: String, in app: XCUIApplication) {
+            let tab = app.descendants(matching: .any)[identifier].firstMatch
             let show = app.buttons["ToggleSideBar"].firstMatch
-            guard show.exists, !wait(for: { tab.isSelected }, timeout: 3) else { return }
+            guard show.exists, !wait(for: { tab.exists && tab.isSelected }, timeout: 3) else { return }
             show.press()
-            let entry = app.collectionViews.cells.matching(identifier: tab.identifier).firstMatch
+            let entry = app.collectionViews.cells.matching(identifier: identifier).firstMatch
             guard wait(for: { entry.exists && entry.isHittable }, timeout: Self.fixtureTimeout) else {
-                return XCTFail("The sidebar has no \(tab.identifier) tab")
+                return XCTFail("The sidebar has no \(identifier) tab")
             }
             entry.press()
             XCTAssertTrue(
-                wait(for: { tab.isSelected }, timeout: Self.fixtureTimeout), "\(tab.identifier) isn't selected")
+                wait(for: { !tab.exists || tab.isSelected }, timeout: Self.fixtureTimeout),
+                "\(identifier) isn't selected")
             // Choosing a tab usually dismisses the sidebar; hide it if it's still there.
             let hide = app.buttons["ToggleSidebar"].firstMatch
             if hide.exists && hide.isHittable { hide.press() }

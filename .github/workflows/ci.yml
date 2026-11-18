@@ -172,7 +172,8 @@ jobs:
 
       # The iPhone Duo is compact, where open(_:in:)'s sidebar fallback (#693) never runs, so one
       # test that needs it runs on a regular-width iPad too: at AX sizes the iPad's top tab bar hides
-      # Account. Only that test: the iPad accessibility audits fail for other reasons (#698). It
+      # Account. Only that test: the iPad accessibility audits still flake at AX5 (#705), so they
+      # run by hand (docs/testing/ui-tests.md). It
       # reuses the iPhone step's build (an iphonesimulator xctestrun serves any simulator) and runs
       # only after that step passes, since the script clears the .build/ui-tests/ it uploads.
       # Nothing uses the iPhone Duo after its step, so it's shut down first rather than left

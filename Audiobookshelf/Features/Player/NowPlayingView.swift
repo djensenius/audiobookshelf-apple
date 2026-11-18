@@ -253,6 +253,7 @@ private struct NowPlayingTitles: View {
                 Text(verbatim: chapter)
                     .font(.subheadline)
                     .foregroundStyle(ABSColor.mutedForeground)
+                    .accessibilityIdentifier("player.chapter")
             }
             Text(verbatim: model.title)
                 .font(.title2.weight(.bold))

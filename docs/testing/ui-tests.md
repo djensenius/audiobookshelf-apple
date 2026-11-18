@@ -32,10 +32,10 @@ If those pass, it runs one test on a regular-width iPad simulator too
 `MiniPlayerTests/testLongPressAtAccessibilitySizeShowsNoMenu`, with the same script and
 `ABS_UI_ACTION=test-without-building`, reusing the iPhone build. The Duo is compact, so it never
 reaches `open`'s sidebar fallback (#693), which that test needs on an iPad at AX sizes. The
-iPad accessibility audits fail for other reasons (#698), so they don't run there. The iPhone Duo
-is shut down before the iPad is created, so the two don't normally run at once. The step has its
-own 35-minute limit: the test takes about 5 minutes locally, but the CI runner can take over 12
-minutes to start the test runner on the cold iPad simulator, and the first passing run took 21
+iPad accessibility audits pass but still flake at AX5 (#705), so they don't run there. The iPhone
+Duo is shut down before the iPad is created, so the two don't normally run at once. The step has
+its own 35-minute limit: the test takes about 5 minutes locally, but the CI runner can take over
+12 minutes to start the test runner on the cold iPad simulator, and the first passing run took 21
 (#703). A stall there fails the step and uploads its results instead of the job's limit
 cancelling the run.
 
@@ -290,6 +290,15 @@ xcrun simctl create abs-audits com.apple.CoreSimulator.SimDeviceType.iPhone-17  
 xcrun simctl boot <udid> && xcrun simctl bootstatus <udid> -b
 ABS_UI_PLATFORM=ios IOS_SIMULATOR_ID=<udid> mise run test:ui -- -only-testing:AudiobookshelfUITests/AccessibilityAuditTests -jobs 2
 xcrun simctl delete <udid>
+```
+
+iPad accessibility audits (manual): the audits pass on a regular-width iPad but still flake at
+AX5 (#705), so CI doesn't run them there. Run them on an iPad Pro 13-inch (M5) simulator before a
+change that affects regular-width layout, themes or text sizes, the same way, with
+`com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5-12GB`:
+
+```sh
+ABS_UI_PLATFORM=ios IOS_SIMULATOR_ID=<ipad-udid> mise run test:ui -- -only-testing:AudiobookshelfUITests/AccessibilityAuditTests
 ```
 
 ## Localized runs and screenshots
