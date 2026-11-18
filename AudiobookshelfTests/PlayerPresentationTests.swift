@@ -56,6 +56,15 @@ import Testing
         #expect(!PlayerSlot.opensNowPlayingWindow(isPresented: false, hasSession: false))
     }
 
+    /// The mini player keeps clear of the part of the bottom accessory the queue inspector covers
+    /// (#687), and of nothing without an inspector or once it's clear.
+    @Test func theMiniPlayerKeepsClearOfTheQueueInspector() {
+        #expect(PlayerSlot.accessoryTrailingInset(accessoryMaxX: 1012, inspectorMinX: 692) == 320)
+        #expect(PlayerSlot.accessoryTrailingInset(accessoryMaxX: 600, inspectorMinX: 692) == 0)
+        #expect(PlayerSlot.accessoryTrailingInset(accessoryMaxX: 1012, inspectorMinX: nil) == 0)
+        #expect(PlayerSlot.accessoryTrailingInset(accessoryMaxX: nil, inspectorMinX: 692) == 0)
+    }
+
     @Test(arguments: [
         PlayerErrorMessage.streamingNeedsConfirmation, .streamingNotAllowed, .sessionStartFailed,
         .streamUnavailable, .streamingInterrupted, .streamRejected, .playbackFailed, .downloadFilesMissing,

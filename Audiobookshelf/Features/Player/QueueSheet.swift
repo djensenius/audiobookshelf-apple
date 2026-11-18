@@ -47,6 +47,8 @@ struct QueueSheet: View {
 /// `Router/isQueueInspectorPresented`.
 struct QueueInspector: View {
     let router: Router
+    /// Called with where the inspector begins in the window (its global `minX`) as it changes.
+    var leadingEdgeChanged: (CGFloat) -> Void = { _ in }
 
     var body: some View {
         NavigationStack {
@@ -65,6 +67,13 @@ struct QueueInspector: View {
                     }
                 }
         }
+        .onGeometryChange(for: CGFloat.self) {
+            $0.frame(in: .global).minX
+        } action: {
+            leadingEdgeChanged($0)
+        }
+        // For UI tests.
+        .accessibilityIdentifier("queue.inspector")
         .inspectorColumnWidth(min: 280, ideal: 340, max: 480)
     }
 }

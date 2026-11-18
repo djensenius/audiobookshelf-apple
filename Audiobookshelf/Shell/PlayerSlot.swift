@@ -48,7 +48,10 @@ final class PlaceholderPlayerState: PlayerSlotState {
 /// - macOS: the mini player is a bar under the content. The full player is the
 ///   ``NowPlayingWindow``, which opens when `Router/isFullPlayerPresented` turns on with a
 ///   session; the flag then resets, so it can turn on again from any scene.
-/// - Both: the queue is an inspector, which compact width shows as a sheet.
+/// - Both: the queue is an inspector, which compact width shows as a sheet. On iOS the bottom
+///   accessory keeps the window's width under an inspector beside the content, so while one is,
+///   the mini player keeps its content clear of it (``accessoryTrailingInset(accessoryMaxX:inspectorMinX:)``,
+///   #687).
 ///
 /// The mini and full players are ``MiniPlayerView`` and ``NowPlayingView`` when `player` is a
 /// ``PlayerViewModel``, as in the app, else placeholders. The queue inspector is
@@ -69,6 +72,12 @@ struct PlayerSlot: ViewModifier {
     let player: any PlayerSlotState
     #if os(macOS)
         @Environment(\.openWindow) private var openWindow
+    #else
+        @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+        /// Where the bottom accessory ends, in the window.
+        @State private var accessoryMaxX: CGFloat?
+        /// Where the queue inspector begins, in the window, while it's on screen.
+        @State private var queueInspectorMinX: CGFloat?
     #endif
 
     func body(content: Content) -> some View {
@@ -92,6 +101,14 @@ struct PlayerSlot: ViewModifier {
     /// Whether turning the full player on opens the Now Playing window (macOS): only with a session.
     nonisolated static func opensNowPlayingWindow(isPresented: Bool, hasSession: Bool) -> Bool {
         isPresented && hasSession
+    }
+
+    /// How much of the bottom accessory's trailing end an inspector beside the content covers, which
+    /// the mini player keeps clear (iOS): the accessory spans the window, under the inspector (#687).
+    /// None without both frames, in window coordinates.
+    nonisolated static func accessoryTrailingInset(accessoryMaxX: CGFloat?, inspectorMinX: CGFloat?) -> CGFloat {
+        guard let accessoryMaxX, let inspectorMinX else { return 0 }
+        return max(0, accessoryMaxX - inspectorMinX)
     }
 
     /// The failure to show: the current one, unless the scene dismissed it.
@@ -146,13 +163,21 @@ struct PlayerSlot: ViewModifier {
             content
                 .tabViewBottomAccessory(isEnabled: player.hasSession) {
                     miniPlayer
+                        .padding(.trailing, accessoryTrailingInset)
+                        .animation(.default, value: accessoryTrailingInset)
+                        .onGeometryChange(for: CGFloat.self) {
+                            $0.frame(in: .global).maxX
+                        } action: {
+                            accessoryMaxX = $0
+                        }
                 }
                 .fullScreenCover(isPresented: $router.isFullPlayerPresented) {
                     fullPlayer.playerErrorAlertLayer(player: player)
                 }
                 .inspector(isPresented: $router.isQueueInspectorPresented) {
-                    QueueInspector(router: router)
+                    QueueInspector(router: router) { queueInspectorMinX = $0 }
                         .playerErrorAlertLayer(player: player)
+                        .onDisappear { queueInspectorMinX = nil }
                 }
         #else
             content
@@ -184,6 +209,13 @@ struct PlayerSlot: ViewModifier {
     }
 
     #if os(iOS)
+        /// The mini player's trailing inset: what the queue inspector covers while it's beside the
+        /// content. Compact width shows it as a sheet, over the whole window.
+        private var accessoryTrailingInset: CGFloat {
+            guard horizontalSizeClass == .regular, router.isQueueInspectorPresented else { return 0 }
+            return Self.accessoryTrailingInset(accessoryMaxX: accessoryMaxX, inspectorMinX: queueInspectorMinX)
+        }
+
         @ViewBuilder private var fullPlayer: some View {
             if let model = player as? PlayerViewModel {
                 NowPlayingView(model: model)

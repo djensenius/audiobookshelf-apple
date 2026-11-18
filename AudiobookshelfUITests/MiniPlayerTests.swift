@@ -72,6 +72,48 @@ final class MiniPlayerTests: XCTestCase {
                 "The Up Next menu took the long press from the Large Content Viewer")
         }
 
+        /// On an iPad, where the queue is an inspector beside the content rather than a sheet, the
+        /// mini player's play/pause and close stay reachable while the inspector is open (#687).
+        @MainActor
+        func testQueueInspectorLeavesMiniPlayerControlsReachable() throws {
+            try XCTSkipUnless(
+                UIDevice.current.userInterfaceIdiom == .pad,
+                "Compact width shows the queue as a sheet over the mini player")
+            let app = showMiniPlayer()
+            let mini = app.descendants(matching: .any)["player.mini"].firstMatch
+            mini.press(forDuration: 1.5)
+            let upNext = app.buttons["player.mini.upNext"].firstMatch
+            XCTAssertTrue(upNext.waitForExistence(timeout: 5), "The Up Next menu didn't appear")
+            upNext.tap()
+            let inspector = app.descendants(matching: .any)["queue.inspector"].firstMatch
+            XCTAssertTrue(inspector.waitForExistence(timeout: Self.fixtureTimeout), "The queue inspector didn't open")
+
+            // The full player's buttons can be in the tree too; only those in the bar count.
+            func inBar(_ identifier: String) -> XCUIElement {
+                app.buttons.matching(identifier: identifier).allElementsBoundByIndex
+                    .first { mini.frame.minY...mini.frame.maxY ~= $0.frame.midY } ?? app.buttons[identifier]
+            }
+            // The bar makes room once the inspector is in place.
+            func becomesHittable(_ element: XCUIElement) -> Bool {
+                let hittable = XCTNSPredicateExpectation(
+                    predicate: NSPredicate(format: "hittable == true"), object: element)
+                return XCTWaiter().wait(for: [hittable], timeout: 5) == .completed
+            }
+            let close = inBar("player.mini.close")
+            XCTAssertTrue(
+                close.waitForExistence(timeout: Self.fixtureTimeout), "The mini player's close button isn't there")
+            XCTAssertTrue(becomesHittable(close), "The queue inspector covers the mini player's close button")
+            let play = inBar("player.play")
+            XCTAssertTrue(play.exists, "The mini player's play button isn't there")
+            XCTAssertTrue(becomesHittable(play), "The queue inspector covers the mini player's play button")
+            // A tap reaches it: playback starts, so the bar shows pause.
+            play.tap()
+            XCTAssertTrue(
+                inBar("player.pause").waitForExistence(timeout: Self.fixtureTimeout),
+                "The mini player's play didn't play")
+            XCTAssertTrue(inspector.exists, "The queue inspector closed")
+        }
+
         /// Signs in, plays the fixture book (`open(_:in:)`'s player) and opens Settings, under the
         /// mini player.
         @MainActor
