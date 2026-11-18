@@ -47,10 +47,17 @@ struct QueueSheet: View {
 /// `Router/isQueueInspectorPresented`.
 struct QueueInspector: View {
     let router: Router
+    #if os(iOS)
+        /// Called with the inspector's frame in the window (`.global`) as it changes, if set.
+        var frameChanged: ((CGRect) -> Void)?
+    #endif
 
     var body: some View {
         NavigationStack {
             QueueList()
+                // For UI tests.
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("queue.inspector")
                 .navigationTitle(Text(verbatim: L10n.string("HeaderUpNext")))
                 #if os(iOS)
                     .navigationBarTitleDisplayMode(.inline)
@@ -65,6 +72,15 @@ struct QueueInspector: View {
                     }
                 }
         }
+        #if os(iOS)
+            // Measured before the column width, which a measurement outside would leave at its
+            // minimum.
+            .onGeometryChange(for: CGRect.self) {
+                $0.frame(in: .global)
+            } action: { frame in
+                frameChanged?(frame)
+            }
+        #endif
         .inspectorColumnWidth(min: 280, ideal: 340, max: 480)
     }
 }
