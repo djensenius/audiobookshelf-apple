@@ -74,7 +74,7 @@ struct PlayerSlot: ViewModifier {
         @Environment(\.openWindow) private var openWindow
     #else
         @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-        /// The bottom accessory's frame in the window, in regular width.
+        /// The bottom accessory's frame in the window.
         @State private var accessoryFrame: CGRect?
         /// The queue inspector's frame in the window, in regular width while it's open.
         @State private var queueInspectorFrame: CGRect?
@@ -172,7 +172,7 @@ struct PlayerSlot: ViewModifier {
                         .onGeometryChange(for: CGRect.self) {
                             $0.frame(in: .global)
                         } action: { frame in
-                            if horizontalSizeClass == .regular { accessoryFrame = frame }
+                            accessoryFrame = frame
                         }
                 }
                 .fullScreenCover(isPresented: $router.isFullPlayerPresented) {

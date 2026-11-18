@@ -89,10 +89,11 @@ final class MiniPlayerTests: XCTestCase {
 
         @MainActor
         private func checkQueueInspectorLeavesMiniPlayerControlsReachable(launchArguments: [String] = []) throws {
-            let app = showMiniPlayer(launchArguments: launchArguments)
+            let app = signIn(launchArguments: launchArguments)
             try XCTSkipUnless(
                 app.windows.firstMatch.horizontalSizeClass == .regular,
                 "Compact width shows the queue as a sheet over the mini player")
+            showMiniPlayer(in: app)
             let mini = app.descendants(matching: .any)["player.mini"].firstMatch
             mini.press(forDuration: 1.5)
             let upNext = app.buttons["player.mini.upNext"].firstMatch
@@ -119,8 +120,8 @@ final class MiniPlayerTests: XCTestCase {
             let close = try XCTUnwrap(hittableInBar("player.mini.close"), "The mini player's close button isn't there")
             XCTAssertTrue(close.isHittable, "The queue inspector covers the mini player's close button")
             // On whichever side the inspector is.
-            XCTAssertFalse(
-                close.frame.intersects(inspector.frame),
+            XCTAssertTrue(
+                close.frame.maxX <= inspector.frame.minX || close.frame.minX >= inspector.frame.maxX,
                 "The mini player's close button (\(close.frame)) is under the queue inspector (\(inspector.frame))")
             let play = try XCTUnwrap(
                 hittableInBar("player.play"), "The queue inspector covers the mini player's play button")
@@ -138,11 +139,17 @@ final class MiniPlayerTests: XCTestCase {
         @MainActor
         private func showMiniPlayer(launchArguments: [String] = []) -> XCUIApplication {
             let app = signIn(launchArguments: launchArguments)
+            showMiniPlayer(in: app)
+            return app
+        }
+
+        /// Plays the fixture book and opens Settings, under the mini player, in a signed-in `app`.
+        @MainActor
+        private func showMiniPlayer(in app: XCUIApplication) {
             open(.player, in: app)
             open(.settings, in: app)
             let mini = app.descendants(matching: .any)["player.mini"].firstMatch
             XCTAssertTrue(mini.waitForExistence(timeout: Self.fixtureTimeout), "The mini player isn't there")
-            return app
         }
     #endif
 }
