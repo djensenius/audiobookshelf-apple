@@ -29,10 +29,6 @@ final class EPUBPageGestures: NSObject {
     private weak var webView: WKWebView?
     /// The recognizers on the web view, until `uninstall`.
     private(set) var recognizers: [EPUBGestureRecognizer] = []
-    #if os(iOS)
-        /// When the latest touch began, in system uptime.
-        private var touchStart: TimeInterval = 0
-    #endif
 
     init(webView: WKWebView) {
         self.webView = webView
@@ -75,7 +71,7 @@ final class EPUBPageGestures: NSObject {
         static let longPressDuration: TimeInterval = 0.5
 
         private func install(on webView: WKWebView) -> [EPUBGestureRecognizer] {
-            let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+            let tap = EPUBTapRecognizer(target: self, action: #selector(tapped(_:)))
             let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
             // Only there for a pointer's click to wait on: a double-click selects a word, not a turn.
             let doubleClick = UITapGestureRecognizer(target: nil, action: nil)
@@ -98,11 +94,17 @@ final class EPUBPageGestures: NSObject {
             return [tap, pan, doubleClick]
         }
 
-        @objc private func tapped(_ recognizer: UITapGestureRecognizer) {
-            guard recognizer.state == .ended, let view = recognizer.view,
-                ProcessInfo.processInfo.systemUptime - touchStart < Self.longPressDuration
-            else { return }
+        @objc private func tapped(_ recognizer: EPUBTapRecognizer) {
+            guard recognizer.state == .ended, let view = recognizer.view, acceptsTap(recognizer) else { return }
             tap(at: recognizer.location(in: view))
+        }
+
+        /// Whether `recognizer`'s tap was let go soon enough to be one. It's the press that counts,
+        /// not when the tap is recognized: a pointer's click is recognized only once a double-click
+        /// has failed, well after the button came up.
+        func acceptsTap(_ recognizer: EPUBTapRecognizer) -> Bool {
+            guard let held = recognizer.holdDuration else { return false }
+            return held < Self.longPressDuration
         }
 
         @objc private func panned(_ recognizer: UIPanGestureRecognizer) {
@@ -128,7 +130,6 @@ final class EPUBPageGestures: NSObject {
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
             // Every touch reaches the tap recognizer first, so it's noted once.
             guard gestureRecognizer === recognizers.first else { return true }
-            touchStart = touch.timestamp
             touchBegan()
             // A pointer's triple-click's third click (a paragraph's selection) isn't a click either.
             return touch.type != .indirectPointer || touch.tapCount <= 1
@@ -147,6 +148,32 @@ final class EPUBPageGestures: NSObject {
             _ gestureRecognizer: UIGestureRecognizer,
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
         ) -> Bool { true }
+    }
+
+    /// A tap that notes how long its touch was held, from going down to coming up.
+    final class EPUBTapRecognizer: UITapGestureRecognizer {
+        /// When the latest press went down and came up, in system uptime.
+        private(set) var press: (began: TimeInterval, ended: TimeInterval?)?
+
+        /// How long the latest press was held, once it has come up.
+        var holdDuration: TimeInterval? {
+            guard let press, let ended = press.ended else { return nil }
+            return ended - press.began
+        }
+
+        func notePressBegan(at time: TimeInterval) { press = (time, nil) }
+
+        func notePressEnded(at time: TimeInterval) { press?.ended = time }
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+            if let touch = touches.first { notePressBegan(at: touch.timestamp) }
+            super.touchesBegan(touches, with: event)
+        }
+
+        override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
+            if let touch = touches.first { notePressEnded(at: touch.timestamp) }
+            super.touchesEnded(touches, with: event)
+        }
     }
 #elseif os(macOS)
     extension EPUBPageGestures: NSGestureRecognizerDelegate {

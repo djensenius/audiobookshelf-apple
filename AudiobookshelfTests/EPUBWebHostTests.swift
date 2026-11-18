@@ -873,6 +873,33 @@ private final class ReaderPage {
         }
     }
 
+    #if os(iOS)
+        /// A tap held as long as a long press is WebKit's (a selection or a menu), not a turn. It's
+        /// the hold that counts: a pointer's click is recognized only after a double-click's wait,
+        /// so a short click is often recognized more than the long press's time after it went down.
+        @Test func aTapIsJudgedByHowLongItWasHeldNotWhenItWasRecognized() throws {
+            let controller = EPUBReaderController(loadBook: { _ in Data() })
+            defer { controller.close() }
+            let gestures = controller.gestures
+            let tap = try #require(gestures.recognizers.compactMap { $0 as? EPUBTapRecognizer }.first)
+            let now = ProcessInfo.processInfo.systemUptime
+            let longPress = EPUBPageGestures.longPressDuration
+
+            #expect(!gestures.acceptsTap(tap), "nothing pressed yet")
+            // A click down 0.1 s, recognized well after the long press's time.
+            tap.notePressBegan(at: now - longPress - 0.3)
+            tap.notePressEnded(at: now - longPress - 0.2)
+            #expect(gestures.acceptsTap(tap))
+            // A long press, let go just now.
+            tap.notePressBegan(at: now - longPress - 0.1)
+            tap.notePressEnded(at: now)
+            #expect(!gestures.acceptsTap(tap))
+            // Still down.
+            tap.notePressBegan(at: now)
+            #expect(!gestures.acceptsTap(tap))
+        }
+    #endif
+
     /// With real epub.js, a book opened with margins is laid out in the width between them from its
     /// first render, without laying it out again. WebKit runs no animation frames for a page that
     /// isn't on screen, as in the test host, and epub.js renders on them, so they're timers here.
