@@ -27,6 +27,13 @@ and waits for the boot to finish (`xcrun simctl bootstatus <udid> -b`, as a cold
 first launch can time out), runs `scripts/ui-test-ci.sh` (below) on it with
 `ABS_UI_PLATFORM=ios` and `IOS_SIMULATOR_ID`, and always deletes it.
 
+If those pass, it runs one test on a regular-width iPad simulator too
+(`abs-ui-ipad-<run>-<attempt>`, an iPad Pro 13-inch (M5), also always deleted):
+`MiniPlayerTests/testLongPressAtAccessibilitySizeShowsNoMenu`, with the same script and
+`ABS_UI_ACTION=test-without-building`, reusing the iPhone build. The Duo is compact, so it never
+reaches `open`'s sidebar fallback (#693), which that test needs on an iPad at AX sizes. The
+iPad accessibility audits fail for other reasons (#698), so they don't run there.
+
 It then runs `mise run test:ui` on macOS only if `automationmodetool` reports Automation Mode
 enabled on the runner. Otherwise the step passes with a *macOS UI tests skipped* warning
 annotation on the run: an administrator must enable Automation Mode on the runner (the command
