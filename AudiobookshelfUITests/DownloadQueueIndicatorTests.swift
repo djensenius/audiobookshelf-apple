@@ -11,7 +11,9 @@ final class DownloadQueueIndicatorTests: XCTestCase {
 
     @MainActor
     func testIndicatorIsInEveryTabRootsBar() {
-        let app = signIn(launchArguments: ["-ABSStallDownloads"])
+        // In English, so the value's check below (count, then a percentage with `%` after it) holds whatever the
+        // device's language: Turkish, for one, puts `%` first.
+        let app = signIn(launchArguments: ["-ABSStallDownloads", "-AppleLanguages", "(en)", "-AppleLocale", "en_US"])
         open(.item, in: app)
         let download = app.buttons["item.download"].firstMatch
         XCTAssertTrue(download.waitForEnabled(timeout: Self.fixtureTimeout), "The item's Download button isn't enabled")
