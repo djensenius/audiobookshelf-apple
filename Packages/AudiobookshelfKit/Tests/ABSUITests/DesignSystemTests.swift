@@ -107,8 +107,9 @@ import Testing
     }
 
     @Test func timestampMatchesLegacy() {
-        #expect(DurationStyle.timestamp.string(245) == "4:05")
-        #expect(DurationStyle.timestamp.string(3723.9) == "1:02:03")
+        let english = Locale(identifier: "en_US")
+        #expect(DurationStyle.timestamp.string(245, locale: english) == "4:05")
+        #expect(DurationStyle.timestamp.string(3723.9, locale: english) == "1:02:03")
     }
 
     @Test func elapsedMatchesLegacy() {
@@ -139,7 +140,7 @@ import Testing
     @Test func timestampEdgeCases() {
         let english = Locale(identifier: "en_US")
         for value in [0, -5, .nan, .infinity] as [TimeInterval] {
-            #expect(DurationStyle.timestamp.string(value) == "0:00", "\(value)")
+            #expect(DurationStyle.timestamp.string(value, locale: english) == "0:00", "\(value)")
             #expect(DurationStyle.timestamp.accessibilityString(value, locale: english) == "0 seconds", "\(value)")
         }
     }
