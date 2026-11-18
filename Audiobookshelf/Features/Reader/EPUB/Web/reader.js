@@ -285,17 +285,52 @@
     displaying = false
   }
 
-  // A tap's position as fractions of the reader's viewport. A tap on a link or one that ends a
-  // selection is the book's, not a page turn or a toolbar toggle.
-  function onClick(event) {
-    const target = event.target
+  // epub.js shows each section in a frame sandboxed without scripts (`allowScriptedContent: false`),
+  // and WebKit runs no event listener for an event in such a frame, this page's included. So taps,
+  // clicks and swipes on the book's text never reach epub.js or this page: the app recognizes them
+  // natively and hands them in (`tap`, `swipe`), with `touchBegan` as each touch or click starts.
+  // Points are in the reader's viewport, in CSS pixels.
+
+  // Whether text was selected as the latest touch began: a tap or swipe that ends a selection (iOS
+  // clears it as the tap lands) is the selection's, not a page turn.
+  let selectedAtTouch = false
+
+  // Whether text is selected on the page or in a section's frame.
+  function hasSelection() {
+    const views = [window]
+    document.querySelectorAll('.epub-container iframe').forEach(function (frame) {
+      if (frame.contentWindow) views.push(frame.contentWindow)
+    })
+    return views.some(function (view) {
+      const selection = view.getSelection && view.getSelection()
+      return Boolean(selection && !selection.isCollapsed)
+    })
+  }
+
+  // The section frame at a point in the reader, if a section is there.
+  function sectionAt(x, y) {
+    const hit = document.elementFromPoint(x, y)
+    return hit && hit.tagName === 'IFRAME' && hit.closest('.epub-container') ? hit : null
+  }
+
+  // The element at a point in the reader, inside a section's frame if that's where it is.
+  function elementAt(x, y) {
+    const hit = document.elementFromPoint(x, y)
+    const frame = hit && hit.tagName === 'IFRAME' ? hit : null
+    if (!frame || !frame.contentDocument) return hit
+    const bounds = frame.getBoundingClientRect()
+    return frame.contentDocument.elementFromPoint(x - bounds.left, y - bounds.top) || hit
+  }
+
+  // A tap or click at a point in the reader, on a section or in the margins. One on a link or that
+  // ends a selection is the book's, not a page turn or a toolbar toggle.
+  function onTap(x, y) {
+    const selected = selectedAtTouch || hasSelection()
+    selectedAtTouch = false
+    if (!rendition || selected) return
+    const target = elementAt(x, y)
     if (target && typeof target.closest === 'function' && target.closest('a')) return
-    const view = event.view
-    const selection = view && view.getSelection && view.getSelection()
-    if (selection && !selection.isCollapsed) return
-    const frame = view && view.frameElement
-    const offset = frame ? frame.getBoundingClientRect() : { left: 0, top: 0 }
-    postTap(offset.left + event.clientX, offset.top + event.clientY)
+    postTap(x, y)
   }
 
   // A tap at a point in the page, as a fraction of its width and height.
@@ -306,42 +341,59 @@
     post({ type: 'tap', x: clamp(x / window.innerWidth), y: clamp(y / window.innerHeight) })
   }
 
-  // A tap in the margins (the viewer's padding), outside epub.js's container and its sections'
-  // frames, whose clicks `onClick` hears; it turns pages or shows the chrome as theirs do.
-  function onMarginClick(event) {
-    if (!rendition) return
-    const target = event.target
-    if (target && typeof target.closest === 'function' && target.closest('.epub-container')) return
-    const selection = window.getSelection && window.getSelection()
-    if (selection && !selection.isCollapsed) return
-    postTap(event.clientX, event.clientY)
+  // A swipe on a section, handed to epub.js's snapper (`snap: true`) as the touches it would have
+  // heard, so it turns the page with its own distance, speed and direction rules. Only one starting
+  // on a section's frame, and not one that starts with text selected (dragging the selection);
+  // elsewhere, the touches reach this page itself (`onMarginTouch`) or the snapper's scroller.
+  let swiping = false
+  function onSwipe(phase, x, y) {
+    const snapper = rendition && rendition.manager && rendition.manager.snapper
+    if (phase === 'start') {
+      const selected = selectedAtTouch || hasSelection()
+      selectedAtTouch = false
+      swiping = Boolean(snapper && snapper._onTouchStart && !selected && sectionAt(x, y))
+    }
+    if (!swiping || !snapper) return
+    const touches = phase === 'start' || phase === 'move' ? [{ screenX: x, screenY: y, clientX: x, clientY: y }] : []
+    const type = { start: 'touchstart', move: 'touchmove', end: 'touchend', cancel: 'touchcancel' }[phase]
+    if (phase === 'end' || phase === 'cancel') swiping = false
+    if (type) toSnapper(snapper, type, { type: type, touches: touches })
   }
 
-  // A swipe that starts in the margins, outside epub.js's container and its sections' frames, whose
-  // touches epub.js's snapper (`snap: true`) hears. It's handed this one's, so it turns the page with
-  // the same distance, speed and direction rules as a swipe on the page. A touch's later events
-  // target the element it started on, so a swipe from the page isn't handled twice. Only once the
-  // snapper listens itself (paginated, with touch), so the margins swipe exactly when the page does.
-  //
-  // A cancelled touch (the system took it, as near the screen's edges) goes back to the page it
-  // started on. The snapper's moves scroll the pages with the finger, and its snap goes to the page
-  // nearest where they are, so past halfway it would turn; the start's page is put back instead, and
-  // the touch forgotten, which the snapper otherwise keeps for the next swipe.
-  let marginTouchStart
+  // A swipe that starts in the margins, outside epub.js's container and its sections' frames. It's
+  // handed to the snapper, so it turns the page with the same rules as a swipe on the page. A
+  // touch's later events target the element it started on, so a swipe from the page isn't handled
+  // twice. Only once the snapper listens itself (paginated, with touch), so the margins swipe
+  // exactly when the page does.
   function onMarginTouch(event) {
     if (!rendition) return
     const target = event.target
     if (target && typeof target.closest === 'function' && target.closest('.epub-container')) return
     const snapper = rendition.manager && rendition.manager.snapper
     if (!snapper || !snapper._onTouchStart) return
-    if (event.type === 'touchstart') {
-      if (snapper.startTouchX === undefined) marginTouchStart = snapperPageOffset(snapper)
+    toSnapper(snapper, event.type, event)
+  }
+
+  // Hands a touch to the snapper. A cancelled touch (the system took it, as near the screen's edges)
+  // goes back to the page it started on. The snapper's moves scroll the pages with the finger, and
+  // its snap goes to the page nearest where they are, so past halfway it would turn; the start's
+  // page is put back instead, and the touch forgotten, which the snapper otherwise keeps for the
+  // next swipe.
+  let touchStartOffset
+  // How far a touch can move, in CSS pixels, and still be a tap (UIKit's tap allows about as much).
+  const tapSlop = 10
+  function toSnapper(snapper, type, event) {
+    if (type === 'touchstart') {
+      if (snapper.startTouchX === undefined) touchStartOffset = snapperPageOffset(snapper)
       snapper.onTouchStart(event)
-    } else if (event.type === 'touchmove') snapper.onTouchMove(event)
-    else if (event.type === 'touchend') {
-      marginTouchStart = undefined
+    } else if (type === 'touchmove') snapper.onTouchMove(event)
+    else if (type === 'touchend') {
+      // A tap, not a swipe: the snapper's snap would animate back to the start's page over the
+      // turn the tap asks for (`tap`), so the touch is just put back and forgotten.
+      if (Math.abs(snapper.endTouchX - snapper.startTouchX) < tapSlop) return cancelTouch(snapper)
+      touchStartOffset = undefined
       snapper.onTouchEnd(event)
-    } else if (event.type === 'touchcancel') cancelMarginTouch(snapper)
+    } else if (type === 'touchcancel') cancelTouch(snapper)
   }
 
   // The offset of the page the snapper's scroller shows, or is nearest to while it moves.
@@ -353,9 +405,9 @@
 
   // Puts the scroller back on the cancelled touch's starting page, as the snapper's own end does
   // without its snap, and clears the touch.
-  function cancelMarginTouch(snapper) {
-    const start = marginTouchStart
-    marginTouchStart = undefined
+  function cancelTouch(snapper) {
+    const start = touchStartOffset
+    touchStartOffset = undefined
     if (snapper.startTouchX === undefined) return
     if (start !== undefined) {
       snapper.scrollTo(start, 0)
@@ -771,9 +823,6 @@
     shown.on('relocated', function (location) {
       if (isCurrent() && !displaying) postRelocated(location)
     })
-    shown.on('click', function (event) {
-      if (isCurrent()) onClick(event)
-    })
     shown.on('displayerror', function (error) {
       // One of epub.js's own displays (a command's display reports its failure itself).
       if (!isCurrent() || state.pendingDisplays > 0) return
@@ -992,10 +1041,21 @@
         if (context.generation === generation) postError(failure.phase || String(command.type), failure)
         throw failure
       }
+    },
+    /** A touch or click on the reader began (before WebKit acts on it). */
+    touchBegan: function () {
+      selectedAtTouch = hasSelection()
+    },
+    /** A tap or click at `x`, `y` in the reader's viewport. */
+    tap: function (x, y) {
+      onTap(Number(x), Number(y))
+    },
+    /** A swipe's `phase` (`start`, `move`, `end` or `cancel`) at `x`, `y` in the reader's viewport. */
+    swipe: function (phase, x, y) {
+      onSwipe(String(phase), Number(x), Number(y))
     }
   }
 
-  document.addEventListener('click', onMarginClick)
   for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) {
     document.addEventListener(type, onMarginTouch, { passive: true })
   }
