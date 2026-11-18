@@ -210,7 +210,10 @@ play/pause button is `player.pause` while playback is requested and `player.play
 in any language, so the helper presses it only while it's `player.pause` and never restarts
 playback that has already stopped. Settings is the Account tab's `account.settings` row on iOS and ⌘, on a
 Mac. The tab bar minimizes as the content scrolls (`tabBarMinimizeBehavior`); `open` expands
-it. The item's metadata is `item.metadata`.
+it. At accessibility text sizes a regular-width iPad's top tab bar pages and hides Account
+behind its Next Page button, so if pressing a tab doesn't select it, `open` chooses it from the
+sidebar (`ToggleSideBar`). It scrolls Account by swiping `account.screen`, not the first
+collection view, which can be the sidebar. The item's metadata is `item.metadata`.
 
 `TabBarTests` checks the compact tab bar (#617): Home, Library, Downloads, Account and Search,
 with no More tab and no library section. It also chooses Series, then Library, from the

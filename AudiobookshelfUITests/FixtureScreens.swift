@@ -145,9 +145,11 @@ extension XCTestCase {
                 openTab(.account, in: app)
                 let link = app.descendants(matching: .any)["account.settings"].firstMatch
                 // The list is lazy: at large text sizes the Settings row is below the fold, and
-                // isn't in the hierarchy until it's scrolled to.
+                // isn't in the hierarchy until it's scrolled to. Swipe the Account list itself: the
+                // first collection view is a regular-width iPad's sidebar.
                 if !link.waitForExistence(timeout: 5) {
-                    for _ in 0..<6 where !link.exists { app.collectionViews.firstMatch.swipeUp() }
+                    let list = app.descendants(matching: .any)["account.screen"].firstMatch
+                    for _ in 0..<6 where !link.exists { list.swipeUp() }
                 }
                 XCTAssertTrue(
                     link.waitForExistence(timeout: Self.fixtureTimeout), "The Account tab has no Settings row")
@@ -286,7 +288,31 @@ extension XCTestCase {
         defer { popToRoot(in: app) }
         revealTab(button, in: app)
         button.press()
+        #if os(iOS)
+            chooseFromSidebar(button, in: app)
+        #endif
     }
+
+    #if os(iOS)
+        /// Selects `tab` from the sidebar (`ToggleSideBar`) if pressing it in the tab bar didn't: at
+        /// accessibility text sizes a regular-width iPad's top tab bar pages, and a later tab (Account)
+        /// sits behind the next one and the Next Page button, where its press lands. No-op once `tab`
+        /// is selected, or where there's no sidebar toggle (iPhone, macOS).
+        @MainActor
+        private func chooseFromSidebar(_ tab: XCUIElement, in app: XCUIApplication) {
+            let toggle = app.buttons["ToggleSideBar"].firstMatch
+            guard toggle.exists, !wait(for: { tab.isSelected }, timeout: 3) else { return }
+            toggle.press()
+            let entries = app.descendants(matching: .any).matching(identifier: tab.identifier)
+            func entry() -> XCUIElement? { entries.allElementsBoundByIndex.first { $0.isHittable && !$0.isSelected } }
+            guard wait(for: { entry() != nil }, timeout: Self.fixtureTimeout), let entry = entry() else {
+                return XCTFail("The sidebar has no \(tab.identifier) tab")
+            }
+            entry.press()
+            XCTAssertTrue(
+                wait(for: { tab.isSelected }, timeout: Self.fixtureTimeout), "\(tab.identifier) isn't selected")
+        }
+    #endif
 
     /// Goes back, with the navigation bar's Back button, until a tab's root (`FixtureTab/rootIdentifier`, or the
     /// Library root's Series section) shows. No-op at a root, or where there's no Back button (macOS sidebars).
