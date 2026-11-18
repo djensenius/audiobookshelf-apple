@@ -110,10 +110,13 @@ jobs:
     # A job of its own, so its cold app builds run beside build-and-test rather than after it.
     # Recent passing runs take 36–58 minutes (median 47). One stalled test (#627) adds about 13:
     # the UI-test step stops it after 10 (#661), then needs about 3 to restart the runner, list the
-    # tests and run it again alone (#666). 75 fits that in even the slowest run seen (58 + 13);
-    # 70 didn't. A second stall, in either run, may not fit: the job then times out and fails
-    # rather than passing. A passing run doesn't take longer.
-    timeout-minutes: 75
+    # tests and run it again alone (#666). 75 fitted that in even the slowest run seen (58 + 13);
+    # 70 didn't. The iPad steps add about 3 to create and boot a simulator, then the iPad test
+    # step, which has its own 25-minute limit: about 5.3 locally, but on CI xcodebuild was still
+    # starting the test runner on the cold iPad simulator 12 minutes in. 105 fits
+    # 58 + 13 + 3 + 25 = 99 plus setup. A second stall in the iPhone run may not fit: the job then
+    # times out and fails rather than passing. A passing run doesn't take longer.
+    timeout-minutes: 105
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       MISE_TASK_RUN_AUTO_INSTALL: "false"
@@ -166,6 +169,40 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
+      # The iPhone Duo is compact, where open(_:in:)'s sidebar fallback (#693) never runs, so one
+      # test that needs it runs on a regular-width iPad too: at AX sizes the iPad's top tab bar hides
+      # Account. Only that test: the iPad accessibility audits fail for other reasons (#698). It
+      # reuses the iPhone step's build (an iphonesimulator xctestrun serves any simulator) and runs
+      # only after that step passes, since the script clears the .build/ui-tests/ it uploads.
+      - name: Create an iPad simulator
+        run: |
+          udid="$(xcrun simctl create "abs-ui-ipad-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5-12GB)"
+          echo "IPAD_SIMULATOR_ID=$udid" >> "$GITHUB_ENV"
+          xcrun simctl bootstatus "$udid" -b
+
+      # IOS_SIMULATOR_ID is set in the command, not in env:, as the iPhone step's $GITHUB_ENV also sets it.
+      # Its own limit makes a stall here fail this step, so its results are uploaded, rather than
+      # the job's limit cancelling the run.
+      - name: UI tests on the iPad simulator (regular width)
+        id: ipad-ui-tests
+        timeout-minutes: 25
+        env:
+          ABS_UI_PLATFORM: ios
+          ABS_UI_ACTION: test-without-building
+        run: |
+          IOS_SIMULATOR_ID="$IPAD_SIMULATOR_ID" scripts/ui-test-ci.sh \
+            -only-testing:AudiobookshelfUITests/MiniPlayerTests/testLongPressAtAccessibilitySizeShowsNoMenu
+
+      # Only for the iPad step's own failure: after an iPhone failure the directory has the iPhone results.
+      - name: Upload the iPad UI test results
+        if: failure() && steps.ipad-ui-tests.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ui-tests-ipad-attempt-${{ github.run_attempt }}
+          path: .build/ui-tests/
+          retention-days: 7
+          if-no-files-found: ignore
+
       # XCUITest on macOS needs Automation Mode, which only an administrator on the runner can
       # enable (docs/testing/ui-tests.md). Until then, warn rather than pass silently. Once it runs,
       # run it with scripts/ui-test-ci.sh, as the iPhone step does, and revisit timeout-minutes
@@ -186,3 +223,9 @@ jobs:
         run: |
           xcrun simctl shutdown "$IOS_SIMULATOR_ID" || true
           xcrun simctl delete "$IOS_SIMULATOR_ID"
+
+      - name: Delete the iPad simulator
+        if: always() && env.IPAD_SIMULATOR_ID != ''
+        run: |
+          xcrun simctl shutdown "$IPAD_SIMULATOR_ID" || true
+          xcrun simctl delete "$IPAD_SIMULATOR_ID"

@@ -188,7 +188,7 @@ public actor LocalSessionUploader {
             do {
                 pending = try await store.pendingSessions(for: serverConnectionID)
             } catch {
-                logger.error("Reading pending local sessions failed: \(String(describing: error), privacy: .public)")
+                logger.error("Reading pending local sessions failed: \(Log.redacted(error), privacy: .public)")
                 break
             }
             await afterPendingRead?()
@@ -276,7 +276,7 @@ public actor LocalSessionUploader {
                 payloads.append(Payload(revision: PendingLocalSessionRevision(session), body: payload))
             } catch {
                 logger.error(
-                    "Local session \(session.id, privacy: .public) can't be uploaded: \(String(describing: error), privacy: .public)"
+                    "Local session \(session.id, privacy: .public) can't be uploaded: \(Log.redacted(error), privacy: .public)"
                 )
                 invalid.answer(
                     session.id, sent: PendingLocalSessionRevision(session), .failure("Invalid session: \(error)"))
@@ -347,7 +347,7 @@ public actor LocalSessionUploader {
             deleted = try await store.settleSessionUpload(
                 sent: attempt.sent, results: attempt.results, isFirstSync: isFirstSync, now: now())
         } catch {
-            logger.error("Settling local session uploads failed: \(String(describing: error), privacy: .public)")
+            logger.error("Settling local session uploads failed: \(Log.redacted(error), privacy: .public)")
             return false
         }
         for (id, result) in attempt.results {

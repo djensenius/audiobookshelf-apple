@@ -758,7 +758,7 @@ public final class ProgressSyncer {
             else { return }
             evidence = prepared
         } catch {
-            logger.error("Preparing session audio evidence failed: \(String(describing: error), privacy: .public)")
+            logger.error("Preparing session audio evidence failed: \(Log.redacted(error), privacy: .public)")
             return
         }
         // Preparation suspends. An ended scope may settle local evidence, never issue a request.
@@ -986,7 +986,7 @@ public final class ProgressSyncer {
             try await store.settleSessionAudio(send, outcome: outcome)
             return true
         } catch {
-            logger.error("Saving session audio outcome failed: \(String(describing: error), privacy: .public)")
+            logger.error("Saving session audio outcome failed: \(Log.redacted(error), privacy: .public)")
             return false
         }
     }
@@ -996,7 +996,7 @@ public final class ProgressSyncer {
             try await store.retrySessionAudioSettlements(for: service.serverConnectionID)
             return true
         } catch {
-            logger.error("Retrying session audio outcome failed: \(String(describing: error), privacy: .public)")
+            logger.error("Retrying session audio outcome failed: \(Log.redacted(error), privacy: .public)")
             return false
         }
     }
@@ -1041,7 +1041,7 @@ public final class ProgressSyncer {
                 } catch {
                     failedPositions[key] = position
                     finishReceipts(for: key, through: position.revision, result: .failure(error))
-                    logger.error("Saving pending progress failed: \(String(describing: error), privacy: .public)")
+                    logger.error("Saving pending progress failed: \(Log.redacted(error), privacy: .public)")
                 }
             }
         }
@@ -1104,7 +1104,7 @@ public final class ProgressSyncer {
         do {
             rows = try await store.pendingSync(for: service.serverConnectionID)
         } catch {
-            logger.error("Reading pending progress failed: \(String(describing: error), privacy: .public)")
+            logger.error("Reading pending progress failed: \(Log.redacted(error), privacy: .public)")
             drainOutcome.failed = true
             return
         }
@@ -1123,7 +1123,7 @@ public final class ProgressSyncer {
                         for: row.key, attempted: &attemptedConfirmations, attemptedKeys: &attemptedKeys)
                 else { continue }
             } catch {
-                logger.error("Fetching pending progress failed: \(String(describing: error), privacy: .public)")
+                logger.error("Fetching pending progress failed: \(Log.redacted(error), privacy: .public)")
                 drainOutcome.failed = true
                 return
             }
@@ -1144,7 +1144,7 @@ public final class ProgressSyncer {
                     patch = try await store.beginSend(for: row.key, now: clock.now())
                     if let patch { await afterProgressSendPreparation?(patch) }
                 } catch {
-                    logger.error("Starting a progress send failed: \(String(describing: error), privacy: .public)")
+                    logger.error("Starting a progress send failed: \(Log.redacted(error), privacy: .public)")
                     drainOutcome.failed = true
                     break
                 }
@@ -1205,7 +1205,7 @@ public final class ProgressSyncer {
                     for: key, attempted: &attemptedConfirmations, attemptedKeys: &attemptedKeys,
                     confirmationOnly: true)
             } catch {
-                logger.error("Confirming progress failed: \(String(describing: error), privacy: .public)")
+                logger.error("Confirming progress failed: \(Log.redacted(error), privacy: .public)")
                 drainOutcome.failed = true
                 return
             }
@@ -1264,7 +1264,7 @@ public final class ProgressSyncer {
             activeProgressIntakeSubmitted?()
             noteServerProgress(try await store.applyStartProgressChange(progress, captured: capture), of: owner)
         } catch {
-            logger.error("Refreshing active progress failed: \(String(describing: error), privacy: .public)")
+            logger.error("Refreshing active progress failed: \(Log.redacted(error), privacy: .public)")
         }
     }
 
@@ -1334,7 +1334,7 @@ public final class ProgressSyncer {
             pendingSettlements[patch.key] = nil
             return true
         } catch {
-            logger.error("Saving a progress outcome failed: \(String(describing: error), privacy: .public)")
+            logger.error("Saving a progress outcome failed: \(Log.redacted(error), privacy: .public)")
             drainOutcome.failed = true
             return false
         }

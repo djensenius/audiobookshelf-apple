@@ -160,6 +160,29 @@ private struct Fixture {
         #expect(next.phase == .done)
     }
 
+    /// The Logs screen removes every saved custom header value (#662), including a signed-out
+    /// connection's, which are kept for signing in again.
+    @Test func listsCustomHeaderValuesForLogs() async throws {
+        let fixture = try Fixture()
+        let accounts = fixture.makeAccounts()
+        #expect(await accounts.customHeaderValuesForLogs().isEmpty)
+        let model = fixture.model(accounts)
+        model.address = "https://\(fixture.server.host)"
+        model.customHeaders = [
+            CustomHeader(name: "CF-Access-Client-Secret", value: "cf-secret"),
+            CustomHeader(name: "X-Proxy", value: "proxy-secret"),
+        ]
+        await model.submitAddress()
+        model.username = "david"
+        await model.signIn()
+        #expect(model.phase == .done)
+        #expect(await accounts.customHeaderValuesForLogs() == ["cf-secret", "proxy-secret"])
+
+        _ = await accounts.logout()
+        #expect(accounts.client == nil)
+        #expect(await accounts.customHeaderValuesForLogs() == ["cf-secret", "proxy-secret"])
+    }
+
     /// With custom headers, `http` is used only after the user confirms it.
     @Test func connectsWithoutEncryptionAfterConfirming() async throws {
         let fixture = try Fixture()

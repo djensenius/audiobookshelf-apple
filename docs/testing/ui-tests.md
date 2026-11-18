@@ -27,6 +27,16 @@ and waits for the boot to finish (`xcrun simctl bootstatus <udid> -b`, as a cold
 first launch can time out), runs `scripts/ui-test-ci.sh` (below) on it with
 `ABS_UI_PLATFORM=ios` and `IOS_SIMULATOR_ID`, and always deletes it.
 
+If those pass, it runs one test on a regular-width iPad simulator too
+(`abs-ui-ipad-<run>-<attempt>`, an iPad Pro 13-inch (M5), also always deleted):
+`MiniPlayerTests/testLongPressAtAccessibilitySizeShowsNoMenu`, with the same script and
+`ABS_UI_ACTION=test-without-building`, reusing the iPhone build. The Duo is compact, so it never
+reaches `open`'s sidebar fallback (#693), which that test needs on an iPad at AX sizes. The
+iPad accessibility audits fail for other reasons (#698), so they don't run there. The step has
+its own 25-minute limit: the test takes about 5 minutes locally, but the CI runner can take
+over 12 minutes to start the test runner on the cold iPad simulator. A stall there fails the step
+and uploads its results instead of the job's limit cancelling the run.
+
 It then runs `mise run test:ui` on macOS only if `automationmodetool` reports Automation Mode
 enabled on the runner. Otherwise the step passes with a *macOS UI tests skipped* warning
 annotation on the run: an administrator must enable Automation Mode on the runner (the command
@@ -61,9 +71,10 @@ the script can't read) fails the step with the first run's exit status, without 
 
 Recent passing runs took 36 to 58 minutes (median 47). A flaky test costs only its retry in the
 runner. A hang adds the 10 minutes and about 3 more to restart the runner, list the tests and
-run it again, so the job's limit is 75 minutes: the slowest run seen with a hang would end by
-minute 71 or so. A second hang, in either run, may not fit; the job then times out and fails
-rather than passing.
+run it again: the slowest run seen with a hang would end by minute 71 or so. The iPad
+simulator and its step (up to 25 minutes, above) come after that, so the job's limit is 105
+minutes. A second hang in the iPhone run may not fit; the job then times out and fails rather
+than passing.
 
 If the step fails, the job uploads `.build/ui-tests/` (the result bundles and lists of tests) as
 the `ui-tests-iphone-duo-attempt-<attempt>` artifact, kept for 7 days.
@@ -216,7 +227,11 @@ play/pause button is `player.pause` while playback is requested and `player.play
 in any language, so the helper presses it only while it's `player.pause` and never restarts
 playback that has already stopped. Settings is the Account tab's `account.settings` row on iOS and ⌘, on a
 Mac. The tab bar minimizes as the content scrolls (`tabBarMinimizeBehavior`); `open` expands
-it. The item's metadata is `item.metadata`.
+it. At accessibility text sizes a regular-width iPad's top tab bar pages and hides Account
+behind its Next Page button, so if pressing a tab doesn't select it, `open` chooses it from the
+sidebar: it shows the sidebar (`ToggleSideBar`), presses the tab's sidebar cell, and hides the
+sidebar again (`ToggleSidebar`). It scrolls Account by swiping `account.screen`, not the first
+collection view, which can be the sidebar. The item's metadata is `item.metadata`.
 
 `TabBarTests` checks the compact tab bar (#617): Home, Library, Downloads, Account and Search,
 with no More tab and no library section. It also chooses Series, then Library, from the

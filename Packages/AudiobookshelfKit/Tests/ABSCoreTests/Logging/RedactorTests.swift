@@ -51,6 +51,29 @@ private let legacyToken =
         )
     }
 
+    /// A server or an error description can escape a custom header value before it's logged, so
+    /// its JSON, Swift-escaped, and percent-encoded forms are removed too, even escaped twice (#662).
+    @Test(arguments: [
+        #"proxy"se\cret/ü"#,  // as is
+        #"proxy\"se\\cret/ü"#,  // JSON, as JSONEncoder writes it with `.withoutEscapingSlashes`
+        #"proxy\"se\\cret\/ü"#,  // JSON, as JSONSerialization writes it
+        #"proxy\"se\\cret/\u00fc"#,  // JSON with non-ASCII escaped
+        #"proxy\"se\\cret\/\u00fc"#,  // JSON with `\/` and non-ASCII escaped
+        #"proxy\\\"se\\\\cret\\/ü"#,  // JSON inside an error's description
+        #"proxy\\\"se\\\\cret\\/\\u00fc"#,  // JSON with `\/` and `\u00fc` inside an error's description
+        "proxy%22se%5Ccret%2F%C3%BC",  // percent-encoded
+    ])
+    func redactsEscapedFormsOfCustomHeaderValues(form: String) {
+        let redactor = Redactor(secrets: [#"proxy"se\cret/ü"#])
+        #expect(redactor.redact(#"body: {"error":""# + form + #""}"#) == #"body: {"error":"<redacted>"}"#)
+    }
+
+    /// A server that escapes both `/` and non-ASCII writes `proxy/ü-secret` as `proxy\/\u00fc-secret` (#662).
+    @Test func redactsJSONFormWithEscapedSlashAndNonASCII() {
+        let redactor = Redactor(secrets: ["proxy/ü-secret"])
+        #expect(redactor.redact(#"{"error":"proxy\/\u00fc-secret"}"#) == #"{"error":"<redacted>"}"#)
+    }
+
     @Test func leavesOrdinaryTextAlone() {
         let text = "Loaded 12 items from library lib_1 in 0.4s"
         #expect(Log.redact(text) == text)
@@ -234,6 +257,21 @@ private let legacyToken =
         let redacted = Log.redact(text)
         #expect(!redacted.contains(token))
         #expect(redacted.contains("output-3.ts?token=<redacted>"))
+    }
+
+    /// ``Log/redacted(_:)`` is what public error logs interpolate (#662): an error's description
+    /// can quote a failing URL or the server's response text.
+    @Test func redactedErrorLosesTokensInItsDescription() throws {
+        struct ServerFailure: Error { let message: String }
+        let url = try #require(URL(string: "https://abs.example/api/me?token=0paque-legacy-token"))
+        let urlError = URLError(.timedOut, userInfo: [NSURLErrorFailingURLErrorKey: url])
+        let serverFailure = ServerFailure(message: "proxy said Authorization: Bearer 0paque-bearer")
+        for error in [urlError, serverFailure] as [any Error] {
+            #expect(String(describing: error).contains("0paque"))
+            #expect(!Log.redacted(error).contains("0paque"))
+        }
+        #expect(Log.redacted(urlError).contains("/api/me?token=<redacted>"))
+        #expect(Log.redacted(serverFailure).contains("Bearer <redacted>"))
     }
 
     /// Redaction must stay linear: before this was fixed, each parameter rescanned the rest of the

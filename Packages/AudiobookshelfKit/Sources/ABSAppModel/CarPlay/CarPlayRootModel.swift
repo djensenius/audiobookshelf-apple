@@ -270,7 +270,7 @@ public final class CarPlayRootModel {
                 try await playItem(itemID: itemID, episodeID: episodeID)
                 threw = false
             } catch {
-                Log.playback.error("CarPlay: couldn't play: \(error, privacy: .public)")
+                Log.playback.error("CarPlay: couldn't play: \(Log.redacted(error), privacy: .public)")
                 threw = true
             }
             if pendingPlay?.origin.operation == origin.operation { pendingPlay = nil }

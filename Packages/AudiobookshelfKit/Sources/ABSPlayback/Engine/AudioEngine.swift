@@ -442,7 +442,7 @@ public final class AudioEngine: AudioEngineProtocol {
             // Without an active session iOS would not play; report it and stay paused (the player
             // may already be playing, for example on a repeated play()). The media is still usable,
             // so this is not a sticky failure: the next play() activates again.
-            logger.error("Audio session activation failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("Audio session activation failed: \(Log.redact(error.localizedDescription), privacy: .public)")
             isAudioSessionActive = false
             isPlaybackRequested = false
             player.pause()
@@ -526,7 +526,7 @@ public final class AudioEngine: AudioEngineProtocol {
 
     private func fail(_ error: AudioEngineError) {
         guard failure == nil else { return }
-        logger.error("Playback failed: \(String(describing: error), privacy: .public)")
+        logger.error("Playback failed: \(Log.redacted(error), privacy: .public)")
         failure = error
         wasPlaybackRequestedAtFailure = isPlaybackRequested
         isPlaybackRequested = false

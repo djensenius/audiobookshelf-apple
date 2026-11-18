@@ -1739,7 +1739,7 @@ public final class PlaybackCoordinator {
                 _ = try await local.closeLocalSession(id: sessionID, report: report)
             } catch {
                 logger.error(
-                    "Closing a local session at account end failed: \(String(describing: error), privacy: .public)")
+                    "Closing a local session at account end failed: \(Log.redacted(error), privacy: .public)")
             }
         }
     }
