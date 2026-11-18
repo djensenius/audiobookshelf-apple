@@ -1,3 +1,4 @@
+import ABSCore
 import AVFoundation
 import Foundation
 
@@ -33,7 +34,9 @@ public struct PlaybackFailure: Sendable, Hashable {
     public let underlyingCode: Int?
     /// The newest HTTP status in the item's error log, when it has one.
     public let httpStatus: Int?
-    /// A display description (the error's localized description).
+    /// A display description (the error's localized description). ``init(error:errorLog:)``
+    /// passes AVFoundation's text through `Log.redact(_:)`, because the engine logs it publicly and
+    /// a stream URL in it may carry `?token=` (#662).
     public let description: String
 
     public init(
@@ -90,7 +93,7 @@ extension PlaybackFailure {
             let newest = errorLog.last { Self.kind(of: $0) != nil } ?? errorLog.last
             self.init(
                 kind: Self.kind(of: nil, errorLog: errorLog), domain: "", code: 0, httpStatus: status,
-                description: newest?.comment ?? "Unknown error")
+                description: newest?.comment.map(Log.redact) ?? "Unknown error")
             return
         }
         let nsError = error as NSError
@@ -100,7 +103,7 @@ extension PlaybackFailure {
             domain: nsError.domain, code: nsError.code,
             underlyingDomain: underlying?.domain, underlyingCode: underlying?.code,
             httpStatus: Self.loaderStatus(in: Self.chain(of: nsError)) ?? status,
-            description: nsError.localizedDescription)
+            description: Log.redact(nsError.localizedDescription))
     }
 
     /// The HTTP status a ``HeaderStreamingError`` in `errors` carries (its code; the other cases

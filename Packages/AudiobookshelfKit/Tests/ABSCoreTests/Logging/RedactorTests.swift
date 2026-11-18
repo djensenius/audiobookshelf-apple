@@ -9,6 +9,12 @@ private func base64URL(_ json: String) -> String {
         .replacingOccurrences(of: "=", with: "")
 }
 
+/// The shape of the legacy, non-expiring token servers 2.26.0–2.28.x put in HLS segment URIs
+/// (#662): a JWT with no `exp` claim.
+private let legacyToken =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiJ1MSIsInVzZXJuYW1lIjoicm9vdCIsImlhdCI6MTc1MjMwMDAwMH0"
+    + ".c2lnbmF0dXJl"
+
 @Suite struct RedactorTests {
     @Test func redactsBearerTokens() {
         #expect(Log.redact("Authorization: Bearer abc.def-123") == "Authorization: Bearer <redacted>")
@@ -177,6 +183,57 @@ private func base64URL(_ json: String) -> String {
         #expect(Log.redact("a=1;token=s3cret;b=2&c=3") == "a=1;token=<redacted>&c=3")
         #expect(Log.redact("token=a;code=b;x=1 next") == "token=<redacted> next")
         #expect(Log.redact("token=a&token=b") == "token=<redacted>&token=<redacted>")
+    }
+
+    // MARK: Stream URLs (#662)
+
+    /// Opaque values are caught by the query rule alone, without the JWT rule's help.
+    @Test(arguments: [legacyToken, "0paque-legacy-token"])
+    func redactsHLSSegmentURLs(token: String) {
+        #expect(
+            Log.redact("GET https://abs.example/hls/abc/output-3.ts?token=\(token) failed")
+                == "GET https://abs.example/hls/abc/output-3.ts?token=<redacted> failed")
+    }
+
+    @Test func redactsEveryURIInAnHLSPlaylist() {
+        let playlist = """
+            #EXTM3U
+            #EXTINF:6.000000,
+            output-0.ts?token=0paque-legacy-token
+            #EXTINF:6.000000,
+            output-1.ts?token=\(legacyToken)
+            #EXT-X-ENDLIST
+            """
+        #expect(
+            Log.redact(playlist) == """
+                #EXTM3U
+                #EXTINF:6.000000,
+                output-0.ts?token=<redacted>
+                #EXTINF:6.000000,
+                output-1.ts?token=<redacted>
+                #EXT-X-ENDLIST
+                """)
+    }
+
+    /// The `?token=` direct-play fallback for null-index podcast episodes (#210), as
+    /// `PlayableTrack.authorizedURL(accessToken:)` builds it.
+    @Test(arguments: [legacyToken, "a%2Bb/c"])
+    func redactsDirectPlayTokenFallbackURLs(token: String) {
+        #expect(
+            Log.redact("https://abs.example/abs/api/items/li-9/file/77%2F8?token=\(token)")
+                == "https://abs.example/abs/api/items/li-9/file/77%2F8?token=<redacted>")
+    }
+
+    /// `String(describing:)` of a URL error lists the failing URL in its user info.
+    @Test(arguments: [legacyToken, "0paque-legacy-token"])
+    func redactsFailingStreamURLsInErrorDescriptions(token: String) throws {
+        let url = try #require(URL(string: "https://abs.example/hls/abc/output-3.ts?token=\(token)"))
+        let error = URLError(.timedOut, userInfo: [NSURLErrorFailingURLErrorKey: url])
+        let text = String(describing: error)
+        #expect(text.contains(token))
+        let redacted = Log.redact(text)
+        #expect(!redacted.contains(token))
+        #expect(redacted.contains("output-3.ts?token=<redacted>"))
     }
 
     /// Redaction must stay linear: before this was fixed, each parameter rescanned the rest of the

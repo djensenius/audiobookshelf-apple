@@ -1492,7 +1492,7 @@ public final class PlaybackCoordinator {
                     // Reported as a session failure so an expired session leads to sign-in.
                     return .sessionStartFailed(error)
                 } catch {
-                    return .unexpected(String(describing: error))
+                    return .unexpected(Log.redact(String(describing: error)))
                 }
             },
             checkSession: { [weak self, sessions] in
@@ -1935,7 +1935,8 @@ public final class PlaybackCoordinator {
     private static func sessionError(_ error: any Error) -> PlaybackCoordinatorError {
         if let error = error as? APIError { return .sessionStartFailed(error) }
         if case LocalPlaybackError.downloadFilesMissing(let key) = error { return .downloadFilesMissing(key) }
-        return .unexpected(String(describing: error))
+        // Logged publicly (CarPlay), so a URL in the text loses its token (#662).
+        return .unexpected(Log.redact(String(describing: error)))
     }
 
     private static func streamError(_ error: any Error) -> PlaybackCoordinatorError {
