@@ -101,7 +101,7 @@ packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 | `mise run test:tools` | Tests for repository tools in `Tools/` (the strings importer), plus `test:release` (the release scripts) |
 | `mise run strings` / `strings:check` | Generate or verify ABSUI's `Localizable.xcstrings` from `strings/*.json` and `Localization/native/`; see [docs/localization.md](docs/localization.md) |
 | `mise run test:ios` | App tests on an iPhone Duo simulator (override with `IOS_SIMULATOR_ID`; local only, not in CI) |
-| `mise run test:ui` | UI tests against the fixture server on macOS (`ABS_UI_PLATFORM=ios` for the simulator; CI runs iOS, and macOS once the runner has Automation Mode); see [docs/testing/ui-tests.md](docs/testing/ui-tests.md) |
+| `mise run test:ui` | UI tests against the fixture server on macOS (`ABS_UI_PLATFORM=ios` for the simulator; CI runs iOS on `ready-to-ship` PRs and nightly, and macOS once the runner has Automation Mode); see [docs/testing/ui-tests.md](docs/testing/ui-tests.md) |
 | `mise run test:ui:runner` | Fake-CLI regressions for CI's UI-test retry (`scripts/ui-test-ci.sh`); also run by `lint:repo`, without Xcode or a simulator |
 | `mise run privacy:check <app>` | Check app and extension required-reason API symbols against their manifests; `mise run privacy:check:tests` tests the detector and runs in `lint:repo` |
 | `mise run screenshots` | App Store screenshots from the fixture server into `build/screenshots/` (`-- --device <id> --locale <tag>`); see [docs/testing/screenshots.md](docs/testing/screenshots.md) |
@@ -172,6 +172,11 @@ tests, including the partial UIKit image-hosting and network-policy branches.
   history.
 - Copilot review runs on every push; address its comments.
 - CI must be green on the exact head SHA before merging.
+- The UI tests take over an hour, so they run only on pull requests labelled
+  `ready-to-ship`, and nightly on `main` (#712). Once review is done, add the label to any
+  PR that changes the app, its packages or its UI tests, and merge only after *UI tests*
+  passes on the exact head. Other PRs may skip it and rely on the nightly run. See
+  [docs/testing/ui-tests.md](docs/testing/ui-tests.md#in-ci).
 
 ## Legacy code and upstream
 
