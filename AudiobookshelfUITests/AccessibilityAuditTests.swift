@@ -924,9 +924,11 @@ struct KnownAuditIssue {
     /// 5.3 to 5.4 seconds against 3.3 to 4.4). A recording shows the player's relayout trailing
     /// the audit's size steps, as for Library's cards (#622), so waiting before the audit can't
     /// help. Downloads' "No downloads" (its `ContentUnavailableView`'s title) did the same about
-    /// one walk in four (#698). Text that really doesn't scale is reported again by every
-    /// re-audit and still fails: a fixed font size is "unsupported", not held back at all.
-    /// Never on macOS, which has no Dynamic Type audit. #705
+    /// one walk in four (#698), but not in place (0 of 8 audits), so it's held on that evidence
+    /// alone: if its re-audit activity never shows in the result bundles, drop Downloads here.
+    /// Text that really doesn't scale is reported again by every re-audit and still fails: a
+    /// fixed font size is "unsupported", not held back at all. Never on macOS, which has no
+    /// Dynamic Type audit. #705
     @MainActor
     static func unconfirmedDynamicTypeKey(_ issue: XCUIAccessibilityAuditIssue, on screen: FixtureScreen) -> String? {
         [FixtureScreen.player, .downloads].contains(screen) ? partialDynamicTypeKey(issue) : nil
