@@ -18,6 +18,8 @@ struct ChaptersSlot: View {
             }
         }
         .disabled(!model.hasChapters)
+        // For UI tests.
+        .accessibilityIdentifier("player.chapters")
     }
 }
 
@@ -113,13 +115,17 @@ private struct ChaptersList: View {
             List {
                 Section {
                     ForEach(chapters, id: \.row.id) { entry in
+                        let isCurrent = entry.row.id == current
                         ChapterRow(
-                            row: entry.row, presentation: entry.presentation, isCurrent: entry.row.id == current,
+                            row: entry.row, presentation: entry.presentation, isCurrent: isCurrent,
                             columnWidth: isAccessibilitySize ? nil : columnWidth
                         ) {
                             select(entry.row)
                         }
                         .equatable()
+                        // Here, not in the row's body: the list doesn't see a row background set
+                        // inside `.equatable()`'s view, so the current chapter wasn't tinted. #705
+                        .listRowBackground(isCurrent ? ABSColor.accent.opacity(0.2) : nil)
                     }
                 } header: {
                     if !isAccessibilitySize {
@@ -178,7 +184,7 @@ private struct ChapterRow: View, Equatable {
                     if let columnWidth {
                         ChapterColumns(
                             columnWidth: columnWidth, start: presentation.startText,
-                            duration: presentation.durationText
+                            duration: presentation.durationText, timesStyle: timesStyle
                         ) {
                             title
                         }
@@ -190,7 +196,7 @@ private struct ChapterRow: View, Equatable {
                                 Text(verbatim: presentation.durationText)
                             }
                             .font(.subheadline.monospacedDigit())
-                            .foregroundStyle(ABSColor.mutedForeground)
+                            .foregroundStyle(timesStyle)
                         }
                     }
                 }
@@ -205,7 +211,6 @@ private struct ChapterRow: View, Equatable {
         }
         .buttonStyle(.plain)
         .fontWeight(isCurrent ? .semibold : nil)
-        .listRowBackground(isCurrent ? ABSColor.accent.opacity(0.2) : nil)
         // On the button itself, so VoiceOver keeps its action.
         .accessibilityLabel(Text(verbatim: presentation.accessibilityLabel))
         .accessibilityValue(Text(verbatim: isCurrent ? L10n.string("LabelCurrentChapter") : ""))
@@ -217,16 +222,23 @@ private struct ChapterRow: View, Equatable {
             .font(.body)
             .lineLimit(3)
     }
+
+    /// The current row's times are primary, like its title: on the row's tint, muted measures 4.2:1
+    /// in light. #705
+    private var timesStyle: AnyShapeStyle {
+        isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(ABSColor.mutedForeground)
+    }
 }
 
 /// A title followed by the start and duration columns, for the rows and the header. The columns
-/// are in `ABSColor.mutedForeground`, not `.secondary`: in the list's section header, which is
+/// default to `ABSColor.mutedForeground`, not `.secondary`: in the list's section header, which is
 /// secondary already, `.secondary` drew the header's Start and Duration at 1.7:1 in light and 2.3:1
 /// in dark, and in a row it's 4.0:1 on white. #705
 private struct ChapterColumns<Title: View>: View {
     let columnWidth: CGFloat
     let start: String
     let duration: String
+    var timesStyle = AnyShapeStyle(ABSColor.mutedForeground)
     @ViewBuilder let title: Title
 
     var body: some View {
@@ -240,7 +252,7 @@ private struct ChapterColumns<Title: View>: View {
                     .frame(minWidth: columnWidth, alignment: .trailing)
             }
             .font(.subheadline.monospacedDigit())
-            .foregroundStyle(ABSColor.mutedForeground)
+            .foregroundStyle(timesStyle)
         }
     }
 }

@@ -260,6 +260,15 @@ bar doesn't have it:
 ABS_UI_PLATFORM=ios mise run test:ui -- -only-testing:AudiobookshelfUITests/DownloadQueueIndicatorTests -jobs 2
 ```
 
+`ChapterHighlightTests` (iOS) checks the current chapter's tint in the chapter list (#705), which
+the audits can't catch. It plays *Pride and Prejudice* and shows the list: on an iPad, the
+details pane beside the player turned to landscape (turned back afterwards); elsewhere, the
+Chapters sheet (`player.chapters`, in the overflow menu of a vertical bar) at its large detent.
+It checks, in light, that the current chapter's row background differs from another row's, and
+that its times measure 4.5:1 or more in black (`MeasuredContrast`). In landscape the screenshot
+is the portrait framebuffer tagged with its orientation, so the test draws it upright before
+reading the rows' frames.
+
 `AccessibilityAuditTests` audits each of those screens at the default text size and at AX5;
 see docs/accessibility.md, "Automated audits". Locally the default size takes about 80 seconds on
 the simulator and AX5 about 100; on CI's runners each audit has taken 110 to 371 seconds.
