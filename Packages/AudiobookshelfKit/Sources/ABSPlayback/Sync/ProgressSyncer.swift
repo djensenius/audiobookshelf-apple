@@ -64,12 +64,12 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   A successful `/sync` still drains the saved position through PATCH: only the store's PATCH
 ///   acknowledgement clears the dirty group, without clearing a newer edit. Clean rows are kept.
 ///   Failed settlements retain their token and outcome for the next drain. A PATCH rejected
-///   for good (``isPermanent(_:)``: 400, 404, 410, 422, or a 403 with Audiobookshelf's exact
-///   no-access message; other 403s stay retryable) is settled with `rejectSend`, so the row
-///   stops being retried until it is edited again. A drain that stopped on any other failure
-///   (a PATCH, a pending row's GET or a store save) schedules one more drain, backed off like
-///   `/sync`; a drain that completes cleanly resets that backoff. Both wakes are cancelled on
-///   detach and quiesce.
+///   for good (``patchRejectionStatus(_:)``: 400, 404, 410, 422, or, for progress PATCHes only,
+///   a 403 with Audiobookshelf's exact no-access message; other 403s stay retryable) is settled
+///   with `rejectSend`, so the row stops being retried until it is edited again. A drain that
+///   stopped on any other failure (a PATCH, a pending row's GET or a store save) schedules one
+///   more drain, backed off like `/sync`; a drain that completes cleanly resets that backoff.
+///   Both wakes are cancelled on detach and quiesce.
 ///   Each pending row is fetched once before sending. Unusable or rejected progress defers that
 ///   row; a thrown lookup stops the pass. In a real conflict, a server value newer than the edit
 ///   wins by ADR 0003 and that group isn't PATCHed over it. A group ADR 0003 shields, because the
@@ -218,8 +218,8 @@ public final class ProgressSyncer {
     private(set) var syncWake: Task<Void, Never>?
     /// The drain scheduled after a drain that stopped on a failure. Readable for tests.
     private(set) var drainWake: Task<Void, Never>?
-    /// Consecutive drains that stopped on a failure.
-    private var drainFailures = 0
+    /// Consecutive drains that stopped on a failure. Readable for tests.
+    private(set) var drainFailures = 0
     /// How the drain running now ended: on a failure, or after its last pending row and
     /// confirmation (neither when it stopped early for another reason, such as a newer position).
     var drainOutcome: (failed: Bool, completed: Bool) = (false, false)
@@ -1176,7 +1176,7 @@ public final class ProgressSyncer {
                     try await service.updateProgress(
                         itemID: row.key.libraryItemId, episodeID: row.key.episodeId, update)
                 } catch {
-                    if let status = Self.permanentStatus(error) {
+                    if let status = Self.patchRejectionStatus(error) {
                         logger.error(
                             "The server rejected a progress PATCH for \(row.key.rawValue, privacy: .private(mask: .hash)) with status \(status, privacy: .public); not retrying it until the next edit"
                         )
@@ -1387,11 +1387,10 @@ public final class ProgressSyncer {
         }
     }
 
-    /// A PATCH rejection that resending the same body would meet again: the item or episode is
-    /// gone (404, 410), the server refuses the body (400, 422), or the user can't access the
-    /// item (a 403 whose body is exactly ``noItemAccessMessage``). Only this list, so a
-    /// misbehaving proxy can't quarantine rows with other statuses (409, 413, 401, 408, 429,
-    /// 5xx and any other 403 stay retryable).
+    /// A rejection that resending the same body would meet again: the item or episode is gone
+    /// (404, 410) or the server refuses the body (400, 422). Only this list, so a misbehaving
+    /// proxy can't quarantine rows with other statuses (409, 413, 401, 403, 408, 429 and 5xx stay
+    /// retryable). Progress PATCHes also accept one exact 403 (``patchRejectionStatus(_:)``).
     static func isPermanent(_ error: any Error) -> Bool { permanentStatus(error) != nil }
 
     /// The plain-text 403 body Audiobookshelf 2.38.0 sends when a progress update targets an
@@ -1399,12 +1398,21 @@ public final class ProgressSyncer {
     /// `createUpdateMediaProgressFromPayload` in `server/models/User.js` (#680).
     static let noItemAccessMessage = "User does not have access to this library item"
 
+    /// The status a progress PATCH was rejected with for good: a permanent status
+    /// (``isPermanent(_:)``), or a 403 whose body is exactly ``noItemAccessMessage``. Any other
+    /// 403 stays retryable, so a proxy still can't quarantine rows.
+    static func patchRejectionStatus(_ error: any Error) -> Int? {
+        if let status = permanentStatus(error) { return status }
+        guard case .forbidden(let message?) = error as? APIError,
+            message.trimmingCharacters(in: .whitespacesAndNewlines) == noItemAccessMessage
+        else { return nil }
+        return 403
+    }
+
     private static func permanentStatus(_ error: any Error) -> Int? {
         switch error as? APIError {
         case .notFound: 404
         case .http(let status, _) where [400, 404, 410, 422].contains(status): status
-        case .forbidden(let message?)
-        where message.trimmingCharacters(in: .whitespacesAndNewlines) == noItemAccessMessage: 403
         default: nil
         }
     }
