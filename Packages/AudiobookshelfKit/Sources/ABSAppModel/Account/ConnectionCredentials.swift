@@ -229,7 +229,7 @@ actor ConnectionCredentials: TokenProvider {
         do {
             _ = try load()
         } catch {
-            Log.auth.error("Couldn't read a connection's session: \(error.description, privacy: .public)")
+            Log.auth.error("Couldn't read a connection's session: \(Log.redact(error.description), privacy: .public)")
             return nil
         }
         return session?.tokens
@@ -314,7 +314,7 @@ actor ConnectionCredentials: TokenProvider {
             needsWrite = false
             return nil
         } catch {
-            Log.auth.error("Couldn't save a connection's session: \(error.description, privacy: .public)")
+            Log.auth.error("Couldn't save a connection's session: \(Log.redact(error.description), privacy: .public)")
             return error
         }
     }

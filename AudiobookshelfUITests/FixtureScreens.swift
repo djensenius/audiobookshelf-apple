@@ -145,9 +145,11 @@ extension XCTestCase {
                 openTab(.account, in: app)
                 let link = app.descendants(matching: .any)["account.settings"].firstMatch
                 // The list is lazy: at large text sizes the Settings row is below the fold, and
-                // isn't in the hierarchy until it's scrolled to.
+                // isn't in the hierarchy until it's scrolled to. Swipe the Account list itself: the
+                // first collection view is a regular-width iPad's sidebar.
                 if !link.waitForExistence(timeout: 5) {
-                    for _ in 0..<6 where !link.exists { app.collectionViews.firstMatch.swipeUp() }
+                    let list = app.descendants(matching: .any)["account.screen"].firstMatch
+                    for _ in 0..<6 where !link.exists { list.swipeUp() }
                 }
                 XCTAssertTrue(
                     link.waitForExistence(timeout: Self.fixtureTimeout), "The Account tab has no Settings row")
@@ -210,9 +212,13 @@ extension XCTestCase {
             #if os(iOS)
                 openTab(.library, in: app)
                 // A sidebar (regular width) has a Series tab; a compact Library root has its section menu.
+                // A regular-width iPad's top tab bar leaves Series to its sidebar, and its Library root
+                // has no section menu, so it's chosen from the sidebar there. #698
                 let tab = app.descendants(matching: .any)["tab.series"].firstMatch
                 if tab.exists && tab.isHittable {
                     tab.press()
+                } else if app.buttons["ToggleSideBar"].exists {
+                    chooseFromSidebar("tab.series", in: app)
                 } else {
                     chooseSection(symbol: "rectangle.stack", in: app)
                 }
@@ -286,7 +292,43 @@ extension XCTestCase {
         defer { popToRoot(in: app) }
         revealTab(button, in: app)
         button.press()
+        #if os(iOS)
+            chooseFromSidebar("tab.\(tab.rawValue)", in: app)
+        #endif
     }
+
+    #if os(iOS)
+        /// Selects the tab with `identifier` from the sidebar if pressing it in the tab bar didn't: at
+        /// accessibility text sizes a regular-width iPad's top tab bar pages, and a later tab
+        /// (Account) sits behind the next one and the Next Page button, where its press lands; and
+        /// Series is only in the sidebar.
+        /// It shows the sidebar (`ToggleSideBar`), presses the tab's sidebar cell (the tab bar's
+        /// copies are buttons), and hides the sidebar again (`ToggleSidebar`), leaving the layout as
+        /// it was. No-op once the tab is selected, or where there's no sidebar toggle (iPhone). A tab
+        /// only in the sidebar (Series) isn't in the tree while it's hidden, nor once choosing it has
+        /// hidden it again, so then the screen it opens is the check.
+        @MainActor
+        private func chooseFromSidebar(_ identifier: String, in app: XCUIApplication) {
+            let tab = app.descendants(matching: .any)[identifier].firstMatch
+            let show = app.buttons["ToggleSideBar"].firstMatch
+            guard show.exists, !wait(for: { tab.exists && tab.isSelected }, timeout: 3) else { return }
+            show.press()
+            let entry = app.collectionViews.cells.matching(identifier: identifier).firstMatch
+            guard wait(for: { entry.exists && entry.isHittable }, timeout: Self.fixtureTimeout) else {
+                return XCTFail("The sidebar has no \(identifier) tab")
+            }
+            entry.press()
+            XCTAssertTrue(
+                wait(for: { !tab.exists || tab.isSelected }, timeout: Self.fixtureTimeout),
+                "\(identifier) isn't selected")
+            // Choosing a tab usually dismisses the sidebar; hide it if it's still there.
+            let hide = app.buttons["ToggleSidebar"].firstMatch
+            if hide.exists && hide.isHittable { hide.press() }
+            XCTAssertTrue(
+                wait(for: { !(entry.exists && entry.isHittable) }, timeout: Self.fixtureTimeout),
+                "The sidebar didn't close")
+        }
+    #endif
 
     /// Goes back, with the navigation bar's Back button, until a tab's root (`FixtureTab/rootIdentifier`, or the
     /// Library root's Series section) shows. No-op at a root, or where there's no Back button (macOS sidebars).

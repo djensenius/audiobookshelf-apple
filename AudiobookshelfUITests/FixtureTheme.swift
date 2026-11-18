@@ -15,13 +15,19 @@ enum FixtureTheme: String {
         self.init(rawValue: arguments[index + 1])
     }
 
-    /// The colour the mini player draws its title in: SwiftUI's primary label, white in dark.
-    var miniPlayerTitle: MeasuredContrast.RGB { .init(red: 255, green: 255, blue: 255) }
+    /// The colour the mini player draws its title in for `theme` (`nil`: the light appearance a new
+    /// simulator has): SwiftUI's primary label, white in dark and black in light. #698
+    static func miniPlayerTitle(_ theme: FixtureTheme?) -> MeasuredContrast.RGB {
+        theme == nil ? .init(red: 0, green: 0, blue: 0) : .init(red: 255, green: 255, blue: 255)
+    }
 
-    /// The colour the mini player draws its author in: mirrors `ABSColor.mutedForegroundOnGlass`
-    /// (ABSUI), the same in dark and black. If the app's colour changes and this doesn't, too few
-    /// pixels match, the measurement is `nil` and the audit issue fails, unfiltered.
-    var miniPlayerSecondaryText: MeasuredContrast.RGB { .init(red: 214, green: 218, blue: 222) }
+    /// The colour the mini player draws its author in for `theme` (`nil`: light): mirrors
+    /// `ABSColor.mutedForegroundOnGlass` (ABSUI), the same in dark and black. If the app's colour
+    /// changes and this doesn't, too few pixels match, the measurement is `nil` and the audit issue
+    /// fails, unfiltered. #698
+    static func miniPlayerSecondaryText(_ theme: FixtureTheme?) -> MeasuredContrast.RGB {
+        theme == nil ? .init(red: 91, green: 99, blue: 108) : .init(red: 214, green: 218, blue: 222)
+    }
 
     /// The colour the Player draws its elapsed and remaining times in for `theme` (`nil`: the light
     /// appearance a new simulator has): mirrors `ABSColor.mutedForeground` (ABSUI). If the app's

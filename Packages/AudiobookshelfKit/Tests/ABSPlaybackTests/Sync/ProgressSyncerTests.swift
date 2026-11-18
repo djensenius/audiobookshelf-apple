@@ -519,4 +519,20 @@ struct ProgressSyncerTests {
     @Test func cancellationIsAmbiguous() {
         #expect(!ProgressSyncer.neverReachedServer(CancellationError()))
     }
+
+    /// An `NSError` or `URLError` with a description has no `(` before the URL it quotes, so
+    /// `caseName` would keep the URL's token if it didn't redact it (#662).
+    @Test func caseNameRedactsTokensInErrorsWithoutACase() throws {
+        let url = try #require(URL(string: "https://h/x?token=SECRET"))
+        let description = "Could not load \(url.absoluteString)"
+        let errors: [any Error] = [
+            NSError(domain: "Test", code: 1, userInfo: [NSLocalizedDescriptionKey: description]),
+            URLError(.timedOut, userInfo: [NSLocalizedDescriptionKey: description, NSURLErrorFailingURLErrorKey: url]),
+        ]
+        for error in errors {
+            #expect(String(describing: error).prefix { $0 != "(" }.contains("SECRET"))
+            #expect(!ProgressSyncer.caseName(error).contains("SECRET"))
+        }
+        #expect(ProgressSyncer.caseName(APIError.http(status: 500, message: "m")) == "http")
+    }
 }

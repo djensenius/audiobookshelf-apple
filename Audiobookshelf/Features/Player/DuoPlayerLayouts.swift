@@ -90,14 +90,17 @@
         }
     }
 
-    /// Reports whether the enclosing split arrangement is side by side.
+    /// Reports whether the enclosing split arrangement is side by side
+    /// (``SplitArrangement/showsSecondaryPane(axis:)``).
     @available(iOS 27.1, *)
     private struct SplitAxisReader: ViewModifier {
         @Binding var isSplit: Bool
         @Environment(\.splitArrangementAxis) private var axis
 
         func body(content: Content) -> some View {
-            content.onChange(of: axis != nil, initial: true) { _, split in isSplit = split }
+            content.onChange(of: SplitArrangement.showsSecondaryPane(axis: axis), initial: true) { _, split in
+                isSplit = split
+            }
         }
     }
 

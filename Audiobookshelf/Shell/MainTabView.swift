@@ -60,6 +60,8 @@ struct MainTabView<Root: View>: View {
         #endif
         // Above the tabs and sidebar while the network or the server is unavailable (#76).
         .modifier(ConnectionBannerHost())
+        // The tab roots' connection indicator, and whether its problem has lasted (#691).
+        .modifier(ConnectionIndicatorHost())
         .modifier(PlayerSlot(router: router, player: player))
         .modifier(RemoteProgressOfferHost())
         .modifier(SceneLibrarySync(router: router))

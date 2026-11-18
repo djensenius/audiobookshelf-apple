@@ -27,6 +27,18 @@ and waits for the boot to finish (`xcrun simctl bootstatus <udid> -b`, as a cold
 first launch can time out), runs `scripts/ui-test-ci.sh` (below) on it with
 `ABS_UI_PLATFORM=ios` and `IOS_SIMULATOR_ID`, and always deletes it.
 
+If those pass, it runs one test on a regular-width iPad simulator too
+(`abs-ui-ipad-<run>-<attempt>`, an iPad Pro 13-inch (M5), also always deleted):
+`MiniPlayerTests/testLongPressAtAccessibilitySizeShowsNoMenu`, with the same script and
+`ABS_UI_ACTION=test-without-building`, reusing the iPhone build. The Duo is compact, so it never
+reaches `open`'s sidebar fallback (#693), which that test needs on an iPad at AX sizes. The
+iPad accessibility audits pass but still flake at AX5 (#705), so they don't run there. The iPhone
+Duo is shut down before the iPad is created, so the two don't normally run at once. The step has
+its own 35-minute limit: the test takes about 5 minutes locally, but the CI runner can take over
+12 minutes to start the test runner on the cold iPad simulator, and the first passing run took 21
+(#703). A stall there fails the step and uploads its results instead of the job's limit
+cancelling the run.
+
 It then runs `mise run test:ui` on macOS only if `automationmodetool` reports Automation Mode
 enabled on the runner. Otherwise the step passes with a *macOS UI tests skipped* warning
 annotation on the run: an administrator must enable Automation Mode on the runner (the command
@@ -61,9 +73,10 @@ the script can't read) fails the step with the first run's exit status, without 
 
 Recent passing runs took 36 to 58 minutes (median 47). A flaky test costs only its retry in the
 runner. A hang adds the 10 minutes and about 3 more to restart the runner, list the tests and
-run it again, so the job's limit is 75 minutes: the slowest run seen with a hang would end by
-minute 71 or so. A second hang, in either run, may not fit; the job then times out and fails
-rather than passing.
+run it again: the slowest run seen with a hang would end by minute 71 or so. The iPad
+simulator and its step (up to 35 minutes, above) come after that, so the job's limit is 115
+minutes. A second hang in the iPhone run may not fit; the job then times out and fails rather
+than passing.
 
 If the step fails, the job uploads `.build/ui-tests/` (the result bundles and lists of tests) as
 the `ui-tests-iphone-duo-attempt-<attempt>` artifact, kept for 7 days.
@@ -110,6 +123,12 @@ half of the audio, then nothing more, so the download queue and the tab roots' q
 (`downloads.queueIndicator`) stay up. It holds for about a minute: the download session's
 request timeout (a minute without data, by default) can then end the transfer, so check the
 indicator soon after starting the download.
+
+Add `-ABSConnectionState <state>` (`connecting`, `offline`, `serverUnreachable`, `connected`,
+`cellular` or `metered`) to force what the connection indicator (`connection.indicator`) shows.
+A fixture launch has no realtime socket, so the indicator is otherwise hidden. Only the indicator
+changes: the network, the connection banner and the replies don't. Only fixture launches read it
+(`FixtureServer.connectionStateArgument`).
 
 The replies are the `fixture-*` files in `Audiobookshelf/Fixtures/Resources/`: status, ping,
 login and authorize, `/api/me`, the libraries, the library with its filter data, the
@@ -216,7 +235,11 @@ play/pause button is `player.pause` while playback is requested and `player.play
 in any language, so the helper presses it only while it's `player.pause` and never restarts
 playback that has already stopped. Settings is the Account tab's `account.settings` row on iOS and ⌘, on a
 Mac. The tab bar minimizes as the content scrolls (`tabBarMinimizeBehavior`); `open` expands
-it. The item's metadata is `item.metadata`.
+it. At accessibility text sizes a regular-width iPad's top tab bar pages and hides Account
+behind its Next Page button, so if pressing a tab doesn't select it, `open` chooses it from the
+sidebar: it shows the sidebar (`ToggleSideBar`), presses the tab's sidebar cell, and hides the
+sidebar again (`ToggleSidebar`). It scrolls Account by swiping `account.screen`, not the first
+collection view, which can be the sidebar. The item's metadata is `item.metadata`.
 
 `TabBarTests` checks the compact tab bar (#617): Home, Library, Downloads, Account and Search,
 with no More tab and no library section. It also chooses Series, then Library, from the
@@ -245,6 +268,13 @@ bar doesn't have it:
 ABS_UI_PLATFORM=ios mise run test:ui -- -only-testing:AudiobookshelfUITests/DownloadQueueIndicatorTests -jobs 2
 ```
 
+`ConnectionIndicatorTests` launches with `-ABSConnectionState offline` and checks the connection
+indicator is in the bar of the Home and Library roots in compact width (#691), not their overflow
+menu. It also checks the worst case: offline with a download stalled by `-ABSStallDownloads`,
+where the Library root's bar has both the queue indicator and the connection indicator. The
+indicator outranks the filter and sort only once the problem has lasted 3 seconds, so the checks
+wait for it. A regular-width iPad and a Mac skip it.
+
 `AccessibilityAuditTests` audits each of those screens at the default text size and at AX5;
 see docs/accessibility.md, "Automated audits". Locally the default size takes about 80 seconds on
 the simulator and AX5 about 100; on CI's runners each audit has taken 110 to 371 seconds.
@@ -260,6 +290,15 @@ xcrun simctl create abs-audits com.apple.CoreSimulator.SimDeviceType.iPhone-17  
 xcrun simctl boot <udid> && xcrun simctl bootstatus <udid> -b
 ABS_UI_PLATFORM=ios IOS_SIMULATOR_ID=<udid> mise run test:ui -- -only-testing:AudiobookshelfUITests/AccessibilityAuditTests -jobs 2
 xcrun simctl delete <udid>
+```
+
+iPad accessibility audits (manual): the audits pass on a regular-width iPad but still flake at
+AX5 (#705), so CI doesn't run them there. Run them on an iPad Pro 13-inch (M5) simulator before a
+change that affects regular-width layout, themes or text sizes, the same way, with
+`com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5-12GB`:
+
+```sh
+ABS_UI_PLATFORM=ios IOS_SIMULATOR_ID=<ipad-udid> mise run test:ui -- -only-testing:AudiobookshelfUITests/AccessibilityAuditTests
 ```
 
 ## Localized runs and screenshots

@@ -97,7 +97,9 @@ struct LanguageSettingsSection: View {
     var body: some View {
         Section {
             LabeledContent {
+                // The value's default secondary label is too faint on the themed row (#698).
                 Text(verbatim: currentLanguage)
+                    .foregroundStyle(ABSColor.mutedForeground)
             } label: {
                 Text(verbatim: L10n.string("LabelLanguage"))
             }

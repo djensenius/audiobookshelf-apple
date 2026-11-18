@@ -306,10 +306,18 @@ private struct ItemDetailActions: View {
         let play = ItemDetailPlayPresentation(button: model.playButton, isMissing: model.isMissing, canPlay: canPlay)
         HStack(spacing: ABSSpacing.small) {
             Button(action: onPlay) {
-                Label {
+                let label = Label {
                     Text(verbatim: L10n.string(play.titleKey))
                 } icon: {
                     Image(systemName: play.systemImage)
+                }
+                // At accessibility sizes the regular-width side column (300 points) can't fit the
+                // icon beside the title and the other buttons, which broke "Play" mid-word; the
+                // title alone fits. A longer localized title shrinks to 80% on one line rather than
+                // breaking mid-word, and only then truncates (VoiceOver still reads it whole). #698
+                ViewThatFits(in: .horizontal) {
+                    label
+                    label.labelStyle(.titleOnly).lineLimit(1).minimumScaleFactor(0.8)
                 }
                 .frame(maxWidth: .infinity)
                 .onAccentForeground()

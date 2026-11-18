@@ -957,7 +957,7 @@ public final class AccountManager {
     private func restoreFailed(_ connection: ServerConnectionDTO?, error: any Error) {
         switch error {
         case let error as KeychainError:
-            Log.auth.error("Couldn't read the saved session: \(error.description, privacy: .public)")
+            Log.auth.error("Couldn't read the saved session: \(Log.redact(error.description), privacy: .public)")
             if error.isUnavailable, let connection {
                 // The saved session may be fine once the Keychain can be read again.
                 goOffline(connection, client: nil, error: .keychain(error))
