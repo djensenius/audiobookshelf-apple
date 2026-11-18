@@ -74,7 +74,9 @@ final class AccessibilityAuditTests: XCTestCase {
     /// ``KnownAuditIssue/namedContrastUnderBottomBar(_:on:in:)`` defers is checked by
     /// ``auditAboveBottomBar(_:deferring:namedDeferrals:hasUnnamed:on:in:named:)``, and one
     /// ``KnownAuditIssue/contentButtonUnderBottomBar(_:on:in:)`` defers by
-    /// ``auditButtonsAboveBottomBar(_:on:in:named:)``.
+    /// ``auditButtonsAboveBottomBar(_:on:in:named:)``. One that
+    /// ``KnownAuditIssue/unconfirmedDynamicTypeKey(_:on:)`` holds back fails only if
+    /// ``confirmDynamicType(_:in:named:)`` reports it again.
     @MainActor
     private func audit(
         _ screen: FixtureScreen, for types: XCUIAccessibilityAuditType, in app: XCUIApplication, textSize: String
@@ -83,6 +85,7 @@ final class AccessibilityAuditTests: XCTestCase {
         var deferred: [String] = []
         var named: [KnownAuditIssue.NamedDeferral] = []
         var buttons: [(label: String, failure: String)] = []
+        var unconfirmed: [(key: String, failure: String)] = []
         var hasUnnamed = false
         let name = "\(screen.name) (\(textSize))"
         // "Dynamic Type font sizes are partially unsupported (User will not be able to change the
@@ -128,6 +131,8 @@ final class AccessibilityAuditTests: XCTestCase {
                         named.append(.init(label: text.label, occurrence: text.occurrence, failure: failure))
                     } else if let label = KnownAuditIssue.contentButtonUnderBottomBar(issue, on: screen, in: app) {
                         buttons.append((label, "\(name): \(Self.failure(issue))"))
+                    } else if let key = KnownAuditIssue.unconfirmedDynamicTypeKey(issue, on: screen) {
+                        unconfirmed.append((key, "\(name): \(Self.failure(issue))"))
                     } else {
                         failures.append("\(name): \(Self.failure(issue))")
                     }
@@ -146,6 +151,9 @@ final class AccessibilityAuditTests: XCTestCase {
             }
             if !buttons.isEmpty {
                 failures += try auditButtonsAboveBottomBar(buttons, on: screen, in: app, named: name)
+            }
+            if !unconfirmed.isEmpty {
+                failures += try confirmDynamicType(unconfirmed, in: app, named: name)
             }
         } catch {
             XCTFail("\(screen.name) (\(textSize)): the accessibility audit failed to run: \(error)")
@@ -169,6 +177,31 @@ final class AccessibilityAuditTests: XCTestCase {
             issue.element == nil
             ? "\(issue.compactDescription) (\(issue.detailedDescription))" : issue.compactDescription
         return "\(auditTypeName(issue.auditType)) on \(elementName(issue.element)): \(description)"
+    }
+
+    /// Audits Dynamic Type again, up to twice, for the issues
+    /// ``KnownAuditIssue/unconfirmedDynamicTypeKey(_:on:)`` held back (`issues`: each one's key and
+    /// failure), and returns the failures of those reported again by every re-audit. Text that
+    /// really doesn't scale to every size is reported every time; the Player's and Downloads'
+    /// misreports haven't come twice in a row. Each re-audit records "k of N reported again" as an
+    /// activity, so how often it's needed shows in the result bundle. #705
+    @MainActor
+    private func confirmDynamicType(
+        _ issues: [(key: String, failure: String)], in app: XCUIApplication, named name: String
+    ) throws -> [String] {
+        var remaining = issues
+        for attempt in 1...2 where !remaining.isEmpty {
+            var reported: Set<String> = []
+            try app.performAccessibilityAudit(for: .dynamicType) { issue in
+                if let key = KnownAuditIssue.partialDynamicTypeKey(issue) { reported.insert(key) }
+                return true
+            }
+            remaining = remaining.filter { reported.contains($0.key) }
+            XCTContext.runActivity(
+                named: "\(name): Dynamic Type re-audit \(attempt): \(remaining.count) of \(issues.count) reported again"
+            ) { _ in }
+        }
+        return remaining.map(\.failure)
     }
 
     /// Checks the contrast issues that ``KnownAuditIssue/isUnnamedContrastUnderBottomBar(_:on:in:)``
@@ -868,6 +901,42 @@ struct KnownAuditIssue {
                 && issue.detailedDescription.contains("UILabel")
         #else
             false
+        #endif
+    }
+
+    /// The key (`partialDynamicTypeKey(_:)`) of `issue` if it's "Dynamic Type font sizes are
+    /// partially unsupported" naming an element on the Player or Downloads, held back to be
+    /// audited again (`AccessibilityAuditTests.confirmDynamicType`) rather than failed at once.
+    ///
+    /// At AX5 on a 13-inch iPad the Player reported every text at once ("Chapter 1", the title,
+    /// the author and the four times) about one audit in five, though they're drawn whole and
+    /// scaled before and after. It isn't playback loading: in place on the paused player, with
+    /// the play/pause button's Loading value gone and every text's frame unchanged between
+    /// audits, 1 of 6 full audits and 1 of 3 Dynamic-Type-only ones reported them (the slow ones,
+    /// 5.3 to 5.4 seconds against 3.3 to 4.4). A recording shows the player's relayout trailing
+    /// the audit's size steps, as for Library's cards (#622), so waiting before the audit can't
+    /// help. Downloads' "No downloads" (its `ContentUnavailableView`'s title) did the same about
+    /// one walk in four (#698). Text that really doesn't scale is reported again by every
+    /// re-audit and still fails: a fixed font size is "unsupported", not held back at all.
+    /// Never on macOS, which has no Dynamic Type audit. #705
+    @MainActor
+    static func unconfirmedDynamicTypeKey(_ issue: XCUIAccessibilityAuditIssue, on screen: FixtureScreen) -> String? {
+        [FixtureScreen.player, .downloads].contains(screen) ? partialDynamicTypeKey(issue) : nil
+    }
+
+    /// The element's identifier, type and label if `issue` is "Dynamic Type font sizes are
+    /// partially unsupported" naming one, to find it again in a re-audit; `nil` otherwise. Not its
+    /// frame, which the audit's size changes could move, so two texts alike share a key, and
+    /// either one reported again keeps both. #705
+    @MainActor
+    static func partialDynamicTypeKey(_ issue: XCUIAccessibilityAuditIssue) -> String? {
+        #if os(iOS)
+            guard issue.auditType == .dynamicType, issue.compactDescription.contains("partially unsupported"),
+                let element = issue.element
+            else { return nil }
+            return "\(element.identifier)|\(element.elementType.rawValue)|\(element.label)"
+        #else
+            nil
         #endif
     }
 
