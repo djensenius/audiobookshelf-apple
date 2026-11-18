@@ -18,7 +18,7 @@ release v2.37.2) use the same readers:
 
 | Format | Legacy app and web client | `ebookLocation` written |
 | --- | --- | --- |
-| EPUB | epub.js (`epubjs` 0.3.88 in the [legacy `package.json`](../../package.json); 0.3.93 in the web client lockfile). Uses `flow: 'paginated'`, `manager: 'continuous'` and `spread: 'auto'` | `location.start.cfi`, e.g. `epubcfi(/6/6!/4/40[c3p19]/1:747)`. Readers ignore any saved value that doesn't start with `epubcfi` |
+| EPUB | epub.js (`epubjs` 0.3.88 in the [legacy `package.json`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/package.json); 0.3.93 in the web client lockfile). Uses `flow: 'paginated'`, `manager: 'continuous'` and `spread: 'auto'` | `location.start.cfi`, e.g. `epubcfi(/6/6!/4/40[c3p19]/1:747)`. Readers ignore any saved value that doesn't start with `epubcfi` |
 | MOBI/AZW3 | `assets/ebooks/mobi.js` ("borrowed from koodo-reader"), rendered as one long scrolling HTML iframe | **None.** Neither the legacy app nor the web client saves MOBI progress |
 | PDF | `@teckel/vue-pdf` (pdf.js) | 1-based page number. The web client sends a number and the legacy app sends `String(page)` |
 | CBZ/CBR | `libarchive.js` (WASM) | 1-based page number. Pages are images (`.jpeg .jpg .png .webp`) sorted by the **last number in the basename**, with unnumbered images appended |
@@ -359,7 +359,7 @@ run in the spike. They are acceptance criteria of the issues below:
   [`ComicReader.vue`](../../components/readers/ComicReader.vue),
   [`PdfReader.vue`](../../components/readers/PdfReader.vue),
   [`assets/ebooks/mobi.js`](../../assets/ebooks/mobi.js), and
-  [`package.json`](../../package.json).
+  [`package.json`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/package.json).
 - Platform research: [`docs/research/platform-apis.md` §7 Zip / CBZ extraction](../research/platform-apis.md).
 - Audiobookshelf web client and server (read-only):
   [`client/components/readers/`](https://github.com/advplyr/audiobookshelf/tree/master/client/components/readers),

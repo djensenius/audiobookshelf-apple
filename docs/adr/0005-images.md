@@ -25,7 +25,7 @@ choice is [0006](0006-now-playing.md); download mechanics are owned by
   directly.
 - Legacy adds `?token=` for servers older than 2.17
   ([`store/index.js`](../../store/index.js), `getDoesServerImagesRequireToken`, line
-  95; also [`NowPlayingInfo.swift`](../../ios/App/Shared/util/NowPlayingInfo.swift),
+  95; also [`NowPlayingInfo.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/util/NowPlayingInfo.swift),
   lines 19–36). That path is dead code below our 2.26.0 minimum and is not ported.
 - The legacy app never sends `width`, so every cover is the server's default
   400 px rendition, whether it is shown in a 50 pt row or a full-width iPad grid.
@@ -33,12 +33,12 @@ choice is [0006](0006-now-playing.md); download mechanics are owned by
   ([`components/app/AudioPlayer.vue`](../../components/app/AudioPlayer.vue),
   line 47).
 - Caching is left to the WebView. Native code (`ApiClient.getData`,
-  [`ios/App/Shared/util/ApiClient.swift`](../../ios/App/Shared/util/ApiClient.swift),
+  [`ios/App/Shared/util/ApiClient.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/util/ApiClient.swift),
   lines 14–19) decodes full-size `UIImage`s with no cache and no downsampling.
 - Downloads fetch the cover as an extra part named `cover.jpg`
-  ([`ios/App/App/plugins/AbsDownloader.swift`](../../ios/App/App/plugins/AbsDownloader.swift),
+  ([`ios/App/App/plugins/AbsDownloader.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/App/plugins/AbsDownloader.swift),
   lines 358–364 and 419–437). The URL is always `?token=<accessToken>`
-  ([`DownloadItemPart.swift`](../../ios/App/Shared/models/download/DownloadItemPart.swift),
+  ([`DownloadItemPart.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/models/download/DownloadItemPart.swift),
   line 81), so the token is persisted in the database. Since the server picks the
   format from `Accept`, `cover.jpg` may not actually be a JPEG. Offline items show
   the local file
@@ -905,10 +905,10 @@ That fits under 256 MiB without eviction churn.
     [`store/index.js`](../../store/index.js),
     [`store/libraries.js`](../../store/libraries.js);
   - [`utils/coverAverageColor.js`](../../utils/coverAverageColor.js);
-  - [`ios/App/Shared/util/NowPlayingInfo.swift`](../../ios/App/Shared/util/NowPlayingInfo.swift),
-    [`ios/App/Shared/util/ApiClient.swift`](../../ios/App/Shared/util/ApiClient.swift),
-    [`ios/App/App/plugins/AbsDownloader.swift`](../../ios/App/App/plugins/AbsDownloader.swift),
-    [`ios/App/Shared/models/download/DownloadItemPart.swift`](../../ios/App/Shared/models/download/DownloadItemPart.swift).
+  - [`ios/App/Shared/util/NowPlayingInfo.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/util/NowPlayingInfo.swift),
+    [`ios/App/Shared/util/ApiClient.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/util/ApiClient.swift),
+    [`ios/App/App/plugins/AbsDownloader.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/App/plugins/AbsDownloader.swift),
+    [`ios/App/Shared/models/download/DownloadItemPart.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/models/download/DownloadItemPart.swift).
 - **Server** (read-only):
   - [`LibraryItemController.getCover`](https://github.com/advplyr/audiobookshelf/blob/83dce682e88c2b32b0c33a8f83a9457bfc459e0e/server/controllers/LibraryItemController.js#L401-L433);
   - [`CacheManager`](https://github.com/advplyr/audiobookshelf/blob/83dce682e88c2b32b0c33a8f83a9457bfc459e0e/server/managers/CacheManager.js#L10-L91);

@@ -32,13 +32,13 @@ Swift 6 with complete strict concurrency, and the player is a `@MainActor`
 
 The legacy app uses MediaPlayer:
 
-- [`ios/App/Shared/util/NowPlayingInfo.swift`](../../ios/App/Shared/util/NowPlayingInfo.swift)
+- [`ios/App/Shared/util/NowPlayingInfo.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/util/NowPlayingInfo.swift)
   builds a `nowPlayingInfo` dictionary.
   - In "chapter track" mode, the title becomes the chapter title, the album title
     keeps the book title, and duration and elapsed time are relative to the chapter
     (lines 64–88).
   - The cover is fetched and wrapped in `MPMediaItemArtwork` (lines 49–62).
-- [`ios/App/Shared/player/AudioPlayer.swift`](../../ios/App/Shared/player/AudioPlayer.swift)
+- [`ios/App/Shared/player/AudioPlayer.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/player/AudioPlayer.swift)
   `setupRemoteTransportControls()` (lines 669–789) registers the commands:
   - play, pause and toggle;
   - skip forward and back, using the user's jump intervals;
@@ -606,8 +606,8 @@ fallback above.
   - `CarPlay.framework/Headers/CPNowPlayingTemplate.h` (`sharedTemplate` :50,
     `allowsMiniPlayer` iOS 27.0 :90) and `CPNowPlayingButton.h`.
 - Legacy:
-  - [`ios/App/Shared/util/NowPlayingInfo.swift`](../../ios/App/Shared/util/NowPlayingInfo.swift);
-  - [`ios/App/Shared/player/AudioPlayer.swift`](../../ios/App/Shared/player/AudioPlayer.swift)
+  - [`ios/App/Shared/util/NowPlayingInfo.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/util/NowPlayingInfo.swift);
+  - [`ios/App/Shared/player/AudioPlayer.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/player/AudioPlayer.swift)
     (lines 669–805).
 - Related ADRs: [0001 Architecture](0001-architecture.md) (module rules, `ABSPlayback`
   owns Now Playing), [0005 Images](0005-images.md) (cover pipeline).
