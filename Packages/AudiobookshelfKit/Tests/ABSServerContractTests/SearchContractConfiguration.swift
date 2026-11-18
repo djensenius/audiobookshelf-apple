@@ -47,6 +47,7 @@ struct SearchContractConfiguration: Sendable {
         let revisions = [
             "2.26.0": "264ae928a9c1af620487488110eec816b14e23ec",
             "2.37.2": "edb1f7efc92ecacdef51aafb4d9d5054ce10604f",
+            "2.38.0": "1430c9fc642d586ff91c8d4cbed20aab2c47e473",
         ]
         provenance = Data(try required("ABS_SEARCH_PROVENANCE").utf8)
         guard let pin = revisions[version],
@@ -58,6 +59,7 @@ struct SearchContractConfiguration: Sendable {
             let digests = [
                 "2.26.0": "sha256:16685fbba37a21d403f5390b907d286e15b3086d26527269b4ad785f71f571e5",
                 "2.37.2": "sha256:b897c33f05972fb1bf484f7487bc878fa91ec8691335c1db6e2929c3a7658efa",
+                "2.38.0": "sha256:60064c23f32fd9099fd39e82c5132c51701d1221135bbca04cd099b589e1edc3",
             ]
             guard root == "/search-fixtures",
                 let labels = record["labels"] as? [String: String],

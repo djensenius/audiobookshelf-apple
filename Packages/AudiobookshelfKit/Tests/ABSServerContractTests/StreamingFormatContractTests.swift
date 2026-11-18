@@ -25,12 +25,12 @@ extension Trait where Self == ConditionTrait {
 extension ContractServer {
     /// Whether HLS playlists add `?token=` with the user's legacy, non-expiring token to every
     /// segment URI. 2.26.0 does (`server/utils/generators/hlsPlaylistGenerator.js` L21 and L25,
-    /// fed `user.token` by `Stream.generatePlaylist`); 2.37.2 lists bare `output-N.ts`. `nil` for
-    /// other servers, where only the segment paths are checked.
+    /// fed `user.token` by `Stream.generatePlaylist`); 2.37.2 and 2.38.0 list bare `output-N.ts`.
+    /// `nil` for other servers, where only the segment paths are checked.
     var hlsSegmentsCarryUserToken: Bool? {
         switch version {
         case "2.26.0": true
-        case "2.37.2": false
+        case "2.37.2", "2.38.0": false
         default: nil
         }
     }

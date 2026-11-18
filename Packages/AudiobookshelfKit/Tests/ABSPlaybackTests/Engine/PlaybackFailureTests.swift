@@ -172,4 +172,37 @@ struct PlaybackFailureTests {
         #expect(invalid.kind == .unknown)
         #expect(invalid.httpStatus == nil)
     }
+
+    /// The engine logs the description publicly ("Playback failed"), so a stream URL in
+    /// AVFoundation's text loses its token (#662). Classification and `httpStatus` still read the
+    /// raw comment, which only the last, constructed case can tell apart.
+    @Test func redactsTokensFromTheDescription() {
+        let segment = "https://abs.example/hls/abc/output-3.ts?token=0paque-legacy-token"
+        let redacted = "https://abs.example/hls/abc/output-3.ts?token=<redacted>"
+        let fromError = PlaybackFailure(
+            error: NSError(
+                domain: "CoreMediaErrorDomain", code: -12_938,
+                userInfo: [NSLocalizedDescriptionKey: "HTTP 404: File Not Found for \(segment)"]))
+        #expect(fromError.description == "HTTP 404: File Not Found for \(redacted)")
+
+        let fromLog = PlaybackFailure(
+            error: nil,
+            errorLog: [.init(domain: "CoreMediaErrorDomain", statusCode: -12_938, comment: "HTTP 404 for \(segment)")])
+        #expect(fromLog.description == "HTTP 404 for \(redacted)")
+        #expect(fromLog.kind == .http(status: 404))
+        for failure in [fromError, fromLog] {
+            #expect(!String(describing: AudioEngineError.itemFailed(trackIndex: 0, failure)).contains("0paque"))
+        }
+
+        // A real comment's "HTTP 404" is never redacted, so only a constructed comment shows
+        // which text classification reads: here redaction removes "HTTP" with the token's value.
+        let statusInToken = PlaybackFailure(
+            error: nil,
+            errorLog: [
+                .init(domain: "CoreMediaErrorDomain", statusCode: -12_938, comment: "output-3.ts?token=HTTP 503")
+            ])
+        #expect(statusInToken.description == "output-3.ts?token=<redacted> 503")
+        #expect(statusInToken.kind == .http(status: 503))
+        #expect(statusInToken.httpStatus == 503)
+    }
 }
