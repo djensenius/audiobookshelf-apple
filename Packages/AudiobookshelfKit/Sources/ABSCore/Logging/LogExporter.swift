@@ -134,8 +134,12 @@ public actor LogExporter {
     }
 
     /// Matching entries, oldest first, with redacted messages.
-    public func entries(matching filter: LogFilter = LogFilter()) async throws -> [LogEntry] {
-        try await source.entries(subsystem: subsystem, since: filter.since)
+    /// - Parameter secrets: Values removed as well as the redactor's own, such as the custom
+    ///   header values saved when the entries are read (#662).
+    public func entries(matching filter: LogFilter = LogFilter(), secrets: [String] = []) async throws -> [LogEntry] {
+        var redactor = redactor
+        redactor.secrets += secrets
+        return try await source.entries(subsystem: subsystem, since: filter.since)
             .filter { $0.subsystem == subsystem && filter.includes($0) }
             .sorted { $0.date < $1.date }
             .map { entry in
@@ -146,8 +150,10 @@ public actor LogExporter {
     }
 
     /// Matching entries as text, one line per entry, oldest first.
-    public func export(matching filter: LogFilter = LogFilter()) async throws -> String {
-        try await entries(matching: filter).map { Self.format($0, timeZone: timeZone) }.joined(separator: "\n")
+    /// - Parameter secrets: Values removed as well as the redactor's own (see ``entries(matching:secrets:)``).
+    public func export(matching filter: LogFilter = LogFilter(), secrets: [String] = []) async throws -> String {
+        try await entries(matching: filter, secrets: secrets).map { Self.format($0, timeZone: timeZone) }
+            .joined(separator: "\n")
     }
 
     /// Formats `entry` as `2026-11-09T20:27:13.197-05:00 [notice] [api] message`.

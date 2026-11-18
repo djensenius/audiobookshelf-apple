@@ -11,7 +11,8 @@ import Foundation
 /// - JSON Web Tokens anywhere in the text (three base64url segments whose first two decode to
 ///   JSON objects, the first with an `"alg"` key).
 ///
-/// Custom header values can't be recognised by pattern, so pass them in as `secrets`. Anything
+/// Custom header values can't be recognised by pattern, so pass them in as `secrets`; their JSON,
+/// Swift-escaped, and percent-encoded forms are removed too. Anything
 /// else, such as a sensitive number logged with public privacy, passes through unchanged; see
 /// ``Log`` for the privacy rules.
 public struct Redactor: Sendable, Equatable {
@@ -22,12 +23,18 @@ public struct Redactor: Sendable, Equatable {
     /// unrelated text.
     public static let minimumSecretLength = 4
 
-    /// Exact values to remove wherever they appear, such as custom header values.
-    /// Values shorter than ``minimumSecretLength`` are ignored.
-    public var secrets: [String]
+    /// Exact values to remove wherever they appear, such as custom header values, along with their
+    /// escaped forms (see ``escapedForms(of:)``). Values shorter than ``minimumSecretLength`` are ignored.
+    public var secrets: [String] {
+        didSet { secretForms = Self.forms(of: secrets) }
+    }
+
+    /// Every form of ``secrets`` to search for, longest first, built once when the secrets are set.
+    private var secretForms: [String]
 
     public init(secrets: [String] = []) {
         self.secrets = secrets
+        self.secretForms = Self.forms(of: secrets)
     }
 
     public func redact(_ text: String) -> String {
@@ -49,7 +56,7 @@ public struct Redactor: Sendable, Equatable {
         ) {
             ranges.append(match.range(withName: "value"))
         }
-        for secret in secrets where secret.count >= Self.minimumSecretLength {
+        for secret in secretForms {
             var search = whole
             while true {
                 let found = original.range(of: secret, options: .literal, range: search)
@@ -69,6 +76,67 @@ public struct Redactor: Sendable, Equatable {
         }
         return result as String
     }
+
+    /// The secrets long enough to redact and their escaped forms, without duplicates, longest first.
+    private static func forms(of secrets: [String]) -> [String] {
+        var seen = Set<String>()
+        return secrets.filter { $0.count >= minimumSecretLength }
+            .flatMap { [$0] + escapedForms(of: $0) }
+            .filter { seen.insert($0).inserted }
+            .sorted { $0.utf16.count > $1.utf16.count }
+    }
+
+    /// How `secret` can appear once a server or the app has escaped it: as a JSON string (with or
+    /// without `\/`, and with or without non-ASCII as `\uXXXX`, in every combination), in Swift's
+    /// `debugDescription` of a string (which an error's description uses for its string payloads),
+    /// percent-encoded, and each of those escaped once more, such as a JSON error body inside an
+    /// error's description (#662).
+    /// Secrets made only of letters, digits, `-`, `.`, `_`, and `~` have no other forms.
+    static func escapedForms(of secret: String) -> [String] {
+        var escapers: [(String) -> String] = [
+            { String(String(reflecting: $0).dropFirst().dropLast()) },
+            { $0.addingPercentEncoding(withAllowedCharacters: percentUnreserved) ?? $0 },
+        ]
+        // Every combination of the JSON options, so none can be left out.
+        for slash in [false, true] {
+            for asciiOnly in [false, true] {
+                escapers.append { jsonEscaped($0, slash: slash, asciiOnly: asciiOnly) }
+            }
+        }
+        let once = escapers.map { $0(secret) }
+        let twice = once.flatMap { form in escapers.map { $0(form) } }
+        var seen: Set<String> = [secret]
+        return (once + twice).filter { seen.insert($0).inserted }
+    }
+
+    /// `text` escaped as the contents of a JSON string.
+    private static func jsonEscaped(_ text: String, slash: Bool, asciiOnly: Bool) -> String {
+        var result = ""
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\"": result += "\\\""
+            case "\\": result += "\\\\"
+            case "/" where slash: result += "\\/"
+            case "\n": result += "\\n"
+            case "\r": result += "\\r"
+            case "\t": result += "\\t"
+            case "\u{08}": result += "\\b"
+            case "\u{0C}": result += "\\f"
+            default:
+                if scalar.value < 0x20 || (asciiOnly && scalar.value > 0x7E) {
+                    for unit in String(scalar).utf16 { result += String(format: "\\u%04x", unit) }
+                } else {
+                    result.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        return result
+    }
+
+    /// RFC 3986 unreserved characters, the only ones left as is when percent-encoding a secret.
+    private static let percentUnreserved = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
 
     /// Sorted, non-empty ranges with overlapping and adjacent ones combined.
     private static func merged(_ ranges: [NSRange]) -> [NSRange] {

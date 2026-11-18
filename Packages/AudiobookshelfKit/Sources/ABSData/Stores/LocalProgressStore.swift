@@ -923,7 +923,7 @@ public enum SessionUploadResult: Sendable, Equatable {
                 session.lastUploadFailureAt = now
                 if session.uploadAttempts >= Self.maxUploadFailures {
                     Self.logger.error(
-                        "Discarding session \(id, privacy: .public) after \(session.uploadAttempts) failed uploads: \(message ?? "", privacy: .public)"
+                        "Discarding session \(id, privacy: .public) after \(session.uploadAttempts) failed uploads: \(Log.redact(message ?? ""), privacy: .public)"
                     )
                     modelContext.delete(session)
                     deleted.insert(id)

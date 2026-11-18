@@ -114,6 +114,68 @@ private func entry(
         #expect(try await exporter.entries().map(\.message) == ["header X-Key: <redacted>"])
     }
 
+    /// Custom header values can't be matched by pattern, so the Logs screen passes the saved ones
+    /// in when it reads the entries (#662). They're removed along with the redactor's own secrets
+    /// and the built-in patterns, for that read only.
+    @Test func removesSecretsGivenWithTheRead() async throws {
+        let exporter = LogExporter(
+            source: FakeSource(stored: [
+                entry(0, .error, "api", "Request failed with CF-Access-Client-Secret: cf-proxy-secret"),
+                entry(1, .error, "realtime", "header X-Key: hunter2, GET /socket.io/?token=abc"),
+            ]),
+            redactor: Redactor(secrets: ["hunter2"]),
+            timeZone: utc
+        )
+        let text = try await exporter.export(secrets: ["cf-proxy-secret"])
+        #expect(
+            text == """
+                2027-01-15T08:00:00.000Z [error] [api] Request failed with CF-Access-Client-Secret: <redacted>
+                2027-01-15T08:00:01.000Z [error] [realtime] header X-Key: <redacted>, GET /socket.io/?token=<redacted>
+                """
+        )
+        // Like the redactor's own, a secret shorter than `Redactor.minimumSecretLength` is ignored.
+        #expect(try await exporter.entries(secrets: ["Req"]).first?.message.hasPrefix("Request failed") == true)
+        #expect(try await exporter.export().contains("cf-proxy-secret"))
+    }
+
+    /// A server that echoes a saved header value in a JSON error body escapes its quote and
+    /// backslash, and the error's description escapes them again. The export still removes it (#662).
+    @Test func removesSecretsEchoedInJSONErrorBodies() async throws {
+        enum EchoError: Error { case http(status: Int, message: String) }
+        let secret = #"proxy"se\cret"#
+        let body = try #require(
+            String(data: JSONSerialization.data(withJSONObject: ["error": "bad header \(secret)"]), encoding: .utf8)
+        )
+        let message = "Request failed: \(String(describing: EchoError.http(status: 400, message: body)))"
+        #expect(message.contains(#"proxy\\\"se\\\\cret"#))
+        let exporter = LogExporter(source: FakeSource(stored: [entry(0, .error, "api", message)]), timeZone: utc)
+        let text = try await exporter.export(secrets: [secret])
+        #expect(
+            text
+                == #"2027-01-15T08:00:00.000Z [error] [api] Request failed: http(status: 400, message: "{\"error\":\"bad header <redacted>\"}")"#
+        )
+    }
+
+    /// A server that escapes both `/` and non-ASCII echoes `proxy"se\cret/ü` as
+    /// `proxy\"se\\cret\/\u00fc`. The export removes it from the body and from the error's
+    /// quoted description (#662).
+    @Test func removesSecretsEchoedWithEscapedSlashAndNonASCII() async throws {
+        enum EchoError: Error { case http(status: Int, message: String) }
+        let body = #"{"error":"bad header proxy\"se\\cret\/\u00fc"}"#
+        let description = String(reflecting: EchoError.http(status: 400, message: body))
+        #expect(description.contains(#"proxy\\\"se\\\\cret\\/\\u00fc"#))
+        let exporter = LogExporter(
+            source: FakeSource(stored: [
+                entry(0, .error, "api", "Response: \(body)"),
+                entry(1, .error, "api", "Request failed: \(description)"),
+            ])
+        )
+        let messages = try await exporter.entries(secrets: [#"proxy"se\cret/ü"#]).map(\.message)
+        try #require(messages.count == 2)
+        #expect(messages[0] == #"Response: {"error":"bad header <redacted>"}"#)
+        #expect(messages[1].hasSuffix(#"message: "{\"error\":\"bad header <redacted>\"}")"#))
+    }
+
     @Test func filtersByLevelCategorySinceAndSubsystem() async throws {
         let exporter = LogExporter(
             source: FakeSource(stored: [

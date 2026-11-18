@@ -350,7 +350,7 @@ public final class DownloadsLifecycle: SessionParticipant {
                                 } catch {
                                     paused.withLock { $0 = false }
                                     Log.downloads.error(
-                                        "Couldn't pause a download of a signed-out server: \(String(describing: error), privacy: .public)"
+                                        "Couldn't pause a download of a signed-out server: \(Log.redacted(error), privacy: .public)"
                                     )
                                 }
                             }
