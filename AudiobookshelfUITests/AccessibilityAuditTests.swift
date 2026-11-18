@@ -105,26 +105,34 @@ final class AccessibilityAuditTests: XCTestCase {
         #endif
         var tabBarIssues = 0
         do {
-            try app.performAccessibilityAudit(for: types) { issue in
-                if KnownAuditIssue.all.contains(where: { $0.matches(issue, on: screen, in: app) }) { return true }
-                if tabBarIssues < tabBarLabels, KnownAuditIssue.isUnnamedUILabelDynamicType(issue) {
-                    tabBarIssues += 1
+            // Contrast is judged in its own audit, first, on the screen as it was opened. The Dynamic
+            // Type audit changes the text size and back, which lays the content out again: Settings at
+            // AX5 on a 13-inch iPad ends every full audit scrolled about 70 points, its first header
+            // then under the navigation bar, where contrast fails. Judged in the same audit, contrast
+            // depended on the order and timing of the two ('Playback Settings' failed in about 3 of 8
+            // walks). #698
+            for pass in [types.intersection(.contrast), types.subtracting(.contrast)] where !pass.isEmpty {
+                try app.performAccessibilityAudit(for: pass) { issue in
+                    if KnownAuditIssue.all.contains(where: { $0.matches(issue, on: screen, in: app) }) { return true }
+                    if tabBarIssues < tabBarLabels, KnownAuditIssue.isUnnamedUILabelDynamicType(issue) {
+                        tabBarIssues += 1
+                        return true
+                    }
+                    // Reported below, with the screen's name.
+                    if KnownAuditIssue.isUnnamedContrastUnderBottomBar(issue, on: screen, in: app) {
+                        deferred.append("\(name): \(Self.failure(issue))")
+                        hasUnnamed = true
+                    } else if let text = KnownAuditIssue.namedContrastUnderBottomBar(issue, on: screen, in: app) {
+                        let failure = "\(name): \(Self.failure(issue))"
+                        deferred.append(failure)
+                        named.append(.init(label: text.label, occurrence: text.occurrence, failure: failure))
+                    } else if let label = KnownAuditIssue.contentButtonUnderBottomBar(issue, on: screen, in: app) {
+                        buttons.append((label, "\(name): \(Self.failure(issue))"))
+                    } else {
+                        failures.append("\(name): \(Self.failure(issue))")
+                    }
                     return true
                 }
-                // Reported below, with the screen's name.
-                if KnownAuditIssue.isUnnamedContrastUnderBottomBar(issue, on: screen, in: app) {
-                    deferred.append("\(name): \(Self.failure(issue))")
-                    hasUnnamed = true
-                } else if let text = KnownAuditIssue.namedContrastUnderBottomBar(issue, on: screen, in: app) {
-                    let failure = "\(name): \(Self.failure(issue))"
-                    deferred.append(failure)
-                    named.append(.init(label: text.label, occurrence: text.occurrence, failure: failure))
-                } else if let label = KnownAuditIssue.contentButtonUnderBottomBar(issue, on: screen, in: app) {
-                    buttons.append((label, "\(name): \(Self.failure(issue))"))
-                } else {
-                    failures.append("\(name): \(Self.failure(issue))")
-                }
-                return true
             }
             if tabBarLabels > 0 {
                 XCTContext.runActivity(
