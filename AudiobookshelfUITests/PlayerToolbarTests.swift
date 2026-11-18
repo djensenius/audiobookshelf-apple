@@ -18,15 +18,18 @@ final class PlayerToolbarTests: XCTestCase {
         ]
 
         /// On an iPad from iOS 27.1, where the player has arrangements (as in `NowPlayingView`), turned
-        /// to portrait (and afterwards back to the orientation it had), the player's toolbar shows
-        /// Chapters, Bookmarks and Up Next, each hittable. Elsewhere it's skipped.
+        /// to portrait, the player's toolbar shows Chapters, Bookmarks and Up Next, each hittable.
+        /// Afterwards it turns back to the orientation it had, if that was portrait or landscape: in a
+        /// fresh runner the device reports `.unknown`, which can't be set. Elsewhere it's skipped.
         @MainActor
         func testPortraitToolbarShowsChaptersBookmarksAndUpNext() throws {
             try XCTSkipUnless(
                 UIDevice.current.userInterfaceIdiom == .pad, "Only an iPad's player has the split arrangement")
             guard #available(iOS 27.1, *) else { throw XCTSkip("The player has arrangements from iOS 27.1") }
             let initial = XCUIDevice.shared.orientation
-            addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = initial }
+            if initial.isPortrait || initial.isLandscape {
+                addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = initial }
+            }
             XCUIDevice.shared.orientation = .portrait
             let app = signIn(launchArguments: Self.launchArguments)
             open(.player, in: app)

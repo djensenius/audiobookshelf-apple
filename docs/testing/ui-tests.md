@@ -267,20 +267,22 @@ ABS_UI_PLATFORM=ios mise run test:ui -- -only-testing:AudiobookshelfUITests/Down
 the audits can't catch. It launches in the light theme at the default text size (`-ABSTheme light`,
 `-UIPreferredContentSizeCategoryName UICTContentSizeCategoryL`), whatever the simulator's, plays
 *Pride and Prejudice* and shows the list: on an iPad from iOS 27.1, where the player has its
-arrangements, the details pane beside the player turned to landscape (turned back to the
-orientation it had afterwards); elsewhere, the Chapters sheet (`player.chapters`, in the overflow
-menu of a vertical bar) at its large detent. It checks that the current chapter's row background
-differs from another row's, and that its times measure 4.5:1 or more in black (`MeasuredContrast`).
+arrangements, the details pane beside the player turned to landscape (turned back afterwards if
+it was in portrait or landscape; a fresh runner reports an unknown orientation, which can't be
+set); elsewhere, the Chapters sheet (`player.chapters`, in the overflow menu of a vertical bar) at
+its large detent. It checks that the current chapter's row background differs from another row's,
+and that its times measure 4.5:1 or more in black (`MeasuredContrast`).
 In landscape the screenshot is the portrait framebuffer tagged with its orientation, so the test
 draws it upright before reading the rows' frames.
 
 `PlayerToolbarTests` (iOS) checks the player's bottom toolbar on an iPad in portrait (#705): from
 iOS 27.1 the split arrangement shows the details pane only side by side, so in portrait the bar
 must keep Chapters, Bookmarks and Up Next (`player.chapters`, `player.bookmarks`, `player.queue`),
-which #706 restored. It launches as `ChapterHighlightTests` does, turns the iPad to portrait (and
-back afterwards), plays *Pride and Prejudice* and checks the three buttons exist and are hittable.
-It's skipped on an iPhone, and before iOS 27.1, where the player has no arrangements. It takes about
-40 seconds:
+which #706 restored. It launches as `ChapterHighlightTests` does, turns the iPad to portrait (back
+afterwards only if it was in portrait or landscape), plays *Pride and Prejudice* and checks the
+three buttons exist and are hittable. It's skipped on an iPhone, and before iOS 27.1, where the
+player has no arrangements, so on an older runtime a green run, the iPad CI step's included, checks
+nothing. It takes about 40 seconds:
 
 ```sh
 ABS_UI_PLATFORM=ios IOS_SIMULATOR_ID=<ipad-udid> mise run test:ui -- -only-testing:AudiobookshelfUITests/PlayerToolbarTests -jobs 2
