@@ -32,10 +32,12 @@ If those pass, it runs one test on a regular-width iPad simulator too
 `MiniPlayerTests/testLongPressAtAccessibilitySizeShowsNoMenu`, with the same script and
 `ABS_UI_ACTION=test-without-building`, reusing the iPhone build. The Duo is compact, so it never
 reaches `open`'s sidebar fallback (#693), which that test needs on an iPad at AX sizes. The
-iPad accessibility audits fail for other reasons (#698), so they don't run there. The step has
-its own 25-minute limit: the test takes about 5 minutes locally, but the CI runner can take
-over 12 minutes to start the test runner on the cold iPad simulator. A stall there fails the step
-and uploads its results instead of the job's limit cancelling the run.
+iPad accessibility audits fail for other reasons (#698), so they don't run there. The iPhone Duo
+is shut down before the iPad is created, so the two don't normally run at once. The step has its
+own 35-minute limit: the test takes about 5 minutes locally, but the CI runner can take over 12
+minutes to start the test runner on the cold iPad simulator, and the first passing run took 21
+(#703). A stall there fails the step and uploads its results instead of the job's limit
+cancelling the run.
 
 It then runs `mise run test:ui` on macOS only if `automationmodetool` reports Automation Mode
 enabled on the runner. Otherwise the step passes with a *macOS UI tests skipped* warning
@@ -72,7 +74,7 @@ the script can't read) fails the step with the first run's exit status, without 
 Recent passing runs took 36 to 58 minutes (median 47). A flaky test costs only its retry in the
 runner. A hang adds the 10 minutes and about 3 more to restart the runner, list the tests and
 run it again: the slowest run seen with a hang would end by minute 71 or so. The iPad
-simulator and its step (up to 25 minutes, above) come after that, so the job's limit is 105
+simulator and its step (up to 35 minutes, above) come after that, so the job's limit is 115
 minutes. A second hang in the iPhone run may not fit; the job then times out and fails rather
 than passing.
 
