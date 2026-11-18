@@ -144,6 +144,11 @@ final class AccessibilityAuditTests: XCTestCase {
                     named: "\(name): top tab bar labels allowed \(tabBarIssues) of \(tabBarLabels)"
                 ) { _ in }
             }
+            // Before the checks above the bottom bar, which scroll: a held element scrolled off
+            // screen would go unreported, and so be forgiven. #705
+            if !unconfirmed.isEmpty {
+                failures += try confirmDynamicType(unconfirmed, in: app, named: name)
+            }
             if !deferred.isEmpty {
                 failures += try auditAboveBottomBar(
                     KnownAuditIssue.contentUnderBottomBar(on: screen, in: app), deferring: deferred,
@@ -151,9 +156,6 @@ final class AccessibilityAuditTests: XCTestCase {
             }
             if !buttons.isEmpty {
                 failures += try auditButtonsAboveBottomBar(buttons, on: screen, in: app, named: name)
-            }
-            if !unconfirmed.isEmpty {
-                failures += try confirmDynamicType(unconfirmed, in: app, named: name)
             }
         } catch {
             XCTFail("\(screen.name) (\(textSize)): the accessibility audit failed to run: \(error)")
