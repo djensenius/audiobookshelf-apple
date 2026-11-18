@@ -133,6 +133,9 @@ private struct ChaptersList: View {
                             // Lines the columns up with the rows' current-chapter checkmark.
                             Image(systemName: "checkmark").hidden()
                         }
+                        // As Settings' headers: the system's header colour is 3.3:1 on the grouped
+                        // background in light. #705
+                        .foregroundStyle(ABSColor.mutedForeground)
                         .accessibilityHidden(true)
                     }
                 }
@@ -187,7 +190,7 @@ private struct ChapterRow: View, Equatable {
                                 Text(verbatim: presentation.durationText)
                             }
                             .font(.subheadline.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(ABSColor.mutedForeground)
                         }
                     }
                 }
@@ -216,7 +219,10 @@ private struct ChapterRow: View, Equatable {
     }
 }
 
-/// A title followed by the start and duration columns, for the rows and the header.
+/// A title followed by the start and duration columns, for the rows and the header. The columns
+/// are in `ABSColor.mutedForeground`, not `.secondary`: in the list's section header, which is
+/// secondary already, `.secondary` drew the header's Start and Duration at 1.7:1 in light and 2.3:1
+/// in dark, and in a row it's 4.0:1 on white. #705
 private struct ChapterColumns<Title: View>: View {
     let columnWidth: CGFloat
     let start: String
@@ -234,7 +240,7 @@ private struct ChapterColumns<Title: View>: View {
                     .frame(minWidth: columnWidth, alignment: .trailing)
             }
             .font(.subheadline.monospacedDigit())
-            .foregroundStyle(.secondary)
+            .foregroundStyle(ABSColor.mutedForeground)
         }
     }
 }
