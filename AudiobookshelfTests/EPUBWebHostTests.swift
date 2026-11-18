@@ -849,6 +849,17 @@ private final class ReaderPage {
             #expect(
                 pan.allowedTouchTypes
                     == [UITouch.TouchType.direct, .pencil].map { NSNumber(value: $0.rawValue) })
+            // A pointer's double-click (an iPad's trackpad) selects a word: its first click waits
+            // to see it isn't one. A finger's double tap selects nothing, so a tap doesn't wait.
+            let taps = recognizers.compactMap { $0 as? UITapGestureRecognizer }
+            let tap = try #require(taps.first { $0.numberOfTapsRequired == 1 })
+            let doubleClick = try #require(taps.first { $0.numberOfTapsRequired == 2 })
+            #expect(doubleClick.allowedTouchTypes == [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)])
+            #expect(tap.allowedTouchTypes.contains(NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)))
+            let gestures = controller.gestures
+            #expect(gestures.gestureRecognizer(tap, shouldRequireFailureOf: doubleClick))
+            #expect(!gestures.gestureRecognizer(pan, shouldRequireFailureOf: doubleClick))
+            #expect(!gestures.gestureRecognizer(doubleClick, shouldRequireFailureOf: tap))
         #elseif os(macOS)
             for recognizer in recognizers {
                 #expect(!recognizer.delaysPrimaryMouseButtonEvents)

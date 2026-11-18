@@ -184,6 +184,10 @@ dependency.
        epub.js's own. Page taps, clicks and swipes are therefore recognized natively
        on the web view (UIKit tap and pan recognizers on iOS, a click that waits out a
        double-click on macOS), alongside WebKit's own, so text selection still works.
+       A pointer click (the Mac, or an iPad's trackpad or mouse) waits out the
+       double-click interval, because a double-click selects a word and must not turn
+       the page or toggle the controls first. A finger tap doesn't wait: a finger's
+       double tap selects nothing in these frames, so taps keep turning pages at once.
        They are handed to the page as `absReader.touchBegan`, `tap` and `swipe`. The
        page hit-tests the same-origin frame to skip links and taps that end a
        selection, and feeds swipes to epub.js's snapper (#684). Don't turn on

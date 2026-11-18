@@ -17,7 +17,8 @@ import WebKit
 /// in such a frame, the page's own included, so the page never hears a tap or swipe on the book's
 /// text. The recognizers watch alongside WebKit's own, which still get every touch, so selecting
 /// text and its menu work as before. Swipes are touch only (a finger or the pencil), on iOS and
-/// iPadOS; on the Mac, a click waits out a double-click, which selects a word instead.
+/// iPadOS. A click, on the Mac or with an iPad's pointer, waits out a double-click, which selects a
+/// word instead; a finger's double tap selects nothing, so a tap doesn't wait.
 @MainActor
 final class EPUBPageGestures: NSObject {
     /// A swipe's progress, as the page's `swipe` takes it.
@@ -76,7 +77,11 @@ final class EPUBPageGestures: NSObject {
         private func install(on webView: WKWebView) -> [EPUBGestureRecognizer] {
             let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
             let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-            for recognizer in [tap, pan] as [UIGestureRecognizer] {
+            // Only there for a pointer's click to wait on: a double-click selects a word, not a turn.
+            let doubleClick = UITapGestureRecognizer(target: nil, action: nil)
+            doubleClick.numberOfTapsRequired = 2
+            doubleClick.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.indirectPointer.rawValue)]
+            for recognizer in [tap, pan, doubleClick] as [UIGestureRecognizer] {
                 // WebKit still gets every touch, as it would without these.
                 recognizer.cancelsTouchesInView = false
                 recognizer.delaysTouchesBegan = false
@@ -90,7 +95,7 @@ final class EPUBPageGestures: NSObject {
             // A tap allows some movement; a drag that far is a swipe (or too short to be one), not
             // a tap as well. The pan fails as soon as a tap's finger lifts, so taps aren't delayed.
             tap.require(toFail: pan)
-            return [tap, pan]
+            return [tap, pan, doubleClick]
         }
 
         @objc private func tapped(_ recognizer: UITapGestureRecognizer) {
@@ -122,11 +127,20 @@ final class EPUBPageGestures: NSObject {
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
             // Every touch reaches the tap recognizer first, so it's noted once.
-            if gestureRecognizer is UITapGestureRecognizer {
-                touchStart = touch.timestamp
-                touchBegan()
-            }
-            return true
+            guard gestureRecognizer === recognizers.first else { return true }
+            touchStart = touch.timestamp
+            touchBegan()
+            // A pointer's triple-click's third click (a paragraph's selection) isn't a click either.
+            return touch.type != .indirectPointer || touch.tapCount <= 1
+        }
+
+        /// A tap waits for the double-click to fail. Only a pointer's clicks reach the double-click,
+        /// so only they wait; a finger's tap goes at once.
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRequireFailureOf otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            recognizers.count == 3 && gestureRecognizer === recognizers[0] && otherGestureRecognizer === recognizers[2]
         }
 
         func gestureRecognizer(
