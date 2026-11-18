@@ -24,20 +24,30 @@ final class ChapterHighlightTests: XCTestCase {
         /// app's colour changes and this doesn't, too few pixels match and the measurement is `nil`.
         private static let headerText = MeasuredContrast.RGB(red: 71, green: 78, blue: 86)
 
-        /// At the Chapters sheet's medium detent, as it opens on an iPhone, the list is on glass over
-        /// the player. In the light theme at the default text size (`launchArguments`) the header's
-        /// Start and Duration measure 4.5:1 or more against the glass around them: about 4.7:1 and
-        /// 5.2:1 on an iPhone 17, where `mutedForeground` measured 3.5:1 and 4.0:1. Not its
-        /// "Chapters", in the same colour: the header's title is semibold, and around its wider
-        /// strokes `MeasuredContrast` takes the glyphs' own anti-aliased edges for the background,
-        /// reading 3.8:1 for a colour 6.5:1 against the glass past them. Skipped on an iPad, where
-        /// from iOS 27.1 the list is a sheet only in portrait.
+        /// At the Chapters sheet's medium detent, as it opens on an iPhone in portrait, the list is on
+        /// glass over the player. In the light theme at the default text size (`launchArguments`) the
+        /// header's Start and Duration measure 4.5:1 or more against the glass around them. The margin
+        /// is thin on an iPhone 17, 4.68:1 and 5.20:1, while CI's iPhone Duo reads 5.49:1 and 5.83:1,
+        /// so a local failure just under 4.5:1 may be the glass's rendering, not a regression; with
+        /// `mutedForeground`, Start read 3.5:1 on the iPhone 17 and 3.9:1 on the Duo. The sheet must be
+        /// at its medium detent: at the large detent the list is opaque, and `mutedForeground` passes
+        /// there too. Not the header's "Chapters", in the same colour: it's semibold, and around its
+        /// wider strokes `MeasuredContrast` takes the glyphs' own anti-aliased edges for the
+        /// background, reading 3.8:1 for a colour 6.5:1 against the glass past them. It turns the
+        /// iPhone to portrait, and back afterwards if it was in portrait or landscape: a fresh runner
+        /// reports `.unknown`, which can't be set. Skipped on an iPad, where from iOS 27.1 the list is
+        /// a sheet only in portrait.
         @MainActor
         func testHeaderIsReadableOnGlass() throws {
             try XCTSkipIf(UIDevice.current.userInterfaceIdiom == .pad, "Measured on an iPhone's sheet")
+            let initial = XCUIDevice.shared.orientation
+            if initial.isPortrait || initial.isLandscape {
+                addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = initial }
+            }
+            XCUIDevice.shared.orientation = .portrait
             let app = signIn(launchArguments: Self.launchArguments)
             open(.player, in: app)
-            openChaptersSheet(in: app)
+            let bar = openChaptersSheet(in: app)
             let rows = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Chapter "))
             let first = rows.firstMatch
             XCTAssertTrue(first.waitForExistence(timeout: Self.fixtureTimeout), "The chapter list has no rows")
@@ -54,8 +64,14 @@ final class ChapterHighlightTests: XCTestCase {
             let attachment = XCTAttachment(screenshot: screenshot)
             attachment.name = "chapters-medium-detent"
             add(attachment)
+            // The sheet's navigation bar is its top: about halfway down at the medium detent, near the
+            // window's top at the large one.
+            let window = app.windows.firstMatch.frame
+            XCTAssertGreaterThan(
+                bar.frame.minY, window.height * 0.25,
+                "The chapters sheet isn't at its medium detent: its top is at \(bar.frame.minY) of \(window.height)")
             let image = try XCTUnwrap(Self.upright(screenshot), "Couldn't read the screenshot")
-            let scale = CGFloat(image.width) / app.windows.firstMatch.frame.width
+            let scale = CGFloat(image.width) / window.width
             // The header is the text right above the first row, in its column: the navigation
             // title and the player's own Duration, under the sheet, have the same labels.
             for label in ["Start", "Duration"] {

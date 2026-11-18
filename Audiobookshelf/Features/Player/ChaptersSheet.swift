@@ -139,10 +139,10 @@ private struct ChaptersList: View {
                             // Lines the columns up with the rows' current-chapter checkmark.
                             Image(systemName: "checkmark").hidden()
                         }
-                        // Not the system's header colour, 3.3:1 on the grouped background in light,
-                        // and for glass, as the other rows' times: at the sheet's medium detent,
-                        // `mutedForeground` measured down to 4.1:1 on an iPhone and 3.6:1 on an
-                        // iPad against the glass just past its glyphs' edges. #705
+                        // Not the system's header colour (3.3:1 on the grouped background in light).
+                        // The glass token, as for the other rows' times: at the sheet's medium
+                        // detent `mutedForeground` measured down to 4.0:1 on an iPhone and 3.5:1 on
+                        // an iPad, against the glass just past its glyphs' edges. #705
                         .foregroundStyle(ABSColor.mutedForegroundOnGlass)
                         .accessibilityHidden(true)
                     }

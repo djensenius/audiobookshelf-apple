@@ -278,20 +278,24 @@ where the Library root's bar has both the queue indicator and the connection ind
 indicator outranks the filter and sort only once the problem has lasted 3 seconds, so the checks
 wait for it. A regular-width iPad and a Mac skip it.
 
-`ChapterHighlightTests` (iOS) checks the current chapter's tint in the chapter list (#705), which
-the audits can't catch. It launches in the light theme at the default text size (`-ABSTheme light`,
-`-UIPreferredContentSizeCategoryName UICTContentSizeCategoryL`), whatever the simulator's, plays
-*Pride and Prejudice* and shows the list: on an iPad from iOS 27.1, where the player has its
-arrangements, the details pane beside the player turned to landscape (turned back afterwards if
-it was in portrait or landscape; a fresh runner reports an unknown orientation, which can't be
-set); elsewhere, the Chapters sheet (`player.chapters`, in the overflow menu of a vertical bar) at
-its large detent. It checks that the current chapter's row background differs from another row's,
-and that its times measure 4.5:1 or more in black (`MeasuredContrast`).
+`ChapterHighlightTests` (iOS) checks the current chapter's tint in the chapter list, and on an
+iPhone the list header's contrast on the sheet's glass (#705), which the audits can't catch. Both
+tests launch in the light theme at the default text size (`-ABSTheme light`,
+`-UIPreferredContentSizeCategoryName UICTContentSizeCategoryL`), whatever the simulator's, and play
+*Pride and Prejudice*. The tint test shows the list: on an iPad from iOS 27.1, where the player
+has its arrangements, the details pane beside the player turned to landscape (turned back
+afterwards if it was in portrait or landscape; a fresh runner reports an unknown orientation,
+which can't be set); elsewhere, the Chapters sheet (`player.chapters`, in the overflow menu of a
+vertical bar) at its large detent. It checks that the current chapter's row background differs
+from another row's, and that its times measure 4.5:1 or more in black (`MeasuredContrast`).
 In landscape the screenshot is the portrait framebuffer tagged with its orientation, so the test
-draws it upright before reading the rows' frames. On an iPhone (skipped on an iPad) a second test
-opens the sheet at its medium detent, on glass over the player, and checks that the list header's
-Start and Duration, in `ABSColor.mutedForegroundOnGlass`, measure 4.5:1 or more there; not its
-semibold "Chapters", whose wide strokes `MeasuredContrast` misreads (see docs/accessibility.md).
+draws it upright before reading the rows' frames. The header test, on an iPhone (skipped on an
+iPad), turns it to portrait (back afterwards only if it was in portrait or landscape) and opens the
+sheet. It checks that the sheet is at its medium detent, on glass over the player, not the opaque
+large detent, where `mutedForeground` passes too. Then it checks that the list header's Start and
+Duration, in `ABSColor.mutedForegroundOnGlass`, measure 4.5:1 or more there; not its semibold
+"Chapters", whose wide strokes `MeasuredContrast` misreads (see docs/accessibility.md). On an
+iPhone 17 they read 4.68:1 and 5.20:1, a thin margin; CI's iPhone Duo reads 5.49:1 and 5.83:1.
 
 `PlayerToolbarTests` (iOS) checks the player's bottom toolbar on an iPad in portrait (#705): from
 iOS 27.1 the split arrangement shows the details pane only side by side, so in portrait the bar
