@@ -277,6 +277,21 @@ element, each with the reason and its issue:
   Plain "unsupported", issues with no element (or with neither identifier nor label) and
   `textClipped` still fail at once. With the chapter title clamped to AX2, the walk still fails
   on it after both re-audits (#705).
+- Settings at XXXL and AX1 on a 13-inch iPad: "Dynamic Type font sizes are unsupported" with no
+  element ("… this SwiftUI.AccessibilityNode") while the Language section's footer, the last
+  text in the list ("Audiobookshelf uses the language you choose for it in the Settings app…"),
+  is wholly on screen (#705). Probed by scroll position, auditing Dynamic Type alone: with the
+  footer wholly on screen it was reported at AX1 in 10 of 11 audits and at XXXL in 4 of 8, and
+  never with it clipped or off screen (0 of 30). With the footer removed it wasn't reported at
+  all (0 of 25 audits, 3 launches, from the bottom of the list up); with it in `.footnote`, in
+  `ABSColor.mutedForeground` as Data's footer is, or cut to one short sentence or to Data's
+  footer text, it still was (1 of 1 each, at AX1). So it isn't the text, its font or its colour,
+  and nothing else in the footer can be: it's a plain `Text`, with no link, image or Markdown,
+  and no font, frame or line limit of the app's. It scales: its frame grows from 59 points tall
+  at XXXL to 68.5 at AX1. So it's the audit's, not fixed. It isn't filtered either, because no
+  walk reaches it: the walks audit Settings at the default size and AX5, near its top. A walk
+  that scrolls Settings to its end at those sizes should filter only this: Settings, Dynamic
+  Type, "unsupported" (not "partially"), with no element, while that footer is wholly on screen.
 - Contrast on content text under the bottom bar, on every screen but the Player (#623, #650).
   On iOS the tab bar floats over the content, with the mini player above it, so a
   screen at rest has rows under the bar's glass, and the audit measures them through it. On an
@@ -414,3 +429,11 @@ Voice Control names and Reduce Motion helpers in `AccessibilityTests`.
   symbol only and reads "Browse" without the section shown: the bar drops a `Label`'s
   accessibility value, as it does for View Options. Its overflow menu entry is titled with the
   section.
+- The chapter list's column header ("Chapters", "Start", "Duration") is hidden from VoiceOver:
+  each row speaks its title, start and duration ("Chapter 1, starts at 0 seconds, duration 30
+  seconds"), and the current one is marked "Current chapter" and selected. XCUITest's element
+  tree still lists the header's texts, as it lists other hidden elements (the rows' checkmarks,
+  Item detail's metadata labels). An audit of the iPad's landscape player, which no walk runs
+  yet, reports it as "Potentially inaccessible text" with no element, as for those labels
+  (#613): on an iPad Pro 13-inch, with the header hidden it's reported, and with the header
+  removed or shown to VoiceOver it isn't (#705).
