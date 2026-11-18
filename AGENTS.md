@@ -95,7 +95,7 @@ packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 | `mise run test` | Package tests (`test:kit`), tool tests (`test:tools`), and macOS app tests (`test:app`, signed ad hoc) |
 | `mise run test:kit:slow` | Slow package tests tagged `.slow` (opt-in via `ABS_SLOW_TESTS=1`; CI runs them on pushes to `main`) |
 | `TEST_RUNNER_ABS_OCR_TESTS=1 mise run test:app -- -only-testing:AudiobookshelfTests/ConnectOCRTests` | Vision OCR of the rendered connect screens; needs a Mac with a Neural Engine (skipped on CI) |
-| `mise run test:kit:ios` | Four iOS-only `ShakeDetectorTests` via the package scheme; required in PR CI, separate from `test` (see below) |
+| `mise run test:kit:ios` | Four iOS-only `ShakeDetectorTests` via the dedicated `AudiobookshelfKit-ShakeDetector` package scheme; required in PR CI, separate from `test` (see below) |
 | `mise run test:kit:ios:runner` | Bounded fake-CLI/result regressions for the iOS gate; also run by `lint:repo`, without Xcode or a simulator |
 | `mise run test:server` / `server:run` | Opt-in `ABSServerContractTests` against a real Audiobookshelf server in Docker (`ABS_SERVER_VERSION` picks the release, default 2.26.0), or start the same seeded server for manual use; `test:kit` compiles the suite and skips it; see [docs/testing/server-contracts.md](docs/testing/server-contracts.md) |
 | `mise run test:tools` | Tests for repository tools in `Tools/` (the strings importer), plus `test:release` (the release scripts) |
@@ -116,7 +116,12 @@ newest runtime, then an already booted device, then device type and UDID.
 Set `IOS_SIMULATOR_ID=<udid>` to select a specific compatible available iPhone;
 an invalid or empty override fails without fallback. No iPhone Duo is required.
 It borrows the device without creating, erasing, deleting or shutting down any
-simulator, disables parallel test workers, and limits builds to two jobs.
+simulator and disables parallel test workers. Builds use every core unless
+`ABS_XCODEBUILD_JOBS=<1-1024>` caps them (use 2 on a shared machine);
+any other value fails before building. The build uses the checked-in
+`AudiobookshelfKit-ShakeDetector` scheme
+(`Packages/AudiobookshelfKit/.swiftpm/xcode/xcshareddata/xcschemes/`), which
+builds only `ABSPlaybackTests` and its dependencies.
 In CI (`CI=true`) or with `ABS_EPHEMERAL_SIMULATOR=1`, unless `IOS_SIMULATOR_ID`
 is set, it instead creates its own `abs-ci-<run>-<attempt>-<pid>-<try>` simulator of
 the selected device type and runtime, and always shuts it down and deletes it. It
