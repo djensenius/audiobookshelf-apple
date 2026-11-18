@@ -283,6 +283,18 @@ private final class MutableClock: Sendable {
         #expect(model.sections.map(\.dateText) == [dateText(now, utc), dateText(stop.timestamp, utc)])
     }
 
+    /// #689: the position follows the model's locale digits.
+    @Test func positionTextUsesTheLocalesDigits() throws {
+        let utc = try calendar("UTC")
+        let now = try date(utc, 2026, 11, 10, 15, 45)
+        let model = PlaybackHistoryModel(
+            mediaKey: mediaKey, source: { _ in AsyncStream { $0.finish() } }, playFromTime: { _, _ in }, calendar: utc,
+            locale: Locale(identifier: "ar_SA"), now: { now })
+        model.apply([event(.pause, at: now, position: 3723.6)])
+
+        #expect(model.sections.first?.rows.first?.positionText == "٠١:٠٢:٠٤")
+    }
+
     @Test(arguments: [
         (3723.4, 3723.0, "01:02:03"), (3723.5, 3724, "01:02:04"), (59.6, 60, "00:01:00"), (-2, 0, "00:00:00"),
     ])

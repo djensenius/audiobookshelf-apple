@@ -4,7 +4,8 @@ import SwiftUI
 
 /// Formats a number of seconds like the legacy app.
 public enum DurationStyle: Hashable, Sendable {
-    /// `4:05` or `1:02:03` (legacy `$secondsToTimestamp`), for playback positions.
+    /// `4:05` or `1:02:03` (legacy `$secondsToTimestamp`), for playback positions, in the
+    /// locale's digits.
     case timestamp
     /// `1d 2h 3m 4s` (legacy `$elapsedPrettyExtended`), localized, for total durations.
     /// Rounds to whole seconds; without seconds the minutes are rounded too. Without days,
@@ -16,7 +17,7 @@ public enum DurationStyle: Hashable, Sendable {
     public func string(_ seconds: TimeInterval, locale: Locale = .autoupdatingCurrent) -> String {
         switch self {
         case .timestamp:
-            TimeFormatting.timestamp(seconds)
+            TimeFormatting.timestamp(seconds, locale: locale)
         case .elapsed(let showSeconds, let useDays):
             Self.elapsed(seconds, showSeconds: showSeconds, useDays: useDays, width: .narrow, locale: locale)
         }

@@ -44,7 +44,7 @@ struct RemoteProgressOfferHost: ViewModifier {
     }
 
     static func message(for offer: RemoteProgressOffer.Pending) -> String {
-        let position = TimeFormatting.timestamp(offer.position)
+        let position = DurationStyle.timestamp.string(offer.position)
         if let device = offer.deviceDescription, !device.isEmpty {
             return L10n.string("MessageRemoteProgressOfferFromDevice", device, position)
         }

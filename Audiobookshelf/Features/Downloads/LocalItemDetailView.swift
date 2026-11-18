@@ -253,7 +253,7 @@ private struct LocalItemHeader: View {
                     .font(.caption)
                     .foregroundStyle(ABSColor.mutedForeground)
                     if detail.totalDuration > 0 {
-                        Text(verbatim: TimeFormatting.timestamp(detail.totalDuration))
+                        Text(verbatim: DurationStyle.timestamp.string(detail.totalDuration))
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(ABSColor.mutedForeground)
                     }
@@ -324,7 +324,7 @@ private struct LocalFileRow: View {
             Spacer(minLength: ABSSpacing.small)
             VStack(alignment: .trailing, spacing: ABSSpacing.xxSmall) {
                 if let duration = file.duration {
-                    Text(verbatim: TimeFormatting.timestamp(duration))
+                    Text(verbatim: DurationStyle.timestamp.string(duration))
                         .font(.caption.monospacedDigit())
                 }
                 Text(verbatim: ByteCountFormatting.string(fromBytes: file.byteCount))
@@ -361,7 +361,7 @@ private struct LocalEpisodeRow: View {
     private var details: String {
         var parts: [String] = []
         if let published = episode.publishedAt { parts.append(published.formatted(date: .abbreviated, time: .omitted)) }
-        if let duration = episode.duration { parts.append(TimeFormatting.timestamp(duration)) }
+        if let duration = episode.duration { parts.append(DurationStyle.timestamp.string(duration)) }
         parts.append(ByteCountFormatting.string(fromBytes: episode.byteCount))
         return parts.joined(separator: " · ")
     }

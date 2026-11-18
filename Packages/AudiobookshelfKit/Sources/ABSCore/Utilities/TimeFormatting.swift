@@ -38,18 +38,36 @@ public enum TimeFormatting {
         }
     }
 
-    /// `m:ss`, or `h:mm:ss` from one hour, for example `4:05` or `1:02:03`.
+    /// `m:ss`, or `h:mm:ss` from one hour, for example `4:05` or `1:02:03`, in ASCII digits.
     /// Fractional seconds are truncated; negative and non-finite values show as `0:00`.
+    /// For text people read, use ``timestamp(_:locale:)``.
     public static func timestamp(_ seconds: TimeInterval) -> String {
         let (hours, minutes, secs) = components(wholeSeconds(seconds, rounded: false))
         if hours == 0 { return "\(minutes):\(pad(secs))" }
         return "\(hours):\(pad(minutes)):\(pad(secs))"
     }
 
-    /// Always `hh:mm:ss`, for example `00:04:05`. Seconds are rounded.
+    /// ``timestamp(_:)`` with `locale`'s digits, for example `٤:٠٥` in `ar_SA`. The shape and the
+    /// `:` separators stay the same in every locale.
+    public static func timestamp(_ seconds: TimeInterval, locale: Locale) -> String {
+        let (hours, minutes, secs) = components(wholeSeconds(seconds, rounded: false))
+        let digits = Digits(locale: locale)
+        if hours == 0 { return "\(digits.plain(minutes)):\(digits.padded(secs))" }
+        return "\(digits.plain(hours)):\(digits.padded(minutes)):\(digits.padded(secs))"
+    }
+
+    /// Always `hh:mm:ss`, for example `00:04:05`, in ASCII digits. Seconds are rounded.
+    /// For text people read, use ``fullTimestamp(_:locale:)``.
     public static func fullTimestamp(_ seconds: TimeInterval) -> String {
         let (hours, minutes, secs) = components(wholeSeconds(seconds, rounded: true))
         return "\(pad(hours)):\(pad(minutes)):\(pad(secs))"
+    }
+
+    /// ``fullTimestamp(_:)`` with `locale`'s digits, for example `٠٠:٠٤:٠٥` in `ar_SA`.
+    public static func fullTimestamp(_ seconds: TimeInterval, locale: Locale) -> String {
+        let (hours, minutes, secs) = components(wholeSeconds(seconds, rounded: true))
+        let digits = Digits(locale: locale)
+        return "\(digits.padded(hours)):\(digits.padded(minutes)):\(digits.padded(secs))"
     }
 
     /// The longest duration, in seconds, that is converted to a whole number. Longer ones are
@@ -89,5 +107,19 @@ public enum TimeFormatting {
 
     private static func pad(_ value: Int) -> String {
         value < 10 ? "0\(value)" : "\(value)"
+    }
+
+    /// Timestamp components in a locale's numbering system, without grouping separators.
+    private struct Digits {
+        private let plainStyle: IntegerFormatStyle<Int>
+        private let paddedStyle: IntegerFormatStyle<Int>
+
+        init(locale: Locale) {
+            plainStyle = IntegerFormatStyle<Int>(locale: locale).grouping(.never)
+            paddedStyle = plainStyle.precision(.integerLength(2...))
+        }
+
+        func plain(_ value: Int) -> String { value.formatted(plainStyle) }
+        func padded(_ value: Int) -> String { value.formatted(paddedStyle) }
     }
 }
