@@ -105,6 +105,12 @@ the fixture launch's theme setting, as the dark accessibility audits do (`Fixtur
 created simulator ignores `XCUIDevice.shared.appearance` and `simctl ui appearance` until it's
 rebooted, so this is how a test sees dark mode. Only fixture launches read it.
 
+Add `-ABSStallDownloads` to keep a track's download under way: its reply sends the headers and
+half of the audio, then nothing more, so the download queue and the tab roots' queue indicator
+(`downloads.queueIndicator`) stay up. `DownloadQueueIndicatorTests` uses it to check that the
+indicator is in the bar of the Home and Library roots (#685), not their overflow menu, with a
+label and a value giving the count and progress (#686), and not in the Downloads root's bar.
+
 The replies are the `fixture-*` files in `Audiobookshelf/Fixtures/Resources/`: status, ping,
 login and authorize, `/api/me`, the libraries, the library with its filter data, the
 personalized shelves, one page of items, one page of series (*Barsoom*, with its three books),
