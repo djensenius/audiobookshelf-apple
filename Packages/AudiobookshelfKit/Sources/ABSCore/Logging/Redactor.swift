@@ -4,9 +4,10 @@ import Foundation
 ///
 /// Always redacts:
 /// - `Bearer` credentials (`Authorization: Bearer abc` becomes `Authorization: Bearer <redacted>`),
-/// - values of token and OAuth query parameters (`token`, `access_token`, `refresh_token`,
-///   `accessToken`, `refreshToken`, `code`, `code_verifier`), in URLs or as bare `name=value` text;
-///   names match in any case and after percent-decoding, and malformed encoded names are redacted,
+/// - values of token, API key, and OAuth query parameters (`token`, `access_token`, `refresh_token`,
+///   `accessToken`, `refreshToken`, `api_key`, `apiKey`, `code`, `code_verifier`), in URLs or as bare
+///   `name=value` text; names match in any case and after percent-decoding, and malformed encoded
+///   names are redacted,
 /// - string values of the JSON keys `token`, `accessToken`, `access_token`, `refreshToken`, `refresh_token`,
 ///   `apiKey`, `api_key`, `password`, and `secret` (in any case), also when the JSON is escaped again
 ///   inside an error's description (`\"token\":\"…\"`),
@@ -199,9 +200,10 @@ public struct Redactor: Sendable, Equatable {
         Rule(#"\\"\#(sensitiveJSONKey)\\"\s*:\s*\\"(?<value>(?:\\\\(?:\\.|[^\\])|\\[^\\"]|[^\\"])*)"#),
     ]
 
-    /// Token and OAuth (PKCE) parameter names, lowercased. Compared after percent-decoding.
+    /// Token, API key, and OAuth (PKCE) parameter names, lowercased. Compared after percent-decoding.
     private static let sensitiveParameterNames: Set<String> = [
-        "token", "access_token", "accesstoken", "refresh_token", "refreshtoken", "code", "code_verifier",
+        "token", "access_token", "accesstoken", "refresh_token", "refreshtoken", "api_key", "apikey", "code",
+        "code_verifier",
     ]
 
     /// Whether a query parameter name is sensitive once percent-decoded, ignoring case

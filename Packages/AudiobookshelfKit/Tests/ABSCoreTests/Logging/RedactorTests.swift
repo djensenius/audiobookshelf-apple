@@ -23,6 +23,7 @@ private let legacyToken =
 
     @Test(arguments: [
         "token", "access_token", "refresh_token", "accessToken", "refreshToken", "TOKEN", "code", "code_verifier",
+        "api_key", "apiKey",
     ])
     func redactsTokenQueryValues(name: String) {
         let url = "https://abs.example.com/api/items/1/cover?\(name)=s3cret&width=400#top"
@@ -161,12 +162,14 @@ private let legacyToken =
     }
 
     /// An error's description escapes the JSON body it quotes once more, including an escaped quote
-    /// in the value (`\\\"`).
+    /// in the value (`\\\"`) and a value that ends in an escaped backslash (`\\\\` before the closing `\"`).
     @Test(arguments: ["token", "accessToken", "refresh_token", "api_key", "password", "secret"])
     func redactsEscapedJSONCredentialValues(key: String) {
         #expect(
             Log.redact(#"message: Optional("{\"\#(key)\" : \"0pa\\\"que\",\"next\":1}")"#)
                 == #"message: Optional("{\"\#(key)\" : \"<redacted>\",\"next\":1}")"#)
+        #expect(
+            Log.redact(#"{\"\#(key)\":\"abc\\\\\",\"next\":1}"#) == #"{\"\#(key)\":\"<redacted>\",\"next\":1}"#)
     }
 
     @Test func redactedErrorLosesJSONCredentialsInItsServerMessage() {

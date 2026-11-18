@@ -200,9 +200,7 @@
                 var components = URLComponents()
                 components.queryItems = query.isEmpty ? nil : query
                 let target = components.percentEncodedQuery.map { "\(path)?\($0)" } ?? path
-                Log.api.error(
-                    "Fixture server: no fixture for \(method, privacy: .public) \(Log.redact(target), privacy: .public)"
-                )
+                Log.api.error("Fixture server: no fixture for \(method, privacy: .public) \(target, privacy: .public)")
                 return .notFound
             }
             if let sessionID = sessionID(method: method, path: path) {
