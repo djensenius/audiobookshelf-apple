@@ -153,16 +153,18 @@ struct PlaylistWriteContractTests {
     @Test func versionSpecificNameAndLibraryAccess() async throws {
         try await PlaylistContractFixture.withFixture { fixture in
             let version = try #require(ContractServer.current?.version)
-            try #require(["2.26.0", "2.37.2"].contains(version))
+            try #require(["2.26.0", "2.37.2", "2.38.0"].contains(version))
+            // 2.37.2 and 2.38.0 sanitize names and check library access; 2.26.0 does neither.
+            let hardened = version != "2.26.0"
             let owner = try await fixture.user()
             let restricted = try await fixture.user(accessibleLibraries: [fixture.seed.podcastLibraryID])
             let created = try await fixture.create(as: owner, name: "<b>Playlist</b>")
-            #expect(created.name == (version == "2.37.2" ? "Playlist" : "<b>Playlist</b>"))
+            #expect(created.name == (hardened ? "Playlist" : "<b>Playlist</b>"))
             let updated = try await fixture.send(
                 PlaylistEndpoints.update(id: created.id, PlaylistUpdateRequest(name: "<i>Updated</i>")), as: owner)
-            #expect(updated.name == (version == "2.37.2" ? "Updated" : "<i>Updated</i>"))
+            #expect(updated.name == (hardened ? "Updated" : "<i>Updated</i>"))
             #expect(try await fixture.read(created.id, as: owner).name == updated.name)
-            if version == "2.37.2" {
+            if hardened {
                 await expectPlaylistStatus(403) { try await fixture.create(as: restricted) }
             } else {
                 #expect(try await fixture.create(as: restricted).items.count == 2)
@@ -178,13 +180,13 @@ struct PlaylistWriteContractTests {
                     PlaylistItemsRequest(items: [PlaylistItemReference(libraryItemID: UUID().uuidString)])),
             ]
             for endpoint in endpoints {
-                if version == "2.37.2" {
+                if hardened {
                     await expectPlaylistStatus(404) { try await fixture.send(endpoint, as: owner) }
                 } else {
                     #expect(try await fixture.send(endpoint, as: owner).items.count == 2)
                 }
             }
-            if version == "2.37.2" {
+            if hardened {
                 await expectPlaylistStatus(404) { try await fixture.delete(created.id, as: owner) }
                 // Owner cannot delete after restriction; fixture explicitly uses verified user cascade.
             } else {

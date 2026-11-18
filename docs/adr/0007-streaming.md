@@ -9,7 +9,7 @@ The native app must stream audiobooks and podcast episodes with `AVPlayer` on iO
 
 The legacy Capacitor app authenticates its HLS transcode stream with the string literal `"AVURLAssetHTTPHeaderFieldsKey"` (`ios/App/Shared/player/AudioPlayer.swift:581-587`). That key is not public API. The iOS 27.2 SDK `AVAsset.h` declares no `HTTPHeaderFieldsKey` constant. AVFoundation's `.tbd` does list `_AVURLAssetHTTPHeaderFieldsKey`, but the leading `_` is Mach-O C symbol mangling: the binary exports a constant named `AVURLAssetHTTPHeaderFieldsKey` that is unpublished and undocumented (see [platform API research §3.4](../research/platform-apis.md)). We will not ship it.
 
-Server facts below come from the server source at `advplyr/audiobookshelf` `master` @ `83dce682e88c2b32b0c33a8f83a9457bfc459e0e` (latest tag v2.37.2) and from tags `v2.22.0` (`25c7e95a`) and `v2.26.0` (`264ae928`).
+Server facts below come from the server source at `advplyr/audiobookshelf` `master` @ `83dce682e88c2b32b0c33a8f83a9457bfc459e0e` (17 commits after tag v2.37.2; included in v2.38.0) and from tags `v2.22.0` (`25c7e95a`) and `v2.26.0` (`264ae928`).
 
 **Starting a play session.**
 
@@ -412,7 +412,7 @@ Cons:
 - **Old servers are refused. This is a deliberate compatibility break with the legacy app.**
   - **Who:** users on servers below 2.26.0. The legacy app still supports them with the old non-expiring token and only a soft warning.
   - **What they see:** a blocking "This server runs Audiobookshelf X. Version 2.26.0 or newer is required." message at sign-in, with upgrade guidance.
-  - **What they must do:** upgrade the server (2.26.0 shipped 2025-07-12; the current release is v2.37.2).
+  - **What they must do:** upgrade the server (2.26.0 shipped 2025-07-12; the latest release is v2.38.0, 2026-11-17).
   - **Not yet settled:** the floor is provisional until the owner signs off (#48).
 - **New failure mode.** Expired access tokens can no longer cause mid-playback 401s from Audiobookshelf, because streaming URLs carry no user access token. (Before 2.29.0, HLS segment URIs carry the legacy, non-expiring token; see #662.) Losing the session (restart, 36-hour idle, same-device takeover) is now the main failure mode. The engine handles it with the bounded recovery in Decision 3, so the engine carries more state: the saved position, the per-session listening deltas, and a persisted sync queue.
 - **Session ids are capabilities.** Never log full track URLs, HLS playlist or segment URIs, or the URIs in an `AVPlayerItem`'s access and error logs at info level. Before 2.29.0 the segment URIs also carry the user's legacy token (#662).
@@ -440,10 +440,10 @@ Cons:
 | 2.22.0–2.25.x | Blocked (pre-JWT auth) | Blocked | Blocked | Blocked |
 | 2.26.0–2.26.2 | Direct play, public track | Direct play, N items in `AVQueuePlayer` | HLS transcode (denylisted) | Direct play |
 | 2.26.3–2.27.x | as above | as above | as above | as above |
-| ≥ 2.28.0 (test on 2.37.2) | as above | as above | as above | as above |
+| ≥ 2.28.0 (test on 2.38.0) | as above | as above | as above | as above |
 | Any ≥ 2.26.0 behind a custom-header proxy | Direct play via resource loader | Direct play via resource loader | Error (needs transcode) | Direct play via resource loader |
 
-**Server side observed.** `StreamingFormatContractTests` ([server contracts](../testing/server-contracts.md#streaming-formats)) checks the server's half of this matrix against real 2.26.0 and 2.37.2 servers, using the app's play request as built on the macOS test host: the play method, track order, `Content-Type` and `206` ranges for direct play, and for Opus and a forced m4b transcode, a playlist and first segment fetched without `Authorization`. The results match this matrix. One thing differs from "relative segment URIs `output-N.ts`" above: every release before 2.29.0 adds `?token=` with the user's legacy, non-expiring token to every segment URI (removed upstream by `2cc6e56b`, "remove token from hls url", 2025-08-19). The suite observes this on 2.26.0, and 2.37.2 doesn't add it. The device checks and the proxy row are still manual (#49). Recorded for the owner's sign-off (#48, #662); decision 1 stays provisional.
+**Server side observed.** `StreamingFormatContractTests` ([server contracts](../testing/server-contracts.md#streaming-formats)) checks the server's half of this matrix against real 2.26.0, 2.37.2 and 2.38.0 servers, using the app's play request as built on the macOS test host: the play method, track order, `Content-Type` and `206` ranges for direct play, and for Opus and a forced m4b transcode, a playlist and first segment fetched without `Authorization`. The results match this matrix. One thing differs from "relative segment URIs `output-N.ts`" above: every release before 2.29.0 adds `?token=` with the user's legacy, non-expiring token to every segment URI (removed upstream by `2cc6e56b`, "remove token from hls url", 2025-08-19). The suite observes this on 2.26.0, and 2.37.2 and 2.38.0 don't add it. The device checks and the proxy row are still manual (#49). Recorded for the owner's sign-off (#48, #662); decision 1 stays provisional.
 
 **Additional checks in #49,** on one supported server:
 - `forceTranscode: true` on an m4b returns `playMethod 2`, and `/hls/…/output.m3u8` plays without any `Authorization` header.

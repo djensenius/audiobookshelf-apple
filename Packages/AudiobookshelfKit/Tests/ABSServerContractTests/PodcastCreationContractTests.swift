@@ -74,10 +74,11 @@ struct PodcastCreationContractTests {
             #expect(item.libraryId == seed.podcastLibraryID && item.folderId == folder.id)
             #expect(item.path == body.path)
             // 2.26.0 strips `folder.fullPath`, which its LibraryFolder model doesn't have, so
-            // `relPath` is the whole path without its leading slash; 2.37.2 strips `folder.path`.
+            // `relPath` is the whole path without its leading slash; 2.37.2 and 2.38.0 strip
+            // `folder.path`.
             switch ContractServer.current?.version {
             case "2.26.0": #expect(item.relPath == String(body.path.drop { $0 == "/" }))
-            case "2.37.2": #expect(item.relPath == title)
+            case "2.37.2", "2.38.0": #expect(item.relPath == title)
             default: #expect(item.relPath == title || item.relPath == String(body.path.drop { $0 == "/" }))
             }
             #expect(item.mediaType == .podcast && item.isFile == false && !item.isMissing && !item.isInvalid)

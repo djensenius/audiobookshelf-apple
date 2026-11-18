@@ -24,13 +24,13 @@ struct ContractServer: Sendable {
         try #require(current, "ABS_TEST_SERVER_URL is not set")
     }
 
-    /// Whether the server still accepts a refresh token a refresh has replaced. Known for the two
-    /// pinned releases (2.26.0 rejects it at once; 2.37.2 has a 10 minute grace period); `nil`
-    /// for any other server, where only the invariants are checked.
+    /// Whether the server still accepts a refresh token a refresh has replaced. Known for the
+    /// pinned releases (2.26.0 rejects it at once; 2.37.2 and 2.38.0 have a 10 minute grace
+    /// period); `nil` for any other server, where only the invariants are checked.
     var acceptsReplacedRefreshToken: Bool? {
         switch version {
         case "2.26.0": false
-        case "2.37.2": true
+        case "2.37.2", "2.38.0": true
         default: nil
         }
     }

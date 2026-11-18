@@ -13,8 +13,8 @@ Catalyst)**. Reading position must sync with the Audiobookshelf web reader throu
 `PATCH /api/me/progress/:id` using `{ ebookLocation, ebookProgress }`.
 
 The legacy app ([`components/readers/`](../../components/readers)) and the web client
-(`advplyr/audiobookshelf`, `client/components/readers/`, read on 2026-11-09, latest
-release v2.37.2) use the same readers:
+(`advplyr/audiobookshelf`, `client/components/readers/`, read on 2026-11-09, when v2.37.2 was the
+latest release; unchanged in v2.38.0) use the same readers:
 
 | Format | Legacy app and web client | `ebookLocation` written |
 | --- | --- | --- |
