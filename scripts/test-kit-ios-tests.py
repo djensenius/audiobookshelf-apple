@@ -294,9 +294,17 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual([(ref.get("BlueprintIdentifier"), ref.get("BlueprintName"))
                                   for ref in tree.findall(path)], [("ABSPlaybackTests", "ABSPlaybackTests")])
         self.assertIn("ABSPlaybackTests", RUNNER["PACKAGE"].joinpath("Package.swift").read_text())
-        # `.swiftpm/` is otherwise ignored; the scheme must not be.
-        ignored = subprocess.run(["git", "check-ignore", "-q", str(scheme)], cwd=ROOT, timeout=10)
-        self.assertEqual(ignored.returncode, 1)
+        # `.swiftpm/` is otherwise ignored; only this scheme is re-included. `--no-index`
+        # checks the rules themselves, not whether a path happens to be tracked.
+        xcode = scheme.parent.parent.parent
+        for path, status in ((scheme, 1),
+                             (xcode / "package.xcworkspace/contents.xcworkspacedata", 0),
+                             (xcode / "xcshareddata/WorkspaceSettings.xcsettings", 0),
+                             (xcode / "xcshareddata/xcschemes/AudiobookshelfKit-Package.xcscheme", 0)):
+            with self.subTest(path=path):
+                ignored = subprocess.run(["git", "check-ignore", "-q", "--no-index", str(path)],
+                                         cwd=ROOT, timeout=10)
+                self.assertEqual(ignored.returncode, status)
 
     def test_build_jobs_are_capped_only_by_abs_xcodebuild_jobs(self):
         def build_args():
@@ -304,7 +312,7 @@ class RunnerTests(unittest.TestCase):
 
         self.run_case()
         self.assertNotIn("-jobs", build_args())
-        for jobs, passed in (("1", "1"), ("2", "2"), ("16", "16"), ("08", "8")):
+        for jobs, passed in (("1", "1"), ("2", "2"), ("16", "16"), ("08", "8"), ("1024", "1024")):
             with self.subTest(jobs=jobs):
                 self.env["ABS_XCODEBUILD_JOBS"] = jobs
                 self.assertIn("Verified 4/4", self.run_case().stdout)
@@ -314,12 +322,12 @@ class RunnerTests(unittest.TestCase):
                 self.assertNotIn("-jobs", test["args"])
         # An invalid value fails before any simulator or xcodebuild call, even in CI.
         self.ci()
-        for jobs in ("", "0", "00", "-1", "2.5", " 2", "two"):
+        for jobs in ("", "0", "00", "-1", "2.5", " 2", "2\n", "two", "\u0662", "1025"):
             with self.subTest(jobs=jobs):
                 (self.root / "calls.jsonl").unlink(missing_ok=True)
                 self.env["ABS_XCODEBUILD_JOBS"] = jobs
                 result = self.run_case(expected=1)
-                self.assertIn(f"ABS_XCODEBUILD_JOBS must be a positive integer, got {jobs!r}", result.stderr)
+                self.assertIn(f"ABS_XCODEBUILD_JOBS must be an integer from 1 to 1024, got {jobs!r}", result.stderr)
                 self.assertFalse((self.root / "calls.jsonl").exists())
 
     def test_explicit_destination_and_ci_toolchain(self):

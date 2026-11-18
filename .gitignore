@@ -96,10 +96,14 @@ node_modules/
 # Swift / Xcode
 .build/
 **/.swiftpm/*
-# Except AudiobookshelfKit's shared schemes (the ABSPlaybackTests-only one used by test:kit:ios).
+# Except the ABSPlaybackTests-only scheme used by test:kit:ios.
 !/Packages/AudiobookshelfKit/.swiftpm/xcode/
 /Packages/AudiobookshelfKit/.swiftpm/xcode/*
 !/Packages/AudiobookshelfKit/.swiftpm/xcode/xcshareddata/
+/Packages/AudiobookshelfKit/.swiftpm/xcode/xcshareddata/*
+!/Packages/AudiobookshelfKit/.swiftpm/xcode/xcshareddata/xcschemes/
+/Packages/AudiobookshelfKit/.swiftpm/xcode/xcshareddata/xcschemes/*
+!/Packages/AudiobookshelfKit/.swiftpm/xcode/xcshareddata/xcschemes/AudiobookshelfKit-ShakeDetector.xcscheme
 DerivedData/
 *.xcresult
 xcuserdata/

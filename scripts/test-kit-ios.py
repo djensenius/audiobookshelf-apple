@@ -10,7 +10,7 @@ It builds with the checked-in `AudiobookshelfKit-ShakeDetector` scheme
 (`Packages/AudiobookshelfKit/.swiftpm/xcode/xcshareddata/xcschemes/`), whose only
 testable is ABSPlaybackTests, so `build-for-testing` compiles that target and its
 dependencies instead of every package test target. xcodebuild picks its own job count;
-set `ABS_XCODEBUILD_JOBS=<positive integer>` to cap it (e.g. 2 on a shared machine).
+set `ABS_XCODEBUILD_JOBS=<1-1024>` to cap it (e.g. 2 on a shared machine).
 
 Result fields/enums come from Xcode 27.2's installed xcresulttool
 `get test-results {summary,tests} --schema` (schema version 0.5.0).
@@ -228,12 +228,13 @@ def test_scheme(listing):
 
 
 def build_jobs(environ):
-    """`-jobs N` from `ABS_XCODEBUILD_JOBS` if set (a positive integer), else xcodebuild's default."""
+    """`-jobs N` from `ABS_XCODEBUILD_JOBS` if set (an integer 1-1024), else xcodebuild's default."""
     if "ABS_XCODEBUILD_JOBS" not in environ:
         return []
     jobs = environ["ABS_XCODEBUILD_JOBS"]
-    if not re.fullmatch(r"[0-9]+", jobs) or int(jobs) < 1:
-        raise ValueError(f"ABS_XCODEBUILD_JOBS must be a positive integer, got {jobs!r}")
+    # `[0-9]`, not `\d` or int() alone, which accept other scripts' digits and whitespace.
+    if not re.fullmatch(r"[0-9]+", jobs) or not 1 <= int(jobs) <= 1024:
+        raise ValueError(f"ABS_XCODEBUILD_JOBS must be an integer from 1 to 1024, got {jobs!r}")
     return ["-jobs", str(int(jobs))]
 
 
