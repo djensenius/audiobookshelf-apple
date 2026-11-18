@@ -612,9 +612,11 @@ Model notes:
     download records or kept downloads) is **not deleted**. It is marked
     `isDisconnected = true` with `disconnectedAt`, its Keychain credentials are
     removed and its resume-data blobs are deleted, but it keeps its `id`.
-    A PATCH the server rejects for good (400, 404, 410, 422; `rejectSend`) cleans
-    its groups unless they were edited since the send, so the row stops retaining
-    the connection; its next edit is sent again.
+    A PATCH the server rejects for good (400, 404, 410, 422, or a 403 whose body is
+    exactly Audiobookshelf's `User does not have access to this library item`, #680;
+    other 403s stay retryable) is settled with `rejectSend`, which cleans its groups
+    unless they were edited since the send, so the row stops retaining the
+    connection; its next edit is sent again.
   - A connection with no retained records is deleted outright. History rows keep
     its old `serverConnectionID` for display only.
   - Login looks up the record by normalized `address` and server `userId` and, if

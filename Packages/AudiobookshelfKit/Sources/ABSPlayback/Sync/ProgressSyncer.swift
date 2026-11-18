@@ -64,7 +64,8 @@ private let logger = Logger(subsystem: "org.davidjensenius.Audiobookshelf", cate
 ///   A successful `/sync` still drains the saved position through PATCH: only the store's PATCH
 ///   acknowledgement clears the dirty group, without clearing a newer edit. Clean rows are kept.
 ///   Failed settlements retain their token and outcome for the next drain. A PATCH rejected
-///   for good (``isPermanent(_:)``: 400, 404, 410, 422) is settled with `rejectSend`, so the row
+///   for good (``isPermanent(_:)``: 400, 404, 410, 422, or a 403 with Audiobookshelf's exact
+///   no-access message; other 403s stay retryable) is settled with `rejectSend`, so the row
 ///   stops being retried until it is edited again. A drain that stopped on any other failure
 ///   (a PATCH, a pending row's GET or a store save) schedules one more drain, backed off like
 ///   `/sync`; a drain that completes cleanly resets that backoff. Both wakes are cancelled on
@@ -1387,15 +1388,23 @@ public final class ProgressSyncer {
     }
 
     /// A PATCH rejection that resending the same body would meet again: the item or episode is
-    /// gone (404, 410) or the server refuses the body (400, 422). Only this list, so a
-    /// misbehaving proxy can't quarantine rows with other statuses (409, 413, 401, 403, 408,
-    /// 429 and 5xx stay retryable).
+    /// gone (404, 410), the server refuses the body (400, 422), or the user can't access the
+    /// item (a 403 whose body is exactly ``noItemAccessMessage``). Only this list, so a
+    /// misbehaving proxy can't quarantine rows with other statuses (409, 413, 401, 408, 429,
+    /// 5xx and any other 403 stay retryable).
     static func isPermanent(_ error: any Error) -> Bool { permanentStatus(error) != nil }
+
+    /// The plain-text 403 body Audiobookshelf 2.38.0 sends when a progress update targets an
+    /// item the user can't access (library access, explicit content or tags), from
+    /// `createUpdateMediaProgressFromPayload` in `server/models/User.js` (#680).
+    static let noItemAccessMessage = "User does not have access to this library item"
 
     private static func permanentStatus(_ error: any Error) -> Int? {
         switch error as? APIError {
         case .notFound: 404
         case .http(let status, _) where [400, 404, 410, 422].contains(status): status
+        case .forbidden(let message?)
+        where message.trimmingCharacters(in: .whitespacesAndNewlines) == noItemAccessMessage: 403
         default: nil
         }
     }

@@ -70,6 +70,40 @@ struct ProgressRejectionTests {
         #expect(!ProgressSyncer.isPermanent(CancellationError()))
     }
 
+    /// Only Audiobookshelf's exact no-access body makes a 403 permanent (#680).
+    @Test func forbiddenClassification() {
+        let noAccess = "User does not have access to this library item"
+        #expect(ProgressSyncer.isPermanent(APIError.forbidden(message: noAccess)))
+        #expect(ProgressSyncer.isPermanent(APIError.forbidden(message: " \(noAccess)\n")))
+        for message in [nil, "Forbidden", "User does not have access to this library", noAccess.lowercased()] {
+            #expect(!ProgressSyncer.isPermanent(APIError.forbidden(message: message)))
+        }
+        #expect(!ProgressSyncer.isPermanent(APIError.unauthorized(message: noAccess)))
+    }
+
+    /// Audiobookshelf 2.38.0 answers a PATCH for an item the user can't access with 403 and an
+    /// exact body: that row settles as rejected and the drain counts as clean. A 403 with any
+    /// other body is retried on the next drain (#680).
+    @Test(
+        arguments: [
+            ("User does not have access to this library item", true), (nil, false), ("Forbidden", false),
+        ] as [(String?, Bool)])
+    func forbiddenPatchIsRejectedOnlyForNoItemAccess(message: String?, rejected: Bool) async throws {
+        let s = try SyncHarness()
+        s.service.state.withLock { $0.patchErrors = [.forbidden(message: message)] }
+        try await edit(s, 50)
+
+        await s.syncer.drainPendingProgress()
+        let row = try #require(try await s.store.progress(for: s.h.key("a")))
+        #expect(row.needsServerSync == !rejected)
+        #expect((s.syncer.drainWake != nil) == !rejected)
+        if rejected { #expect(row.lastSyncError == "rejected 403") }
+
+        await s.syncer.drainPendingProgress()
+        #expect(s.service.patches.count == (rejected ? 1 : 2))
+        #expect(try await s.store.progress(for: s.h.key("a"))?.needsServerSync == false)
+    }
+
     /// A rejection whose cleanup can't be saved keeps its send in flight: the next drain saves
     /// the cleanup without PATCHing the same values again, and a new edit is still sent, whether
     /// it lands before that retry or after it.
