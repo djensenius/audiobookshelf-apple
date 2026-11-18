@@ -692,9 +692,10 @@ struct KnownAuditIssue {
             // pixels unmeasurable, the issue fails, unfiltered. #641
             //
             // The same in light on a 13-inch iPad, every run: the author ("Jane Austen") on Settings,
-            // whose rgb(91,99,108) measures 6.0:1 on the floating mini player's light glass. In light
-            // only at regular width, with the tab bar along the top (`topTabBarButtonCount`), so
-            // compact light runs keep the check they had. #698
+            // whose rgb(91,99,108) measured 6.0:1 on the floating mini player's light glass, before
+            // #705 darkened it to rgb(71,78,86). In light only at regular width, with the tab bar
+            // along the top (`topTabBarButtonCount`), so compact light runs keep the check they
+            // had. #698
             all.append(
                 KnownAuditIssue(type: .contrast) { element, app in
                     guard let element, isMiniPlayerText(element, in: app) else { return false }

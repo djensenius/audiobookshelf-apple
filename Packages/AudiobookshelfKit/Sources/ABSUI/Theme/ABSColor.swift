@@ -32,9 +32,11 @@ public enum ABSColor {
     )
     /// Secondary text on Liquid Glass, such as the mini player's author: in dark mode the glass
     /// takes a lighter tint from the content under it, where ``mutedForeground`` measures 2.7:1;
-    /// this is 5.1:1 there. #641
+    /// this is 5.1:1 there. #641 Also the chapter list's times: at the sheet's medium detent
+    /// they're on glass over the player, darker in light, where ``mutedForeground`` measures 3.7:1
+    /// in light and 3.5:1 in dark against the glass around its glyphs (not its average colour). #705
     public static let mutedForegroundOnGlass = ABSThemedColor(
-        light: .rgb(91, 99, 108), dark: .rgb(214, 218, 222), black: .rgb(214, 218, 222)
+        light: .rgb(71, 78, 86), dark: .rgb(214, 218, 222), black: .rgb(214, 218, 222)
     )
     /// Text and icons on an ``accent`` fill, such as a prominent button's label: white on the
     /// light accent (4.9:1), and dark on the dark accent, `rgb(79, 195, 204)`, where white is

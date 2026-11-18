@@ -172,8 +172,10 @@ jobs:
 
       # The iPhone Duo is compact, where open(_:in:)'s sidebar fallback (#693) never runs, so one
       # test that needs it runs on a regular-width iPad too: at AX sizes the iPad's top tab bar hides
-      # Account. Only that test: the iPad accessibility audits still flake at AX5 (#705), so they
-      # run by hand (docs/testing/ui-tests.md). It
+      # Account. So does a check that the player's toolbar keeps Chapters, Bookmarks and Up Next in
+      # portrait (#705), which the Duo skips; it takes under a minute locally. Only those two: the
+      # iPad accessibility audits still flake at AX5 (#705), so they run by hand
+      # (docs/testing/ui-tests.md), and ChapterHighlightTests' iPad half isn't proven on CI. It
       # reuses the iPhone step's build (an iphonesimulator xctestrun serves any simulator) and runs
       # only after that step passes, since the script clears the .build/ui-tests/ it uploads.
       # Nothing uses the iPhone Duo after its step, so it's shut down first rather than left
@@ -196,7 +198,8 @@ jobs:
           ABS_UI_ACTION: test-without-building
         run: |
           IOS_SIMULATOR_ID="$IPAD_SIMULATOR_ID" scripts/ui-test-ci.sh \
-            -only-testing:AudiobookshelfUITests/MiniPlayerTests/testLongPressAtAccessibilitySizeShowsNoMenu
+            -only-testing:AudiobookshelfUITests/MiniPlayerTests/testLongPressAtAccessibilitySizeShowsNoMenu \
+            -only-testing:AudiobookshelfUITests/PlayerToolbarTests/testPortraitToolbarShowsChaptersBookmarksAndUpNext
 
       # Only for the iPad step's own failure: after an iPhone failure the directory has the iPhone results.
       - name: Upload the iPad UI test results

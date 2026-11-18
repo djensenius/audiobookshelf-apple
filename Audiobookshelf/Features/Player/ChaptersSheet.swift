@@ -224,16 +224,18 @@ private struct ChapterRow: View, Equatable {
     }
 
     /// The current row's times are primary, like its title: on the row's tint, muted measures 4.2:1
-    /// in light. #705
+    /// in light. The others' are for glass: at the sheet's medium detent the list is on glass over
+    /// the player, where `mutedForeground` measures 3.7:1 in light and 3.5:1 in dark against the
+    /// glass around its glyphs (not the glass's average colour). #705
     private var timesStyle: AnyShapeStyle {
-        isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(ABSColor.mutedForeground)
+        isCurrent ? AnyShapeStyle(.primary) : AnyShapeStyle(ABSColor.mutedForegroundOnGlass)
     }
 }
 
 /// A title followed by the start and duration columns, for the rows and the header. The columns
-/// default to `ABSColor.mutedForeground`, not `.secondary`: in the list's section header, which is
-/// secondary already, `.secondary` drew the header's Start and Duration at 1.7:1 in light and 2.3:1
-/// in dark, and in a row it's 4.0:1 on white. #705
+/// default to `ABSColor.mutedForeground`, the header's, not `.secondary`: in the list's section
+/// header, which is secondary already, `.secondary` drew the header's Start and Duration at 1.7:1
+/// in light and 2.3:1 in dark, and in a row it's 4.0:1 on white. Rows pass their own. #705
 private struct ChapterColumns<Title: View>: View {
     let columnWidth: CGFloat
     let start: String

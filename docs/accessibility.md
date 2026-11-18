@@ -217,7 +217,9 @@ behind it):
   from the rows under it, `rgb(87, 88, 88)` over Settings, where `mutedForeground` is 2.7:1
   ("Contrast failed"); in black, 3.2:1 on Settings and 4.0:1 on Downloads ("nearly passed").
   The mini player's secondary text and Close button now use `ABSColor.mutedForegroundOnGlass`:
-  5.1:1 on that dark glass and 9.4:1 on the black theme's; light is unchanged, 5.5:1.
+  5.1:1 on that dark glass and 9.4:1 on the black theme's; light was unchanged, 5.5:1, until
+  #705 darkened it to `rgb(71, 78, 86)` for the chapter list (below), 7.6:1 computed on the light
+  glass.
 - The Player in the black theme: "Chapter 1", the author and the elapsed times in
   `mutedForeground`'s black value, legacy's `rgb(120, 126, 132)`, are 3.5–3.6:1 on the player's
   backdrop, which is tinted by the cover (`rgb(47, 40, 38)`), not black ("nearly passed"). The
@@ -226,6 +228,21 @@ behind it):
   dark audit during #638, isn't reported at rest: it measures 11.7:1 in dark and 21:1 in black.
   It's the system's title, drawn in the label colour, so content scrolled under it is the only
   thing that can lower it.
+
+The chapter list's times, measured from iPhone 17 and iPad Pro 13-inch (M5) screenshots in each
+theme (#705), which no walk audits: at the Chapters sheet's medium detent, as it opens on an
+iPhone, the list is on glass over the player, on average `rgb(214, 211, 210)` in light and
+`rgb(67, 66, 65)` in dark and black. There the other chapters' times, in `mutedForeground`,
+measured 3.7–3.8:1 in light and 3.5:1 in dark and black, and 4.0:1 and 3.7:1 on the iPad's sheet:
+`MeasuredContrast`'s 10th percentile against the glass around each glyph, not against the
+average colour, which computes 4.1:1 and 3.9:1. `DesignSystemTests` checks against greys fitted
+to those measurements instead, `rgb(202, 202, 202)` and `rgb(72, 72, 72)`. The times now use
+`ABSColor.mutedForegroundOnGlass`, its light value darkened from `mutedForeground`'s to
+`rgb(71, 78, 86)`: 5.2:1 in light and 6.2–6.3:1 in dark and black on the iPhone's glass, 5.4:1
+and 6.9:1 on the iPad's, and 8.2–11.6:1 at the large detent and in the iPad's landscape details
+pane. The current chapter's times, on its accent tint, are unchanged: 8.2:1 or more in light and
+4.7:1 or more in dark. So is the column header, in `mutedForeground` (chosen in #705 for the
+landscape pane), which still measures 2.6–4.0:1 on the medium detent's glass.
 
 Known issues are filtered in `KnownAuditIssue.all`, by screen, audit type, description and
 element, each with the reason and its issue:

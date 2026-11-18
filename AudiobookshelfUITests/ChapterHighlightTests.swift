@@ -70,16 +70,19 @@ final class ChapterHighlightTests: XCTestCase {
         }
 
         /// Shows the chapter list: on an iPad from iOS 27.1, turned to landscape, the details pane
-        /// beside the player (turned back to the orientation it had after the test); elsewhere, the
-        /// chapters sheet at its large detent, where it's opaque, not glass over the player. A vertical
-        /// bar (the iPhone Duo's outer display) has the Chapters button in its overflow menu, found by
-        /// symbol as in `open(.bookmarks, in:)`.
+        /// beside the player (turned back afterwards if it was in portrait or landscape; a fresh
+        /// runner reports `.unknown`, which can't be set); elsewhere, the chapters sheet at its large
+        /// detent, where it's opaque, not glass over the player. A vertical bar (the iPhone Duo's
+        /// outer display) has the Chapters button in its overflow menu, found by symbol as in
+        /// `open(.bookmarks, in:)`.
         @MainActor
         private func showChapters(in app: XCUIApplication) {
             // The player has arrangements, and so the details pane, from iOS 27.1, as in `NowPlayingView`.
             if UIDevice.current.userInterfaceIdiom == .pad, #available(iOS 27.1, *) {
                 let initial = XCUIDevice.shared.orientation
-                addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = initial }
+                if initial.isPortrait || initial.isLandscape {
+                    addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = initial }
+                }
                 XCUIDevice.shared.orientation = .landscapeLeft
                 return
             }

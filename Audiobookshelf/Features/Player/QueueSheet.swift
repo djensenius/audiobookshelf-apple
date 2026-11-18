@@ -25,6 +25,8 @@ struct QueueSlot: View {
             }
         }
         .disabled(queue == nil)
+        // For UI tests.
+        .accessibilityIdentifier("player.queue")
     }
 }
 
