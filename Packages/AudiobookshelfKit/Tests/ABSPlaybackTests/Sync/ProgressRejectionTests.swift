@@ -23,6 +23,7 @@ struct ProgressRejectionTests {
         (APIError.notFound, "rejected 404"), (.http(status: 400, message: nil), "rejected 400"),
         (.http(status: 404, message: nil), "rejected 404"), (.http(status: 410, message: nil), "rejected 410"),
         (.http(status: 422, message: nil), "rejected 422"),
+        (.forbidden(message: "User does not have access to this library item"), "rejected 403"),
     ])
     func permanentRejectionIsNotRetriedUntilTheNextEdit(error: APIError, recorded: String) async throws {
         let s = try SyncHarness()
@@ -30,6 +31,8 @@ struct ProgressRejectionTests {
         try await edit(s, 50)
 
         await s.syncer.drainPendingProgress()
+        // A rejection settles the row, so the drain isn't counted as failed.
+        #expect(s.syncer.drainWake == nil && s.syncer.drainFailures == 0)
 
         let row = try #require(try await s.store.progress(for: s.h.key("a")))
         #expect(!row.needsServerSync)
@@ -68,6 +71,36 @@ struct ProgressRejectionTests {
             #expect(!ProgressSyncer.isPermanent(error))
         }
         #expect(!ProgressSyncer.isPermanent(CancellationError()))
+    }
+
+    /// Only Audiobookshelf's exact no-access body makes a progress PATCH's 403 permanent; other
+    /// requests' 403s, including that one, stay retryable (#680).
+    @Test func forbiddenClassification() {
+        let noAccess = "User does not have access to this library item"
+        #expect(ProgressSyncer.patchRejectionStatus(APIError.forbidden(message: noAccess)) == 403)
+        #expect(ProgressSyncer.patchRejectionStatus(APIError.forbidden(message: " \(noAccess)\n")) == 403)
+        #expect(!ProgressSyncer.isPermanent(APIError.forbidden(message: noAccess)))
+        for message in [nil, "Forbidden", "User does not have access to this library", noAccess.lowercased()] {
+            #expect(ProgressSyncer.patchRejectionStatus(APIError.forbidden(message: message)) == nil)
+        }
+        #expect(ProgressSyncer.patchRejectionStatus(APIError.unauthorized(message: noAccess)) == nil)
+        #expect(ProgressSyncer.patchRejectionStatus(APIError.http(status: 410, message: nil)) == 410)
+    }
+
+    /// A 403 without Audiobookshelf's exact no-access body is retried on the next drain (#680).
+    @Test(arguments: [nil, "Forbidden"] as [String?])
+    func otherForbiddenPatchesStayRetried(message: String?) async throws {
+        let s = try SyncHarness()
+        s.service.state.withLock { $0.patchErrors = [.forbidden(message: message)] }
+        try await edit(s, 50)
+
+        await s.syncer.drainPendingProgress()
+        #expect(try await s.store.progress(for: s.h.key("a"))?.needsServerSync == true)
+        #expect(s.syncer.drainWake != nil)
+
+        await s.syncer.drainPendingProgress()
+        #expect(s.service.patches.count == 2)
+        #expect(try await s.store.progress(for: s.h.key("a"))?.needsServerSync == false)
     }
 
     /// A rejection whose cleanup can't be saved keeps its send in flight: the next drain saves
