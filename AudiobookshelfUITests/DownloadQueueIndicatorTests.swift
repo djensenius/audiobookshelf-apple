@@ -33,8 +33,8 @@ final class DownloadQueueIndicatorTests: XCTestCase {
             XCTAssertFalse(indicator.label.isEmpty, "\(screen.name)'s queue indicator has no label")
             XCTAssertNotEqual(indicator.label, "1", "\(screen.name)'s queue indicator is labelled with its count")
             let value = indicator.value as? String ?? ""
-            XCTAssertTrue(
-                value.contains("1") && value.contains("%"),
+            XCTAssertNotNil(
+                value.range(of: #"^1 \D+, \d+\s?%"#, options: .regularExpression),
                 "\(screen.name)'s queue indicator's value (\(value)) doesn't give the count and progress")
         }
 
@@ -45,6 +45,6 @@ final class DownloadQueueIndicatorTests: XCTestCase {
 
         // The Downloads root lists the downloads under way itself.
         open(.downloads, in: app)
-        XCTAssertFalse(indicator.exists, "The Downloads root's bar has the queue indicator")
+        XCTAssertTrue(indicator.waitForNonExistence(timeout: 2), "The Downloads root's bar has the queue indicator")
     }
 }

@@ -37,7 +37,8 @@
 
         /// With ``launchArgument``, keeps every track download under way (#685): its reply sends the headers and the
         /// first half of the audio, then nothing more, so the download queue and the tab roots' queue indicator stay
-        /// up for UI tests and screenshots.
+        /// up for UI tests and screenshots. Only for about a minute: the download session's request timeout (a minute
+        /// without data, by default) can then end the transfer.
         static let stallDownloadsArgument = "-ABSStallDownloads"
 
         /// Whether a fixture launch with `arguments` stalls a `method` request for `path` (``stallDownloadsArgument``):

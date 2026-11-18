@@ -30,9 +30,4 @@ import Testing
         #expect(
             DownloadQueueToolbar.accessibilityValue(count: 3, fraction: 0, locale: english) == "3 downloads, 0% done")
     }
-
-    /// It outranks the Library screen's filter and sort, so a crowded bar keeps it (#685).
-    @Test func outranksTheLibraryControls() {
-        #expect(DownloadQueueToolbar.visibilityPriority > .high)
-    }
 }

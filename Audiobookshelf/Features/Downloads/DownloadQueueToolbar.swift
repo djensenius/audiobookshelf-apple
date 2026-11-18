@@ -35,10 +35,11 @@ struct DownloadQueueToolbar: ToolbarContent {
     static let visibilityPriority = ToolbarItemVisibilityPriority(higherThan: .high)
 
     /// The button's accessibility value: how many downloads and how far they are, for example "1 download, 50% done".
-    static func accessibilityValue(count: Int, fraction: Double, locale: Locale = .current) -> String {
+    /// `locale` is for tests; `nil` is the app's.
+    static func accessibilityValue(count: Int, fraction: Double, locale: Locale? = nil) -> String {
         L10n.plural(
             "LabelDownloadQueueAccessibility", count: count,
-            fraction.formatted(.percent.precision(.fractionLength(0)).locale(locale)), locale: locale)
+            fraction.formatted(.percent.precision(.fractionLength(0)).locale(locale ?? .current)), locale: locale)
     }
 
     /// Pushes the download queue on `tab`'s stack unless it's already on top (a double click).
@@ -75,6 +76,8 @@ private struct DownloadQueueButton: View {
         }
         .accessibilityLabel(Text(verbatim: title))
         .accessibilityValue(Text(verbatim: value))
+        // A Mac's toolbar has no title for it otherwise.
+        .help(Text(verbatim: title))
         // For UI tests.
         .accessibilityIdentifier("downloads.queueIndicator")
     }
