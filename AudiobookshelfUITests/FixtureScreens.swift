@@ -294,23 +294,30 @@ extension XCTestCase {
     }
 
     #if os(iOS)
-        /// Selects `tab` from the sidebar (`ToggleSideBar`) if pressing it in the tab bar didn't: at
-        /// accessibility text sizes a regular-width iPad's top tab bar pages, and a later tab (Account)
-        /// sits behind the next one and the Next Page button, where its press lands. No-op once `tab`
-        /// is selected, or where there's no sidebar toggle (iPhone, macOS).
+        /// Selects `tab` from the sidebar if pressing it in the tab bar didn't: at accessibility text
+        /// sizes a regular-width iPad's top tab bar pages, and a later tab (Account) sits behind the
+        /// next one and the Next Page button, where its press lands. It shows the sidebar
+        /// (`ToggleSideBar`), presses the tab's sidebar cell (the tab bar's copies are buttons), and
+        /// hides the sidebar again (`ToggleSidebar`), leaving the layout as it was. No-op once `tab`
+        /// is selected, or where there's no sidebar toggle (iPhone).
         @MainActor
         private func chooseFromSidebar(_ tab: XCUIElement, in app: XCUIApplication) {
-            let toggle = app.buttons["ToggleSideBar"].firstMatch
-            guard toggle.exists, !wait(for: { tab.isSelected }, timeout: 3) else { return }
-            toggle.press()
-            let entries = app.descendants(matching: .any).matching(identifier: tab.identifier)
-            func entry() -> XCUIElement? { entries.allElementsBoundByIndex.first { $0.isHittable && !$0.isSelected } }
-            guard wait(for: { entry() != nil }, timeout: Self.fixtureTimeout), let entry = entry() else {
+            let show = app.buttons["ToggleSideBar"].firstMatch
+            guard show.exists, !wait(for: { tab.isSelected }, timeout: 3) else { return }
+            show.press()
+            let entry = app.collectionViews.cells.matching(identifier: tab.identifier).firstMatch
+            guard wait(for: { entry.exists && entry.isHittable }, timeout: Self.fixtureTimeout) else {
                 return XCTFail("The sidebar has no \(tab.identifier) tab")
             }
             entry.press()
             XCTAssertTrue(
                 wait(for: { tab.isSelected }, timeout: Self.fixtureTimeout), "\(tab.identifier) isn't selected")
+            // Choosing a tab usually dismisses the sidebar; hide it if it's still there.
+            let hide = app.buttons["ToggleSidebar"].firstMatch
+            if hide.exists && hide.isHittable { hide.press() }
+            XCTAssertTrue(
+                wait(for: { !(entry.exists && entry.isHittable) }, timeout: Self.fixtureTimeout),
+                "The sidebar didn't close")
         }
     #endif
 

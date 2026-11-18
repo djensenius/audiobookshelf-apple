@@ -212,7 +212,8 @@ playback that has already stopped. Settings is the Account tab's `account.settin
 Mac. The tab bar minimizes as the content scrolls (`tabBarMinimizeBehavior`); `open` expands
 it. At accessibility text sizes a regular-width iPad's top tab bar pages and hides Account
 behind its Next Page button, so if pressing a tab doesn't select it, `open` chooses it from the
-sidebar (`ToggleSideBar`). It scrolls Account by swiping `account.screen`, not the first
+sidebar: it shows the sidebar (`ToggleSideBar`), presses the tab's sidebar cell, and hides the
+sidebar again (`ToggleSidebar`). It scrolls Account by swiping `account.screen`, not the first
 collection view, which can be the sidebar. The item's metadata is `item.metadata`.
 
 `TabBarTests` checks the compact tab bar (#617): Home, Library, Downloads, Account and Search,
