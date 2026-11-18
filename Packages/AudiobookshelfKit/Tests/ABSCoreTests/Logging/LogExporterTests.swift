@@ -138,6 +138,24 @@ private func entry(
         #expect(try await exporter.export().contains("cf-proxy-secret"))
     }
 
+    /// A server that echoes a saved header value in a JSON error body escapes its quote and
+    /// backslash, and the error's description escapes them again. The export still removes it (#662).
+    @Test func removesSecretsEchoedInJSONErrorBodies() async throws {
+        enum EchoError: Error { case http(status: Int, message: String) }
+        let secret = #"proxy"se\cret"#
+        let body = try #require(
+            String(data: JSONSerialization.data(withJSONObject: ["error": "bad header \(secret)"]), encoding: .utf8)
+        )
+        let message = "Request failed: \(String(describing: EchoError.http(status: 400, message: body)))"
+        #expect(message.contains(#"proxy\\\"se\\\\cret"#))
+        let exporter = LogExporter(source: FakeSource(stored: [entry(0, .error, "api", message)]), timeZone: utc)
+        let text = try await exporter.export(secrets: [secret])
+        #expect(
+            text
+                == #"2027-01-15T08:00:00.000Z [error] [api] Request failed: http(status: 400, message: "{\"error\":\"bad header <redacted>\"}")"#
+        )
+    }
+
     @Test func filtersByLevelCategorySinceAndSubsystem() async throws {
         let exporter = LogExporter(
             source: FakeSource(stored: [

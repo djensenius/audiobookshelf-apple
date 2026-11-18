@@ -51,6 +51,21 @@ private let legacyToken =
         )
     }
 
+    /// A server or an error description can escape a custom header value before it's logged, so
+    /// its JSON, Swift-escaped, and percent-encoded forms are removed too, even escaped twice (#662).
+    @Test(arguments: [
+        #"proxy"se\cret/ü"#,  // as is
+        #"proxy\"se\\cret/ü"#,  // JSON, as JSONEncoder writes it with `.withoutEscapingSlashes`
+        #"proxy\"se\\cret\/ü"#,  // JSON, as JSONSerialization writes it
+        #"proxy\"se\\cret/\u00fc"#,  // JSON with non-ASCII escaped
+        #"proxy\\\"se\\\\cret\\/ü"#,  // JSON inside an error's description
+        "proxy%22se%5Ccret%2F%C3%BC",  // percent-encoded
+    ])
+    func redactsEscapedFormsOfCustomHeaderValues(form: String) {
+        let redactor = Redactor(secrets: [#"proxy"se\cret/ü"#])
+        #expect(redactor.redact(#"body: {"error":""# + form + #""}"#) == #"body: {"error":"<redacted>"}"#)
+    }
+
     @Test func leavesOrdinaryTextAlone() {
         let text = "Loaded 12 items from library lib_1 in 0.4s"
         #expect(Log.redact(text) == text)
