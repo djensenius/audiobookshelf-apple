@@ -1,4 +1,5 @@
 #if os(iOS)
+    import ABSCore
     import AVFoundation
     import os
 
@@ -63,7 +64,8 @@
             do {
                 try session.setActive(false, options: .notifyOthersOnDeactivation)
             } catch {
-                logger.error("Audio session deactivation failed: \(error.localizedDescription, privacy: .public)")
+                logger.error(
+                    "Audio session deactivation failed: \(Log.redact(error.localizedDescription), privacy: .public)")
             }
         }
 

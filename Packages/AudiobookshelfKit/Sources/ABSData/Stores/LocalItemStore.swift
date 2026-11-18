@@ -261,7 +261,8 @@ import SwiftData
                 do {
                     snapshots[connectionID] = try items(serverConnectionID: connectionID)
                 } catch {
-                    Log.data.error("Couldn't read downloaded items: \(error.localizedDescription, privacy: .public)")
+                    Log.data.error(
+                        "Couldn't read downloaded items: \(Log.redact(error.localizedDescription), privacy: .public)")
                     continue
                 }
             }

@@ -6,6 +6,12 @@ or shutting one down. In CI (`CI=true`) or with `ABS_EPHEMERAL_SIMULATOR=1`, and
 `IOS_SIMULATOR_ID`, it creates its own `abs-ci-*` simulator and always deletes it,
 because concurrent runner instances share one CoreSimulator device set.
 
+It builds with the checked-in `AudiobookshelfKit-ShakeDetector` scheme
+(`Packages/AudiobookshelfKit/.swiftpm/xcode/xcshareddata/xcschemes/`), whose only
+testable is ABSPlaybackTests, so `build-for-testing` compiles that target and its
+dependencies instead of every package test target. xcodebuild picks its own job count;
+set `ABS_XCODEBUILD_JOBS=<1-1024>` to cap it (e.g. 2 on a shared machine).
+
 Result fields/enums come from Xcode 27.2's installed xcresulttool
 `get test-results {summary,tests} --schema` (schema version 0.5.0).
 Keep the four-method allowlist strict: this is not all iOS package coverage.
@@ -25,6 +31,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGE = ROOT / "Packages/AudiobookshelfKit"
+SCHEME = "AudiobookshelfKit-ShakeDetector"
 METHODS = {
     "aDetectorStopsItsOwnUpdates()",
     "stoppingAnEarlierDetectorLeavesTheLaterOneRunning()",
@@ -209,16 +216,26 @@ def verify_results(summary, tests, udid):
 
 
 def test_scheme(listing):
-    """The scheme with the package's test action, from `xcodebuild -list -json` in the package.
+    """The checked-in ABSPlaybackTests-only scheme, from `xcodebuild -list -json` in the package.
 
-    Xcode names it after the only product when the manifest has one; with more (the widget's
-    AudiobookshelfWidgetKit), the per-product schemes can't test and it is `<package>-Package`.
+    Xcode's generated `<package>-Package` scheme builds every test target even with
+    `-only-testing`, so there is no fallback to it.
     """
     schemes = listing["workspace"]["schemes"]
-    for name in ("AudiobookshelfKit-Package", "AudiobookshelfKit"):
-        if name in schemes:
-            return name
-    raise ValueError(f"No AudiobookshelfKit test scheme in: {schemes}")
+    if SCHEME in schemes:
+        return SCHEME
+    raise ValueError(f"No {SCHEME} scheme (checked in under {PACKAGE.name}/.swiftpm) in: {schemes}")
+
+
+def build_jobs(environ):
+    """`-jobs N` from `ABS_XCODEBUILD_JOBS` if set (an integer 1-1024), else xcodebuild's default."""
+    if "ABS_XCODEBUILD_JOBS" not in environ:
+        return []
+    jobs = environ["ABS_XCODEBUILD_JOBS"]
+    # `[0-9]`, not `\d` or int() alone, which accept other scripts' digits and whitespace.
+    if not re.fullmatch(r"[0-9]+", jobs) or not 1 <= int(jobs) <= 1024:
+        raise ValueError(f"ABS_XCODEBUILD_JOBS must be an integer from 1 to 1024, got {jobs!r}")
+    return ["-jobs", str(int(jobs))]
 
 
 def ephemeral_requested(environ):
@@ -342,7 +359,7 @@ def xcodebuild_phase(action, args, *, tee, timeout):
         raise
 
 
-def run_tests(scheme, udid, simulator_name=None):
+def run_tests(scheme, udid, simulator_name=None, jobs=()):
     parent = ROOT / ".build/kit-ios"
     parent.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="run.", dir=parent))
@@ -362,7 +379,7 @@ def run_tests(scheme, udid, simulator_name=None):
     ]
     # Build first, so a slow cold build can't use up the test run's limit.
     xcodebuild_phase("build-for-testing", [
-        *shared, "-jobs", "2", "CODE_SIGNING_ALLOWED=NO",
+        *shared, *jobs, "CODE_SIGNING_ALLOWED=NO",
     ], tee=simulator_name is not None, timeout=BUILD_TIMEOUT)
     xcodebuild_phase("test-without-building", [
         *shared, "-resultBundlePath", str(result),
@@ -412,6 +429,7 @@ def main():
         return
     if sys.argv[1:]:
         raise ValueError(f"Unknown arguments: {sys.argv[1:]}")
+    jobs = build_jobs(os.environ)
     # Read the deployment minimum without invoking SwiftPM or resolving packages.
     minimums = re.findall(r"\.iOS\(\.v(\d+(?:_\d+)*)\)", (PACKAGE / "Package.swift").read_text())
     if len(minimums) != 1:
@@ -424,13 +442,13 @@ def main():
     scheme = test_scheme(json.loads(command(["xcodebuild", "-list", "-json"], capture=True, timeout=300)))
 
     if not ephemeral_requested(os.environ):
-        run_tests(scheme, selected["udid"])
+        run_tests(scheme, selected["udid"], jobs=jobs)
         return
     # One retry, on a fresh simulator, only for a known infrastructure signature.
     for attempt in (1, 2):
         name = ephemeral_name(os.environ, attempt)
         try:
-            with_ephemeral_simulator(selected, name, lambda udid, name: run_tests(scheme, udid, name))
+            with_ephemeral_simulator(selected, name, lambda udid, name: run_tests(scheme, udid, name, jobs))
             return
         except SimulatorInfrastructureError as failure:
             if attempt == 2:

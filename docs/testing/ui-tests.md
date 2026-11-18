@@ -35,10 +35,12 @@ reaches `open`'s sidebar fallback (#693), which that test needs on an iPad at AX
 `PlayerToolbarTests/testPortraitToolbarShowsChaptersBookmarksAndUpNext` (below), which the Duo
 skips. The iPad accessibility audits pass but still flake at AX5 (#705), so they don't run there.
 On CI `ChapterHighlightTests` runs only on the Duo, in its Chapters sheet: its iPad half, the
-details pane in landscape, hasn't run on CI's runner yet. The step has its own 25-minute limit: the
-mini player's test takes about 5 minutes locally and the toolbar's under one, but the CI runner can
-take over 12 minutes to start the test runner on the cold iPad simulator. A stall there fails the
-step and uploads its results instead of the job's limit cancelling the run.
+details pane in landscape, hasn't run on CI's runner yet. The iPhone Duo is shut down before the
+iPad is created, so the two don't normally run at once. The step has its own 35-minute limit: the
+mini player's test takes about 5 minutes locally and the toolbar's under one, but the CI runner
+can take over 12 minutes to start the test runner on the cold iPad simulator, and the first
+passing run took 21 (#703). A stall there fails the step and uploads its results instead of the
+job's limit cancelling the run.
 
 It then runs `mise run test:ui` on macOS only if `automationmodetool` reports Automation Mode
 enabled on the runner. Otherwise the step passes with a *macOS UI tests skipped* warning
@@ -75,7 +77,7 @@ the script can't read) fails the step with the first run's exit status, without 
 Recent passing runs took 36 to 58 minutes (median 47). A flaky test costs only its retry in the
 runner. A hang adds the 10 minutes and about 3 more to restart the runner, list the tests and
 run it again: the slowest run seen with a hang would end by minute 71 or so. The iPad
-simulator and its step (up to 25 minutes, above) come after that, so the job's limit is 105
+simulator and its step (up to 35 minutes, above) come after that, so the job's limit is 115
 minutes. A second hang in the iPhone run may not fit; the job then times out and fails rather
 than passing.
 
@@ -124,6 +126,12 @@ half of the audio, then nothing more, so the download queue and the tab roots' q
 (`downloads.queueIndicator`) stay up. It holds for about a minute: the download session's
 request timeout (a minute without data, by default) can then end the transfer, so check the
 indicator soon after starting the download.
+
+Add `-ABSConnectionState <state>` (`connecting`, `offline`, `serverUnreachable`, `connected`,
+`cellular` or `metered`) to force what the connection indicator (`connection.indicator`) shows.
+A fixture launch has no realtime socket, so the indicator is otherwise hidden. Only the indicator
+changes: the network, the connection banner and the replies don't. Only fixture launches read it
+(`FixtureServer.connectionStateArgument`).
 
 The replies are the `fixture-*` files in `Audiobookshelf/Fixtures/Resources/`: status, ping,
 login and authorize, `/api/me`, the libraries, the library with its filter data, the
@@ -262,6 +270,13 @@ bar doesn't have it:
 ```sh
 ABS_UI_PLATFORM=ios mise run test:ui -- -only-testing:AudiobookshelfUITests/DownloadQueueIndicatorTests -jobs 2
 ```
+
+`ConnectionIndicatorTests` launches with `-ABSConnectionState offline` and checks the connection
+indicator is in the bar of the Home and Library roots in compact width (#691), not their overflow
+menu. It also checks the worst case: offline with a download stalled by `-ABSStallDownloads`,
+where the Library root's bar has both the queue indicator and the connection indicator. The
+indicator outranks the filter and sort only once the problem has lasted 3 seconds, so the checks
+wait for it. A regular-width iPad and a Mac skip it.
 
 `ChapterHighlightTests` (iOS) checks the current chapter's tint in the chapter list (#705), which
 the audits can't catch. It launches in the light theme at the default text size (`-ABSTheme light`,

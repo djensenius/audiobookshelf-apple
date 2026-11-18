@@ -4,10 +4,14 @@ import Foundation
 ///
 /// Always redacts:
 /// - `Bearer` credentials (`Authorization: Bearer abc` becomes `Authorization: Bearer <redacted>`),
-/// - values of token and OAuth query parameters (`token`, `access_token`, `refresh_token`,
-///   `accessToken`, `refreshToken`, `code`, `code_verifier`), in URLs or as bare `name=value` text;
-///   names match in any case and after percent-decoding, and malformed encoded names are redacted,
-/// - JSON `"password"` values,
+/// - values of token, API key, and OAuth query parameters (`token`, `access_token`, `refresh_token`,
+///   `accessToken`, `refreshToken`, `api_key`, `apiKey`, `code`, `code_verifier`), in URLs or as bare
+///   `name=value` text; names match in any case and after percent-decoding, and malformed encoded
+///   names are redacted,
+/// - string values of the JSON keys `token`, `accessToken`, `access_token`, `refreshToken`, `refresh_token`,
+///   `apiKey`, `api_key`, `password`, and `secret` (in any case), also when the JSON is escaped again
+///   inside an error's description (`\"token\":\"…\"`, with any whitespace around the colon written
+///   as `\n`, `\r`, or `\t`),
 /// - JSON Web Tokens anywhere in the text (three base64url segments whose first two decode to
 ///   JSON objects, the first with an `"alg"` key).
 ///
@@ -184,16 +188,30 @@ public struct Redactor: Sendable, Equatable {
         }
     }
 
+    /// JSON keys whose string values are credentials. Rules match them in any case, as whole keys.
+    private static let sensitiveJSONKey = #"(?:token|access_?token|refresh_?token|api_?key|password|secret)"#
+
+    /// Whitespace between tokens of JSON that an error's description has escaped again: a newline,
+    /// carriage return, or tab there reads `\n`, `\r`, or `\t`. Each alternative starts with a different
+    /// character, and the quantifier is possessive, so matching stays linear.
+    private static let escapedJSONWhitespace = #"(?:\s|\\[nrt])*+"#
+
     private static let rules = [
         // Bearer credentials, whether a JWT or an opaque token.
         Rule(#"\bBearer\s+(?<value>[^\s,;"']+)"#),
-        // JSON passwords, including escaped characters such as `\"`.
-        Rule(#""password"\s*:\s*"(?<value>(?:[^"\\]|\\.)*)"#),
+        // String values of sensitive JSON keys, including escaped characters such as `\"`.
+        Rule(#""\#(sensitiveJSONKey)"\s*:\s*"(?<value>(?:[^"\\]|\\.)*)"#),
+        // The same JSON escaped once more, as an error's description quotes a response body:
+        // `\"token\":\"a\\\"b\"`. A `\\` starts an escape in the JSON; any other `\` is the outer one.
+        Rule(
+            #"\\"\#(sensitiveJSONKey)\\"\#(escapedJSONWhitespace):\#(escapedJSONWhitespace)"#
+                + #"\\"(?<value>(?:\\\\(?:\\.|[^\\])|\\[^\\"]|[^\\"])*)"#),
     ]
 
-    /// Token and OAuth (PKCE) parameter names, lowercased. Compared after percent-decoding.
+    /// Token, API key, and OAuth (PKCE) parameter names, lowercased. Compared after percent-decoding.
     private static let sensitiveParameterNames: Set<String> = [
-        "token", "access_token", "accesstoken", "refresh_token", "refreshtoken", "code", "code_verifier",
+        "token", "access_token", "accesstoken", "refresh_token", "refreshtoken", "api_key", "apikey", "code",
+        "code_verifier",
     ]
 
     /// Whether a query parameter name is sensitive once percent-decoded, ignoring case
