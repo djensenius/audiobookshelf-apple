@@ -563,6 +563,7 @@ ArrangementView { primary } secondary: { secondary }
 
 - Every toolbar item is a `Label` with a title and a system image. Counts use `.badge` instead of inline text. Spacing uses `ToolbarItemGroup` rather than flexible spacers, because those collapse in vertical bars.
 - Primary actions get `.visibilityPriority(.high)`: play/pause, skip, speed, and play on detail screens.
+- In compact width the connection indicator outranks the Library root's filter and sort while it shows a problem (connecting, offline, server unreachable), so the problem stays in the crowded bar and the sort moves into "…" (and the filter too while the download queue indicator, which also outranks them, is there). A working connection, cellular or metered included, keeps the default priority and stays in "…" there; regular width keeps the default (#691). Rejected: the leading edge (the sort went into "…" even while connected), hiding a plain connection (no room gained; legacy always shows it) and sharing one item with the queue indicator (a custom control).
 - Rarely used actions go into `ToolbarOverflowMenu`: download, add to playlist, sleep timer, bookmarks, history and share.
   - `ToolbarOverflowMenu` is iOS-only (`#if os(iOS)`).
   - On macOS the same items go into a toolbar `Menu`.

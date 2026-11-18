@@ -111,6 +111,12 @@ half of the audio, then nothing more, so the download queue and the tab roots' q
 request timeout (a minute without data, by default) can then end the transfer, so check the
 indicator soon after starting the download.
 
+Add `-ABSConnectionState <state>` (`connecting`, `offline`, `serverUnreachable`, `connected`,
+`cellular` or `metered`) to force what the connection indicator (`connection.indicator`) shows.
+A fixture launch has no realtime socket, so the indicator is otherwise hidden. Only the indicator
+changes: the network, the connection banner and the replies don't. Only fixture launches read it
+(`FixtureServer.connectionStateArgument`).
+
 The replies are the `fixture-*` files in `Audiobookshelf/Fixtures/Resources/`: status, ping,
 login and authorize, `/api/me`, the libraries, the library with its filter data, the
 personalized shelves, one page of items, one page of series (*Barsoom*, with its three books),
@@ -244,6 +250,10 @@ bar doesn't have it:
 ```sh
 ABS_UI_PLATFORM=ios mise run test:ui -- -only-testing:AudiobookshelfUITests/DownloadQueueIndicatorTests -jobs 2
 ```
+
+`ConnectionIndicatorTests` launches with `-ABSConnectionState offline` and checks the connection
+indicator is in the bar of the Home and Library roots in compact width (#691), not their overflow
+menu. A regular-width iPad and a Mac skip it.
 
 `AccessibilityAuditTests` audits each of those screens at the default text size and at AX5;
 see docs/accessibility.md, "Automated audits". Locally the default size takes about 80 seconds on
