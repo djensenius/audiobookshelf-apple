@@ -232,6 +232,7 @@ private struct LocalItemCover: View {
 private struct LocalItemHeader: View {
     let detail: LocalItemDetail
     let coverFile: LocalItemDetailModel.CoverFile?
+    @Environment(\.locale) private var locale
 
     var body: some View {
         VStack(alignment: .leading, spacing: ABSSpacing.medium) {
@@ -248,12 +249,13 @@ private struct LocalItemHeader: View {
                     }
                     Text(
                         verbatim: L10n.string(
-                            "LabelDownloadedTotalSize", ByteCountFormatting.string(fromBytes: detail.totalBytes))
+                            "LabelDownloadedTotalSize",
+                            ByteCountFormatting.string(fromBytes: detail.totalBytes, locale: locale))
                     )
                     .font(.caption)
                     .foregroundStyle(ABSColor.mutedForeground)
                     if detail.totalDuration > 0 {
-                        Text(verbatim: TimeFormatting.timestamp(detail.totalDuration))
+                        Text(verbatim: DurationStyle.timestamp.string(detail.totalDuration, locale: locale))
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(ABSColor.mutedForeground)
                     }
@@ -302,6 +304,7 @@ private struct LocalItemLinkView: View {
 /// An audio track, ebook or other file: number or format, title, type, duration and size.
 private struct LocalFileRow: View {
     let file: LocalItemDetail.File
+    @Environment(\.locale) private var locale
 
     var body: some View {
         HStack(spacing: ABSSpacing.medium) {
@@ -324,10 +327,10 @@ private struct LocalFileRow: View {
             Spacer(minLength: ABSSpacing.small)
             VStack(alignment: .trailing, spacing: ABSSpacing.xxSmall) {
                 if let duration = file.duration {
-                    Text(verbatim: TimeFormatting.timestamp(duration))
+                    Text(verbatim: DurationStyle.timestamp.string(duration, locale: locale))
                         .font(.caption.monospacedDigit())
                 }
-                Text(verbatim: ByteCountFormatting.string(fromBytes: file.byteCount))
+                Text(verbatim: ByteCountFormatting.string(fromBytes: file.byteCount, locale: locale))
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(ABSColor.mutedForeground)
             }
@@ -345,6 +348,7 @@ private struct LocalFileRow: View {
 /// A downloaded podcast episode: title, date, duration and size.
 private struct LocalEpisodeRow: View {
     let episode: LocalItemDetail.Episode
+    @Environment(\.locale) private var locale
 
     var body: some View {
         VStack(alignment: .leading, spacing: ABSSpacing.xxSmall) {
@@ -361,8 +365,8 @@ private struct LocalEpisodeRow: View {
     private var details: String {
         var parts: [String] = []
         if let published = episode.publishedAt { parts.append(published.formatted(date: .abbreviated, time: .omitted)) }
-        if let duration = episode.duration { parts.append(TimeFormatting.timestamp(duration)) }
-        parts.append(ByteCountFormatting.string(fromBytes: episode.byteCount))
+        if let duration = episode.duration { parts.append(DurationStyle.timestamp.string(duration, locale: locale)) }
+        parts.append(ByteCountFormatting.string(fromBytes: episode.byteCount, locale: locale))
         return parts.joined(separator: " · ")
     }
 }

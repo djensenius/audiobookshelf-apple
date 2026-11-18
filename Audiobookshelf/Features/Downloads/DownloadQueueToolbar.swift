@@ -7,6 +7,9 @@ import SwiftUI
 /// around its count, which pushes the queue (``DownloadQueueView``) on the tab's stack. It shows
 /// the count and ring of the queue's Downloading header. Only the button reads the live progress,
 /// so a progress update redraws the ring, not the toolbar.
+///
+/// It's there only while something downloads, so it outranks the bar's other items (#685): a crowded
+/// bar, such as the compact Library root's, moves those into its overflow menu instead.
 struct DownloadQueueToolbar: ToolbarContent {
     /// The tab whose root shows the toolbar, and whose stack the queue is pushed on.
     let tab: AppTab
@@ -23,8 +26,20 @@ struct DownloadQueueToolbar: ToolbarContent {
                         DownloadQueueToolbar.open(in: router, on: tab)
                     }
                 }
+                .visibilityPriority(Self.visibilityPriority)
             }
         }
+    }
+
+    /// Above the Library screen's filter and sort (`LibraryToolbar`), the bar's highest otherwise.
+    static let visibilityPriority = ToolbarItemVisibilityPriority(higherThan: .high)
+
+    /// The button's accessibility value: how many downloads and how far they are, for example "1 download, 50% done".
+    /// `locale` is for tests; `nil` is the app's.
+    static func accessibilityValue(count: Int, fraction: Double, locale: Locale? = nil) -> String {
+        L10n.plural(
+            "LabelDownloadQueueAccessibility", count: count,
+            fraction.formatted(.percent.precision(.fractionLength(0)).locale(locale ?? .current)), locale: locale)
     }
 
     /// Pushes the download queue on `tab`'s stack unless it's already on top (a double click).
@@ -35,6 +50,9 @@ struct DownloadQueueToolbar: ToolbarContent {
     }
 }
 
+/// The ring itself is the button's label, not a `Label`'s icon: an iOS 27 bar shows an icon-only
+/// `Label` with a custom icon as its title instead (#686). VoiceOver reads the title and the count
+/// and progress, as the ring hides its count.
 private struct DownloadQueueButton: View {
     let controller: DownloadsController
     let serverID: UUID?
@@ -44,27 +62,22 @@ private struct DownloadQueueButton: View {
     var body: some View {
         let fraction = DownloadsListing.downloadingFraction(
             records: controller.records, progress: controller.progress, serverConnectionID: serverID)
+        let title = L10n.string("HeaderDownloading")
+        let value = DownloadQueueToolbar.accessibilityValue(count: count, fraction: fraction)
         Button(action: action) {
-            Label {
-                Text(verbatim: L10n.string("HeaderDownloading"))
-            } icon: {
-                DownloadProgressIndicator(fraction: fraction, count: count)
-            }
-            .labelStyle(.iconOnly)
+            DownloadProgressIndicator(fraction: fraction, count: count)
         }
         .accessibilityShowsLargeContentViewer {
             Label {
-                Text(verbatim: L10n.string("HeaderDownloading"))
+                Text(verbatim: title)
             } icon: {
                 Image(systemName: "arrow.down.circle")
             }
         }
-        .accessibilityValue(
-            Text(
-                verbatim: L10n.plural(
-                    "LabelDownloadQueueAccessibility", count: count,
-                    fraction.formatted(.percent.precision(.fractionLength(0)))))
-        )
+        .accessibilityLabel(Text(verbatim: title))
+        .accessibilityValue(Text(verbatim: value))
+        // A Mac's toolbar has no title for it otherwise.
+        .help(Text(verbatim: title))
         // For UI tests.
         .accessibilityIdentifier("downloads.queueIndicator")
     }

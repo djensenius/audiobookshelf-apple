@@ -267,6 +267,15 @@ import Testing
         #expect(rows.first { $0.labelKey == "LabelNarrators" }?.values == [link, link])
     }
 
+    /// #688: item detail shows a size through the same helper, so the same units, as Downloads.
+    @Test func sizeMatchesDownloads() async throws {
+        let model = await loadedModel(ItemDetailPreviewData.makeBook(size: 432_103_424))
+        let rows = ItemDetailMetadataRow.rows(for: try #require(model.details), locale: locale)
+        let size = ByteCountFormatting.string(fromBytes: 432_103_424, locale: locale)
+        #expect(size == "432.1 MB")
+        #expect(rows.first { $0.labelKey == "LabelSize" }?.values == [.text(size)])
+    }
+
     @Test func zeroSizeIsLeftOut() async throws {
         let model = await loadedModel(ItemDetailPreviewData.makeBook(size: 0))
         let labels = ItemDetailMetadataRow.rows(for: try #require(model.details), locale: locale).map(\.labelKey)

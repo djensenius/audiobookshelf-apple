@@ -1,4 +1,5 @@
 import ABSAppModel
+import ABSCore
 import ABSUI
 import SwiftUI
 
@@ -20,7 +21,7 @@ struct ItemDetailInfoSheet: View {
                     }
                     if let size = details.size, size > 0 {
                         LabeledContent {
-                            Text(verbatim: Int64(size).formatted(.byteCount(style: .file).locale(locale)))
+                            Text(verbatim: ByteCountFormatting.string(fromBytes: Int64(size), locale: locale))
                         } label: {
                             Text(verbatim: L10n.string("LabelSize"))
                         }

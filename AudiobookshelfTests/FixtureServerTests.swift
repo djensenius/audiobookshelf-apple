@@ -319,6 +319,16 @@ struct FixtureServerTests {
         #expect(!hasOverride)
     }
 
+    /// `-ABSStallDownloads` stalls only a track's download, so the queue stays up for UI tests (#685).
+    @Test func readsTheStallDownloadsArgument() {
+        let download = "/api/items/li_pride/file/11/download"
+        let arguments = [FixtureServer.launchArgument, FixtureServer.stallDownloadsArgument]
+        #expect(FixtureServer.stalls(method: "GET", path: download, arguments: arguments))
+        #expect(!FixtureServer.stalls(method: "GET", path: download, arguments: [FixtureServer.launchArgument]))
+        #expect(!FixtureServer.stalls(method: "GET", path: "/api/items/li_pride", arguments: arguments))
+        #expect(!FixtureServer.stalls(method: "POST", path: download, arguments: arguments))
+    }
+
     /// `-ABSTheme <theme>` picks a fixture launch's theme (#641); anything else leaves it alone.
     @Test func readsTheThemeArgument() {
         let argument = FixtureServer.themeArgument

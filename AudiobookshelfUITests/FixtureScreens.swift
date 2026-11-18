@@ -388,7 +388,7 @@ extension XCTestCase {
 
     /// Polls `condition` on the main run loop until it's true or `timeout` passes.
     @MainActor
-    private func wait(for condition: () -> Bool, timeout: TimeInterval) -> Bool {
+    func wait(for condition: () -> Bool, timeout: TimeInterval) -> Bool {
         let deadline = Date.now.addingTimeInterval(timeout)
         while !condition() {
             guard Date.now < deadline else { return false }

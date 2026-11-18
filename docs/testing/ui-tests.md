@@ -105,6 +105,12 @@ the fixture launch's theme setting, as the dark accessibility audits do (`Fixtur
 created simulator ignores `XCUIDevice.shared.appearance` and `simctl ui appearance` until it's
 rebooted, so this is how a test sees dark mode. Only fixture launches read it.
 
+Add `-ABSStallDownloads` to keep a track's download under way: its reply sends the headers and
+half of the audio, then nothing more, so the download queue and the tab roots' queue indicator
+(`downloads.queueIndicator`) stay up. It holds for about a minute: the download session's
+request timeout (a minute without data, by default) can then end the transfer, so check the
+indicator soon after starting the download.
+
 The replies are the `fixture-*` files in `Audiobookshelf/Fixtures/Resources/`: status, ping,
 login and authorize, `/api/me`, the libraries, the library with its filter data, the
 personalized shelves, one page of items, one page of series (*Barsoom*, with its three books),
@@ -231,6 +237,17 @@ series card's identifier is `series.<id>`). It waits for the series' three books
 (`item.li_barsoom_1` to `_3`, served by `fixture-items-series-ser_barsoom.json`), checks each
 card's label starts with its title, and checks the cards are in sequence order: *A Princess of
 Mars*, *The Gods of Mars*, *The Warlord of Mars*.
+
+`DownloadQueueIndicatorTests` starts a download of *Pride and Prejudice* with
+`-ABSStallDownloads`, then checks the queue indicator (`downloads.queueIndicator`) is in the bar
+of the Home and Library roots (#685), not their overflow menu, which isn't in the hierarchy
+until it opens. It checks the indicator's label isn't its count and its value gives the count
+and progress (#686), that it opens the queue (`downloads.list`), and that the Downloads root's
+bar doesn't have it:
+
+```sh
+ABS_UI_PLATFORM=ios mise run test:ui -- -only-testing:AudiobookshelfUITests/DownloadQueueIndicatorTests -jobs 2
+```
 
 `AccessibilityAuditTests` audits each of those screens at the default text size and at AX5;
 see docs/accessibility.md, "Automated audits". Locally the default size takes about 80 seconds on

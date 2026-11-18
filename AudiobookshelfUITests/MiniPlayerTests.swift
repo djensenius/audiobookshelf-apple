@@ -72,16 +72,84 @@ final class MiniPlayerTests: XCTestCase {
                 "The Up Next menu took the long press from the Large Content Viewer")
         }
 
+        /// In regular width, where the queue is an inspector beside the content rather than a sheet,
+        /// the mini player's play/pause and close stay reachable while the inspector is open (#687).
+        @MainActor
+        func testQueueInspectorLeavesMiniPlayerControlsReachable() throws {
+            try checkQueueInspectorLeavesMiniPlayerControlsReachable()
+        }
+
+        /// The same in a right-to-left layout, where the inspector is on the left (#687).
+        @MainActor
+        func testQueueInspectorLeavesMiniPlayerControlsReachableRightToLeft() throws {
+            try checkQueueInspectorLeavesMiniPlayerControlsReachable(launchArguments: [
+                "-AppleTextDirection", "YES", "-NSForceRightToLeftWritingDirection", "YES",
+            ])
+        }
+
+        @MainActor
+        private func checkQueueInspectorLeavesMiniPlayerControlsReachable(launchArguments: [String] = []) throws {
+            let app = signIn(launchArguments: launchArguments)
+            try XCTSkipUnless(
+                app.windows.firstMatch.horizontalSizeClass == .regular,
+                "Compact width shows the queue as a sheet over the mini player")
+            showMiniPlayer(in: app)
+            let mini = app.descendants(matching: .any)["player.mini"].firstMatch
+            mini.press(forDuration: 1.5)
+            let upNext = app.buttons["player.mini.upNext"].firstMatch
+            XCTAssertTrue(upNext.waitForExistence(timeout: Self.fixtureTimeout), "The Up Next menu didn't appear")
+            upNext.press()
+            let inspector = app.descendants(matching: .any)["queue.inspector"].firstMatch
+            XCTAssertTrue(inspector.waitForExistence(timeout: Self.fixtureTimeout), "The queue inspector didn't open")
+
+            // The full player's buttons can be in the tree too; only those in the bar count.
+            func inBar(_ identifier: String) -> XCUIElement? {
+                app.buttons.matching(identifier: identifier).allElementsBoundByIndex
+                    .first { mini.frame.minY...mini.frame.maxY ~= $0.frame.midY }
+            }
+            // The bar makes room once the inspector is in place.
+            func hittableInBar(_ identifier: String) -> XCUIElement? {
+                var button: XCUIElement?
+                _ = wait(
+                    for: {
+                        button = inBar(identifier)
+                        return button?.isHittable == true
+                    }, timeout: Self.fixtureTimeout)
+                return button
+            }
+            let close = try XCTUnwrap(hittableInBar("player.mini.close"), "The mini player's close button isn't there")
+            XCTAssertTrue(close.isHittable, "The queue inspector covers the mini player's close button")
+            // On whichever side the inspector is.
+            XCTAssertTrue(
+                close.frame.maxX <= inspector.frame.minX || close.frame.minX >= inspector.frame.maxX,
+                "The mini player's close button (\(close.frame)) is under the queue inspector (\(inspector.frame))")
+            let play = try XCTUnwrap(
+                hittableInBar("player.play"), "The queue inspector covers the mini player's play button")
+            XCTAssertTrue(play.isHittable, "The queue inspector covers the mini player's play button")
+            // A press reaches it: playback starts, so the bar shows pause.
+            play.press()
+            XCTAssertTrue(
+                wait(for: { inBar("player.pause") != nil }, timeout: Self.fixtureTimeout),
+                "The mini player's play didn't play")
+            XCTAssertTrue(inspector.exists, "The queue inspector closed")
+        }
+
         /// Signs in, plays the fixture book (`open(_:in:)`'s player) and opens Settings, under the
         /// mini player.
         @MainActor
         private func showMiniPlayer(launchArguments: [String] = []) -> XCUIApplication {
             let app = signIn(launchArguments: launchArguments)
+            showMiniPlayer(in: app)
+            return app
+        }
+
+        /// Plays the fixture book and opens Settings, under the mini player, in a signed-in `app`.
+        @MainActor
+        private func showMiniPlayer(in app: XCUIApplication) {
             open(.player, in: app)
             open(.settings, in: app)
             let mini = app.descendants(matching: .any)["player.mini"].firstMatch
             XCTAssertTrue(mini.waitForExistence(timeout: Self.fixtureTimeout), "The mini player isn't there")
-            return app
         }
     #endif
 }
