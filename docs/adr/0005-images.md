@@ -17,20 +17,20 @@ choice is [0006](0006-now-playing.md); download mechanics are owned by
 **Legacy behaviour** (what we port):
 
 - URLs are built in
-  [`store/globals.js`](../../store/globals.js) (`getLibraryItemCoverSrc`, line 30):
+  [`store/globals.js`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/store/globals.js) (`getLibraryItemCoverSrc`, line 30):
   `GET /api/items/:id/cover?ts=<updatedAt>[&raw=1][&token=<accessToken>]`. Author
   images use `GET /api/authors/:id/image?ts=<updatedAt>[&token=…]`
-  ([`components/covers/AuthorImage.vue`](../../components/covers/AuthorImage.vue),
+  ([`components/covers/AuthorImage.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/covers/AuthorImage.vue),
   lines 57–67). If `media.coverPath` is an absolute `http(s)` URL, it is used
   directly.
 - Legacy adds `?token=` for servers older than 2.17
-  ([`store/index.js`](../../store/index.js), `getDoesServerImagesRequireToken`, line
+  ([`store/index.js`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/store/index.js), `getDoesServerImagesRequireToken`, line
   95; also [`NowPlayingInfo.swift`](../../ios/App/Shared/util/NowPlayingInfo.swift),
   lines 19–36). That path is dead code below our 2.26.0 minimum and is not ported.
 - The legacy app never sends `width`, so every cover is the server's default
   400 px rendition, whether it is shown in a 50 pt row or a full-width iPad grid.
   The player passes `raw` and gets the original file at full resolution
-  ([`components/app/AudioPlayer.vue`](../../components/app/AudioPlayer.vue),
+  ([`components/app/AudioPlayer.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/app/AudioPlayer.vue),
   line 47).
 - Caching is left to the WebView. Native code (`ApiClient.getData`,
   [`ios/App/Shared/util/ApiClient.swift`](../../ios/App/Shared/util/ApiClient.swift),
@@ -42,14 +42,14 @@ choice is [0006](0006-now-playing.md); download mechanics are owned by
   line 81), so the token is persisted in the database. Since the server picks the
   format from `Accept`, `cover.jpg` may not actually be a JPEG. Offline items show
   the local file
-  ([`BookCover.vue`](../../components/covers/BookCover.vue), `fullCoverUrl`, line
+  ([`BookCover.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/covers/BookCover.vue), `fullCoverUrl`, line
   112).
 - Custom headers (`serverConfig.customHeaders`) are only sent by the connect form
-  ([`components/connection/ServerConnectForm.vue`](../../components/connection/ServerConnectForm.vue),
+  ([`components/connection/ServerConnectForm.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/connection/ServerConnectForm.vue),
   line 640). `<img>` cover requests can't carry them, so covers break behind
   header-gated reverse proxies.
 - **Placeholders:**
-  [`BookCover.vue`](../../components/covers/BookCover.vue) has three states:
+  [`BookCover.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/covers/BookCover.vue) has three states:
   - no cover: title and author drawn on a placeholder (lines 25–32);
   - load error: logo on a tinted background (lines 18–23);
   - loaded: a 300 ms fade-in.
@@ -57,10 +57,10 @@ choice is [0006](0006-now-playing.md); download mechanics are owned by
   When the image's aspect ratio differs from the library's by more than 0.15, it
   is shown aspect-fit over a blurred copy of itself (lines 152–171). The library
   aspect ratio is 1.6 or 1
-  ([`store/libraries.js`](../../store/libraries.js), lines 27–30).
+  ([`store/libraries.js`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/store/libraries.js), lines 27–30).
 - **Average colour:** the player and item page tint their backgrounds with the
   cover's average colour and an `isLight` flag. This uses `fast-average-color`
-  ([`utils/coverAverageColor.js`](../../utils/coverAverageColor.js)), with
+  ([`utils/coverAverageColor.js`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/utils/coverAverageColor.js)), with
   fallback `rgb(55, 56, 56)` (`AudioPlayer.vue`, lines 432–442).
 
 **Server behaviour** (verified in
@@ -899,12 +899,12 @@ That fits under 256 MiB without eviction churn.
   - [0007 Streaming and minimum server version](0007-streaming.md);
   - [architecture.md](../architecture.md).
 - **Legacy code:**
-  - [`components/covers/BookCover.vue`](../../components/covers/BookCover.vue),
-    [`components/covers/AuthorImage.vue`](../../components/covers/AuthorImage.vue);
-  - [`store/globals.js`](../../store/globals.js),
-    [`store/index.js`](../../store/index.js),
-    [`store/libraries.js`](../../store/libraries.js);
-  - [`utils/coverAverageColor.js`](../../utils/coverAverageColor.js);
+  - [`components/covers/BookCover.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/covers/BookCover.vue),
+    [`components/covers/AuthorImage.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/covers/AuthorImage.vue);
+  - [`store/globals.js`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/store/globals.js),
+    [`store/index.js`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/store/index.js),
+    [`store/libraries.js`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/store/libraries.js);
+  - [`utils/coverAverageColor.js`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/utils/coverAverageColor.js);
   - [`ios/App/Shared/util/NowPlayingInfo.swift`](../../ios/App/Shared/util/NowPlayingInfo.swift),
     [`ios/App/Shared/util/ApiClient.swift`](../../ios/App/Shared/util/ApiClient.swift),
     [`ios/App/App/plugins/AbsDownloader.swift`](../../ios/App/App/plugins/AbsDownloader.swift),

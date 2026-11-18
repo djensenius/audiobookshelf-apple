@@ -944,6 +944,6 @@ Ongoing checks:
     [`ios/App/Shared/util/ApiClient.swift`](../../ios/App/Shared/util/ApiClient.swift)
     (`syncLocalSessionsWithServer`),
     [`ios/App/Shared/player/PlayerProgress.swift`](../../ios/App/Shared/player/PlayerProgress.swift)
-  - [`plugins/db.js`](../../plugins/db.js),
-    [`pages/media/_id/history.vue`](../../pages/media/_id/history.vue),
-    [`android/app/src/main/java/com/audiobookshelf/app/data/MediaItemEvent.kt`](../../android/app/src/main/java/com/audiobookshelf/app/data/MediaItemEvent.kt)
+  - [`plugins/db.js`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/plugins/db.js),
+    [`pages/media/_id/history.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/pages/media/_id/history.vue),
+    [`android/app/src/main/java/com/audiobookshelf/app/data/MediaItemEvent.kt`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/android/app/src/main/java/com/audiobookshelf/app/data/MediaItemEvent.kt)
