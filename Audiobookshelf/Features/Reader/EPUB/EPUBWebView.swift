@@ -91,6 +91,7 @@ final class EPUBReaderController {
         let stranded = pending.values
         pending = [:]
         for continuation in stranded { continuation.resume(throwing: CommandError.closed) }
+        gestures.uninstall()
         webView.configuration.userContentController.removeScriptMessageHandler(forName: EPUBMessageHandler.name)
         webView.stopLoading()
         navigation.isClosed = true

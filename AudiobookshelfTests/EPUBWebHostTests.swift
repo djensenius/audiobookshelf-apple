@@ -756,7 +756,8 @@ private final class ReaderPage {
         /// With real epub.js, a click on a section's text turns pages or shows the chrome as one in
         /// the margins does (#684). epub.js's sections are sandboxed without scripts, so WebKit runs
         /// no listener in them (epub.js's, the page's): the click is the app's recognizer's. Clicks
-        /// go through a window, as the mouse's do.
+        /// go through a window, as the mouse's do. A double-click (a word's selection), in a section
+        /// or in the margins, and a Control-click (the context menu) aren't clicks.
         @Test(.timeLimit(.minutes(1))) func aClickOnTheBooksTextIsPostedOnce() async throws {
             let page = try await realEPUBJSPage()
             let window = NSWindow(
@@ -770,17 +771,20 @@ private final class ReaderPage {
             defer { opening.cancel() }
             try await page.waitForSectionText()
             let taps = { page.events.compactMap { $0["type"] as? String == "tap" ? $0["x"] as? Double : nil } }
-            func click(x: Double) async throws {
+            func click(x: Double, clicks: Int = 1) async throws {
                 let before = taps().count
-                for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
-                    let event = try #require(
-                        NSEvent.mouseEvent(
-                            with: type, location: CGPoint(x: x, y: 300), modifierFlags: [],
-                            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                            context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
-                    window.sendEvent(event)
+                for clickCount in 1...clicks {
+                    for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                        let event = try #require(
+                            NSEvent.mouseEvent(
+                                with: type, location: CGPoint(x: x, y: 300), modifierFlags: [],
+                                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                context: nil, eventNumber: 0, clickCount: clickCount, pressure: 1))
+                        window.sendEvent(event)
+                    }
                 }
-                for _ in 0..<100 where taps().count == before {
+                // A click waits out a double-click's interval before it's a click.
+                for _ in 0..<150 where taps().count == before {
                     try await Task.sleep(for: .milliseconds(20))
                 }
                 // Long enough for a second post, were the click handled twice.
@@ -797,8 +801,66 @@ private final class ReaderPage {
             #expect(taps() == [0.5])
             try await click(x: 50)
             #expect(taps() == [0.5, 0.05])
+
+            for x in [500.0, 50] {
+                try await click(x: x, clicks: 2)
+            }
+            #expect(taps() == [0.5, 0.05])
+            // A Control-click isn't tried (sent, it would open the context menu's modal loop).
+            let gestures = page.controller.gestures
+            let control = try #require(
+                NSEvent.mouseEvent(
+                    with: .leftMouseDown, location: CGPoint(x: 500, y: 300), modifierFlags: .control,
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+            for recognizer in gestures.recognizers {
+                #expect(!gestures.gestureRecognizer(recognizer, shouldAttemptToRecognizeWith: control))
+            }
+            // The double-clicks selected, in the section and the page. Once that's cleared, a click
+            // is a click again.
+            let selections = "[\(ReaderPage.section).defaultView.getSelection(), window.getSelection()]"
+            #expect(
+                try await page.evaluate("\(selections).map(function (s) { return s.isCollapsed })") == "[false,false]")
+            _ = try await page.evaluate("\(selections).forEach(function (s) { s.removeAllRanges() })")
+            try await click(x: 500)
+            #expect(taps() == [0.5, 0.05, 0.5])
         }
     #endif
+
+    /// The page's recognizers watch alongside WebKit's own, which still get every touch at once
+    /// (selecting text, its menu); on iPadOS, a trackpad's click-drag selects text rather than
+    /// swiping. They come off the web view as the reader closes.
+    @Test func thePageGesturesLeaveTouchesToWebKitUntilClosed() throws {
+        let controller = EPUBReaderController(loadBook: { _ in Data() })
+        let recognizers = controller.gestures.recognizers
+        #expect(!recognizers.isEmpty)
+        for recognizer in recognizers {
+            #expect(recognizer.view === controller.webView)
+        }
+        #if os(iOS)
+            let pan = try #require(recognizers.compactMap { $0 as? UIPanGestureRecognizer }.first)
+            #expect(recognizers.contains { $0 is UITapGestureRecognizer })
+            for recognizer in recognizers {
+                #expect(!recognizer.cancelsTouchesInView)
+                #expect(!recognizer.delaysTouchesBegan)
+                #expect(!recognizer.delaysTouchesEnded)
+            }
+            #expect(pan.maximumNumberOfTouches == 1)
+            #expect(
+                pan.allowedTouchTypes
+                    == [UITouch.TouchType.direct, .pencil].map { NSNumber(value: $0.rawValue) })
+        #elseif os(macOS)
+            for recognizer in recognizers {
+                #expect(!recognizer.delaysPrimaryMouseButtonEvents)
+            }
+        #endif
+
+        controller.close()
+        #expect(controller.gestures.recognizers.isEmpty)
+        for recognizer in recognizers {
+            #expect(recognizer.view == nil)
+        }
+    }
 
     /// With real epub.js, a book opened with margins is laid out in the width between them from its
     /// first render, without laying it out again. WebKit runs no animation frames for a page that
@@ -910,7 +972,12 @@ private final class ReaderPage {
             try await Task.sleep(for: .milliseconds(20))
         }
         try #require(width > 0)
-        // The opening layout's resizes would cancel the first snap.
+        // The opening displays its page twice, the second scrolling back to it, and posts where it
+        // landed once done: a swipe before then would be undone.
+        for _ in 0..<250 where page.last("relocated") == nil && page.last("error") == nil {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        try #require(page.last("relocated") != nil)
         _ = try await page.evaluate("(function (s) { s.resizeCanceler = false; return 1 })(\(snapper))")
 
         try await swipe(viewer, from: 90, to: 10)

@@ -178,6 +178,16 @@ dependency.
      - JS → Swift events go through one `WKScriptMessageHandler` (`relocated`, `toc`,
        `tap`, `error`). Swift → JS calls use `callAsyncJavaScript` (`open`,
        `display(cfiOrHref)`, `next`, `prev`, `applySettings`).
+     - Book scripts never run: epub.js renders with `allowScriptedContent: false`, so
+       each section's frame is sandboxed without `allow-scripts`. WebKit then runs no
+       event listener for events in that frame, including the reader page's and
+       epub.js's own. Page taps, clicks and swipes are therefore recognized natively
+       on the web view (UIKit tap and pan recognizers on iOS, a click that waits out a
+       double-click on macOS), alongside WebKit's own, so text selection still works.
+       They are handed to the page as `absReader.touchBegan`, `tap` and `swipe`. The
+       page hit-tests the same-origin frame to skip links and taps that end a
+       selection, and feeds swipes to epub.js's snapper (#684). Don't turn on
+       `allow-scripts` to get these events back; book scripts are untrusted.
    - **Progress**
      - Write `ebookLocation = location.start.cfi` and
        `ebookProgress = location.end.percentage`.
@@ -213,7 +223,9 @@ dependency.
      `minSpreadWidth` is scaled by the same margin, so epub.js agrees with the spread
      the native `ReaderSpreadPolicy` decided (decision 7) exactly as it did before.
      Taps in the margins turn pages or show the chrome, and swipes that start there
-     turn pages, as taps and swipes on the page do.
+     turn pages, as taps and swipes on the page do. Margin taps go through the native
+     recognizers (decision 1); margin swipes through the page's own touch listeners,
+     which run there, outside the sandboxed frames.
    - EPUB applies these as epub.js theme rules (the legacy `themeRules`). PDF and
      comics only change the chrome and page background.
 7. **Two-page spreads**

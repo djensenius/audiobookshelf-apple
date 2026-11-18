@@ -329,7 +329,7 @@
     selectedAtTouch = false
     if (!rendition || selected) return
     const target = elementAt(x, y)
-    if (target && typeof target.closest === 'function' && target.closest('a')) return
+    if (target && typeof target.closest === 'function' && target.closest('a, area, [role="link"]')) return
     postTap(x, y)
   }
 
@@ -381,6 +381,7 @@
   // next swipe.
   let touchStartOffset
   // How far a touch can move, in CSS pixels, and still be a tap (UIKit's tap allows about as much).
+  // CSS pixels are UIKit points only because the reader can't be zoomed.
   const tapSlop = 10
   function toSnapper(snapper, type, event) {
     if (type === 'touchstart') {
