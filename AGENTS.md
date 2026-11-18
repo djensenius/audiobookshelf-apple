@@ -116,7 +116,12 @@ newest runtime, then an already booted device, then device type and UDID.
 Set `IOS_SIMULATOR_ID=<udid>` to select a specific compatible available iPhone;
 an invalid or empty override fails without fallback. No iPhone Duo is required.
 It borrows the device without creating, erasing, deleting or shutting down any
-simulator, disables parallel test workers, and limits builds to two jobs.
+simulator and disables parallel test workers. Builds use every core unless
+`ABS_XCODEBUILD_JOBS=<positive integer>` caps them (use 2 on a shared machine);
+any other value fails before building. The build uses the checked-in
+`AudiobookshelfKit-ShakeDetector` scheme
+(`Packages/AudiobookshelfKit/.swiftpm/xcode/xcshareddata/xcschemes/`), which
+builds only `ABSPlaybackTests` and its dependencies.
 In CI (`CI=true`) or with `ABS_EPHEMERAL_SIMULATOR=1`, unless `IOS_SIMULATOR_ID`
 is set, it instead creates its own `abs-ci-<run>-<attempt>-<pid>-<try>` simulator of
 the selected device type and runtime, and always shuts it down and deletes it. It

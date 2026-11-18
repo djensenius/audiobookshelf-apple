@@ -95,7 +95,11 @@ node_modules/
 
 # Swift / Xcode
 .build/
-.swiftpm/
+**/.swiftpm/*
+# Except AudiobookshelfKit's shared schemes (the ABSPlaybackTests-only one used by test:kit:ios).
+!/Packages/AudiobookshelfKit/.swiftpm/xcode/
+/Packages/AudiobookshelfKit/.swiftpm/xcode/*
+!/Packages/AudiobookshelfKit/.swiftpm/xcode/xcshareddata/
 DerivedData/
 *.xcresult
 xcuserdata/

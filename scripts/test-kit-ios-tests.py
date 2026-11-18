@@ -22,6 +22,7 @@ import tempfile
 import time
 import unittest
 from unittest import mock
+from xml.etree import ElementTree
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -170,7 +171,7 @@ class RunnerTests(unittest.TestCase):
             path.chmod(0o700)
         self.env = dict(os.environ, CASE_ROOT=str(self.root))
         for key in ("IOS_SIMULATOR_ID", "DEVELOPER_DIR", "CI", "ABS_EPHEMERAL_SIMULATOR",
-                    "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
+                    "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT", "ABS_XCODEBUILD_JOBS"):
             self.env.pop(key, None)
         self.env["PATH"] = str(binaries) + os.pathsep + self.env["PATH"]
         newest, older, too_old = runtime("27.2"), runtime("27.0"), runtime("26.5")
@@ -197,7 +198,8 @@ class RunnerTests(unittest.TestCase):
             {"nodeType": "Test Plan", "name": "AudiobookshelfKit", "children": [self.bundle]},
         ]}
         self.listing = {"workspace": {"name": "AudiobookshelfKit", "schemes": [
-            "AudiobookshelfKit", "AudiobookshelfKit-Package", "AudiobookshelfWidgetKit",
+            "AudiobookshelfKit", "AudiobookshelfKit-Package", "AudiobookshelfKit-ShakeDetector",
+            "AudiobookshelfWidgetKit",
         ]}}
         self.faults = {}
         self.udids = CREATED
@@ -236,7 +238,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(listing["cwd"], str(self.package))
         work = next((self.root / ".build/kit-ios").iterdir())
         shared = [
-            "-scheme", "AudiobookshelfKit-Package",
+            "-scheme", "AudiobookshelfKit-ShakeDetector",
             "-destination", f"platform=iOS Simulator,id={FIRST}", "-destination-timeout", "60",
             "-only-testing:ABSPlaybackTests/ShakeDetectorTests",
             "-derivedDataPath", str(work / "DerivedData"),
@@ -245,8 +247,9 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(call["cwd"], str(self.package))
             self.assertEqual(call["developerDir"], "/Applications/Xcode.app/Contents/Developer")
         # Build, then test what was built: same derived data, destination and filter.
+        # Without ABS_XCODEBUILD_JOBS, xcodebuild uses every core (no `-jobs`).
         self.assertEqual(build["args"], [
-            "build-for-testing", *shared, "-jobs", "2", "CODE_SIGNING_ALLOWED=NO",
+            "build-for-testing", *shared, "CODE_SIGNING_ALLOWED=NO",
         ])
         self.assertEqual(test["args"], [
             "test-without-building", *shared, "-resultBundlePath", str(work / "Tests.xcresult"),
@@ -268,16 +271,10 @@ class RunnerTests(unittest.TestCase):
         self.run_case()
         self.assert_no_simulator_mutation()
 
-    def test_scheme_follows_the_manifests_products(self):
-        # One product: Xcode's scheme is named after it and has the test action.
-        self.listing["workspace"]["schemes"] = ["AudiobookshelfKit"]
-        self.run_case()
-        build, test = [call for call in self.calls() if call["tool"] == "xcodebuild"][-2:]
-        self.assertEqual(build["args"][:3], ["build-for-testing", "-scheme", "AudiobookshelfKit"])
-        self.assertEqual(test["args"][:3], ["test-without-building", "-scheme", "AudiobookshelfKit"])
-        # Neither scheme listed: fail before testing anything.
-        self.listing["workspace"]["schemes"] = ["AudiobookshelfWidgetKit"]
-        self.assertIn("No AudiobookshelfKit test scheme", self.run_case(expected=1).stderr)
+    def test_only_the_checked_in_scheme_is_used(self):
+        # Xcode's generated schemes build every package test target; never fall back to them.
+        self.listing["workspace"]["schemes"] = ["AudiobookshelfKit", "AudiobookshelfKit-Package"]
+        self.assertIn("No AudiobookshelfKit-ShakeDetector scheme", self.run_case(expected=1).stderr)
         self.assertEqual(self.calls()[-1]["args"], ["-list", "-json"])
         self.faults = {"list": 66}
         self.run_case(expected=66)
@@ -286,6 +283,44 @@ class RunnerTests(unittest.TestCase):
         (self.root / "listing.json").write_text("not JSON")
         self.run_case(expected=1, prepare=False)
         self.assertEqual(self.calls()[-1]["args"], ["-list", "-json"])
+
+    def test_checked_in_scheme_builds_and_tests_only_abs_playback_tests(self):
+        scheme = ROOT / "Packages/AudiobookshelfKit/.swiftpm/xcode/xcshareddata/xcschemes/" \
+            "AudiobookshelfKit-ShakeDetector.xcscheme"
+        tree = ElementTree.parse(scheme)
+        for path in ("BuildAction/BuildActionEntries/BuildActionEntry/BuildableReference",
+                     "TestAction/Testables/TestableReference/BuildableReference"):
+            with self.subTest(path=path):
+                self.assertEqual([(ref.get("BlueprintIdentifier"), ref.get("BlueprintName"))
+                                  for ref in tree.findall(path)], [("ABSPlaybackTests", "ABSPlaybackTests")])
+        self.assertIn("ABSPlaybackTests", RUNNER["PACKAGE"].joinpath("Package.swift").read_text())
+        # `.swiftpm/` is otherwise ignored; the scheme must not be.
+        ignored = subprocess.run(["git", "check-ignore", "-q", str(scheme)], cwd=ROOT, timeout=10)
+        self.assertEqual(ignored.returncode, 1)
+
+    def test_build_jobs_are_capped_only_by_abs_xcodebuild_jobs(self):
+        def build_args():
+            return [call for call in self.calls() if call["args"][:1] == ["build-for-testing"]][-1]["args"]
+
+        self.run_case()
+        self.assertNotIn("-jobs", build_args())
+        for jobs, passed in (("1", "1"), ("2", "2"), ("16", "16"), ("08", "8")):
+            with self.subTest(jobs=jobs):
+                self.env["ABS_XCODEBUILD_JOBS"] = jobs
+                self.assertIn("Verified 4/4", self.run_case().stdout)
+                self.assertEqual(build_args()[-3:], ["-jobs", passed, "CODE_SIGNING_ALLOWED=NO"])
+                # The cap applies to the build only; the test phase runs one worker anyway.
+                test = [call for call in self.calls() if call["args"][:1] == ["test-without-building"]][-1]
+                self.assertNotIn("-jobs", test["args"])
+        # An invalid value fails before any simulator or xcodebuild call, even in CI.
+        self.ci()
+        for jobs in ("", "0", "00", "-1", "2.5", " 2", "two"):
+            with self.subTest(jobs=jobs):
+                (self.root / "calls.jsonl").unlink(missing_ok=True)
+                self.env["ABS_XCODEBUILD_JOBS"] = jobs
+                result = self.run_case(expected=1)
+                self.assertIn(f"ABS_XCODEBUILD_JOBS must be a positive integer, got {jobs!r}", result.stderr)
+                self.assertFalse((self.root / "calls.jsonl").exists())
 
     def test_explicit_destination_and_ci_toolchain(self):
         self.env.update(IOS_SIMULATOR_ID=OLDER, DEVELOPER_DIR="/Applications/Xcode_27.2.app/Contents/Developer")
@@ -559,7 +594,7 @@ class RunnerTests(unittest.TestCase):
                 contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             try:
                 RUNNER["with_ephemeral_simulator"](selected, "abs-ci-local-1-1-1", lambda udid, name: (
-                    RUNNER["run_tests"]("AudiobookshelfKit-Package", udid, name)))
+                    RUNNER["run_tests"]("AudiobookshelfKit-ShakeDetector", udid, name)))
             except subprocess.TimeoutExpired as error:
                 failure = error
         # Whatever happened, the simulator was created, booted, then shut down and deleted.
