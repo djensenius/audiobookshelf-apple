@@ -88,7 +88,7 @@ public struct PlaybackHistoryRecorder: PlaybackHistoryRecording {
             try await store.record(event, onlyIfHistoryExists: name == .sync)
         } catch {
             Log.data.error(
-                "Couldn't record a \(name.rawValue, privacy: .public) history event: \(error.localizedDescription, privacy: .public)"
+                "Couldn't record a \(name.rawValue, privacy: .public) history event: \(Log.redact(error.localizedDescription), privacy: .public)"
             )
         }
     }

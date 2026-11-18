@@ -196,7 +196,8 @@ public final class NowPlayingController {
                 try await session.becomeApplicationPrimary()
                 succeeded = true
             } catch {
-                Log.playback.error("Now Playing: couldn't become application primary: \(error, privacy: .public)")
+                Log.playback.error(
+                    "Now Playing: couldn't become application primary: \(Log.redacted(error), privacy: .public)")
                 succeeded = false
             }
             guard self.activationGeneration == generation else { return }
@@ -244,7 +245,7 @@ public final class NowPlayingController {
         do {
             try await session.becomeSystemPrimary()
         } catch {
-            Log.playback.error("Now Playing: couldn't become system primary: \(error, privacy: .public)")
+            Log.playback.error("Now Playing: couldn't become system primary: \(Log.redacted(error), privacy: .public)")
         }
     }
 

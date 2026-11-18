@@ -206,7 +206,7 @@ final class AppEnvironment {
                 Log.data.info("Pruned \(pruned, privacy: .public) expired playback history events")
             } catch {
                 Log.data.error(
-                    "Couldn't prune playback history: \(error.localizedDescription, privacy: .public)")
+                    "Couldn't prune playback history: \(Log.redact(error.localizedDescription), privacy: .public)")
             }
         }
     }
