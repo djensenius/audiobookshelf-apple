@@ -112,11 +112,12 @@ jobs:
     # the UI-test step stops it after 10 (#661), then needs about 3 to restart the runner, list the
     # tests and run it again alone (#666). 75 fitted that in even the slowest run seen (58 + 13);
     # 70 didn't. The iPad steps add about 3 to create and boot a simulator, then the iPad test
-    # step, which has its own 25-minute limit: about 5.3 locally, but on CI xcodebuild was still
-    # starting the test runner on the cold iPad simulator 12 minutes in. 105 fits
-    # 58 + 13 + 3 + 25 = 99 plus setup. A second stall in the iPhone run may not fit: the job then
-    # times out and fails rather than passing. A passing run doesn't take longer.
-    timeout-minutes: 105
+    # step, which has its own 35-minute limit: about 5.3 locally, but on CI xcodebuild was still
+    # starting the test runner on the cold iPad simulator 12 minutes in, and its first passing run
+    # took 21 (#703). 115 fits 58 + 13 + 3 + 35 = 109 plus setup. A second stall in the iPhone run
+    # may not fit: the job then times out and fails rather than passing. A passing run doesn't
+    # take longer.
+    timeout-minutes: 115
     env:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       MISE_TASK_RUN_AUTO_INSTALL: "false"
@@ -175,8 +176,11 @@ jobs:
       # run by hand (docs/testing/ui-tests.md). It
       # reuses the iPhone step's build (an iphonesimulator xctestrun serves any simulator) and runs
       # only after that step passes, since the script clears the .build/ui-tests/ it uploads.
+      # Nothing uses the iPhone Duo after its step, so it's shut down first rather than left
+      # running beside the iPad (#703); the cleanup step below still deletes it.
       - name: Create an iPad simulator
         run: |
+          xcrun simctl shutdown "$IOS_SIMULATOR_ID" || true
           udid="$(xcrun simctl create "abs-ui-ipad-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5-12GB)"
           echo "IPAD_SIMULATOR_ID=$udid" >> "$GITHUB_ENV"
           xcrun simctl bootstatus "$udid" -b
@@ -186,7 +190,7 @@ jobs:
       # the job's limit cancelling the run.
       - name: UI tests on the iPad simulator (regular width)
         id: ipad-ui-tests
-        timeout-minutes: 25
+        timeout-minutes: 35
         env:
           ABS_UI_PLATFORM: ios
           ABS_UI_ACTION: test-without-building

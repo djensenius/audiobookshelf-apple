@@ -1,3 +1,4 @@
+import ABSCore
 import AVFoundation
 import os
 
@@ -53,7 +54,7 @@ public final class SystemSleepTimerFeedback: SleepTimerFeedback {
         do {
             try output.engine.start()
         } catch {
-            logger.error("Sleep timer chime failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("Sleep timer chime failed: \(Log.redact(error.localizedDescription), privacy: .public)")
             return
         }
         chimeGeneration += 1
@@ -65,7 +66,7 @@ public final class SystemSleepTimerFeedback: SleepTimerFeedback {
         do {
             try output.node.playAudio()
         } catch {
-            logger.error("Sleep timer chime failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("Sleep timer chime failed: \(Log.redact(error.localizedDescription), privacy: .public)")
             chimeDidFinish(generation)
         }
     }
@@ -85,7 +86,7 @@ public final class SystemSleepTimerFeedback: SleepTimerFeedback {
         do {
             try engine.connectNode(node, to: engine.mainMixerNode, format: format)
         } catch {
-            logger.error("Sleep timer chime failed: \(error.localizedDescription, privacy: .public)")
+            logger.error("Sleep timer chime failed: \(Log.redact(error.localizedDescription), privacy: .public)")
             return nil
         }
         outputGeneration += 1

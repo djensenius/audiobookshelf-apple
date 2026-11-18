@@ -368,6 +368,6 @@ public final class EbookProgressModel {
     }
 
     private nonisolated static func caseName(_ error: any Error) -> String {
-        String(String(describing: error).prefix { $0 != "(" })
+        Log.redact(String(String(describing: error).prefix { $0 != "(" }))
     }
 }

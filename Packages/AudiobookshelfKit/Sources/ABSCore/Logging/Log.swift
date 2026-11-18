@@ -48,7 +48,8 @@ public enum Log {
         Logger(subsystem: subsystem, category: category.rawValue)
     }
 
-    /// Removes bearer tokens, token query values, and JWTs from `text`.
+    /// Removes credentials from `text`: bearer tokens, token and API key query values, JWTs, and the
+    /// string values of JSON credential keys such as `password`. See ``Redactor`` for the full list.
     public static func redact(_ text: String) -> String {
         Redactor().redact(text)
     }
