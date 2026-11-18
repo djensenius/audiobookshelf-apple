@@ -12,11 +12,13 @@ name: UI tests
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
+    # Later patterns override earlier ones; paths-ignore can't re-include a file.
+    paths:
+      - "**"
+      - "!docs/**"
+      - "!**/*.md"
       # Copied into the app bundle.
-      - "!THIRD_PARTY_NOTICES.md"
+      - "THIRD_PARTY_NOTICES.md"
   schedule:
     - cron: "0 7 * * *"
   workflow_dispatch:

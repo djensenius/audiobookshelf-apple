@@ -4,18 +4,22 @@ name: CI
 # Documentation-only changes skip this workflow; repo-lint.yml still runs.
 on:
   pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
+    # Later patterns override earlier ones; paths-ignore can't re-include a file.
+    paths:
+      - "**"
+      - "!docs/**"
+      - "!**/*.md"
       # Copied into the app bundle.
-      - "!THIRD_PARTY_NOTICES.md"
+      - "THIRD_PARTY_NOTICES.md"
   push:
     branches: [main]
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
+    # Later patterns override earlier ones; paths-ignore can't re-include a file.
+    paths:
+      - "**"
+      - "!docs/**"
+      - "!**/*.md"
       # Copied into the app bundle.
-      - "!THIRD_PARTY_NOTICES.md"
+      - "THIRD_PARTY_NOTICES.md"
 
 permissions:
   contents: read
