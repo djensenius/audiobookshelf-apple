@@ -1417,8 +1417,9 @@ public final class ProgressSyncer {
         }
     }
 
-    /// The error's case without associated values (which can carry server messages), for logs.
+    /// The error's case without associated values (which can carry server messages), for logs. Other
+    /// errors, such as an `NSError` quoting a URL, may have no `(` before a token, so it's redacted (#662).
     static func caseName(_ error: any Error) -> String {
-        String(String(describing: error).prefix { $0 != "(" })
+        Log.redact(String(String(describing: error).prefix { $0 != "(" }))
     }
 }

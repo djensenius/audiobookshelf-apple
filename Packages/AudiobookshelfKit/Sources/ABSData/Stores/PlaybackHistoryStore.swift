@@ -241,7 +241,8 @@ import SwiftData
                 do {
                     snapshots[observer.mediaKey] = try events(for: observer.mediaKey)
                 } catch {
-                    Log.data.error("Couldn't read playback history: \(error.localizedDescription, privacy: .public)")
+                    Log.data.error(
+                        "Couldn't read playback history: \(Log.redact(error.localizedDescription), privacy: .public)")
                     continue
                 }
             }

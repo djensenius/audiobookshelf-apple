@@ -187,7 +187,7 @@ final class EPUBReaderSession {
             // The table of contents is decoded off the main actor (below).
             event = try EPUBBridgeEvent.decode(data, skipping: ["toc"])
         } catch {
-            Self.log.error("Undecodable reader event: \(String(describing: error), privacy: .public)")
+            Self.log.error("Undecodable reader event: \(Log.redacted(error), privacy: .public)")
             return
         }
         switch event {
@@ -212,7 +212,8 @@ final class EPUBReaderSession {
                 model.toggleChrome()
             }
         case .error(let message, let phase):
-            Self.log.error("Reader \(phase ?? "?", privacy: .public) failed: \(message, privacy: .public)")
+            Self.log.error(
+                "Reader \(Log.redact(phase ?? "?"), privacy: .public) failed: \(Log.redact(message), privacy: .public)")
             if phase == "open" { failed = true }
             // The sheet says the book has none rather than waiting for good.
             if phase == "toc" { contents.receive(EPUBTableOfContents([])) }
@@ -259,7 +260,7 @@ final class EPUBReaderSession {
             do {
                 try await controller.send(command.jsonData())
             } catch {
-                Self.log.error("Reader command failed: \(String(describing: error), privacy: .public)")
+                Self.log.error("Reader command failed: \(Log.redacted(error), privacy: .public)")
             }
         }
     }
