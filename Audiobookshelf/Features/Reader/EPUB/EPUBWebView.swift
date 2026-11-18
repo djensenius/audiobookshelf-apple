@@ -15,6 +15,8 @@ final class EPUBReaderController {
     }
 
     let webView: WKWebView
+    /// The taps, clicks and swipes on the pages, which the page itself can't hear.
+    let gestures: EPUBPageGestures
     /// Each event the page posts, as JSON `Data` (see the EPUB bridge contract).
     var onEvent: (Data) -> Void {
         get { messages.onEvent }
@@ -38,6 +40,7 @@ final class EPUBReaderController {
             EPUBSchemeHandler(resourceURL: resourceURL, loadBook: loadBook), forURLScheme: EPUBSchemeHandler.scheme)
         messages.install(in: configuration.userContentController)
         webView = WKWebView(frame: .zero, configuration: configuration)
+        gestures = EPUBPageGestures(webView: webView)
         webView.navigationDelegate = navigation
         #if DEBUG
             webView.isInspectable = true
@@ -88,6 +91,7 @@ final class EPUBReaderController {
         let stranded = pending.values
         pending = [:]
         for continuation in stranded { continuation.resume(throwing: CommandError.closed) }
+        gestures.uninstall()
         webView.configuration.userContentController.removeScriptMessageHandler(forName: EPUBMessageHandler.name)
         webView.stopLoading()
         navigation.isClosed = true
