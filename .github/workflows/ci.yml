@@ -179,15 +179,19 @@ jobs:
           echo "IPAD_SIMULATOR_ID=$udid" >> "$GITHUB_ENV"
           xcrun simctl bootstatus "$udid" -b
 
+      # IOS_SIMULATOR_ID is set in the command, not in env:, as the iPhone step's $GITHUB_ENV also sets it.
       - name: UI tests on the iPad simulator (regular width)
+        id: ipad-ui-tests
         env:
           ABS_UI_PLATFORM: ios
           ABS_UI_ACTION: test-without-building
-          IOS_SIMULATOR_ID: ${{ env.IPAD_SIMULATOR_ID }}
-        run: scripts/ui-test-ci.sh -only-testing:AudiobookshelfUITests/MiniPlayerTests/testLongPressAtAccessibilitySizeShowsNoMenu
+        run: |
+          IOS_SIMULATOR_ID="$IPAD_SIMULATOR_ID" scripts/ui-test-ci.sh \
+            -only-testing:AudiobookshelfUITests/MiniPlayerTests/testLongPressAtAccessibilitySizeShowsNoMenu
 
+      # Only for the iPad step's own failure: after an iPhone failure the directory has the iPhone results.
       - name: Upload the iPad UI test results
-        if: failure()
+        if: failure() && steps.ipad-ui-tests.outcome == 'failure'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ui-tests-ipad-attempt-${{ github.run_attempt }}
