@@ -93,7 +93,9 @@ final class AccessibilityAuditTests: XCTestCase {
         // element. None on the full player, which covers the bar. So per audit, at most as many as
         // the bar's row of hittable tab buttons (`KnownAuditIssue.topTabBarButtonCount`), never on
         // the Player or Bookmarks, and only "partially" (a fixed font size is "unsupported"); any
-        // more fail. #698
+        // more fail. The cap is the bar's tab count, not a measured maximum: the slack is
+        // intentional, since how many titles the bar reports varies with its width and scroll,
+        // and each audit records "k of N" as an activity so drift shows in the result bundle. #698
         #if os(iOS)
             let tabBarLabels =
                 types.contains(.dynamicType) && ![FixtureScreen.player, .bookmarks].contains(screen)
@@ -123,6 +125,11 @@ final class AccessibilityAuditTests: XCTestCase {
                     failures.append("\(name): \(Self.failure(issue))")
                 }
                 return true
+            }
+            if tabBarLabels > 0 {
+                XCTContext.runActivity(
+                    named: "\(name): top tab bar labels allowed \(tabBarIssues) of \(tabBarLabels)"
+                ) { _ in }
             }
             if !deferred.isEmpty {
                 failures += try auditAboveBottomBar(
@@ -390,7 +397,9 @@ final class AccessibilityAuditTests: XCTestCase {
                         if KnownAuditIssue.all.contains(where: { $0.matches(issue, on: screen, in: app) }) {
                             return true
                         }
-                        // One with no element could be the button's, so it fails too.
+                        // One with no element could be the button's, so it fails too. This is strict on
+                        // purpose: if it flakes, read the issue's description in the result bundle and
+                        // add a scoped `KnownAuditIssue` for what it is, rather than dropping these.
                         if let found = issue.element {
                             if found.elementType == .button, found.label == button.label {
                                 failures.append(
@@ -562,9 +571,10 @@ struct KnownAuditIssue {
                 // (probed), the values likewise, and AX5 shows them whole. An audit of only Dynamic
                 // Type on Settings at AX5 reports none of them, and at XXXL or AX1 it reports the
                 // rows in view, so it's the audit's measurement, as for the cards (#622). Only
-                // "partially" (a fixed font size is "unsupported", and fails), only text in a
-                // Settings row's switch or button, and only while it's at least one AX5 body line
-                // (63.5 points) tall, so text drawn at a smaller size still fails. #698
+                // "partially" (a fixed font size is "unsupported", and fails), only those four rows'
+                // title or value (`isScaledSettingsRowText`), only with the iPad's top tab bar (the
+                // iPhone's AX5 audit is unchanged), and only while it's one AX5 body line (63.5
+                // points) tall, so text drawn at another size or wrapped still fails. #698
                 KnownAuditIssue(
                     screen: .settings, type: .dynamicType, description: "partially unsupported",
                     element: isScaledSettingsRowText),
@@ -853,18 +863,34 @@ struct KnownAuditIssue {
         #endif
     }
 
-    /// Whether `element` is text in a Settings row's switch or button (a `Toggle` or menu `Picker`
-    /// row, at least half the form's width), at least 60 points tall: one line of body text at AX5
-    /// is 63.5. #698
+    /// The Settings toggles whose titles the AX5 audit misreports on a 13-inch iPad, by their
+    /// (English) titles. #698
+    private static let scaledSettingsToggles: Set<String> = ["Use bookshelf view", "Disable auto rewind"]
+
+    /// The Settings menu pickers whose values the AX5 audit misreports on a 13-inch iPad, by their
+    /// (English) titles: the row's button is labelled "<title>, <value>", the value spoken in full
+    /// for the jump intervals ("Jump backwards time, 10 seconds" around the text "10s"). #698
+    private static let scaledSettingsPickers: Set<String> = ["Theme", "Jump backwards time", "Jump forwards time"]
+
+    /// Whether `element` is one line of AX5 body text (63.5 points; 60 to 80 allowed) that is a
+    /// ``scaledSettingsToggles`` switch's title or a ``scaledSettingsPickers`` button's value, with
+    /// the top tab bar showing (a regular-width iPad), so the iPhone's AX5 audit is unchanged. #698
     @MainActor
     private static func isScaledSettingsRowText(_ element: XCUIElement?, in app: XCUIApplication) -> Bool {
         guard let element, element.elementType == .staticText else { return false }
         let frame = element.frame
-        guard frame.height >= 60 else { return false }
+        let label = element.label
+        guard (60..<80).contains(frame.height), topTabBarButtonCount(in: app) > 0 else { return false }
         let form = app.descendants(matching: .any)["settings.screen"].firstMatch
-        let width = form.frame.width
-        let rows = form.switches.allElementsBoundByIndex + form.buttons.allElementsBoundByIndex
-        return rows.contains { $0.frame.width >= width / 2 && $0.frame.contains(frame) }
+        if form.switches.allElementsBoundByIndex.contains(where: {
+            $0.label == label && scaledSettingsToggles.contains(label) && $0.frame.contains(frame)
+        }) {
+            return true
+        }
+        return form.buttons.allElementsBoundByIndex.contains { row in
+            scaledSettingsPickers.contains { row.label.hasPrefix("\($0), ") }
+                && row.frame.contains(frame)
+        }
     }
 
     /// Whether `element` is text in an item card (`item.<id>`), which the card speaks in full, not
