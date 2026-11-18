@@ -262,6 +262,21 @@ element, each with the reason and its issue:
   Only "partially unsupported", only for text in the menu inside a navigation bar is filtered:
   with a fixed `.font(.system(size: 17))` the audit reports "Dynamic Type font sizes are
   unsupported", which still fails.
+- The Player and Downloads at AX5 on a 13-inch iPad: "Dynamic Type font sizes are partially
+  unsupported" on every text of the Player at once ("Chapter 1", the title, the author and the
+  four times) in 1 of 4 walks, and on Downloads' "No downloads" in 1 of 4 (#698), though they're
+  drawn whole and scaled. Audited in place on the paused, settled player (the Loading value
+  gone, every text's frame unchanged), 1 of 6 full audits and 1 of 3 Dynamic Type audits
+  reported them, the slow ones, so it isn't playback loading, and waiting before the audit
+  doesn't help: as for Library's cards (#622), the relayout trails the audit's size steps.
+  Downloads didn't reproduce in place (0 of 8), so it's held on #698's walks alone. These issues
+  aren't filtered but held back: on those two screens, "partially unsupported" naming an element
+  with an identifier or a label (keyed by identifier, type and label) is audited again for
+  Dynamic Type alone, up to twice, before the checks above the bottom bar scroll, and fails if
+  every re-audit reports it again. Each re-audit records "k of N reported again" as an activity.
+  Plain "unsupported", issues with no element (or with neither identifier nor label) and
+  `textClipped` still fail at once. With the chapter title clamped to AX2, the walk still fails
+  on it after both re-audits (#705).
 - Contrast on content text under the bottom bar, on every screen but the Player (#623, #650).
   On iOS the tab bar floats over the content, with the mini player above it, so a
   screen at rest has rows under the bar's glass, and the audit measures them through it. On an
