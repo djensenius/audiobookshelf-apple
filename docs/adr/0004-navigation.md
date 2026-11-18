@@ -392,7 +392,7 @@ IDs follow the URL rules. A present but invalid `item` or `episode` rejects the 
 | Platform | Mini player | Full player | Queue, chapters and bookmarks while browsing |
 | --- | --- | --- | --- |
 | iPhone and Duo outer (compact) | `tabViewBottomAccessory(isEnabled:)`, adapting to `tabViewBottomAccessoryPlacement` (`.expanded` or `.inline`) | `fullScreenCover` → `PlayerScreen` | Sheet. `.inspector` falls back to a sheet in compact width |
-| iPad and Duo inner (regular) | Same accessory | Same `fullScreenCover` → `PlayerScreen` (two panes when wide) | `.inspector` trailing column. The accessory keeps the window's width under it, so the mini player keeps its controls clear of it (#687) |
+| iPad and Duo inner (regular) | Same accessory | Same `fullScreenCover` → `PlayerScreen` (two panes when wide) | `.inspector` trailing column (the left in right-to-left layouts). The accessory keeps the window's width under it, so the mini player keeps its controls clear of it (#687) |
 | Mac | `.safeAreaInset(edge: .bottom)` bar in each main window | `Window("Now Playing", id: "now-playing")`, opened with `openWindow` | `.inspector`, toggled with `InspectorCommands` |
 
 **Why iOS uses one presentation for every size class**

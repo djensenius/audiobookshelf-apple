@@ -50,8 +50,8 @@ final class PlaceholderPlayerState: PlayerSlotState {
 ///   session; the flag then resets, so it can turn on again from any scene.
 /// - Both: the queue is an inspector, which compact width shows as a sheet. On iOS the bottom
 ///   accessory keeps the window's width under an inspector beside the content, so while one is,
-///   the mini player keeps its content clear of it (``accessoryTrailingInset(accessoryMaxX:inspectorMinX:)``,
-///   #687).
+///   the mini player keeps its content clear of it on its trailing side (the left in right-to-left
+///   layouts): ``accessoryTrailingInset(accessory:inspector:)``, #687.
 ///
 /// The mini and full players are ``MiniPlayerView`` and ``NowPlayingView`` when `player` is a
 /// ``PlayerViewModel``, as in the app, else placeholders. The queue inspector is
@@ -74,10 +74,10 @@ struct PlayerSlot: ViewModifier {
         @Environment(\.openWindow) private var openWindow
     #else
         @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-        /// Where the bottom accessory ends, in the window.
-        @State private var accessoryMaxX: CGFloat?
-        /// Where the queue inspector begins, in the window, while it's on screen.
-        @State private var queueInspectorMinX: CGFloat?
+        /// The bottom accessory's frame in the window, in regular width.
+        @State private var accessoryFrame: CGRect?
+        /// The queue inspector's frame in the window, in regular width while it's open.
+        @State private var queueInspectorFrame: CGRect?
     #endif
 
     func body(content: Content) -> some View {
@@ -103,12 +103,15 @@ struct PlayerSlot: ViewModifier {
         isPresented && hasSession
     }
 
-    /// How much of the bottom accessory's trailing end an inspector beside the content covers, which
-    /// the mini player keeps clear (iOS): the accessory spans the window, under the inspector (#687).
-    /// None without both frames, in window coordinates.
-    nonisolated static func accessoryTrailingInset(accessoryMaxX: CGFloat?, inspectorMinX: CGFloat?) -> CGFloat {
-        guard let accessoryMaxX, let inspectorMinX else { return 0 }
-        return max(0, accessoryMaxX - inspectorMinX)
+    /// How much of the bottom accessory's width an inspector beside the content covers, which the
+    /// mini player keeps clear on its trailing side, where the inspector is in either layout
+    /// direction (iOS): the accessory spans the window, under the inspector (#687). It's the
+    /// overlap of the two frames' horizontal extents, in the same (window) space, so it doesn't
+    /// depend on which side the inspector is on, or on where its frame ends vertically. None
+    /// without both frames.
+    nonisolated static func accessoryTrailingInset(accessory: CGRect?, inspector: CGRect?) -> CGFloat {
+        guard let accessory, let inspector else { return 0 }
+        return max(0, min(accessory.maxX, inspector.maxX) - max(accessory.minX, inspector.minX))
     }
 
     /// The failure to show: the current one, unless the scene dismissed it.
@@ -164,20 +167,23 @@ struct PlayerSlot: ViewModifier {
                 .tabViewBottomAccessory(isEnabled: player.hasSession) {
                     miniPlayer
                         .padding(.trailing, accessoryTrailingInset)
-                        .animation(.default, value: accessoryTrailingInset)
-                        .onGeometryChange(for: CGFloat.self) {
-                            $0.frame(in: .global).maxX
-                        } action: {
-                            accessoryMaxX = $0
+                        // Only opening and closing the inspector animate, not a resize.
+                        .animation(.default, value: router.isQueueInspectorPresented)
+                        .onGeometryChange(for: CGRect.self) {
+                            $0.frame(in: .global)
+                        } action: { frame in
+                            if horizontalSizeClass == .regular { accessoryFrame = frame }
                         }
                 }
                 .fullScreenCover(isPresented: $router.isFullPlayerPresented) {
                     fullPlayer.playerErrorAlertLayer(player: player)
                 }
                 .inspector(isPresented: $router.isQueueInspectorPresented) {
-                    QueueInspector(router: router) { queueInspectorMinX = $0 }
+                    QueueInspector(router: router, frameChanged: queueInspectorFrameChanged)
                         .playerErrorAlertLayer(player: player)
-                        .onDisappear { queueInspectorMinX = nil }
+                }
+                .onChange(of: router.isQueueInspectorPresented) { _, isPresented in
+                    if !isPresented { queueInspectorFrame = nil }
                 }
         #else
             content
@@ -213,7 +219,19 @@ struct PlayerSlot: ViewModifier {
         /// content. Compact width shows it as a sheet, over the whole window.
         private var accessoryTrailingInset: CGFloat {
             guard horizontalSizeClass == .regular, router.isQueueInspectorPresented else { return 0 }
-            return Self.accessoryTrailingInset(accessoryMaxX: accessoryMaxX, inspectorMinX: queueInspectorMinX)
+            return Self.accessoryTrailingInset(accessory: accessoryFrame, inspector: queueInspectorFrame)
+        }
+
+        /// Records the queue inspector's frame, in regular width only: compact width shows it as a
+        /// sheet. Its first frame after it opens can come after the open itself, so that one
+        /// animates the mini player making room; later ones (a resize) don't.
+        private func queueInspectorFrameChanged(_ frame: CGRect) {
+            guard horizontalSizeClass == .regular else { return }
+            if queueInspectorFrame == nil {
+                withAnimation { queueInspectorFrame = frame }
+            } else {
+                queueInspectorFrame = frame
+            }
         }
 
         @ViewBuilder private var fullPlayer: some View {

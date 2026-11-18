@@ -47,12 +47,17 @@ struct QueueSheet: View {
 /// `Router/isQueueInspectorPresented`.
 struct QueueInspector: View {
     let router: Router
-    /// Called with where the inspector begins in the window (its global `minX`) as it changes.
-    var leadingEdgeChanged: (CGFloat) -> Void = { _ in }
+    #if os(iOS)
+        /// Called with the inspector's frame in the window (`.global`) as it changes, if set.
+        var frameChanged: ((CGRect) -> Void)?
+    #endif
 
     var body: some View {
         NavigationStack {
             QueueList()
+                // For UI tests.
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("queue.inspector")
                 .navigationTitle(Text(verbatim: L10n.string("HeaderUpNext")))
                 #if os(iOS)
                     .navigationBarTitleDisplayMode(.inline)
@@ -67,13 +72,15 @@ struct QueueInspector: View {
                     }
                 }
         }
-        .onGeometryChange(for: CGFloat.self) {
-            $0.frame(in: .global).minX
-        } action: {
-            leadingEdgeChanged($0)
-        }
-        // For UI tests.
-        .accessibilityIdentifier("queue.inspector")
+        #if os(iOS)
+            // Measured before the column width, which a measurement outside would leave at its
+            // minimum.
+            .onGeometryChange(for: CGRect.self) {
+                $0.frame(in: .global)
+            } action: { frame in
+                frameChanged?(frame)
+            }
+        #endif
         .inspectorColumnWidth(min: 280, ideal: 340, max: 480)
     }
 }

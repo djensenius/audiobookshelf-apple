@@ -1,6 +1,7 @@
 import ABSAppModel
 import ABSCore
 import ABSUI
+import CoreGraphics
 import Testing
 
 @testable import Audiobookshelf
@@ -57,12 +58,29 @@ import Testing
     }
 
     /// The mini player keeps clear of the part of the bottom accessory the queue inspector covers
-    /// (#687), and of nothing without an inspector or once it's clear.
+    /// (#687), on either side, and of nothing without an inspector or once it's clear.
     @Test func theMiniPlayerKeepsClearOfTheQueueInspector() {
-        #expect(PlayerSlot.accessoryTrailingInset(accessoryMaxX: 1012, inspectorMinX: 692) == 320)
-        #expect(PlayerSlot.accessoryTrailingInset(accessoryMaxX: 600, inspectorMinX: 692) == 0)
-        #expect(PlayerSlot.accessoryTrailingInset(accessoryMaxX: 1012, inspectorMinX: nil) == 0)
-        #expect(PlayerSlot.accessoryTrailingInset(accessoryMaxX: nil, inspectorMinX: 692) == 0)
+        // A 13-inch iPad in portrait: the accessory across the window, the inspector 340 pt wide.
+        let accessory = CGRect(x: 20, y: 1280, width: 992, height: 56)
+        let inspectorOnTheRight = CGRect(x: 692, y: 0, width: 340, height: 1366)
+        let inspectorOnTheLeft = CGRect(x: 0, y: 0, width: 340, height: 1366)
+        func inset(_ accessory: CGRect?, _ inspector: CGRect?) -> CGFloat {
+            PlayerSlot.accessoryTrailingInset(accessory: accessory, inspector: inspector)
+        }
+        // Left to right.
+        #expect(inset(accessory, inspectorOnTheRight) == 320)
+        // Right to left: the same overlap, not the window's width less the inspector's.
+        #expect(inset(accessory, inspectorOnTheLeft) == 320)
+        // Partly over the accessory's end.
+        #expect(inset(accessory, CGRect(x: 1000, y: 0, width: 32, height: 1366)) == 12)
+        // Over all of it: no more than its width.
+        #expect(inset(accessory, CGRect(x: 0, y: 0, width: 1032, height: 1366)) == 992)
+        // Beside it, or ending above it: horizontal extents are what count.
+        #expect(inset(CGRect(x: 20, y: 1280, width: 600, height: 56), inspectorOnTheRight) == 0)
+        #expect(inset(accessory, CGRect(x: 692, y: 0, width: 340, height: 1200)) == 320)
+        // Without either frame.
+        #expect(inset(accessory, nil) == 0)
+        #expect(inset(nil, inspectorOnTheRight) == 0)
     }
 
     @Test(arguments: [
