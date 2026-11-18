@@ -1002,7 +1002,7 @@ public final class AccountManager {
             default:
                 // Connection failures, timeouts, server errors, a proxy's 401 or 403, a refused
                 // redirect and unexpected responses.
-                Log.auth.notice("Offline: \(error?.diagnosticDescription ?? "cancelled", privacy: .public)")
+                Log.auth.notice("Offline: \(Log.redact(error?.diagnosticDescription ?? "cancelled"), privacy: .public)")
                 goOffline(connection, client: client, error: error.map(AccountError.server))
             }
         }

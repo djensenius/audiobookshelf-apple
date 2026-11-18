@@ -1,3 +1,4 @@
+import ABSCore
 import Foundation
 import Testing
 
@@ -16,6 +17,21 @@ import Testing
     func buildsSocketURL(address: String, expected: String) throws {
         let url = try #require(URL(string: address))
         #expect(SocketEndpoint.url(forServerAddress: url)?.absoluteString == expected)
+    }
+
+    /// The token goes in the `auth` event, never in the URL, so the endpoint (and any error that
+    /// quotes it) can't carry one: an address's query, fragment and user info are dropped (#662).
+    @Test(arguments: [
+        "https://abs.example/abs?token=0paque-secret",
+        "https://abs.example/abs/?access_token=0paque-secret&x=1#token=0paque-secret",
+        "https://david:0paque-secret@abs.example/abs",
+    ])
+    func socketURLCarriesNoCredentials(address: String) throws {
+        let address = try #require(URL(string: address))
+        let url = try #require(SocketEndpoint.url(forServerAddress: address))
+        #expect(url.absoluteString == "wss://abs.example/abs/socket.io/?EIO=4&transport=websocket")
+        let error = URLError(.cannotConnectToHost, userInfo: [NSURLErrorFailingURLErrorKey: url])
+        #expect(!Log.redacted(error).contains("0paque"))
     }
 
     @Test(arguments: ["ftp://example.com", "file:///tmp/abs", "example.com"])

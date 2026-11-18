@@ -1,3 +1,4 @@
+import ABSCore
 import Foundation
 import os
 
@@ -176,7 +177,7 @@ public actor SocketClient {
             connection = try await transport.connect(url: url, headers: headers)
         } catch {
             guard generation == self.generation, mode == .active else { return }
-            Self.logger.error("Socket connect failed: \(error.localizedDescription, privacy: .public)")
+            Self.logger.error("Socket connect failed: \(Log.redact(error.localizedDescription), privacy: .public)")
             scheduleReconnect()
             return
         }
@@ -192,7 +193,7 @@ public actor SocketClient {
                     await self?.receive(message, generation: generation)
                 }
             } catch {
-                Self.logger.info("Socket receive failed: \(error.localizedDescription, privacy: .public)")
+                Self.logger.info("Socket receive failed: \(Log.redact(error.localizedDescription), privacy: .public)")
             }
             await self?.connectionEnded(generation: generation)
         }
@@ -295,7 +296,7 @@ public actor SocketClient {
         do {
             packet = try EngineIOPacket(decoding: text)
         } catch {
-            Self.logger.error("Dropping undecodable Engine.IO packet: \(String(describing: error), privacy: .public)")
+            Self.logger.error("Dropping undecodable Engine.IO packet: \(Log.redacted(error), privacy: .public)")
             return
         }
         switch packet {
@@ -321,7 +322,7 @@ public actor SocketClient {
         do {
             packet = try SocketIOPacket(decoding: text)
         } catch {
-            Self.logger.error("Dropping undecodable Socket.IO packet: \(String(describing: error), privacy: .public)")
+            Self.logger.error("Dropping undecodable Socket.IO packet: \(Log.redacted(error), privacy: .public)")
             return
         }
         switch packet {
@@ -332,7 +333,7 @@ public actor SocketClient {
             continuation.yield(.connected)
             await sendAuth(generation: generation)
         case .connectError(SocketIOPacket.mainNamespace, let message):
-            Self.logger.error("Socket connect error: \(message ?? "unknown", privacy: .public)")
+            Self.logger.error("Socket connect error: \(Log.redact(message ?? "unknown"), privacy: .public)")
             _ = closeConnection()
             continuation.yield(.disconnected(.connectError(message: message)))
             scheduleReconnect()
@@ -352,14 +353,14 @@ public actor SocketClient {
             event = try RealtimeEvent.decode(name: name, arguments: arguments)
         } catch {
             Self.logger.error(
-                "Dropping malformed \(name, privacy: .public) event: \(String(describing: error), privacy: .public)"
+                "Dropping malformed \(Log.redact(name), privacy: .public) event: \(Log.redacted(error), privacy: .public)"
             )
             return
         }
         guard let event else { return }
         continuation.yield(event)
         if case .authFailed(let message) = event {
-            Self.logger.error("Socket auth failed: \(message ?? "unknown", privacy: .public)")
+            Self.logger.error("Socket auth failed: \(Log.redact(message ?? "unknown"), privacy: .public)")
             mode = .haltedByAuthFailure
             cancelReconnect()
             tearDown(reason: .authFailed)
@@ -371,7 +372,7 @@ public actor SocketClient {
         do {
             await send(Self.wrap(try .event("auth", token)), generation: generation)
         } catch {
-            Self.logger.error("Could not encode auth event: \(String(describing: error), privacy: .public)")
+            Self.logger.error("Could not encode auth event: \(Log.redacted(error), privacy: .public)")
         }
     }
 
@@ -383,7 +384,7 @@ public actor SocketClient {
             // Receiving may carry on after a failed send, so don't wait for it to fail. The
             // generation check keeps a late failure from closing a replacement connection.
             guard generation == self.generation else { return }
-            Self.logger.info("Socket send failed: \(error.localizedDescription, privacy: .public)")
+            Self.logger.info("Socket send failed: \(Log.redact(error.localizedDescription), privacy: .public)")
             tearDown(reason: .transportClosed)
             scheduleReconnect()
         }

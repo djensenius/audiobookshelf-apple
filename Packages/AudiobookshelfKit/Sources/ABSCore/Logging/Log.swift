@@ -9,7 +9,8 @@ import os
 /// - Give every interpolation an explicit `privacy:` argument.
 /// - Mark a string `.public` only after passing it through ``Log/redact(_:)`` (or a ``Redactor``
 ///   that knows the custom header values). ``Redactor`` matches text patterns and can't recognise
-///   a sensitive number.
+///   a sensitive number. Log an error's text with ``Log/redacted(_:)``, or its
+///   `localizedDescription` through ``Log/redact(_:)``.
 /// - Mark sensitive numbers `.private`, or `.private(mask: .hash)` when entries need to be
 ///   correlated, for example user or library item identifiers held as integers, playback
 ///   positions, and durations.
@@ -50,5 +51,15 @@ public enum Log {
     /// Removes bearer tokens, token query values, and JWTs from `text`.
     public static func redact(_ text: String) -> String {
         Redactor().redact(text)
+    }
+
+    /// `String(describing: error)` passed through ``redact(_:)``, for logging an error with public
+    /// privacy. Error text can quote a URL, request or server response, so it may carry a token.
+    ///
+    /// ```swift
+    /// Log.api.error("Request failed: \(Log.redacted(error), privacy: .public)")
+    /// ```
+    public static func redacted(_ error: any Error) -> String {
+        redact(String(describing: error))
     }
 }

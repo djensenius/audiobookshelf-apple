@@ -102,6 +102,16 @@ private func loadedModel(_ entries: [LogEntry], serverAddresses: [String] = []) 
         #expect(model.exportText == "2027-01-15T08:00:00.250Z [error] [auth] Login failed")
     }
 
+    /// The Logs screen passes the saved custom header values, which only the accounts know (#662).
+    @Test func removesSecretsGivenToTheLoad() async {
+        let model = LogsModel(
+            exporter: LogExporter(source: FakeSource(stored: [entry(0, .info, "api", "X-Proxy: proxy-secret")])),
+            timeZone: .gmt)
+        await model.load(secrets: ["proxy-secret"])
+        #expect(model.rows.map(\.entry.message) == ["X-Proxy: <redacted>"])
+        #expect(!model.exportText.contains("proxy-secret"))
+    }
+
     @Test func reportsAFailedLoad() async {
         let model = LogsModel(exporter: LogExporter(source: FailingSource()))
         await model.load()

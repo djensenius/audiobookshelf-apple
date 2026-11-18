@@ -114,6 +114,29 @@ private func entry(
         #expect(try await exporter.entries().map(\.message) == ["header X-Key: <redacted>"])
     }
 
+    /// Custom header values can't be matched by pattern, so the Logs screen passes the saved ones
+    /// in when it reads the entries (#662). They're removed along with the redactor's own secrets
+    /// and the built-in patterns, for that read only.
+    @Test func removesSecretsGivenWithTheRead() async throws {
+        let exporter = LogExporter(
+            source: FakeSource(stored: [
+                entry(0, .error, "api", "Request failed with CF-Access-Client-Secret: cf-proxy-secret"),
+                entry(1, .error, "realtime", "header X-Key: hunter2, GET /socket.io/?token=abc"),
+            ]),
+            redactor: Redactor(secrets: ["hunter2"]),
+            timeZone: utc
+        )
+        let text = try await exporter.export(secrets: ["cf-proxy-secret"])
+        #expect(
+            text == """
+                2027-01-15T08:00:00.000Z [error] [api] Request failed with CF-Access-Client-Secret: <redacted>
+                2027-01-15T08:00:01.000Z [error] [realtime] header X-Key: <redacted>, GET /socket.io/?token=<redacted>
+                """
+        )
+        #expect(try await exporter.entries(matching: LogFilter(minimumLevel: .fault), secrets: ["x-y-z"]).isEmpty)
+        #expect(try await exporter.export().contains("cf-proxy-secret"))
+    }
+
     @Test func filtersByLevelCategorySinceAndSubsystem() async throws {
         let exporter = LogExporter(
             source: FakeSource(stored: [

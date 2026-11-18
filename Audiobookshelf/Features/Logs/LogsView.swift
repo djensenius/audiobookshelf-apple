@@ -13,8 +13,10 @@ import UniformTypeIdentifiers
 
 /// The Logs screen, a port of `pages/logs.vue`: this launch's log, newest first, with level,
 /// category and text filters, server address masking, and copy, share and (on a Mac) export.
-/// Everything shown or exported has tokens removed by ``LogExporter``.
+/// Everything shown or exported has tokens and saved custom header values removed by
+/// ``LogExporter``.
 struct LogsView: View {
+    @Environment(AccountManager.self) private var accounts: AccountManager?
     @State private var model: LogsModel
     @State private var copied = false
     @State private var isExporting = false
@@ -62,7 +64,7 @@ struct LogsView: View {
                 } else if model.loadFailed {
                     Text(verbatim: L10n.string("MessageLogsLoadFailed"))
                     Button {
-                        Task { await model.load() }
+                        Task { await load() }
                     } label: {
                         Text(verbatim: L10n.string("ButtonRetry"))
                     }
@@ -81,17 +83,22 @@ struct LogsView: View {
                 contentTypes: [.plainText], defaultFilename: LogsFile.filename
             ) { result in
                 if case .failure(let error) = result {
-                    Log.ui.error("Couldn't export the logs: \(String(describing: error), privacy: .public)")
+                    Log.ui.error("Couldn't export the logs: \(Log.redacted(error), privacy: .public)")
                 }
             }
         #endif
-        .task { await model.load() }
-        .refreshable { await model.load() }
+        .task { await load() }
+        .refreshable { await load() }
         .task(id: copied) {
             guard copied else { return }
             try? await Task.sleep(for: .seconds(2))
             copied = false
         }
+    }
+
+    /// Loads the entries without the saved custom header values, which only the accounts know.
+    private func load() async {
+        await model.load(secrets: await accounts?.customHeaderValuesForLogs() ?? [])
     }
 
     @ToolbarContentBuilder

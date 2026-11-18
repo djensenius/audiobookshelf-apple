@@ -54,7 +54,10 @@ public final class LogsModel {
     ///
     /// Loads can overlap (the first load and a pull to refresh): the most recently started one
     /// wins, so an older load finishing later never replaces newer entries or status.
-    public func load() async {
+    /// - Parameter secrets: Values to remove from every message as well, such as the saved custom
+    ///   header values (``AccountManager/customHeaderValuesForLogs()``), which ``Redactor`` can't
+    ///   recognise by pattern (#662).
+    public func load(secrets: [String] = []) async {
         loadGeneration += 1
         let generation = loadGeneration
         activeLoads += 1
@@ -64,14 +67,14 @@ public final class LogsModel {
             isLoading = activeLoads > 0
         }
         do {
-            let loaded = try await exporter.entries()
+            let loaded = try await exporter.entries(secrets: secrets)
             guard generation == loadGeneration else { return }
             entries = loaded
             loadFailed = false
         } catch {
             guard generation == loadGeneration else { return }
             loadFailed = true
-            Log.ui.error("Couldn't read the logs: \(String(describing: error), privacy: .public)")
+            Log.ui.error("Couldn't read the logs: \(Log.redacted(error), privacy: .public)")
         }
     }
 

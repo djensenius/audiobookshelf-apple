@@ -236,6 +236,21 @@ private let legacyToken =
         #expect(redacted.contains("output-3.ts?token=<redacted>"))
     }
 
+    /// ``Log/redacted(_:)`` is what public error logs interpolate (#662): an error's description
+    /// can quote a failing URL or the server's response text.
+    @Test func redactedErrorLosesTokensInItsDescription() throws {
+        struct ServerFailure: Error { let message: String }
+        let url = try #require(URL(string: "https://abs.example/api/me?token=0paque-legacy-token"))
+        let urlError = URLError(.timedOut, userInfo: [NSURLErrorFailingURLErrorKey: url])
+        let serverFailure = ServerFailure(message: "proxy said Authorization: Bearer 0paque-bearer")
+        for error in [urlError, serverFailure] as [any Error] {
+            #expect(String(describing: error).contains("0paque"))
+            #expect(!Log.redacted(error).contains("0paque"))
+        }
+        #expect(Log.redacted(urlError).contains("/api/me?token=<redacted>"))
+        #expect(Log.redacted(serverFailure).contains("Bearer <redacted>"))
+    }
+
     /// Redaction must stay linear: before this was fixed, each parameter rescanned the rest of the
     /// text, so these inputs took seconds. Each now takes milliseconds; the bound is generous.
     @Test(
