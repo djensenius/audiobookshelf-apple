@@ -935,12 +935,14 @@ struct KnownAuditIssue {
     /// The element's identifier, type and label if `issue` is "Dynamic Type font sizes are
     /// partially unsupported" naming one, to find it again in a re-audit; `nil` otherwise. Not its
     /// frame, which the audit's size changes could move, so two texts alike share a key, and
-    /// either one reported again keeps both. #705
+    /// either one reported again keeps both. `nil` too for an element with neither an identifier
+    /// nor a label, which would share its key with every other such element of its type, so it
+    /// fails at once. #705
     @MainActor
     static func partialDynamicTypeKey(_ issue: XCUIAccessibilityAuditIssue) -> String? {
         #if os(iOS)
             guard issue.auditType == .dynamicType, issue.compactDescription.contains("partially unsupported"),
-                let element = issue.element
+                let element = issue.element, !(element.identifier.isEmpty && element.label.isEmpty)
             else { return nil }
             return "\(element.identifier)|\(element.elementType.rawValue)|\(element.label)"
         #else
