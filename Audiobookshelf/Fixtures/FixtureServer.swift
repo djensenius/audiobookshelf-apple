@@ -35,6 +35,18 @@
             return AppTheme(rawValue: arguments[index + 1])
         }
 
+        /// With ``launchArgument``, keeps every track download under way (#685): its reply sends the headers and the
+        /// first half of the audio, then nothing more, so the download queue and the tab roots' queue indicator stay
+        /// up for UI tests and screenshots. Only for about a minute: the download session's request timeout (a minute
+        /// without data, by default) can then end the transfer.
+        static let stallDownloadsArgument = "-ABSStallDownloads"
+
+        /// Whether a fixture launch with `arguments` stalls a `method` request for `path` (``stallDownloadsArgument``):
+        /// only a track's download does.
+        static func stalls(method: String, path: String, arguments: [String]) -> Bool {
+            arguments.contains(stallDownloadsArgument) && method == "GET" && isTrackDownload(path)
+        }
+
         /// The session ID in `fixture-play-*.json`, which each reply replaces: every `/play` opens a
         /// new session, as on a real server, and `GET /api/session/:id` answers with the ID asked for.
         static let sessionPlaceholder = "fixture-session-id"
@@ -154,8 +166,7 @@
             case ("GET", _) where parts.count == 3 && parts[0...1] == ["api", "session"]:
                 return ("fixture-play-\(SampleLibrary.prideAndPrejudice.id)", "json")
             // A track's download (`DownloadRequests.filePath(itemID:ino:)`): every fixture file is the bundled audio.
-            case ("GET", _)
-            where parts.count == 6 && parts[0...1] == ["api", "items"] && parts[3] == "file" && parts[5] == "download":
+            case ("GET", _) where isTrackDownload(path):
                 return audio
             default: return nil
             }
@@ -222,6 +233,12 @@
             return file
         }
 
+        /// Whether `path` is a track's download, `/api/items/:id/file/:ino/download` (`DownloadRequests.filePath(itemID:ino:)`).
+        private static func isTrackDownload(_ path: String) -> Bool {
+            let parts = path.split(separator: "/").map(String.init)
+            return parts.count == 6 && parts[0...1] == ["api", "items"] && parts[3] == "file" && parts[5] == "download"
+        }
+
         /// Whether `path` is a session's `/api/session/:id/sync` or `/api/session/:id/close`.
         private static func isSessionReport(_ path: String) -> Bool {
             let parts = path.split(separator: "/").map(String.init)
@@ -262,6 +279,14 @@
                 headerFields: ["Content-Type": reply.contentType, "Content-Length": String(reply.body.count)])!
             guard !isStopped.withLock({ $0 }) else { return }
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            let stalls =
+                reply.status == 200
+                && FixtureServer.stalls(
+                    method: request.httpMethod ?? "GET", path: url.path(), arguments: ProcessInfo.processInfo.arguments)
+            guard !stalls else {
+                client?.urlProtocol(self, didLoad: reply.body.prefix(reply.body.count / 2))
+                return
+            }
             client?.urlProtocol(self, didLoad: reply.body)
             client?.urlProtocolDidFinishLoading(self)
         }
