@@ -17,6 +17,6 @@ lane :beta do |options|
   args.concat(targets) if targets
 
   Dir.chdir(repo_root) do
-    sh(uploader, *args)
+    sh("/bin/bash", uploader, *args)
   end
 end
