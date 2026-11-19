@@ -2,7 +2,8 @@ import XCTest
 
 /// The chapter list's current-chapter highlight (#705), on iOS: the details pane beside the
 /// landscape player on an iPad from iOS 27.1, and the chapters sheet elsewhere. The accessibility
-/// audits can't catch a missing tint: the row stays readable without it.
+/// audits can't catch a missing tint: the row stays readable without it. On an iPhone, also the
+/// list's header on the sheet's glass, which no audit walk reaches.
 final class ChapterHighlightTests: XCTestCase {
     override func setUp() {
         continueAfterFailure = false
@@ -18,6 +19,73 @@ final class ChapterHighlightTests: XCTestCase {
         private static let launchArguments = [
             "-ABSTheme", "light", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryL",
         ]
+
+        /// `ABSColor.mutedForegroundOnGlass` in light (ABSUI), the chapter list's header colour. If the
+        /// app's colour changes and this doesn't, too few pixels match and the measurement is `nil`.
+        private static let headerText = MeasuredContrast.RGB(red: 71, green: 78, blue: 86)
+
+        /// At the Chapters sheet's medium detent, as it opens on an iPhone in portrait, the list is on
+        /// glass over the player. In the light theme at the default text size (`launchArguments`) the
+        /// header's Start and Duration measure 4.5:1 or more against the glass around them. The margin
+        /// is thin on an iPhone 17, 4.68:1 and 5.20:1, while CI's iPhone Duo reads 5.49:1 and 5.83:1,
+        /// so a local failure just under 4.5:1 may be the glass's rendering, not a regression; with
+        /// `mutedForeground`, Start read 3.5:1 on the iPhone 17 and 3.9:1 on the Duo. The sheet must be
+        /// at its medium detent: at the large detent the list is opaque, and `mutedForeground` passes
+        /// there too. Not the header's "Chapters", in the same colour: it's semibold, and around its
+        /// wider strokes `MeasuredContrast` takes the glyphs' own anti-aliased edges for the
+        /// background, reading 3.8:1 for a colour 6.5:1 against the glass past them. It turns the
+        /// iPhone to portrait, and back afterwards if it was in portrait or landscape: a fresh runner
+        /// reports `.unknown`, which can't be set. Skipped on an iPad, where from iOS 27.1 the list is
+        /// a sheet only in portrait.
+        @MainActor
+        func testHeaderIsReadableOnGlass() throws {
+            try XCTSkipIf(UIDevice.current.userInterfaceIdiom == .pad, "Measured on an iPhone's sheet")
+            let initial = XCUIDevice.shared.orientation
+            if initial.isPortrait || initial.isLandscape {
+                addTeardownBlock { @MainActor in XCUIDevice.shared.orientation = initial }
+            }
+            XCUIDevice.shared.orientation = .portrait
+            let app = signIn(launchArguments: Self.launchArguments)
+            open(.player, in: app)
+            let bar = openChaptersSheet(in: app)
+            let rows = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Chapter "))
+            let first = rows.firstMatch
+            XCTAssertTrue(first.waitForExistence(timeout: Self.fixtureTimeout), "The chapter list has no rows")
+            var frame = CGRect.null
+            XCTAssertTrue(
+                wait(
+                    for: {
+                        defer { frame = first.frame }
+                        return first.frame == frame
+                    }, timeout: Self.fixtureTimeout),
+                "The chapter list didn't settle")
+
+            let screenshot = XCUIScreen.main.screenshot()
+            let attachment = XCTAttachment(screenshot: screenshot)
+            attachment.name = "chapters-medium-detent"
+            add(attachment)
+            // The sheet's navigation bar is its top: about halfway down at the medium detent, near the
+            // window's top at the large one.
+            let window = app.windows.firstMatch.frame
+            XCTAssertGreaterThan(
+                bar.frame.minY, window.height * 0.25,
+                "The chapters sheet isn't at its medium detent: its top is at \(bar.frame.minY) of \(window.height)")
+            let image = try XCTUnwrap(Self.upright(screenshot), "Couldn't read the screenshot")
+            let scale = CGFloat(image.width) / window.width
+            // The header is the text right above the first row, in its column: the navigation
+            // title and the player's own Duration, under the sheet, have the same labels.
+            for label in ["Start", "Duration"] {
+                let header = app.staticTexts.matching(NSPredicate(format: "label == %@", label))
+                    .allElementsBoundByIndex.map(\.frame)
+                    .filter { $0.maxY <= frame.minY + 1 && $0.maxX > frame.minX && $0.minX < frame.maxX }
+                    .max { $0.maxY < $1.maxY }
+                let found = try XCTUnwrap(header, "The chapter list's header has no '\(label)'")
+                let ratio = MeasuredContrast.ratio(in: found, of: image, scale: scale, text: Self.headerText)
+                XCTAssertGreaterThanOrEqual(
+                    ratio ?? 0, 4.5,
+                    "The header's '\(label)' isn't 4.5:1 on the sheet's glass: \(String(describing: ratio))")
+            }
+        }
 
         /// In the light theme at the default text size (`launchArguments`), the current chapter's row
         /// is tinted, unlike the others, and its times are readable on the tint: drawn in the primary
@@ -86,6 +154,15 @@ final class ChapterHighlightTests: XCTestCase {
                 XCUIDevice.shared.orientation = .landscapeLeft
                 return
             }
+            let bar = openChaptersSheet(in: app)
+            bar.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).press(
+                forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.05)))
+        }
+
+        /// Opens the Chapters sheet, at its medium detent, and returns its navigation bar.
+        @MainActor
+        @discardableResult
+        private func openChaptersSheet(in app: XCUIApplication) -> XCUIElement {
             var button = app.buttons["player.chapters"].firstMatch
             if !(button.waitForExistence(timeout: 3) && button.isHittable) {
                 let overflow = app.buttons["BottomOverflowBarButtonItem"].firstMatch
@@ -97,8 +174,7 @@ final class ChapterHighlightTests: XCTestCase {
             button.press()
             let bar = app.navigationBars.containing(.button, identifier: "player.sheet.done").firstMatch
             XCTAssertTrue(bar.waitForExistence(timeout: Self.fixtureTimeout), "The chapters sheet didn't appear")
-            bar.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.5)).press(
-                forDuration: 0.1, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.2, dy: 0.05)))
+            return bar
         }
 
         /// `screenshot` drawn upright. In landscape it's the portrait framebuffer tagged with its

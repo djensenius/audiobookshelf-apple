@@ -240,9 +240,23 @@ to those measurements instead, `rgb(202, 202, 202)` and `rgb(72, 72, 72)`. The t
 `ABSColor.mutedForegroundOnGlass`, its light value darkened from `mutedForeground`'s to
 `rgb(71, 78, 86)`: 5.2:1 in light and 6.2–6.3:1 in dark and black on the iPhone's glass, 5.4:1
 and 6.9:1 on the iPad's, and 8.2–11.6:1 at the large detent and in the iPad's landscape details
-pane. The current chapter's times, on its accent tint, are unchanged: 8.2:1 or more in light and
-4.7:1 or more in dark. So is the column header, in `mutedForeground` (chosen in #705 for the
-landscape pane), which still measures 2.6–4.0:1 on the medium detent's glass.
+pane. The current chapter's times, on its accent tint, are unchanged: 8.1:1 or more in light and
+4.7:1 or more in dark. The column header ("Chapters", "Start", "Duration"), in `mutedForeground`
+since #705 for the landscape pane, now uses `mutedForegroundOnGlass` too: at the iPhone's medium
+detent `mutedForeground` measured down to 4.2:1 in light and 4.0:1 in dark and black around Start,
+and on the iPad's sheet 3.9:1 and 3.5:1 around Chapters. The glass token measures 5.9:1 or more
+in light and 7.5:1 or more in dark there on the iPhone, 5.4:1 and 6.6:1 or more on the iPad, and
+7.5:1 or more at the large detent and in the pane. Those header figures come from a one-off
+measurement of the screenshots, with a script outside the repository, and no test checks them.
+They take the background past the glyphs' anti-aliased edges (2 pixels): the header's title is
+semibold, and at the iPhone's 3x its strokes are 5–6 pixels wide, so `MeasuredContrast`'s ring,
+2–4 pixels out, lands mostly on those edges. It reads the glass token's "Chapters" at 3.8:1 in
+light and 3.5:1 in dark, and `ABSColor.foreground`'s at 3.9:1 in dark, 10.4:1 past the edges; at
+the iPad's 2x the two measurements differ by 0.61 or less (0.31 or less below 7:1).
+`ChapterHighlightTests` checks the header's Start and Duration in light on an iPhone, at the
+sheet's medium detent, which `MeasuredContrast` reads at 4.68:1 and 5.20:1 on an iPhone 17, close
+to the 4.5:1 it requires, and 5.49:1 and 5.83:1 on the iPhone Duo (with `mutedForeground`, Start
+read 3.5:1 on the iPhone 17 and 3.9:1 on the Duo).
 
 Known issues are filtered in `KnownAuditIssue.all`, by screen, audit type, description and
 element, each with the reason and its issue:
