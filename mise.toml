@@ -1,5 +1,6 @@
 [tools]
 actionlint = "1.7.12"
+ruby = "3.4"
 shellcheck = "0.11.0"
 
 # Apple tasks use DEVELOPER_DIR from the environment when set (CI selects

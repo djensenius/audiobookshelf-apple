@@ -103,10 +103,13 @@ copy the appropriate `CHANGELOG.md` section into TestFlight's build details. The
 
 ## Fastlane TestFlight lane
 
-Install the pinned dependencies once, then use the mise task:
+Use the Ruby version configured by mise, then install the Bundler version recorded in
+`Gemfile.lock` and the pinned dependencies:
 
 ```sh
-bundle install
+mise install
+mise exec -- gem install bundler -v 4.0.20
+mise exec -- bundle _4.0.20_ install
 mise run release:testflight                 # iOS, then macOS
 mise run release:testflight macos           # one platform
 mise run release:testflight --export-only   # sign and export into .build/testflight; upload nothing
