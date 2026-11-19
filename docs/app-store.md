@@ -2,7 +2,7 @@
 
 What the App Store Connect record needs, and what the repository already declares. The
 record itself, screenshots and the archive privacy report are manual steps for the
-maintainer ([Manual steps](#manual-steps)). Releases go through Xcode Cloud
+maintainer ([Manual steps](#manual-steps)). Releases use Fastlane
 ([release.md](release.md)).
 
 ## Listing
