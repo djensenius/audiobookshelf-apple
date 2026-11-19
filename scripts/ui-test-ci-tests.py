@@ -15,9 +15,11 @@ from pathlib import Path
 import re
 import runpy
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -400,6 +402,129 @@ class ScriptTests(unittest.TestCase):
             {"exit": 65, "tests": tree}, {"exit": 0, "selected": selected(tree)},
             {"exit": 0, "tests": report(suite("FailingTests", case("testOne()")))},
         ], 0)
+
+
+class RunnerDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="runner-diagnostics.")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        binaries = self.root / "bin"
+        binaries.mkdir()
+        collector = """#!/usr/bin/env bash
+printf '%s\\n' "${0##*/}" >> "$DIAGNOSTICS_LOG"
+if [[ "${0##*/}" == "$FAIL_COLLECTOR" ]]; then exit 7; fi
+"""
+        for name in ("memory_pressure", "vm_stat", "df"):
+            path = binaries / name
+            path.write_text(collector)
+            path.chmod(0o700)
+        command = binaries / "test-command"
+        command.write_text("""#!/usr/bin/env bash
+for _ in {1..500}; do
+  if [[ -f "$SLEEP_PID_FILE" ]]; then exit "$COMMAND_STATUS"; fi
+  /bin/sleep 0.01
+done
+exit 66
+""")
+        command.chmod(0o700)
+        signal_command = binaries / "signal-command"
+        signal_command.write_text("""#!/usr/bin/env bash
+trap 'printf terminated > "$SIGNAL_FILE"; exit 42' INT TERM
+printf '%s\\n' "$$" > "$COMMAND_PID_FILE"
+/bin/sleep 60 &
+printf '%s\\n' "$!" > "$DESCENDANT_PID_FILE"
+wait "$!"
+""")
+        signal_command.chmod(0o700)
+        sleeper = binaries / "sleep"
+        sleeper.write_text("""#!/usr/bin/env bash
+printf '%s\\n' "$$" > "$SLEEP_PID_FILE"
+exec /bin/sleep "$@"
+""")
+        sleeper.chmod(0o700)
+        self.sleep_pid_file = self.root / "sleep.pid"
+        self.command_pid_file = self.root / "command.pid"
+        self.descendant_pid_file = self.root / "descendant.pid"
+        self.env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"],
+                        DIAGNOSTICS_LOG=str(self.root / "collectors.log"), FAIL_COLLECTOR="memory_pressure",
+                        SLEEP_PID_FILE=str(self.sleep_pid_file), COMMAND_PID_FILE=str(self.command_pid_file),
+                        DESCENDANT_PID_FILE=str(self.descendant_pid_file),
+                        SIGNAL_FILE=str(self.root / "signal"))
+
+    def test_a_failed_collector_doesnt_replace_the_wrapped_command_status(self):
+        script = ROOT / "scripts/with-runner-diagnostics.sh"
+        for status in (0, 65):
+            with self.subTest(status=status):
+                (self.root / "collectors.log").unlink(missing_ok=True)
+                self.sleep_pid_file.unlink(missing_ok=True)
+                try:
+                    result = subprocess.run([str(script), "test-command"], env=dict(self.env, COMMAND_STATUS=str(status)),
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                    self.assertIn("memory_pressure exited with status 7", result.stdout)
+                    collectors = (self.root / "collectors.log").read_text().splitlines()
+                    self.assertIn("vm_stat", collectors)
+                    self.assertIn("df", collectors)
+                    sleeper_pid = int(self.sleep_pid_file.read_text())
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(sleeper_pid, 0)
+                finally:
+                    if self.sleep_pid_file.exists():
+                        try:
+                            sleeper_pid = int(self.sleep_pid_file.read_text())
+                            os.kill(sleeper_pid, 0)
+                        except ProcessLookupError:
+                            pass
+                        else:
+                            os.kill(sleeper_pid, 15)
+
+    def test_signals_are_forwarded_to_the_command_and_the_monitor_is_reaped(self):
+        script = ROOT / "scripts/with-runner-diagnostics.sh"
+        for interrupt, status in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
+            with self.subTest(signal=interrupt):
+                (self.root / "signal").unlink(missing_ok=True)
+                self.command_pid_file.unlink(missing_ok=True)
+                self.sleep_pid_file.unlink(missing_ok=True)
+                self.descendant_pid_file.unlink(missing_ok=True)
+                process = subprocess.Popen([str(script), "signal-command"], env=self.env, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, text=True)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not (self.command_pid_file.exists() and self.sleep_pid_file.exists()
+                               and self.descendant_pid_file.exists()):
+                        if process.poll() is not None or time.monotonic() >= deadline:
+                            self.fail("command or sampler did not start")
+                        time.sleep(0.01)
+                    command_pid = int(self.command_pid_file.read_text())
+                    self.assertEqual(os.getpgid(command_pid), command_pid)
+                    descendant_pid = int(self.descendant_pid_file.read_text())
+                    self.assertEqual(os.getpgid(descendant_pid), command_pid)
+                    process.send_signal(interrupt)
+                    stdout, stderr = process.communicate(timeout=5)
+                    self.assertEqual(process.returncode, status, stdout + stderr)
+                    self.assertEqual((self.root / "signal").read_text(), "terminated")
+                    for pid_file in (self.command_pid_file, self.descendant_pid_file, self.sleep_pid_file):
+                        pid = int(pid_file.read_text())
+                        with self.assertRaises(ProcessLookupError):
+                            os.kill(pid, 0)
+                finally:
+                    for pid_file in (self.command_pid_file, self.descendant_pid_file, self.sleep_pid_file):
+                        if pid_file.exists():
+                            pid = int(pid_file.read_text())
+                            try:
+                                os.kill(pid, 0)
+                            except ProcessLookupError:
+                                pass
+                            else:
+                                os.kill(pid, signal.SIGTERM)
+                    if process.poll() is None:
+                        process.send_signal(signal.SIGTERM)
+                        try:
+                            process.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.communicate()
 
 
 class TestUITaskTests(unittest.TestCase):
