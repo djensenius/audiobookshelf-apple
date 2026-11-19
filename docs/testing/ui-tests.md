@@ -21,8 +21,27 @@ On macOS, XCUITest needs Automation Mode. If a run stops with an authentication 
 
 ## In CI
 
-The CI workflow's *UI tests* job runs beside *Lint, build, and test*, so its cold builds don't
-lengthen that job. It creates its own iPhone Duo simulator (`abs-ui-<run>-<attempt>`), boots it
+The *UI tests* workflow (`.github/workflows/ui-tests.yml`) takes over an hour on the hosted
+runner, so it doesn't run on every push (#712). It runs:
+
+- on a pull request labelled `ready-to-ship`: when the label is added, and again on every push
+  while it stays. A new push cancels the suite still running for the previous one;
+- nightly at 07:00 UTC on `main`, unless `main` has had no commits in the past day;
+- on demand, on any branch: *Actions* > *UI tests* > *Run workflow*.
+
+Otherwise its *UI tests* job is skipped, and a small gate job notes why. Add the label once a
+change has passed review, as the last check before merging. Any PR that changes the app, its
+packages or the UI tests needs it, and merges only after a *UI tests* run on its head commit has
+a *UI tests* job that succeeded (see `AGENTS.md`). A skipped *UI tests* check isn't a pass:
+adding any other label to a labelled PR starts a run whose job skips, and the PR's checks may then
+show that run rather than the real result, so look in *Actions*. A UI regression in a PR merged
+without the label shows up in the next nightly run, if someone checks it: GitHub emails a
+scheduled run's failure only to whoever last changed its cron. Documentation-only changes
+(`docs/**`, `**/*.md` except `THIRD_PARTY_NOTICES.md`, which ships in the app) skip both this
+workflow and the CI workflow's *Lint, build, and test*.
+
+On a push, the *UI tests* job runs beside the CI workflow's *Lint, build, and test*, so its cold
+builds don't lengthen that job. It creates its own iPhone Duo simulator (`abs-ui-<run>-<attempt>`), boots it
 and waits for the boot to finish (`xcrun simctl bootstatus <udid> -b`, as a cold simulator's
 first launch can time out), runs `scripts/ui-test-ci.sh` (below) on it with
 `ABS_UI_PLATFORM=ios` and `IOS_SIMULATOR_ID`, and always deletes it.
