@@ -70,7 +70,7 @@ finish() {
   trap - EXIT
   trap '' INT TERM
   if [[ -n "$command_pid" ]]; then
-    kill -TERM "$command_pid" 2>/dev/null || true
+    kill -TERM -- "-$command_pid" 2>/dev/null || true
     wait "$command_pid" 2>/dev/null || true
     command_pid=
   fi
@@ -97,7 +97,10 @@ handle_signal() {
   local status=$2
   trap '' INT TERM
   if [[ -n "$command_pid" ]]; then
-    kill -s "$signal" "$command_pid" 2>/dev/null || true
+    kill -s "$signal" -- "-$command_pid" 2>/dev/null || true
+    if [[ "$signal" == INT ]]; then
+      kill -TERM -- "-$command_pid" 2>/dev/null || true
+    fi
     wait "$command_pid" 2>/dev/null || true
     command_pid=
   fi
@@ -111,7 +114,7 @@ snapshot
 monitor &
 monitor_pid=$!
 
-# Keep SIGINT deliverable to the asynchronous command.
+# Isolate the command so INT/TERM reach its descendants.
 set -m
 "$@" &
 command_pid=$!
