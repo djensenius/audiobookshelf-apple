@@ -132,7 +132,7 @@ jobs:
       - name: UI tests on the iPhone Duo simulator
         env:
           ABS_UI_PLATFORM: ios
-        run: scripts/ui-test-ci.sh
+        run: scripts/with-runner-diagnostics.sh scripts/ui-test-ci.sh
 
       # The result bundles and lists of tests the script left, to see why the step failed.
       - name: Upload the iPhone UI test results
@@ -171,7 +171,7 @@ jobs:
           ABS_UI_PLATFORM: ios
           ABS_UI_ACTION: test-without-building
         run: |
-          IOS_SIMULATOR_ID="$IPAD_SIMULATOR_ID" scripts/ui-test-ci.sh \
+          IOS_SIMULATOR_ID="$IPAD_SIMULATOR_ID" scripts/with-runner-diagnostics.sh scripts/ui-test-ci.sh \
             -only-testing:AudiobookshelfUITests/MiniPlayerTests/testLongPressAtAccessibilitySizeShowsNoMenu \
             -only-testing:AudiobookshelfUITests/PlayerToolbarTests/testPortraitToolbarShowsChaptersBookmarksAndUpNext
 
