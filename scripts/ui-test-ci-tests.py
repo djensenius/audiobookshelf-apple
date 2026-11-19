@@ -418,23 +418,51 @@ if [[ "${0##*/}" == "$FAIL_COLLECTOR" ]]; then exit 7; fi
             path.write_text(collector)
             path.chmod(0o700)
         command = binaries / "test-command"
-        command.write_text("#!/bin/sh\nexit \"$COMMAND_STATUS\"\n")
+        command.write_text("""#!/usr/bin/env bash
+for _ in {1..500}; do
+  if [[ -f "$SLEEP_PID_FILE" ]]; then exit "$COMMAND_STATUS"; fi
+  /bin/sleep 0.01
+done
+exit 66
+""")
         command.chmod(0o700)
+        sleeper = binaries / "sleep"
+        sleeper.write_text("""#!/usr/bin/env bash
+printf '%s\\n' "$$" > "$SLEEP_PID_FILE"
+exec /bin/sleep "$@"
+""")
+        sleeper.chmod(0o700)
+        self.sleep_pid_file = self.root / "sleep.pid"
         self.env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"],
-                        DIAGNOSTICS_LOG=str(self.root / "collectors.log"), FAIL_COLLECTOR="memory_pressure")
+                        DIAGNOSTICS_LOG=str(self.root / "collectors.log"), FAIL_COLLECTOR="memory_pressure",
+                        SLEEP_PID_FILE=str(self.sleep_pid_file))
 
     def test_a_failed_collector_doesnt_replace_the_wrapped_command_status(self):
         script = ROOT / "scripts/with-runner-diagnostics.sh"
         for status in (0, 65):
             with self.subTest(status=status):
                 (self.root / "collectors.log").unlink(missing_ok=True)
-                result = subprocess.run([str(script), "test-command"], env=dict(self.env, COMMAND_STATUS=str(status)),
-                                        capture_output=True, text=True, timeout=30)
-                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
-                self.assertIn("memory_pressure exited with status 7", result.stdout)
-                collectors = (self.root / "collectors.log").read_text().splitlines()
-                self.assertIn("vm_stat", collectors)
-                self.assertIn("df", collectors)
+                self.sleep_pid_file.unlink(missing_ok=True)
+                try:
+                    result = subprocess.run([str(script), "test-command"], env=dict(self.env, COMMAND_STATUS=str(status)),
+                                            capture_output=True, text=True, timeout=5)
+                    self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                    self.assertIn("memory_pressure exited with status 7", result.stdout)
+                    collectors = (self.root / "collectors.log").read_text().splitlines()
+                    self.assertIn("vm_stat", collectors)
+                    self.assertIn("df", collectors)
+                    sleeper_pid = int(self.sleep_pid_file.read_text())
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(sleeper_pid, 0)
+                finally:
+                    if self.sleep_pid_file.exists():
+                        try:
+                            sleeper_pid = int(self.sleep_pid_file.read_text())
+                            os.kill(sleeper_pid, 0)
+                        except ProcessLookupError:
+                            pass
+                        else:
+                            os.kill(sleeper_pid, 15)
 
 
 class TestUITaskTests(unittest.TestCase):
