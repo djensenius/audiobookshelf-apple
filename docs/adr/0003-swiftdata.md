@@ -934,18 +934,18 @@ Ongoing checks:
 - SDK: `MacOSX27.2.sdk/System/Library/Frameworks/SwiftData.framework/Versions/A/Modules/SwiftData.swiftmodule/arm64e-apple-macos.swiftinterface`
   and `iPhoneOS27.2.sdk/System/Library/Frameworks/SwiftData.framework/Modules/SwiftData.swiftmodule/arm64e-apple-ios.swiftinterface`
 - Legacy:
-  - [`ios/App/Shared/util/Database.swift`](../../ios/App/Shared/util/Database.swift),
-    [`ios/App/Shared/util/DaoExtensions.swift`](../../ios/App/Shared/util/DaoExtensions.swift)
-  - [`ios/App/Shared/models/local/`](../../ios/App/Shared/models/local/),
-    [`ios/App/Shared/models/download/`](../../ios/App/Shared/models/download/),
-    [`ios/App/Shared/models/ServerConnectionConfig.swift`](../../ios/App/Shared/models/ServerConnectionConfig.swift),
-    [`ios/App/Shared/models/PlaybackSession.swift`](../../ios/App/Shared/models/PlaybackSession.swift)
-  - [`ios/App/App/plugins/AbsDatabase.swift`](../../ios/App/App/plugins/AbsDatabase.swift),
-    [`ios/App/App/AppDelegate.swift`](../../ios/App/App/AppDelegate.swift) (Realm
+  - [`ios/App/Shared/util/Database.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/util/Database.swift),
+    [`ios/App/Shared/util/DaoExtensions.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/util/DaoExtensions.swift)
+  - [`ios/App/Shared/models/local/`](https://github.com/djensenius/audiobookshelf-apple/tree/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/models/local),
+    [`ios/App/Shared/models/download/`](https://github.com/djensenius/audiobookshelf-apple/tree/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/models/download),
+    [`ios/App/Shared/models/ServerConnectionConfig.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/models/ServerConnectionConfig.swift),
+    [`ios/App/Shared/models/PlaybackSession.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/models/PlaybackSession.swift)
+  - [`ios/App/App/plugins/AbsDatabase.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/App/plugins/AbsDatabase.swift),
+    [`ios/App/App/AppDelegate.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/App/AppDelegate.swift) (Realm
     schema 21),
-    [`ios/App/Shared/util/ApiClient.swift`](../../ios/App/Shared/util/ApiClient.swift)
+    [`ios/App/Shared/util/ApiClient.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/util/ApiClient.swift)
     (`syncLocalSessionsWithServer`),
-    [`ios/App/Shared/player/PlayerProgress.swift`](../../ios/App/Shared/player/PlayerProgress.swift)
+    [`ios/App/Shared/player/PlayerProgress.swift`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/ios/App/Shared/player/PlayerProgress.swift)
   - [`plugins/db.js`](../../plugins/db.js),
     [`pages/media/_id/history.vue`](../../pages/media/_id/history.vue),
     [`android/app/src/main/java/com/audiobookshelf/app/data/MediaItemEvent.kt`](../../android/app/src/main/java/com/audiobookshelf/app/data/MediaItemEvent.kt)
