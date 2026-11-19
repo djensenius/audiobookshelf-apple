@@ -12,7 +12,7 @@ format needs a rendering engine on iOS, iPadOS, iPhone Duo and **native macOS (n
 Catalyst)**. Reading position must sync with the Audiobookshelf web reader through
 `PATCH /api/me/progress/:id` using `{ ebookLocation, ebookProgress }`.
 
-The legacy app ([`components/readers/`](../../components/readers)) and the web client
+The legacy app ([`components/readers/`](https://github.com/djensenius/audiobookshelf-apple/tree/f9f623582a55daeaddd02a90d380c243a86aa322/components/readers)) and the web client
 (`advplyr/audiobookshelf`, `client/components/readers/`, read on 2026-11-09, when v2.37.2 was the
 latest release; unchanged in v2.38.0) use the same readers:
 
@@ -369,12 +369,12 @@ run in the spike. They are acceptance criteria of the issues below:
 
 ## References
 
-- Legacy readers: [`components/readers/Reader.vue`](../../components/readers/Reader.vue),
-  [`EpubReader.vue`](../../components/readers/EpubReader.vue),
-  [`MobiReader.vue`](../../components/readers/MobiReader.vue),
-  [`ComicReader.vue`](../../components/readers/ComicReader.vue),
-  [`PdfReader.vue`](../../components/readers/PdfReader.vue),
-  [`assets/ebooks/mobi.js`](../../assets/ebooks/mobi.js), and
+- Legacy readers: [`components/readers/Reader.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/readers/Reader.vue),
+  [`EpubReader.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/readers/EpubReader.vue),
+  [`MobiReader.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/readers/MobiReader.vue),
+  [`ComicReader.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/readers/ComicReader.vue),
+  [`PdfReader.vue`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/components/readers/PdfReader.vue),
+  [`assets/ebooks/mobi.js`](https://github.com/djensenius/audiobookshelf-apple/blob/f9f623582a55daeaddd02a90d380c243a86aa322/assets/ebooks/mobi.js), and
   [`package.json`](../../package.json).
 - Platform research: [`docs/research/platform-apis.md` §7 Zip / CBZ extraction](../research/platform-apis.md).
 - Audiobookshelf web client and server (read-only):
