@@ -402,6 +402,41 @@ class ScriptTests(unittest.TestCase):
         ], 0)
 
 
+class RunnerDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="runner-diagnostics.")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        binaries = self.root / "bin"
+        binaries.mkdir()
+        collector = """#!/usr/bin/env bash
+printf '%s\\n' "${0##*/}" >> "$DIAGNOSTICS_LOG"
+if [[ "${0##*/}" == "$FAIL_COLLECTOR" ]]; then exit 7; fi
+"""
+        for name in ("memory_pressure", "vm_stat", "df"):
+            path = binaries / name
+            path.write_text(collector)
+            path.chmod(0o700)
+        command = binaries / "test-command"
+        command.write_text("#!/bin/sh\nexit \"$COMMAND_STATUS\"\n")
+        command.chmod(0o700)
+        self.env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"],
+                        DIAGNOSTICS_LOG=str(self.root / "collectors.log"), FAIL_COLLECTOR="memory_pressure")
+
+    def test_a_failed_collector_doesnt_replace_the_wrapped_command_status(self):
+        script = ROOT / "scripts/with-runner-diagnostics.sh"
+        for status in (0, 65):
+            with self.subTest(status=status):
+                (self.root / "collectors.log").unlink(missing_ok=True)
+                result = subprocess.run([str(script), "test-command"], env=dict(self.env, COMMAND_STATUS=str(status)),
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                self.assertIn("memory_pressure exited with status 7", result.stdout)
+                collectors = (self.root / "collectors.log").read_text().splitlines()
+                self.assertIn("vm_stat", collectors)
+                self.assertIn("df", collectors)
+
+
 class TestUITaskTests(unittest.TestCase):
     """test:ui's run script from mise.toml, with a fake xcodebuild."""
 
