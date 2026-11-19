@@ -1,5 +1,10 @@
 # Xcode 27.2 JSON project format: verified skeleton and CI research for audiobookshelf-apple
 
+> Historical research from before the release decision changed. The active release
+> workflow is the manually invoked Fastlane lane documented in
+> [docs/release.md](../release.md); the Xcode Cloud findings below are retained as
+> background, not as the current plan.
+
 ## 1. Summary
 
 - **Hand-written JSON works.** A hand-authored `project.xcproj` builds with Xcode 27.2 (27B52) for iOS Simulator and macOS, and the app unit tests pass on macOS and on iPhone Duo. `swift test` passes for the local package.
@@ -677,7 +682,7 @@ jobs:
 Fallbacks if 27.2 is unavailable (for example a private-repo minutes concern or the preview label):
 1. Run `swift build/test` and `swift format lint` only for `Packages/AudiobookshelfKit`. This needs a Swift 6.4 toolchain, which is part of Xcode 27.2. Unless the 27.1 toolchain also accepts tools-version 6.4 (not tested), lower the Package tools version.
 2. Use a self-hosted Mac with Xcode 27.2.
-3. Use Xcode Cloud for the app build and test, and keep GitHub Actions for lint and package tests.
+3. At the time, use Xcode Cloud for the app build and test, and keep GitHub Actions for lint and package tests. This recommendation was superseded by the manually invoked Fastlane path in [docs/release.md](../release.md).
 
 ---
 

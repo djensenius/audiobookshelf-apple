@@ -1,5 +1,6 @@
 [tools]
 actionlint = "1.7.12"
+ruby = "3.4"
 shellcheck = "0.11.0"
 
 # Apple tasks use DEVELOPER_DIR from the environment when set (CI selects
@@ -74,7 +75,7 @@ mise run xcproj:check
 """
 
 [tasks."release:testflight"]
-description = "Archive Release and upload it to TestFlight from this Mac (docs/release.md › Uploading from a Mac)"
+description = "Use Fastlane to archive Release and upload to TestFlight from this Mac (docs/release.md)"
 usage = '''
 flag "--export-only" help="Sign and export into .build/testflight; upload nothing"
 arg "[platform]" var=#true help="ios or macos (default: both)"
@@ -83,10 +84,10 @@ env = { DEVELOPER_DIR = "{{ env.DEVELOPER_DIR | default(value='/Applications/Xco
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-args=()
-if [[ "${usage_export_only:-}" == "true" ]]; then args+=(--export-only); fi
-for platform in ${usage_platform:-}; do args+=("$platform"); done
-scripts/testflight-upload.sh ${args[@]+"${args[@]}"}
+args=(bundle exec fastlane beta)
+if [[ "${usage_export_only:-}" == "true" ]]; then args+=(export_only:true); fi
+if [[ -n "${usage_platform:-}" ]]; then args+=("target:${usage_platform}"); fi
+"${args[@]}"
 """
 
 [tasks."build:kit:extension"]

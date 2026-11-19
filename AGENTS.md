@@ -75,7 +75,8 @@ not built:
 | `android/` | Android app — ignore |
 | `strings/` | Translations for 42 locales — the source for localization |
 
-Repository tooling lives in `scripts/`, `ci_scripts/` (Xcode Cloud), `Tools/` (Swift tool
+Repository tooling lives in `scripts/`, `fastlane/` (TestFlight releases), `ci_scripts/`
+(legacy Xcode Cloud scripts), `Tools/` (Swift tool
 packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 
 ## Toolchain
@@ -107,7 +108,7 @@ packages, e.g. the strings importer), `.github/workflows/`, and `mise.toml`.
 | `mise run screenshots` | App Store screenshots from the fixture server into `build/screenshots/` (`-- --device <id> --locale <tag>`); see [docs/testing/screenshots.md](docs/testing/screenshots.md) |
 | `mise run xcproj:check` / `xcproj:format` | Check or rewrite `project.xcproj` in canonical form |
 | `mise run release:version <x.y.z>` | Set `MARKETING_VERSION` for every target, then `xcproj:check` ([docs/release.md](docs/release.md#versioning)) |
-| `mise run release:testflight [ios\|macos] [--export-only]` | Archive a clean checkout of a commit on `origin/main` and upload it to TestFlight until Xcode Cloud is set up ([docs/release.md](docs/release.md#uploading-from-a-mac)) |
+| `mise run release:testflight [ios\|macos] [--export-only]` | Use Fastlane to archive a clean checkout of a commit on `origin/main` and upload it to TestFlight ([docs/release.md](docs/release.md)) |
 
 Run `mise run lint`, `mise run xcproj:check`, and `mise run test` before pushing.
 
@@ -156,11 +157,11 @@ tests, including the partial UIKit image-hosting and network-policy branches.
 - Format with `swift format`.
 - Prefer built-in Apple frameworks. Any new Swift Package Manager dependency must be
   justified in the PR description.
-- Do not add CocoaPods, Carthage, Capacitor, or Fastlane. Releases go through
-  Xcode Cloud ([docs/release.md](docs/release.md)): `ci_scripts/` holds its build
-  scripts, the build number is the Xcode Cloud `CI_BUILD_NUMBER`, and builds are
-  referred to by their TestFlight build number. Until its workflows exist, the
-  maintainer uploads with `mise run release:testflight`.
+- Do not add CocoaPods, Carthage, or Capacitor. TestFlight releases use the
+  manually invoked Fastlane lane in `fastlane/Fastfile`, which delegates archive
+  and upload to `scripts/testflight-upload.sh` ([docs/release.md](docs/release.md)).
+  `ci_scripts/` are retained only as legacy Xcode Cloud helpers; they do not run
+  in the release path. Refer to releases by their TestFlight build numbers.
 
 ## Pull requests
 

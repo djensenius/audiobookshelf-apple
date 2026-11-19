@@ -1,59 +1,42 @@
-# Releases (Xcode Cloud and TestFlight)
+# Releases (Fastlane and TestFlight)
 
-Once it's set up (issue #20), Xcode Cloud builds every push to `main` and sends iOS and
-macOS builds to internal TestFlight testers. A second workflow builds `v*` tags and sends
-them to external testers through Beta App Review ([Releasing a version](#releasing-a-version)).
-There is no Fastlane. Until those workflows exist, builds are uploaded from a Mac with
-`mise run release:testflight` ([Uploading from a Mac](#uploading-from-a-mac)). GitHub
-Actions only lints, builds and tests (see `.github/workflows/`). The App Store listing,
-privacy answers, privacy manifests, export compliance and review notes are in
-[app-store.md](app-store.md).
-
-The Xcode Cloud workflows live in App Store Connect, not in this repository. The
-repository provides:
+TestFlight builds are started manually on a Mac with Fastlane. The `beta` lane delegates
+archive, signing and upload to the existing `scripts/testflight-upload.sh`; Xcode Cloud
+does not build or upload this app. GitHub Actions continues to lint, build and test (see
+`.github/workflows/`). The App Store listing, privacy answers, privacy manifests, export
+compliance and review notes are in [app-store.md](app-store.md).
 
 | Path | Purpose |
 | --- | --- |
-| `ci_scripts/ci_post_clone.sh` | On tag builds, fails if a `v<x.y.z>` tag doesn't match `MARKETING_VERSION` ([Releasing a version](#releasing-a-version)). Prints the Xcode version. Holds the opt-in `.xcproj` fallback (below). Installs nothing. |
-| `ci_scripts/ci_post_xcodebuild.sh` | Writes `TestFlight/WhatToTest.en-US.txt` after archive actions |
-| `CHANGELOG.md` | Release notes ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)); its topmost section with entries becomes "What to Test" |
-| `scripts/set-version.sh` (`mise run release:version`) | Sets `MARKETING_VERSION` ([Versioning](#versioning)) |
-| `scripts/testflight-upload.sh` (`mise run release:testflight`) | Archives and uploads to TestFlight from a Mac ([Uploading from a Mac](#uploading-from-a-mac)) |
+| `Gemfile` / `Gemfile.lock` | Pin Fastlane for repeatable release commands |
+| `fastlane/Fastfile` | Manual TestFlight `beta` lane |
+| `mise.toml` (`mise run release:testflight`) | Fastlane entry point ([Fastlane TestFlight lane](#fastlane-testflight-lane)) |
+| `scripts/testflight-upload.sh` | Archives and uploads from a Mac |
+| `CHANGELOG.md` | Release notes; use the relevant section for TestFlight's "What to Test" |
 | `Audiobookshelf.xcodeproj/xcshareddata/xcschemes/Audiobookshelf.xcscheme` | Shared scheme; its Archive action uses Release |
+
+`ci_scripts/` contains the former Xcode Cloud hooks. They are retained for reference but
+are not part of the current release path.
 
 ## Referring to builds
 
-A release is identified by its **TestFlight build number**, for example "TestFlight
-build 42". That number is the Xcode Cloud build number (`CI_BUILD_NUMBER`). TestFlight
-shows it as `0.1.0 (42)`, where `0.1.0` is `MARKETING_VERSION`. One Xcode Cloud build
-archives both platforms, so the iOS and macOS builds from the same commit share the
-number. A build uploaded from a Mac is numbered per platform instead, so its iOS and macOS
-numbers can differ ([Uploading from a Mac](#uploading-from-a-mac)). Use the number in
-issues, PRs and bug reports.
+Identify a release by its **TestFlight build number**, for example `0.1.0 (42)`. The
+version is `MARKETING_VERSION`; App Store Connect manages the build number during export.
+iOS and macOS uploads may receive different build numbers. Use the actual number shown
+in TestFlight in issues, PRs and bug reports.
 
 ## Build numbers
 
-Xcode Cloud assigns each build an integer build number. It starts at 1 and goes up by
-one with every build of the product. When Xcode Cloud distributes a build to TestFlight
-or the App Store, it uses that number as the build number (`CFBundleVersion`). Apple
-documents this in
-[Setting the next build number for Xcode Cloud builds](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds).
-
-So the project needs no build-number step:
+The upload script asks App Store Connect to manage the build number
+(`manageAppVersionAndBuildNumber`), so the project needs no build-number step:
 
 - `CURRENT_PROJECT_VERSION` stays `1` in `project.xcproj`. Only local builds use it.
 - Scripts don't edit the build number. **Never run `agvtool`**: it can't read
   `project.xcproj`, and it leaves an empty `project.pbxproj` that breaks the project
   (see [the research notes](research/xcode-project-and-ci.md)).
 - To release a new version, run `mise run release:version <x.y.z>` ([Versioning](#versioning)).
-- Mac App Store builds need a build number that always goes up, even across versions.
-  The Xcode Cloud counter does that, as long as nobody uploads a build another way. After
-  any upload from a Mac ([Uploading from a Mac](#uploading-from-a-mac)), set a higher next
-  number in App Store Connect › your app › Xcode Cloud › Settings › Build Number (Admin or
-  App Manager role) before Xcode Cloud uploads again.
-
-Check this on the first Xcode Cloud build: TestFlight must show the Xcode Cloud build
-number, not `(1)`. If it shows `(1)`, see [Troubleshooting](#troubleshooting).
+- App Store Connect manages uploaded build numbers. Don't manually increment
+  `CURRENT_PROJECT_VERSION`.
 
 ## Versioning
 
@@ -98,26 +81,13 @@ to the App Store is a separate, manual step in App Store Connect.
    git push origin vx.y.z
    ```
 
-   The tag must match `MARKETING_VERSION`. `ci_post_clone.sh` checks this first on tag
-   builds (`CI_TAG` is set) and stops the build before anything else runs. Xcode Cloud
-   runs the scripts of the tagged commit, so only tags on commits that include the check
-   are protected:
+   The tag must match `MARKETING_VERSION`; the manual Fastlane workflow does not start
+   automatically from a tag. Verify they match before uploading.
 
-   - a tag that doesn't start with `v` and a digit, such as `nightly`, isn't a release
-     tag; the script logs that and doesn't check it;
-   - any other tag must be exactly `v<MAJOR.MINOR.PATCH>`, with the same rules as
-     `release:version` (no leading zeros, no suffixes), so `v1.0` and `v0.9.1-beta` fail;
-   - every `MARKETING_VERSION` setting in `project.xcproj`, conditional ones included,
-     must equal the tag's version. A setting may be a string or a one-string array
-     (`["1.2.3"]`); any other value (a longer or empty array, a number, an escaped
-     string) fails the build, since the check can't read it.
-
-   The workflow builds every `v*` tag, so a malformed one fails rather than shipping a
-   build whose version isn't the tag. `mise run test:release` covers the check.
-4. The `Release (tags)` workflow ([checklist](#release-workflow-checklist)) archives iOS
-   and macOS. "What to Test" comes from the `x.y.z` section, because the empty
-   `Unreleased` section is passed over. Both builds go to the external group, and the
-   first build of each version waits for Beta App Review.
+   Then run `mise run release:testflight` from a clean checkout of that tagged commit.
+   The upload script requires the commit to be on `origin/main`.
+4. After processing, distribute the builds to internal testers in App Store Connect.
+   For external testers, submit them to Beta App Review.
 5. Record the **TestFlight build number**, for example "1.0.0 (57)", in the release issue
    and wherever the release is discussed. Use the same build when you submit to the App
    Store.
@@ -125,68 +95,29 @@ to the App Store is a separate, manual step in App Store Connect.
    `mise run release:version` with the next version on `main` before more user-facing
    changes land.
 
-The push of the release commit to `main` also produces an internal build of the same
-commit. The tag build has a higher build number; testers and reports should use the
-number from the tag build.
-
 ## What to Test notes
 
-After an archive action for TestFlight, `ci_post_xcodebuild.sh` writes
-`TestFlight/WhatToTest.en-US.txt` at the repository root, next to the project. Xcode
-Cloud reads that file when it uploads the build and puts its text in TestFlight's "What
-to Test" field
-([Including notes for testers](https://developer.apple.com/documentation/xcode/including-notes-for-testers-with-a-beta-release-of-your-app)).
+The Fastlane upload does not set "What to Test" notes. After Apple processes the build,
+copy the appropriate `CHANGELOG.md` section into TestFlight's build details. The legacy
+`ci_post_xcodebuild.sh` generates notes for Xcode Cloud only.
 
-The notes contain:
+## Fastlane TestFlight lane
 
-- a `Build <CI_BUILD_NUMBER> (<short commit>)` line and a blank line;
-- the topmost `## ` section of `CHANGELOG.md` that has entries: its title without
-  brackets (`Unreleased`, or `1.0.0 - 2026-11-12`), then its `### ` subheadings and
-  entries. Blank lines and link definitions are dropped, and an entry that wraps onto
-  indented lines is joined into one line;
-- if `CHANGELOG.md` is missing or no section has entries, the last 20 non-merge commits
-  instead. Each commit is its subject line plus its body, without blank lines and
-  without `Co-authored-by`, `Copilot-Session` and `Signed-off-by` trailers;
-- at most 4,000 bytes (TestFlight's limit is 4,000 characters). The text is cut at a
-  line break.
-
-The notes are optional, so the script never fails the build. It prints
-`Skipping What to Test notes: <reason>`, writes nothing and exits 0 when:
-
-- `CI_XCODEBUILD_ACTION` is set to something other than `archive`;
-- `CI_APP_STORE_SIGNED_APP_PATH` isn't a directory. Apple's example uses this check:
-  the App Store-signed export only exists after a successful archive whose deployment
-  preparation targets TestFlight or the App Store;
-- `xcodebuild` failed (`CI_XCODEBUILD_EXIT_CODE` isn't 0);
-- `CI_PRIMARY_REPOSITORY_PATH` is empty or unset, or the script can't `cd` into it;
-- `git log` fails, or the notes can't be written. It writes `WhatToTest.en-US.txt.tmp`
-  first and moves it into place, and removes the temp file on failure.
-
-For the commit fallback, if the clone is shallow, it runs `git fetch --deepen=100`. Prompts are off
-(`GIT_TERMINAL_PROMPT=0`, SSH `BatchMode=yes`), and the connection gives up after a
-20-second SSH connect timeout or 30 seconds below 1,000 bytes/s over HTTP. If the fetch
-fails, it prints a warning and uses whatever history is there. `TestFlight/` is in
-`.gitignore`; don't commit it.
-
-Try the script locally (it writes into the given checkout):
+Use the Ruby version configured by mise, then install the Bundler version recorded in
+`Gemfile.lock` and the pinned dependencies:
 
 ```sh
-CI_APP_STORE_SIGNED_APP_PATH=/tmp CI_PRIMARY_REPOSITORY_PATH="$PWD" CI_BUILD_NUMBER=0 \
-  ci_scripts/ci_post_xcodebuild.sh && cat TestFlight/WhatToTest.en-US.txt && rm -r TestFlight
-```
-
-## Uploading from a Mac
-
-Until the Xcode Cloud workflows exist (issue #20), a TestFlight build is uploaded from a
-Mac, the way the maintainer's other apps are released. `mise run release:testflight` runs
-`scripts/testflight-upload.sh`, which archives the Release configuration with
-`xcodebuild archive` and uploads it with `xcodebuild -exportArchive`. There is no Fastlane.
-
-```sh
+mise install
+mise exec -- gem install bundler -v 4.0.20
+mise exec -- bundle _4.0.20_ install
 mise run release:testflight                 # iOS, then macOS
 mise run release:testflight macos           # one platform
 mise run release:testflight --export-only   # sign and export into .build/testflight; upload nothing
 ```
+
+The equivalent direct Fastlane command is `bundle exec fastlane beta target:ios` (omit
+`target` to build both platforms). The lane is manual; it does not upload on pushes,
+create App Store Connect records or distribute builds to tester groups.
 
 Before the first upload:
 
@@ -197,8 +128,7 @@ Before the first upload:
   compiles with "PLA Update available … must agree to the latest Program License
   Agreement", followed by profile errors about the App Groups capability.
 - The App Store Connect app record for `org.davidjensenius.Audiobookshelf` exists with the
-  iOS and macOS platforms ([maintainer checklist](#maintainer-setup-checklist)). A script
-  can't create it.
+  iOS and macOS platforms ([maintainer setup](#maintainer-setup)).
 - Xcode can sign in to Apple. Either use a team App Store Connect API key with the Admin
   role (creating cloud-managed distribution certificates needs it), or the account signed
   in to Xcode. The key is described by `~/.appstoreconnect/api_key.json` (`key_filepath`,
@@ -229,9 +159,7 @@ After the upload:
 
 1. Wait for App Store Connect to process the builds; Apple emails when each is ready.
    Export compliance needs no answer ([why](app-store.md#export-compliance)).
-2. A Mac upload has no "What to Test" notes. Write them with the command in
-   [What to Test notes](#what-to-test-notes), with `CI_BUILD_NUMBER` set to the TestFlight
-   build number, and paste them into TestFlight › the build › Test Details.
+2. Add the "What to Test" notes from the matching `CHANGELOG.md` section.
 3. Add the builds to the internal group, unless it gets new builds automatically. For
    external testers, add them to the external group, which submits them to Beta App Review.
 4. Record the TestFlight build numbers ([Referring to builds](#referring-to-builds)).
@@ -248,40 +176,9 @@ URL scheme for deep links ([ADR 0004](adr/0004-navigation.md)). The legacy app
 - Ask testers to remove the legacy app, and check deep links on a device that doesn't
   have it.
 
-## `.xcproj` fallback
+## Maintainer setup
 
-Apple doesn't say whether Xcode Cloud accepts the JSON project format
-(`project.xcproj`). If a build fails because Xcode Cloud can't read the project, turn
-on the fallback:
-
-1. In the workflow, open Environment › Environment Variables and add
-   `ABS_CONVERT_PROJECT` = `1`.
-2. Start a build. `ci_post_clone.sh` then runs
-   `xcodebuild -convert-project 'Xcode 16.0' -project Audiobookshelf.xcodeproj` in the
-   Xcode Cloud checkout. That replaces `project.xcproj` with a classic `project.pbxproj`
-   (objectVersion 110) before Xcode Cloud runs `xcodebuild`. The script fails if
-   `project.xcproj` is still there afterwards, or if `project.pbxproj` is missing or
-   empty.
-3. Never commit a converted project. The repository keeps `project.xcproj`, and Xcode
-   rejects a project that has both files.
-
-Checked locally with Xcode 27.2 (build 27B52):
-
-- `xcodebuild -help` lists `-convert-project FORMAT`.
-- An unknown format makes it print the accepted ones: `Xcode 2.4` … `Xcode 16.0`,
-  `Xcode 16.3`, `Xcode 26.3`, `Xcode 27.0` and `Xcode Project` (JSON).
-- `ABS_CONVERT_PROJECT=1 ci_scripts/ci_post_clone.sh` on a scratch copy produced
-  `project.pbxproj` and `project.xcworkspace` and removed `project.xcproj`.
-  `xcodebuild -list` on the result shows both targets and the `Audiobookshelf` scheme.
-
-Limit: the fallback only helps if the failure happens during the build, after the
-clone. If Xcode or App Store Connect can't read the project while you create the
-workflow (for example, no scheme to pick), a script can't fix that. Record the error in
-issue #20.
-
-## Maintainer setup checklist
-
-These steps need the maintainer's Apple account; no agent can do them.
+These steps require the maintainer's Apple account and signing access:
 
 Before you start, finish the
 [ADR 0002 checklist](adr/0002-identity-and-no-migration.md#maintainer-checklist):
@@ -289,109 +186,41 @@ Before you start, finish the
 - [ ] The explicit App ID `org.davidjensenius.Audiobookshelf` (team `9JALHNGRBQ`) is
       registered for iOS and macOS with the App Groups capability.
 - [ ] The App Group `group.org.davidjensenius.Audiobookshelf` is registered and
-      assigned to that App ID.
+      assigned to both the app and widget App IDs.
 - [ ] The App Store Connect app record exists with the iOS and macOS platforms.
 
-Then create the workflow (Xcode › Integrate › Create Workflow, or App Store Connect ›
-the app › Xcode Cloud):
-
-- [ ] Connect Xcode Cloud to the GitHub repository `djensenius/audiobookshelf-apple`.
-      Pick the product for `Audiobookshelf.xcodeproj`, app `Audiobookshelf`.
-- [ ] Name the workflow `TestFlight (main)`. Restrict editing to Admins if you want.
-- [ ] Environment: Xcode **27.2** and the latest stable macOS, not a beta (Apple has
-      had beta-environment problems before). Leave "Clean" off. Add no environment
-      variables unless you need the `.xcproj` fallback.
-- [ ] Start condition: Branch Changes on `main` only. Turn on auto-cancel of
-      superseded builds.
-- [ ] Action: Archive, platform **iOS**, scheme `Audiobookshelf`, deployment
-      preparation **TestFlight (Internal Testing Only)**.
-- [ ] Action: Archive, platform **macOS**, scheme `Audiobookshelf`, deployment
-      preparation **TestFlight (Internal Testing Only)**.
-      The setting is named "Deployment Preparation" in the archive action; if your Xcode
-      labels the options differently, pick the internal-testing-only TestFlight option.
-- [ ] In App Store Connect › TestFlight, create an internal group (for example
-      `Internal`) and add yourself.
-- [ ] Post-action: TestFlight Internal Testing, once for the iOS archive and once for
-      the macOS archive, both to that internal group.
-- [ ] Signing: no setup. The targets use automatic signing with team `9JALHNGRBQ`, and
-      Xcode Cloud uses its cloud-managed distribution certificates and creates the
-      profiles. The profiles must contain the entitlements from ADR 0002: App Group
-      and keychain access group on both platforms, plus App Sandbox and network client
-      on macOS. The embedded widget extension (`org.davidjensenius.Audiobookshelf.Widgets`)
-      gets its own profiles with the same App Group and keychain group (plus App Sandbox
-      on macOS). Don't upload certificates or profiles.
+- [ ] In App Store Connect › TestFlight, create an internal group and add yourself.
+- [ ] Install the pinned Fastlane gem with `bundle install`.
+- [ ] Configure the App Store Connect API key locally using the documented environment
+      variables or `~/.appstoreconnect/api_key.json`; never commit or print its contents.
+- [ ] Signing: the targets use automatic signing for team `9JALHNGRBQ`. Xcode creates
+      distribution certificates and profiles with `-allowProvisioningUpdates`. The
+      profiles must contain the entitlements from ADR 0002: App Group and keychain access
+      group on both platforms, plus App Sandbox and network client on macOS. The embedded
+      widget extension gets its own profiles with the same App Group and keychain group
+      (plus App Sandbox on macOS).
 - [ ] Export compliance: no prompt is expected, because
       `ITSAppUsesNonExemptEncryption = NO` is set for the app and the widget extension
       ([why](app-store.md#export-compliance)).
-- [ ] Start a build on `main`. Check:
+- [ ] From a clean checkout of a commit on `origin/main`, run
+      `mise run release:testflight`. Check:
   - both archives succeed;
-  - the build log shows `Xcode 27.2` from `ci_post_clone.sh`;
-  - TestFlight shows `0.1.0 (N)` with N equal to the Xcode Cloud build number;
-  - "What to Test" contains the commit notes.
-- [ ] Post the iOS and macOS TestFlight build numbers in the PR for issue #20. If you
-      needed the `.xcproj` fallback, say so there too.
-
-### Release workflow checklist
-
-The second workflow builds `v*` tags for external testers (issue #110). Create it the same
-way as `TestFlight (main)`, or duplicate that workflow and change it:
-
-- [ ] Name it `Release (tags)`.
-- [ ] Environment: the same Xcode and macOS as `TestFlight (main)`. Add
-      `ABS_CONVERT_PROJECT` = `1` only if that workflow needs it.
-- [ ] Start condition: **Tag Changes** only, restricted to custom tags matching `v*`.
-      Remove the Branch Changes condition. The repository still has old upstream tags
-      such as `v0.9.x-beta`; they only start a build if someone pushes them again, so
-      don't. The tag check won't catch one: Xcode Cloud runs the `ci_scripts` of the
-      tagged commit, and those commits predate the check.
-- [ ] Action: Archive, platform **iOS**, scheme `Audiobookshelf`, deployment preparation
-      **TestFlight and App Store**.
-- [ ] Action: Archive, platform **macOS**, scheme `Audiobookshelf`, deployment preparation
-      **TestFlight and App Store**.
-- [ ] In App Store Connect › TestFlight, create an external group (for example `Beta`)
-      and fill in Test Information: beta app description, feedback email, contact
-      details and privacy policy URL. Beta App Review needs them.
-- [ ] Post-actions: **TestFlight External Testing** to that group, once for the iOS
-      archive and once for the macOS archive. Optionally also TestFlight Internal
-      Testing to `Internal`.
-- [ ] Signing and export compliance: as for `TestFlight (main)`; nothing to set up.
-- [ ] Do a first release with [Releasing a version](#releasing-a-version). Check:
-  - the build starts from the tag, not from `main`;
-  - the `ci_post_clone.sh` log shows `Release tag vx.y.z matches MARKETING_VERSION x.y.z`;
-  - TestFlight shows `x.y.z (N)`, with N the Xcode Cloud build number;
-  - "What to Test" shows the `x.y.z` section of `CHANGELOG.md`;
-  - the build is submitted for Beta App Review and reaches the external group.
-- [ ] Record the TestFlight build number in issue #110.
+  - the TestFlight build appears after Apple's processing;
+  - add it to the internal group and record each platform's build number.
 
 ## Troubleshooting
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Xcode 27.2 isn't in the Environment picker | Xcode Cloud doesn't offer it yet. Wait, or pick the newest Xcode 27.x that can open `project.xcproj` (the format opens in earlier Xcode 27 releases). |
-| Build fails because the project can't be read or parsed | Turn on the `.xcproj` fallback (`ABS_CONVERT_PROJECT=1`). |
-| Script output shows it ran as `zsh <file>`, or "permission denied" | The executable bit got lost. Check `git ls-files -s ci_scripts` shows `100755`; fix with `git update-index --chmod=+x ci_scripts/<script>.sh`. |
+| `bundle exec fastlane` cannot find a gem | Run `bundle install` at the repository root. |
+| Script output shows it ran as `zsh <file>`, or "permission denied" | The executable bit got lost. Check `git ls-files -s scripts/testflight-upload.sh` shows `100755`; restore it with `git update-index --chmod=+x scripts/testflight-upload.sh`. |
 | Signing fails with an App Group or keychain-group entitlement error | The App ID is missing the App Groups capability, or the group isn't assigned to it. Fix it in the developer portal (ADR 0002 checklist), then rebuild. |
-| macOS upload is rejected because the build number is too low | A build was uploaded outside Xcode Cloud. Raise Next Build Number in App Store Connect › Xcode Cloud › Settings › Build Number. |
-| TestFlight shows build `(1)` for every build | Xcode Cloud didn't apply its build number. Don't use `agvtool`. Add a CI-only text edit of `"CURRENT_PROJECT_VERSION": "1"` in `project.xcproj` to `ci_post_clone.sh` (in the checkout only, never committed), and record it here. |
-| "What to Test" is empty or old | Check the `ci_post_xcodebuild.sh` log for `Wrote …/WhatToTest.en-US.txt` or a `Skipping What to Test notes: …` line, which gives the reason. Notes are only written after a successful archive for TestFlight. If the log says `CHANGELOG.md is missing or has no entries`, the notes list commits instead; add entries to `CHANGELOG.md`. |
-| Tag build fails with `release tag v… doesn't match MARKETING_VERSION` or `is not v<MAJOR.MINOR.PATCH>` | The tag points at a commit whose `MARKETING_VERSION` differs, or isn't a strict `v<x.y.z>`. Run `mise run release:version x.y.z` on a branch, merge it, then delete the tag (`git push origin :refs/tags/vx.y.z` and `git tag -d vx.y.z`) and tag the merge commit. |
+| "What to Test" is empty or old | Fastlane does not upload those notes. Paste the matching `CHANGELOG.md` section into TestFlight's build details. |
 | Upload rejected because the version is closed or already released | App Store Connect doesn't take new builds for a version that is already on the App Store. Run `mise run release:version` with the next version and merge it. |
-| Package resolution fails | Xcode Cloud doesn't resolve packages automatically. The only remote package is ZIPFoundation (pinned in `AudiobookshelfKit`). Its pin is committed in both `Packages/AudiobookshelfKit/Package.resolved` and `Audiobookshelf.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`; update both when a remote package changes. |
+| Package resolution fails | The only remote package is ZIPFoundation (pinned in `AudiobookshelfKit`). Its pin is committed in both `Packages/AudiobookshelfKit/Package.resolved` and `Audiobookshelf.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`; update both when a remote package changes. |
 
 ## References
 
-- [Writing custom build scripts](https://developer.apple.com/documentation/xcode/writing-custom-build-scripts):
-  the `ci_scripts` location, script names, the shebang and executable bit, and
-  `zsh` when they're missing.
-- [Environment variable reference](https://developer.apple.com/documentation/xcode/environment-variable-reference):
-  `CI_PRIMARY_REPOSITORY_PATH` (the clone, for example `/Volumes/workspace/repository`),
-  `CI_TAG` (the tag that started the build; unset or empty for branch builds),
-  `CI_WORKSPACE_PATH` (for example `/Volumes/workspace`), `CI_BUILD_NUMBER`,
-  `CI_XCODEBUILD_ACTION`, `CI_XCODEBUILD_EXIT_CODE`, `CI_ARCHIVE_PATH` (archive actions
-  only) and `CI_APP_STORE_SIGNED_APP_PATH` (the export signed for TestFlight and the App
-  Store).
-- [Setting the next build number for Xcode Cloud builds](https://developer.apple.com/documentation/xcode/setting-the-next-build-number-for-xcode-cloud-builds)
-- [Including notes for testers with a beta release of your app](https://developer.apple.com/documentation/xcode/including-notes-for-testers-with-a-beta-release-of-your-app)
-- [Xcode Cloud workflow reference](https://developer.apple.com/documentation/xcode/xcode-cloud-workflow-reference)
+- [Fastlane documentation](https://docs.fastlane.tools/)
 - [ADR 0002: App identity](adr/0002-identity-and-no-migration.md) and
   [research: Xcode project and CI](research/xcode-project-and-ci.md)

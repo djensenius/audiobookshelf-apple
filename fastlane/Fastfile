@@ -1,0 +1,22 @@
+repo_root = File.expand_path("..", __dir__)
+uploader = File.join(repo_root, "scripts", "testflight-upload.sh")
+
+lane :beta do |options|
+  targets = options[:target]&.to_s&.split(/[,\s]+/)
+  unless targets.nil? || (!targets.empty? && targets.all? { |target| %w[ios macos].include?(target) })
+    UI.user_error!("target must contain ios and/or macos")
+  end
+
+  export_only = options[:export_only].to_s
+  unless ["", "false", "true"].include?(export_only)
+    UI.user_error!("export_only must be true or false")
+  end
+
+  args = []
+  args << "--export-only" if export_only == "true"
+  args.concat(targets) if targets
+
+  Dir.chdir(repo_root) do
+    sh("/bin/bash", uploader, *args)
+  end
+end
