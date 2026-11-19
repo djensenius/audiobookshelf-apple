@@ -15,9 +15,11 @@ from pathlib import Path
 import re
 import runpy
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 
@@ -426,6 +428,13 @@ done
 exit 66
 """)
         command.chmod(0o700)
+        signal_command = binaries / "signal-command"
+        signal_command.write_text("""#!/usr/bin/env bash
+trap 'printf terminated > "$SIGNAL_FILE"; exit 42' INT TERM
+printf '%s\\n' "$$" > "$COMMAND_PID_FILE"
+while true; do /bin/sleep 1; done
+""")
+        signal_command.chmod(0o700)
         sleeper = binaries / "sleep"
         sleeper.write_text("""#!/usr/bin/env bash
 printf '%s\\n' "$$" > "$SLEEP_PID_FILE"
@@ -433,9 +442,11 @@ exec /bin/sleep "$@"
 """)
         sleeper.chmod(0o700)
         self.sleep_pid_file = self.root / "sleep.pid"
+        self.command_pid_file = self.root / "command.pid"
         self.env = dict(os.environ, PATH=str(binaries) + os.pathsep + os.environ["PATH"],
                         DIAGNOSTICS_LOG=str(self.root / "collectors.log"), FAIL_COLLECTOR="memory_pressure",
-                        SLEEP_PID_FILE=str(self.sleep_pid_file))
+                        SLEEP_PID_FILE=str(self.sleep_pid_file), COMMAND_PID_FILE=str(self.command_pid_file),
+                        SIGNAL_FILE=str(self.root / "signal"))
 
     def test_a_failed_collector_doesnt_replace_the_wrapped_command_status(self):
         script = ROOT / "scripts/with-runner-diagnostics.sh"
@@ -463,6 +474,47 @@ exec /bin/sleep "$@"
                             pass
                         else:
                             os.kill(sleeper_pid, 15)
+
+    def test_signals_are_forwarded_to_the_command_and_the_monitor_is_reaped(self):
+        script = ROOT / "scripts/with-runner-diagnostics.sh"
+        for interrupt, status in ((signal.SIGINT, 130), (signal.SIGTERM, 143)):
+            with self.subTest(signal=interrupt):
+                (self.root / "signal").unlink(missing_ok=True)
+                self.command_pid_file.unlink(missing_ok=True)
+                self.sleep_pid_file.unlink(missing_ok=True)
+                process = subprocess.Popen([str(script), "signal-command"], env=self.env, stdout=subprocess.PIPE,
+                                           stderr=subprocess.PIPE, text=True)
+                try:
+                    deadline = time.monotonic() + 5
+                    while not (self.command_pid_file.exists() and self.sleep_pid_file.exists()):
+                        if process.poll() is not None or time.monotonic() >= deadline:
+                            self.fail("command or sampler did not start")
+                        time.sleep(0.01)
+                    process.send_signal(interrupt)
+                    stdout, stderr = process.communicate(timeout=5)
+                    self.assertEqual(process.returncode, status, stdout + stderr)
+                    self.assertEqual((self.root / "signal").read_text(), "terminated")
+                    for pid_file in (self.command_pid_file, self.sleep_pid_file):
+                        pid = int(pid_file.read_text())
+                        with self.assertRaises(ProcessLookupError):
+                            os.kill(pid, 0)
+                finally:
+                    for pid_file in (self.command_pid_file, self.sleep_pid_file):
+                        if pid_file.exists():
+                            pid = int(pid_file.read_text())
+                            try:
+                                os.kill(pid, 0)
+                            except ProcessLookupError:
+                                pass
+                            else:
+                                os.kill(pid, signal.SIGTERM)
+                    if process.poll() is None:
+                        process.send_signal(signal.SIGTERM)
+                        try:
+                            process.communicate(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                            process.communicate()
 
 
 class TestUITaskTests(unittest.TestCase):
